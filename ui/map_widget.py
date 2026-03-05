@@ -427,10 +427,10 @@ def build_map_html() -> str:
           id: "road-minor", type: "line",
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["in", ["get", "class"], ["literal", ["minor","service","residential"]]],
-          minzoom: 11,
+          minzoom: 8,
           paint: {{
             "line-color": "#252530",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.5, 14, 2]
+            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.3, 14, 2]
           }}
         }},
 
@@ -501,14 +501,14 @@ def build_map_html() -> str:
           layout: {{
             "text-field": ["coalesce", ["get", "ref"], ["get", "name:latin"], ""],
             "text-font": ["Noto Sans Bold"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 7, 9, 14, 12],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 7, 11, 14, 14],
             "symbol-placement": "line",
             "text-max-angle": 30,
             "text-padding": 10,
             "symbol-spacing": 400
           }},
           paint: {{
-            "text-color": "#CC7744",
+            "text-color": "#E89050",
             "text-halo-color": "#0D0D14",
             "text-halo-width": 2
           }}
@@ -522,37 +522,58 @@ def build_map_html() -> str:
           layout: {{
             "text-field": ["coalesce", ["get", "name:latin"], ["get", "ref"], ""],
             "text-font": ["Noto Sans Regular"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 10, 9, 14, 11],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 14, 13],
             "symbol-placement": "line",
             "text-max-angle": 30,
             "text-padding": 8,
             "symbol-spacing": 350
           }},
           paint: {{
-            "text-color": "#5A5A75",
+            "text-color": "#A8A8C8",
             "text-halo-color": "#0D0D14",
             "text-halo-width": 1.5
           }}
         }},
-        // Minor / local: very subtle, only when zoomed in
+        // Tertiary: backed by road-secondary lines visible at zoom 8
         {{
-          id: "road-label-minor", type: "symbol",
+          id: "road-label-tertiary", type: "symbol",
           source: "storm-tiles", "source-layer": "transportation_name",
-          filter: ["in", ["get", "class"], ["literal", ["tertiary", "minor", "residential", "service"]]],
-          minzoom: 11,
+          filter: ["==", ["get", "class"], "tertiary"],
+          minzoom: 8,
           layout: {{
             "text-field": ["get", "name:latin"],
             "text-font": ["Noto Sans Regular"],
-            "text-size": 10,
+            "text-size": 12,
             "symbol-placement": "line",
             "text-max-angle": 30,
             "text-padding": 6,
             "symbol-spacing": 300
           }},
           paint: {{
-            "text-color": "#484858",
+            "text-color": "#888898",
             "text-halo-color": "#0D0D14",
-            "text-halo-width": 1
+            "text-halo-width": 1.5
+          }}
+        }},
+        // Minor / local: only when zoomed in (lines not visible before zoom 8)
+        {{
+          id: "road-label-minor", type: "symbol",
+          source: "storm-tiles", "source-layer": "transportation_name",
+          filter: ["in", ["get", "class"], ["literal", ["minor", "residential", "service"]]],
+          minzoom: 8,
+          layout: {{
+            "text-field": ["get", "name:latin"],
+            "text-font": ["Noto Sans Regular"],
+            "text-size": 12,
+            "symbol-placement": "line",
+            "text-max-angle": 30,
+            "text-padding": 6,
+            "symbol-spacing": 300
+          }},
+          paint: {{
+            "text-color": "#888898",
+            "text-halo-color": "#0D0D14",
+            "text-halo-width": 1.5
           }}
         }},
 

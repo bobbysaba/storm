@@ -3,8 +3,6 @@
 
 A standalone desktop application for storm chasing situational awareness. Runs on a laptop in the field and is designed for **low bandwidth environments** — offline map tiles, compressed radar data, and efficient MQTT messaging.
 
-Built with Python + PyQt6. Not a web app — a native desktop application.
-
 ---
 
 ## Current Features
@@ -74,6 +72,28 @@ Windows: double-click `scripts\create_app_windows.bat`
 
 </details>
 
+---
+
+## Updating
+
+To pull the latest code and sync your conda environment, run the update script before a chase day. It does **not** run automatically — you control when updates are applied.
+
+**macOS:**
+```bash
+bash scripts/update.sh
+```
+
+**Windows:** double-click `scripts\update.bat` or run it from a terminal.
+
+The script:
+1. Runs `git pull` to fetch the latest code
+2. Updates the conda environment (`conda env update --prune`)
+3. Rebuilds `STORM.app` (macOS) / refreshes the Desktop shortcut (Windows)
+
+> If `git pull` fails, it usually means you have local uncommitted changes that conflict. Run `git status` to see what's changed, resolve any conflicts, and re-run the script.
+
+---
+
 ### 3. Download the map tiles
 
 The MBTiles file is too large for git and is hosted separately.
@@ -142,6 +162,8 @@ storm/
 │   ├── create_app.sh        # Builds STORM.app macOS bundle
 │   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
 │   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
+│   ├── update.sh            # Pulls latest code + updates conda env (macOS)
+│   ├── update.bat           # Pulls latest code + updates conda env (Windows)
 │   └── test_mqtt_send.py    # CLI tool — sends test obs payloads to MQTT broker
 │
 ├── core/                    # Pure data types (no Qt, no I/O)
