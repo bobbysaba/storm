@@ -31,3 +31,6 @@ scripts/create_icon.py
 # ignore the data used to test the app 
 *.log
 veh_data/
+
+# roadmap (is for local progress only)
+roadmap.txt
