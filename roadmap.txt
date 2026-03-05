@@ -1,0 +1,188 @@
+storm/                              # STORM — Severe Thunderstorm Observation and Reconnaissance Monitor
+│
+├── main.py                         # Entry point. Parses CLI args (--debug, --monitor,
+│                                   # --truck-replay-file, --render-grid-size), configures
+│                                   # logging, shows LaunchDialog, wires up MainWindow,
+│                                   # starts optional truck replay timer.
+│
+├── config.py                       # Application constants. Reads MQTT certs and paths
+│                                   # from .aws/. VEHICLE_ID and OBS_FILE_DIR are defaults
+│                                   # only — overwritten by the launch dialog at startup.
+│
+├── ui/
+│   ├── launch_dialog.py            # Pre-launch dialog. Prompts for vehicle ID, data
+│   │                               # directory, and monitor mode. Persists choices in
+│   │                               # QSettings so next launch is pre-populated.
+│   │
+│   ├── main_window.py              # Top-level QMainWindow. Assembles layout: toolbar,
+│   │                               # map center, status bar, collapsible radar drawer,
+│   │                               # annotation tools panel. Owns all subsystem lifetimes
+│   │                               # and wires signals between layers.
+│   │
+│   ├── map_widget.py               # QWebEngineView wrapping MapLibre GL JS (bundled).
+│   │                               # Flask tile server runs on localhost:8765 serving
+│   │                               # MBTiles, static assets, and fonts. Exposes
+│   │                               # Python↔JS bridge (stormAddVehicle, stormAddStormCone,
+│   │                               # stormAddAnnotation, stormMeasure*, etc.).
+│   │
+│   ├── radar_overlay.py            # Receives RadarScan objects, reprojects polar data to
+│   │                               # lat/lon grid, renders as base64 PNG, injects into
+│   │                               # MapLibre raster source. Owns the render thread and
+│   │                               # grid-size setting.
+│   │
+│   ├── radar_controls.py           # Collapsible radar drawer: site selector (sorted by
+│   │                               # distance from home), product toggle (reflectivity/
+│   │                               # velocity), playback controls (⏮ ⏪ ▶/⏸ ⏩ ⏭),
+│   │                               # timeline slider, opacity slider.
+│   │
+│   ├── station_plot_layer.py       # Renders MetPy-style station plot PNGs for each
+│   │                               # vehicle that has surface obs. Injects into map as
+│   │                               # custom markers via stormAddStationPlot.
+│   │
+│   ├── annotation_tools.py         # Collapsible annotation type selector panel. Emits
+│   │                               # annotation_type_selected signal when user picks a
+│   │                               # type (road closure, flooding, debris, etc.).
+│   │
+│   ├── annotation_dialog.py        # AnnotationPlaceDialog (place new) and
+│   │                               # AnnotationEditDialog (edit/delete existing).
+│   │
+│   ├── storm_cone_dialog.py        # Input dialog for storm motion cone: speed (kt),
+│   │                               # heading (°), duration (min). Validates input.
+│   │
+│   ├── history_widget.py           # Time series chart for a vehicle's obs history.
+│   │                               # Queries ObsHistoryStore; renders pressure, temp,
+│   │                               # dewpoint, wind speed/direction over last 10 min.
+│   │                               # [TODO: connect to live pipeline and surface in UI]
+│   │
+│   ├── theme.py                    # QSS dark theme stylesheet + color constants
+│   │                               # (ACCENT, TEXT_MUTED, BG_PANEL, etc.).
+│   │
+│   └── vehicle_panel.py            # [PLANNED] Collapsible side panel listing all known
+│                                   # vehicles with last-seen time, freshness color,
+│                                   # current obs summary. Clicking opens history_widget.
+│
+├── core/                           # Pure data types — no Qt, no I/O.
+│   ├── annotation.py               # Annotation dataclass + ANNOTATION_TYPE_MAP registry.
+│   │                               # Serialization via to_dict / from_dict.
+│   │
+│   ├── observation.py              # Meteorological obs record: lat, lon, timestamp,
+│   │                               # temp, dewpoint, pressure, wind speed/dir.
+│   │
+│   ├── radar_scan.py               # RadarScan dataclass: site, product, scan_time,
+│   │                               # data array, geographic bounds, colormap metadata.
+│   │
+│   ├── storm_cone.py               # StormCone dataclass + GeoJSON polygon builder.
+│   │                               # Generates a 60-min motion cone from origin, speed,
+│   │                               # and heading. Serialization via to_dict / from_dict.
+│   │
+│   └── vehicle.py                  # Vehicle dataclass: ID, callsign, lat, lon,
+│                                   # timestamp, color, latest Observation.
+│
+├── data/                           # Background I/O and decoding — no Qt.
+│   ├── radar_fetcher.py            # Polls Unidata THREDDS every 2 min for NEXRAD L3
+│   │                               # files (N0Q/N0B reflectivity, N0U/N0S velocity).
+│   │                               # Backfills last 12 scans on startup. Signals UI
+│   │                               # when a new scan is available.
+│   │
+│   ├── radar_decoder.py            # Decodes NEXRAD L3 files via MetPy. Returns a
+│   │                               # RadarScan with the decoded data array and metadata.
+│   │
+│   ├── obs_file_watcher.py         # Polls a YYYYMMDD.txt instrument logger file for
+│   │                               # new lines (Track A data path). Parses each record
+│   │                               # using a configurable FieldMap. Emits obs_received
+│   │                               # signal with a typed Observation object.
+│   │
+│   ├── gps_reader.py               # Reads NMEA sentences from serial port via pyserial
+│   │                               # + pynmea2 (Track B data path). Runs in background
+│   │                               # thread. Emits fix_received on valid GGA/RMC.
+│   │                               # [TODO: integrate into main pipeline]
+│   │
+│   ├── obs_history_store.py        # Thread-safe rolling buffer (10-min deque per
+│   │                               # vehicle). Updated by both Track A and Track B.
+│   │                               # Queried by history_widget and station_plot_layer.
+│   │
+│   └── truck_replay.py             # Loads a FOFS truck logger CSV/TXT and replays it
+│                                   # locally at configurable speed (--truck-replay-file).
+│                                   # Bypasses MQTT — useful for offline testing.
+│
+├── network/
+│   ├── mqtt_client.py              # Paho-MQTT wrapper. TLS auth via .aws/ certs.
+│   │                               # Handles connect/reconnect, subscribe, publish.
+│   │                               # Emits connected and message_received Qt signals.
+│   │
+│   ├── vehicle_sync.py             # Publishes local vehicle observations to
+│   │                               # storm/vehicles/{vehicle_id} on MQTT.
+│   │
+│   ├── vehicle_fetcher.py          # Polls the NSSL scout_locs.json endpoint for remote
+│   │                               # vehicle positions. Updates map markers.
+│   │
+│   ├── annotation_sync.py          # Bidirectional annotation sync over MQTT.
+│   │                               # Topic: storm/annotations/{annotation_id}.
+│   │                               # Emits annotation_received / annotation_deleted.
+│   │
+│   └── storm_cone_sync.py          # Bidirectional storm cone sync over MQTT.
+│                                   # Topic: storm/cones/{cone_id}.
+│                                   # Emits cone_received / cone_deleted.
+│
+├── static/                         # Bundled offline assets (no CDN required).
+│   ├── maplibre-gl.js              # MapLibre GL JS (bundled locally)
+│   ├── maplibre-gl.css
+│   └── fonts/                      # Noto Sans glyph PBFs (Latin ranges)
+│
+├── tiles/
+│   └── storm.mbtiles               # NOT in git. OpenStreetMap vector tiles (MBTiles).
+│                                   # Download separately and place here.
+│
+├── .aws/                           # AWS IoT TLS credentials (not in git).
+│   ├── storm.pem                   # CA certificate
+│   ├── storm.pem.crt               # Device certificate
+│   ├── storm-private.pem.key       # Private key
+│   └── storm-public.pem.key        # Public key
+│
+├── veh_data/                       # Local vehicle / replay data.
+│   ├── dltruck_locations.json      # Previous deployment locations overlay.
+│   └── test.txt                    # Sample truck obs for replay / MQTT testing.
+│
+├── storm_mac.yml                   # Conda environment spec — macOS
+├── storm_windows.yml               # Conda environment spec — Windows
+├── create_app.sh                   # Builds STORM.app macOS bundle
+├── create_icon.py                  # Generates storm.icns / storm.ico from storm.png
+├── test_mqtt_send.py               # CLI tool: sends test obs payloads to MQTT broker
+└── config.py                       # (see above)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMPLEMENTATION STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DONE
+  ────────────────────────────────────────────────────────────────────────────
+  [x] Offline vector map (MapLibre GL + MBTiles local tile server)
+  [x] NEXRAD radar overlay (L3 reflectivity + velocity, MetPy decode)
+  [x] Radar playback — 12-scan backfill, timeline slider, full transport controls
+  [x] Storm motion cones — place, configure speed/heading, edit, delete
+  [x] Road condition annotations — place, edit, delete (7 types)
+  [x] Station plot markers — MetPy-style PNGs at vehicle positions
+  [x] Dark theme — full QSS dark UI
+  [x] UTC clock + coordinate/zoom display in status bar
+  [x] Launch dialog — vehicle ID, data directory, monitor mode
+  [x] MQTT client — TLS auth, connect/reconnect, pub/sub
+  [x] Annotation MQTT sync — bidirectional create/update/delete
+  [x] Storm cone MQTT sync — bidirectional create/update/delete
+  [x] Vehicle publisher — publishes local obs to storm/vehicles/{id}
+  [x] Vehicle fetcher — polls NSSL endpoint for remote vehicle positions
+  [x] Obs file watcher — Track A (FOFS instrument logger CSV)
+  [x] Obs history store — 10-min rolling buffer per vehicle
+  [x] Truck replay — offline CSV playback with optional timestamp restamping
+  [x] GPS reader — Track B auto-detects and starts when no obs file dir is configured
+  [x] History widget — time series chart (pressure, temp, dewp, wind)
+  [x] macOS .app bundle (create_app.sh)
+  [x] Conda env specs (storm_mac.yml, storm_windows.yml)
+
+  ────────────────────────────────────────────────────────────────────────────
+
+  TODO
+  ────────────────────────────────────────────────────────────────────────────
+  [ ] Vehicle panel (ui/vehicle_panel.py) — active vehicle list dock with
+      freshness colors, last-seen time, click-to-focus, click-to-history
+  [ ] PyInstaller packaging — standalone .app / .exe (no Python install required)
