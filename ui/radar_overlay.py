@@ -221,9 +221,12 @@ class RadarOverlay(QObject):
             data_filled, coords, order=0, prefilter=False, mode="constant", cval=sentinel
         ).reshape(IMG, IMG)
 
-        # mask outside, sentinel, and sub-threshold pixels (~8 dBZ matches RadarScope)
+        # mask outside and sentinel pixels
         data_out[outside | (data_out <= sentinel + 1.0)] = np.nan
-        data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
+        # for reflectivity only: mask sub-threshold pixels (~8 dBZ matches RadarScope)
+        # do NOT apply to velocity — velocity values include negatives (-100 to +100 kt)
+        if scan.colormap != "nws_vel":
+            data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
 
         # reuse cached ScalarMappable — recreating norm+cmap every frame is wasteful
         cache_key = (scan.colormap, scan.vmin, scan.vmax)
@@ -268,29 +271,47 @@ class RadarOverlay(QObject):
           const imageUrl = "{data_url}";
           const coords   = {coords_js};
 
-          if (map.getSource("{self.SOURCE_ID}")) {{
-            // update existing source in-place — avoids layer flicker
-            map.getSource("{self.SOURCE_ID}").updateImage({{
-              url: imageUrl,
-              coordinates: coords
-            }});
-          }} else {{
-            // first time — add source and layer
-            map.addSource("{self.SOURCE_ID}", {{
-              type: "image",
-              url: imageUrl,
-              coordinates: coords
-            }});
+          try {{
+            if (map.getSource("{self.SOURCE_ID}")) {{
+              // update existing source in-place — avoids layer flicker
+              map.getSource("{self.SOURCE_ID}").updateImage({{
+                url: imageUrl,
+                coordinates: coords
+              }});
+            }} else {{
+              // first time — add source and layer
+              map.addSource("{self.SOURCE_ID}", {{
+                type: "image",
+                url: imageUrl,
+                coordinates: coords
+              }});
 
-            map.addLayer({{
-              id: "{self.LAYER_ID}",
-              type: "raster",
-              source: "{self.SOURCE_ID}",
-              paint: {{
-                "raster-opacity": 0.75,
-                "raster-fade-duration": 300
+              try {{
+                map.addLayer({{
+                  id: "{self.LAYER_ID}",
+                  type: "raster",
+                  source: "{self.SOURCE_ID}",
+                  paint: {{
+                    "raster-opacity": 0.75,
+                    "raster-fade-duration": 300
+                  }}
+                }}, "road-unpaved");   // insert below road labels/roads so they stay visible
+              }} catch(layerErr) {{
+                // fallback: "road-unpaved" may not exist yet — add without beforeId
+                console.warn("[STORM] radar addLayer beforeId failed, adding on top:", layerErr.message);
+                map.addLayer({{
+                  id: "{self.LAYER_ID}",
+                  type: "raster",
+                  source: "{self.SOURCE_ID}",
+                  paint: {{
+                    "raster-opacity": 0.75,
+                    "raster-fade-duration": 300
+                  }}
+                }});
               }}
-            }}, "road-unpaved");   // insert below road layers so roads stay visible
+            }}
+          }} catch(e) {{
+            console.error("[STORM] radar inject error:", e.message || e);
           }}
         }})();
         """

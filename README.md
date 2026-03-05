@@ -10,27 +10,17 @@ Built with Python + PyQt6. Not a web app — a native desktop application.
 ## Current Features
 
 - **Offline vector map** — OpenStreetMap tiles served locally from MBTiles via a bundled Flask server; no internet required for the base map
-- **NEXRAD radar overlay** — fetches Level 3 reflectivity and velocity from Unidata THREDDS (~50–300 KB per scan); reprojects polar data to lat/lon and renders as a transparent PNG overlay on the map
-- **Radar playback** — automatically backfills the last 12 scans (~1 hour of history) on startup; full playback controls (⏮ ⏪ ▶/⏸ ⏩ ⏭) with a timeline slider
-- **Storm motion cones** — click to place a 60-minute motion cone; configurable speed and heading; editable and deletable after placement; synced to all connected clients over MQTT
-- **Road annotations** — place road closure, construction, flooding, downed lines, debris, and other markers on the map; editable after placement; synced over MQTT
-- **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb)
-- **Vehicle tracking** — polls NSSL vehicle location endpoint; publishes local obs to MQTT; remote vehicles appear as colored markers on the map
-- **Obs file watcher** — monitors FOFS instrument logger files (Track A); parses each new record and feeds the obs pipeline
-- **Obs history store** — 10-minute rolling buffer of surface obs per vehicle; feeds station plots and history charts
-- **Dark theme** — full dark UI optimized for field use on a laptop screen
-- **UTC clock** — live UTC time in the status bar
-- **Coordinate display** — lat/lon and zoom level update on mouse move
-- **Launch dialog** — prompts for vehicle ID, data directory, and monitor mode on every launch; persists settings across sessions
-- **Monitor mode** — display remote vehicles and radar without publishing any local data
+- **NEXRAD radar overlay** — fetches Level 3 reflectivity and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map
+- **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
+- **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
 
 ---
 
 ## Requirements
 
-- Python 3.11 (tested with [Miniforge](https://github.com/conda-forge/miniforge))
+- Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm`
-- macOS or Linux (Windows untested)
+- macOS or Windows
 
 ---
 
@@ -43,19 +33,46 @@ git clone https://github.com/bobbysaba/storm.git
 cd storm
 ```
 
-### 2. Create the conda environment
+### 2. Run the setup script
+
+The setup script creates the `storm` conda environment and places a launch shortcut on your Desktop — all in one step. If you already have Miniforge, Miniconda, or Anaconda installed, it will be used automatically and nothing extra will be installed.
 
 **macOS:**
 ```bash
-conda env create -f storm_mac.yml
+bash setup_mac.sh
+```
+
+**Windows:** double-click `setup_windows.bat` or run it from a terminal.
+
+> If you prefer to set up manually, see steps 2a–2b below.
+
+<details>
+<summary>Manual setup</summary>
+
+**2a. Create the conda environment**
+
+macOS:
+```bash
+conda env create -f envs/storm_mac.yml
 conda activate storm
 ```
 
-**Windows:**
+Windows:
 ```bash
-conda env create -f storm_windows.yml
+conda env create -f envs/storm_windows.yml
 conda activate storm
 ```
+
+**2b. Create the Desktop shortcut (optional)**
+
+macOS:
+```bash
+bash scripts/create_app.sh
+```
+
+Windows: double-click `scripts\create_app_windows.bat`
+
+</details>
 
 ### 3. Download the map tiles
 
@@ -63,7 +80,7 @@ The MBTiles file is too large for git and is hosted separately.
 
 **[Download tiles/ folder (Google Drive)](https://drive.google.com/drive/folders/1q4DJ-mg94tpDWHLEkQ_50oQ3uauQ77it?usp=sharing)**
 
-Download the entire `tiles/` folder and place it in the project root so the structure is:
+Download the file and place it in the `tiles/` folder so the structure is:
 ```
 tiles/storm.mbtiles
 ```
@@ -92,17 +109,16 @@ Obtain the four TLS cert files and place them at:
 .aws/storm-private.pem.key
 .aws/storm-public.pem.key
 ```
-These are distributed out-of-band and are never committed to the repo.
+These are distributed out-of-band and are never committed to the repo. Please contact [Bobby Saba](mailto:robert.saba@noaa.gov) for the files.
 
 ### 6. macOS app bundle (optional)
 
 To create a double-clickable `STORM.app`:
 ```bash
-# First generate icons from a 1024×1024 PNG named storm.png:
-python create_icon.py
-# Then build the bundle:
-./create_app.sh
+bash scripts/create_app.sh
 ```
+
+The app bundle records your project folder location at build time, so it can be moved or copied anywhere — the Dock, `/Applications`, a Desktop alias — and will always launch from the correct location. If you ever move the project folder itself, just re-run `bash scripts/create_app.sh` to update the path.
 
 ---
 
@@ -112,6 +128,21 @@ python create_icon.py
 storm/
 ├── main.py                  # Entry point
 ├── config.py                # Constants — cert paths, MQTT settings, defaults
+├── storm.icns               # macOS app icon
+├── storm.ico                # Windows app icon
+├── setup_mac.sh             # One-step setup: installs conda, env, Desktop shortcut (macOS)
+├── setup_windows.bat        # One-step setup: installs conda, env, Desktop shortcut (Windows)
+├── roadmap.txt              # Implementation status and planned features
+│
+├── envs/                    # Conda environment specs
+│   ├── storm_mac.yml        # macOS environment
+│   └── storm_windows.yml    # Windows environment
+│
+├── scripts/                 # Build and utility scripts
+│   ├── create_app.sh        # Builds STORM.app macOS bundle
+│   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
+│   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
+│   └── test_mqtt_send.py    # CLI tool — sends test obs payloads to MQTT broker
 │
 ├── core/                    # Pure data types (no Qt, no I/O)
 │   ├── annotation.py        # Annotation dataclass + type registry
@@ -151,6 +182,8 @@ storm/
 ├── static/                  # Bundled offline assets (no CDN)
 │   ├── maplibre-gl.js
 │   ├── maplibre-gl.css
+│   ├── indicator_on.svg     # MQTT connection status indicators
+│   ├── indicator_off.svg
 │   └── fonts/               # Noto Sans glyph PBFs (Latin ranges)
 │
 ├── tiles/
@@ -167,7 +200,7 @@ storm/
 ## Architecture Notes
 
 - **Tile server** — Flask runs on `http://localhost:8765` in a background daemon thread, serving the map HTML, MapLibre assets, fonts, and MBTiles vector tiles. MapLibre GL JS is bundled locally — no internet required.
-- **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 12 scans. Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
+- **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context. Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
 - **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both feed the same `ObsHistoryStore` and publish via `VehicleSync`.
 - **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`.
@@ -183,19 +216,3 @@ Oklahoma, Kansas, Nebraska, South Dakota, North Dakota, Texas (panhandle and nor
 The dropdown automatically sorts by distance from your configured home location and shows the 5 nearest sites. Any NEXRAD site can be entered manually via the **OTHER...** option.
 
 ---
-
-## Roadmap
-
-- [ ] PyInstaller packaging — standalone `.app` / `.exe` (no Python install required)
-
----
-
-## Known Cosmetic Warnings
-
-These appear in the console but are harmless:
-
-| Warning | Cause |
-|---|---|
-| `font-variant-numeric` QSS warning | Qt ignores this CSS property |
-| `SF Pro Display` font not found | Falls back to system font |
-| Skia Graphite backend error | Qt/GPU initialization message |
