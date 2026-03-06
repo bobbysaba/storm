@@ -14,9 +14,14 @@ from ui.radar_overlay import set_render_grid_size
 from data.truck_replay import load_truck_observations
 import config
 
-# disable Chromium sandbox (required for unsigned .app bundles on macOS)
-# run GPU in-process to avoid Mach port rendezvous failures on macOS
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
+# Chromium flags vary by platform:
+#   macOS: --in-process-gpu avoids Mach port rendezvous failures in unsigned bundles
+#   Windows: --disable-gpu-compositing avoids IDCompositionDevice4 errors on
+#            GPUs/drivers that don't support DirectComposition
+if sys.platform == "win32":
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-compositing"
+else:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
 
 def _configure_logging(level_name: str) -> None:
     # map level name string to logging constant
