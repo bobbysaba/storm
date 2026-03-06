@@ -16,7 +16,6 @@ SET "SHORTCUT=%USERPROFILE%\Desktop\STORM.lnk"
 
 IF NOT EXIST "%LAUNCHER%" (
     echo ERROR: launch_storm.bat not found in %SCRIPTS_DIR%
-    pause
     EXIT /B 1
 )
 
@@ -26,7 +25,6 @@ powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = 
 
 IF ERRORLEVEL 1 (
     echo ERROR: Could not create shortcut.
-    pause
     EXIT /B 1
 )
 
@@ -40,4 +38,3 @@ IF NOT EXIST "%ICON%" (
     echo       Then re-run this script.
     echo.
 )
-pause
