@@ -38,7 +38,7 @@ GPS_BAUD: int = 4800
 
 # ── Previous deployment locations ─────────────────────────────────────────────
 
-DEPLOY_LOCS_FILE: str = str(_PROJ / "veh_data" / "dltruck_locations.json")
+DEPLOY_LOCS_FILE: str = str(_PROJ / "data" / "deployment_locations.json")
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
