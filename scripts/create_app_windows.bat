@@ -22,15 +22,7 @@ IF NOT EXIST "%LAUNCHER%" (
 
 echo Creating STORM shortcut on Desktop...
 
-powershell -Command "& { ^
-    $ws = New-Object -ComObject WScript.Shell; ^
-    $s  = $ws.CreateShortcut('%SHORTCUT%'); ^
-    $s.TargetPath      = '%LAUNCHER%'; ^
-    $s.WorkingDirectory = '%PROJECT_DIR%'; ^
-    $s.WindowStyle     = 1; ^
-    if (Test-Path '%ICON%') { $s.IconLocation = '%ICON%,0' }; ^
-    $s.Save() ^
-}"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath = '%LAUNCHER%'; $s.WorkingDirectory = '%PROJECT_DIR%'; $s.WindowStyle = 1; if (Test-Path '%ICON%') { $s.IconLocation = '%ICON%,0' }; $s.Save()"
 
 IF ERRORLEVEL 1 (
     echo ERROR: Could not create shortcut.
