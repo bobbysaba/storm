@@ -7,10 +7,24 @@ import os
 import sqlite3
 import threading
 import zlib
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineSettings
+import sys
+
+# Windows fallback: disable WebGL map rendering by default to avoid
+# GPU/ANGLE crashes on older drivers. Set STORM_FORCE_MAPLIBRE=1
+# to force normal MapLibre mode.
+SAFE_MAP_MODE = (
+    sys.platform == "win32"
+    and os.environ.get("STORM_FORCE_MAPLIBRE", "0") != "1"
+)
+
 from PyQt6.QtCore import QUrl, QTimer, pyqtSignal, QObject, pyqtSlot
-from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
+
+if not SAFE_MAP_MODE:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEngineSettings
+    from PyQt6.QtWebChannel import QWebChannel
+
 from flask import Flask, Response, jsonify, send_from_directory
 
 from config import ACCENT_COLOR
@@ -29,6 +43,57 @@ TILES_PATH = os.path.abspath(
 STATIC_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "static")
 )
+
+
+def build_safe_map_html() -> str:
+    return """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>STORM (Safe Map Mode)</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #0A0A0F; color: #C1C9D8; }
+    .wrap {
+      width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+      font-family: "Segoe UI", sans-serif; text-align: center; padding: 24px; box-sizing: border-box;
+    }
+    .card {
+      max-width: 720px; border: 1px solid #1E1E2E; border-radius: 10px;
+      background: rgba(15, 15, 26, 0.92); padding: 22px 24px;
+    }
+    h2 { margin: 0 0 10px; color: #00CFFF; font-size: 20px; letter-spacing: 0.6px; }
+    p { margin: 0; color: #B5BDCC; font-size: 13px; line-height: 1.45; }
+  </style>
+  <script>
+    // No-op API stubs so Python runJavaScript calls remain safe.
+    function _noop() {}
+    window.stormAddVehicle = _noop;
+    window.stormRemoveVehicle = _noop;
+    window.stormFlyTo = _noop;
+    window.stormAddAnnotation = _noop;
+    window.stormRemoveAnnotation = _noop;
+    window.stormAddStormCone = _noop;
+    window.stormRemoveStormCone = _noop;
+    window.stormAddStationPlot = _noop;
+    window.stormRemoveStationPlot = _noop;
+    window.stormSetStationPlotsVisible = _noop;
+    window.stormLoadDeployLocs = _noop;
+    window.stormSetDeployLocsVisible = _noop;
+    window.stormMeasureActivate = _noop;
+    window.stormMeasureClick = _noop;
+    window.stormMeasureClear = _noop;
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h2>Safe Map Mode Enabled</h2>
+      <p>WebGL map rendering is disabled on this Windows machine to prevent QtWebEngine GPU crashes.
+      Set <code>STORM_FORCE_MAPLIBRE=1</code> to try normal map rendering again.</p>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 # ── Map HTML ──────────────────────────────────────────────────────────────────
@@ -264,6 +329,25 @@ def build_map_html() -> str:
     window.onerror = function(msg, src, line) {{
       console.error("JS ERROR: " + msg + " at " + src + ":" + line);
     }};
+
+    // Define no-op bridge functions up front so Python calls stay safe even
+    // if MapLibre/WebGL initialization fails on this machine.
+    function _stormNoop() {{}}
+    window.stormAddVehicle = _stormNoop;
+    window.stormRemoveVehicle = _stormNoop;
+    window.stormFlyTo = _stormNoop;
+    window.stormAddAnnotation = _stormNoop;
+    window.stormRemoveAnnotation = _stormNoop;
+    window.stormAddStormCone = _stormNoop;
+    window.stormRemoveStormCone = _stormNoop;
+    window.stormAddStationPlot = _stormNoop;
+    window.stormRemoveStationPlot = _stormNoop;
+    window.stormSetStationPlotsVisible = _stormNoop;
+    window.stormLoadDeployLocs = _stormNoop;
+    window.stormSetDeployLocsVisible = _stormNoop;
+    window.stormMeasureActivate = _stormNoop;
+    window.stormMeasureClick = _stormNoop;
+    window.stormMeasureClear = _stormNoop;
 
     // Suppress MapLibre's benign AbortController warning that fires when
     // updateImage() cancels a prior in-flight radar image fetch.
@@ -686,6 +770,7 @@ def build_map_html() -> str:
       var empty = {{type:'FeatureCollection',features:[]}};
       map.addSource('measure-points', {{type:'geojson', data:empty}});
       map.addSource('measure-line',   {{type:'geojson', data:empty}});
+      map.addSource('measure-label',  {{type:'geojson', data:empty}});
       map.addSource('measure-rubber', {{type:'geojson', data:empty}});
 
       map.addLayer({{id:'measure-rubber', type:'line', source:'measure-rubber',
@@ -693,10 +778,11 @@ def build_map_html() -> str:
                 'line-dasharray':[4,3],'line-opacity':0.45}}}});
       map.addLayer({{id:'measure-line', type:'line', source:'measure-line',
         paint:{{'line-color':'#FFFFFF','line-width':2}}}});
-      map.addLayer({{id:'measure-label', type:'symbol', source:'measure-line',
+      map.addLayer({{id:'measure-label', type:'symbol', source:'measure-label',
         layout:{{'text-field':['get','label'],'text-size':11,
-                 'text-font':['Noto Sans Bold'],'symbol-placement':'line-center',
-                 'text-allow-overlap':true}},
+                 'text-font':['Noto Sans Bold'],
+                 'text-anchor':'center',
+                 'text-allow-overlap':false}},
         paint:{{'text-color':'#FFFFFF','text-halo-color':'#0A0A0F','text-halo-width':2}}}});
       map.addLayer({{id:'measure-points', type:'circle', source:'measure-points',
         paint:{{'circle-radius':5,'circle-color':'#FFFFFF',
@@ -1003,7 +1089,7 @@ def build_map_html() -> str:
 
     window.stormMeasureClear = function() {{
       window._measureAnchor = null;
-      ['measure-points','measure-line','measure-rubber'].forEach(function(s) {{
+      ['measure-points','measure-line','measure-label','measure-rubber'].forEach(function(s) {{
         if (map.getSource(s)) map.getSource(s).setData({{type:'FeatureCollection',features:[]}});
       }});
     }};
@@ -1014,13 +1100,22 @@ def build_map_html() -> str:
         map.getSource('measure-points').setData({{type:'FeatureCollection',features:[
           {{type:'Feature',geometry:{{type:'Point',coordinates:[lon,lat]}}}}
         ]}});
+        map.getSource('measure-line').setData({{type:'FeatureCollection',features:[]}});
+        map.getSource('measure-label').setData({{type:'FeatureCollection',features:[]}});
       }} else {{
         var anchor = window._measureAnchor;
         var dist  = _haversineM(anchor[1],anchor[0],lat,lon);
         var label = dist.toFixed(1)+' mi  /  '+(dist*1.60934).toFixed(1)+' km';
+        var midLon = (anchor[0] + lon) / 2.0;
+        var midLat = (anchor[1] + lat) / 2.0;
         map.getSource('measure-line').setData({{type:'FeatureCollection',features:[
           {{type:'Feature',
             geometry:{{type:'LineString',coordinates:[anchor,[lon,lat]]}},
+            properties:{{label:label}}}}
+        ]}});
+        map.getSource('measure-label').setData({{type:'FeatureCollection',features:[
+          {{type:'Feature',
+            geometry:{{type:'Point',coordinates:[midLon,midLat]}},
             properties:{{label:label}}}}
         ]}});
         window._measureAnchor = null;
@@ -1215,7 +1310,7 @@ class MapBridge(QObject):
 
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
-class MapWidget(QWebEngineView):
+class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     map_clicked        = pyqtSignal(float, float)
     map_moved          = pyqtSignal(float, float, float)
     feature_clicked    = pyqtSignal(str)
@@ -1225,13 +1320,26 @@ class MapWidget(QWebEngineView):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        if SAFE_MAP_MODE:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(24, 24, 24, 24)
+            msg = QLabel(
+                "Safe Map Mode: WebEngine disabled on this Windows device to avoid GPU crashes."
+            )
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #B5BDCC; font-size: 13px;")
+            layout.addWidget(msg)
+            self._map_ready = True
+            self._js_queue = []
+            return
+
         start_server(TILES_PATH, STATIC_PATH, TILE_SERVER_PORT)
 
         settings = self.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
-        settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, not SAFE_MAP_MODE)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, not SAFE_MAP_MODE)
         settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
 
         self.bridge = MapBridge()
@@ -1264,6 +1372,8 @@ class MapWidget(QWebEngineView):
             self._js_queue.clear()
 
     def run_js(self, script: str):
+        if SAFE_MAP_MODE:
+            return
         if self._map_ready:
             self.page().runJavaScript(script)
         else:

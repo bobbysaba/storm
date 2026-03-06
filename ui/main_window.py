@@ -3,12 +3,13 @@
 # assembles the layout: toolbar, map widget, status bar, and collapsible panels.
 
 import json
+import os
 import logging
 import html
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget,
+    QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox
 )
@@ -55,19 +56,79 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_THEME)
 
         # ── build UI in dependency order ──────────────────────────────────
+        self._runtime_safe = os.environ.get("STORM_RUNTIME_SAFE", "0") == "1"
+
         self._init_map()
         self._init_toolbar()
         self._init_statusbar()
         self._init_vehicle_panel()
-        self._init_radar()
-        self._init_mqtt()
-        self._init_vehicle_fetcher()
-        self._init_annotations()
-        self._init_storm_cone()
-        self._init_measure()
-        self._init_stations()
-        self._init_deploy_locs()
-        self._init_data_inputs()
+
+        # Fine-grained startup toggles are for crash-isolation only.
+        # Keep them opt-in so normal runs always start full functionality.
+        toggles_enabled = (
+            os.environ.get("STORM_ENABLE_STARTUP_TOGGLES", "0") == "1"
+        ) or debug
+        self._disable_radar = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_RADAR", "0") == "1"
+        )
+        self._disable_mqtt = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_MQTT", "0") == "1"
+        )
+        self._disable_vehicle_fetcher = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_VEHICLE_FETCHER", "0") == "1"
+        )
+        self._disable_annotations = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_ANNOTATIONS", "0") == "1"
+        )
+        self._disable_deploy_locs = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_DEPLOY_LOCS", "0") == "1"
+        )
+        self._disable_data_inputs = (
+            toggles_enabled and os.environ.get("STORM_DISABLE_DATA_INPUTS", "0") == "1"
+        )
+
+        # Features that require MQTT should be disabled when MQTT is disabled.
+        if self._disable_mqtt:
+            self._disable_vehicle_fetcher = True
+            self._disable_annotations = True
+            self._disable_data_inputs = True
+
+        if self._runtime_safe:
+            log.warning("Running in safe runtime mode (radar/MQTT/data inputs disabled)")
+            self._init_measure()
+            self._init_stations()
+            self.status_msg_label.setText("Safe runtime mode - background services disabled")
+            self.status_msg_label.setStyleSheet(
+                "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
+            )
+        else:
+            log.warning(
+                "Startup toggles: radar=%s mqtt=%s fetcher=%s annotations=%s deploy_locs=%s data_inputs=%s",
+                "off" if self._disable_radar else "on",
+                "off" if self._disable_mqtt else "on",
+                "off" if self._disable_vehicle_fetcher else "on",
+                "off" if self._disable_annotations else "on",
+                "off" if self._disable_deploy_locs else "on",
+                "off" if self._disable_data_inputs else "on",
+            )
+
+            if not self._disable_radar:
+                self._init_radar()
+            if not self._disable_mqtt:
+                self._init_mqtt()
+            if not self._disable_vehicle_fetcher:
+                self._init_vehicle_fetcher()
+            if not self._disable_annotations:
+                self._init_annotations()
+                self._init_storm_cone()
+
+            self._init_measure()
+            self._init_stations()
+
+            if not self._disable_deploy_locs:
+                self._init_deploy_locs()
+            if not self._disable_data_inputs:
+                self._init_data_inputs()
 
         # wire map mousemove → status bar coordinate and zoom display
         self.map_widget.map_moved.connect(
@@ -252,6 +313,7 @@ class MainWindow(QMainWindow):
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
         super().closeEvent(event)
+        QApplication.quit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -336,6 +398,7 @@ class MainWindow(QMainWindow):
 
     def _init_vehicle_panel(self):
         self.vehicle_dock = QDockWidget("", self)
+        self.vehicle_dock.setObjectName("vehicleDock")
         self.vehicle_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self.vehicle_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
@@ -582,10 +645,13 @@ class MainWindow(QMainWindow):
         self.update_vehicle_obs(obs)
 
     def _mqtt_connect(self):
+        use_tls = config.MQTT_USE_TLS and os.environ.get("STORM_MQTT_NO_TLS", "0") != "1"
+        if not use_tls:
+            log.warning("MQTT TLS disabled via STORM_MQTT_NO_TLS=1 (diagnostic mode)")
         self._mqtt_client.connect_to_broker(
             host=config.MQTT_HOST,
             port=config.MQTT_PORT,
-            use_tls=config.MQTT_USE_TLS,
+            use_tls=use_tls,
             ca_cert=config.MQTT_CA_CERT,
             cert_file=config.MQTT_CERT_FILE,
             key_file=config.MQTT_KEY_FILE,
@@ -1052,6 +1118,7 @@ class MainWindow(QMainWindow):
     def _init_debug_panel(self):
         # collapsible dock showing live fetch/cache/loop state
         self._debug_dock = QDockWidget("DEBUG", self)
+        self._debug_dock.setObjectName("debugDock")
         self._debug_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self._debug_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
 

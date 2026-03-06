@@ -1,10 +1,51 @@
 # main.py
-# entry point — parses CLI args, configures logging, launches Qt application.
+# entry point â€” parses CLI args, configures logging, launches Qt application.
 
 import sys
 import os
 import argparse
 import logging
+import faulthandler
+
+# Chromium flags vary by platform:
+#   macOS: --in-process-gpu avoids Mach port rendezvous failures in unsigned bundles
+#   Windows: The Intel HD 620 driver (21.20.x) crashes after a failed
+#            IDCompositionDevice4 QueryInterface in direct_composition_support.cc.
+#            --in-process-gpu runs the GPU thread inside the main browser process
+#            rather than a separate GPU subprocess.  This takes a different
+#            initialization path that avoids the direct_composition_support.cc crash
+#            on the old Intel driver.  (Same flag used on macOS for a similar reason.)
+#            --ignore-gpu-blocklist allows the Intel D3D11 GPU to be used.
+def _configure_qt_webengine_env() -> None:
+    # Must run before importing modules that pull in QtWebEngine classes.
+    if sys.platform == "win32":
+        # Windows defaults to map-capable hardware mode.
+        # Set STORM_RUNTIME_SAFE=1 to force software rendering on unstable machines.
+        runtime_safe = os.environ.get("STORM_RUNTIME_SAFE", "0") == "1"
+        if runtime_safe:
+            os.environ["QMLSCENE_DEVICE"] = "softwarecontext"
+            os.environ["QT_QUICK_BACKEND"] = "software"
+            os.environ["QT_OPENGL"] = "software"
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                "--no-sandbox "
+                "--disable-gpu "
+                "--disable-gpu-compositing"
+            )
+        else:
+            os.environ.pop("QMLSCENE_DEVICE", None)
+            os.environ.pop("QT_QUICK_BACKEND", None)
+            os.environ.pop("QT_OPENGL", None)
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                "--no-sandbox "
+                "--in-process-gpu "
+                "--ignore-gpu-blocklist"
+            )
+    else:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
+
+
+_configure_qt_webengine_env()
+
 from PyQt6.QtWidgets import QApplication, QDialog
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -13,15 +54,6 @@ from ui.main_window import MainWindow
 from ui.radar_overlay import set_render_grid_size
 from data.truck_replay import load_truck_observations
 import config
-
-# Chromium flags vary by platform:
-#   macOS: --in-process-gpu avoids Mach port rendezvous failures in unsigned bundles
-#   Windows: --disable-gpu-compositing avoids IDCompositionDevice4 errors on
-#            GPUs/drivers that don't support DirectComposition
-if sys.platform == "win32":
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu-compositing"
-else:
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
 
 def _configure_logging(level_name: str) -> None:
     # map level name string to logging constant
@@ -39,14 +71,20 @@ def _configure_logging(level_name: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="STORM — Severe Thunderstorm Observation and Reconnaissance Monitor")
+    try:
+        _fh = open("storm_fault.log", "a", buffering=1, encoding="utf-8")
+        faulthandler.enable(file=_fh, all_threads=True)
+    except Exception:
+        pass
+
+    parser = argparse.ArgumentParser(description="STORM â€” Severe Thunderstorm Observation and Reconnaissance Monitor")
     parser.add_argument(
         "--debug", action="store_true",
         help="enable debug logging and in-app debug panel"
     )
     parser.add_argument(
         "--monitor", action="store_true",
-        help="monitor mode — display remote vehicles and radar without publishing any local data"
+        help="monitor mode â€” display remote vehicles and radar without publishing any local data"
     )
     parser.add_argument(
         "--log-level", default="WARNING",
@@ -98,6 +136,11 @@ def main():
     app.setApplicationName("STORM")
     app.setOrganizationName("STORM")
     app.setFont(QFont("Segoe UI", 10))
+    # Prevent the app from quitting when the launch dialog hides.
+    # On Windows, hiding a top-level dialog triggers Qt's "last window closed"
+    # quit event before the main window is shown.  We handle quitting explicitly
+    # in MainWindow.closeEvent instead.
+    app.setQuitOnLastWindowClosed(False)
 
     # Show launch dialog unless --monitor was passed directly on the CLI
     monitor = args.monitor
@@ -112,13 +155,18 @@ def main():
 
     window = MainWindow(debug=args.debug, monitor=monitor)
 
-    # forward JS console messages to Python logging so they show up in --debug output
+    # Forward JS console messages when WebEngine is available.
     js_log = logging.getLogger("storm.js")
-    def handle_js_message(level, message, line, source):
-        js_log.debug("JS [%s:%s] %s", source, line, message)
-    window.map_widget.page().javaScriptConsoleMessage = handle_js_message
+    if hasattr(window.map_widget, "page"):
+        def handle_js_message(level, message, line, source):
+            js_log.debug("JS [%s:%s] %s", source, line, message)
+        window.map_widget.page().javaScriptConsoleMessage = handle_js_message
 
+    app.aboutToQuit.connect(lambda: print("DEBUG: aboutToQuit signal fired", flush=True))
+    app.lastWindowClosed.connect(lambda: print("DEBUG: lastWindowClosed signal fired", flush=True))
+    print("DEBUG: calling window.show()", flush=True)
     window.show()
+    print("DEBUG: entering app.exec()", flush=True)
 
     if args.truck_replay_file:
         _start_truck_replay(
@@ -128,7 +176,9 @@ def main():
             restamp=args.truck_replay_restamp,
         )
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    print(f"DEBUG: app.exec() returned {exit_code}", flush=True)
+    sys.exit(exit_code)
 
 
 def _start_truck_replay(window: MainWindow, file_path: str,
@@ -149,7 +199,7 @@ def _start_truck_replay(window: MainWindow, file_path: str,
 
     if restamp:
         # Shift all timestamps so the last obs lands at now.
-        # This preserves relative spacing while making the data appear live —
+        # This preserves relative spacing while making the data appear live â€”
         # required for the history store (10-min rolling window) and freshness
         # colors to work correctly when replaying old files.
         now = datetime.now(timezone.utc)

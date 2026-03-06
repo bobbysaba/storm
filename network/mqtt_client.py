@@ -3,7 +3,9 @@
 # re-emits events as Qt signals so the rest of the app never touches threads.
 
 import logging
+import os
 import threading
+import ssl
 
 import paho.mqtt.client as mqtt
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -66,29 +68,45 @@ class MQTTClient(QObject):
             c.on_disconnect = self._on_disconnect
             c.on_message    = self._on_message
 
-            if use_tls:
-                if ca_cert or cert_file or key_file:
-                    # mTLS — required for AWS IoT Core
-                    c.tls_set(
-                        ca_certs=ca_cert or None,
-                        certfile=cert_file or None,
-                        keyfile=key_file or None,
-                    )
-                else:
-                    # standard server-side TLS only (Mosquitto + username/password)
-                    c.tls_set()
-
-            # paho will automatically retry after disconnect with exponential
-            # back-off between _RECONNECT_MIN and _RECONNECT_MAX seconds
-            c.reconnect_delay_set(_RECONNECT_MIN, _RECONNECT_MAX)
 
             try:
+                log.info("MQTT: begin connect pipeline (host=%s port=%d tls=%s)", host, port, use_tls)
+                if use_tls:
+                    if ca_cert or cert_file or key_file:
+                        # mTLS required for AWS IoT Core. Pre-validate files first
+                        # so bad cert/key inputs fail cleanly instead of crashing later.
+                        for label, path in (
+                            ("ca_cert", ca_cert),
+                            ("cert_file", cert_file),
+                            ("key_file", key_file),
+                        ):
+                            if not path or not os.path.isfile(path):
+                                raise FileNotFoundError(f"MQTT TLS {label} missing: {path!r}")
+                            if os.path.getsize(path) == 0:
+                                raise ValueError(f"MQTT TLS {label} is empty: {path!r}")
+
+                        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                        ctx.load_verify_locations(cafile=ca_cert)
+                        ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+                        c.tls_set_context(ctx)
+                        c.tls_insecure_set(False)
+                        log.info("MQTT: TLS context initialized")
+                    else:
+                        # Standard server-side TLS only (no client cert/key).
+                        c.tls_set()
+                        log.info("MQTT: basic TLS initialized")
+
+                # paho will automatically retry after disconnect with exponential
+                # back-off between _RECONNECT_MIN and _RECONNECT_MAX seconds
+                c.reconnect_delay_set(_RECONNECT_MIN, _RECONNECT_MAX)
+                log.info("MQTT: calling connect_async")
                 c.connect_async(host, port, keepalive=60)
+                log.info("MQTT: starting loop thread")
                 c.loop_start()
                 self._client = c
                 log.info("MQTT: connecting to %s:%d (client_id=%r)", host, port, self._client_id)
-            except Exception as e:
-                log.error("MQTT: connect failed: %s", e)
+            except Exception:
+                log.exception("MQTT: connect failed during setup")
 
     def publish(self, topic: str, payload: str, qos: int = 1, retain: bool = False):
         """Publish a UTF-8 string payload.  No-op if not connected."""
