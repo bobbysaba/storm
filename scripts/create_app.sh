@@ -27,11 +27,11 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 # storm environment's python directly — avoids "conda activate" which requires
 # an interactive shell and silently fails when launched by Finder.
 
-cat > "$MACOS_DIR/storm_launcher.sh" << LAUNCHER
+cat > "$MACOS_DIR/storm_launcher.sh" << 'LAUNCHER'
 #!/bin/bash
 
 # Project root baked in at build time — app can be moved or symlinked freely.
-PROJECT_DIR="$PROJECT_DIR"
+PROJECT_DIR="__PROJECT_DIR__"
 
 # ── Find conda base ───────────────────────────────────────────────────────────
 CONDA_BASE=""
@@ -46,7 +46,7 @@ for DIR in \
     "/opt/homebrew/Caskroom/miniforge/base" \
     "/opt/miniconda3" \
     "/opt/anaconda3"; do
-    if [ -f "$DIR/etc/profile.d/conda.sh" ]; then
+    if [ -d "$DIR" ]; then
         CONDA_BASE="$DIR"
         break
     fi
@@ -61,6 +61,7 @@ fi
 # Bypass "conda activate" — it requires an interactive shell and silently fails
 # when the app is launched by Finder rather than from a terminal.
 PYTHON=""
+ENV_PREFIX=""
 for ENV_NAME in storm storm311; do
     CANDIDATE="$CONDA_BASE/envs/$ENV_NAME/bin/python"
     if [ -f "$CANDIDATE" ]; then
@@ -76,7 +77,7 @@ if [ -z "$PYTHON" ]; then
 fi
 
 # Set PATH so any subprocesses (Flask, etc.) find the right binaries
-export PATH="$ENV_PREFIX/bin:$CONDA_BASE/bin:$PATH"
+export PATH="$ENV_PREFIX/bin:$CONDA_BASE/bin:$CONDA_BASE/condabin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export CONDA_PREFIX="$ENV_PREFIX"
 
 # Use certifi's CA bundle — macOS app bundles don't inherit the system SSL certs
@@ -89,6 +90,9 @@ fi
 cd "$PROJECT_DIR"
 exec "$PYTHON" main.py
 LAUNCHER
+
+# Bake in the project directory path
+sed -i '' "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$MACOS_DIR/storm_launcher.sh"
 
 chmod +x "$MACOS_DIR/storm_launcher.sh"
 

@@ -15,8 +15,8 @@ from data.truck_replay import load_truck_observations
 import config
 
 # disable Chromium sandbox (required for unsigned .app bundles on macOS)
-# enable GPU rasterization for smoother WebEngine rendering
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --enable-gpu-rasterization"
+# run GPU in-process to avoid Mach port rendezvous failures on macOS
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
 
 def _configure_logging(level_name: str) -> None:
     # map level name string to logging constant
