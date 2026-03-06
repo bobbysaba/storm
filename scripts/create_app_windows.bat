@@ -27,7 +27,7 @@ powershell -Command "& { ^
     $s  = $ws.CreateShortcut('%SHORTCUT%'); ^
     $s.TargetPath      = '%LAUNCHER%'; ^
     $s.WorkingDirectory = '%PROJECT_DIR%'; ^
-    $s.WindowStyle     = 0; ^
+    $s.WindowStyle     = 1; ^
     if (Test-Path '%ICON%') { $s.IconLocation = '%ICON%,0' }; ^
     $s.Save() ^
 }"
