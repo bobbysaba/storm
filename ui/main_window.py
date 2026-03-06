@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
@@ -82,6 +82,15 @@ class MainWindow(QMainWindow):
         self._clock_timer.start(1000)
         self._clock_layout_synced = False
         self._update_clock()
+
+        # Restore window geometry and dock layout from last session.
+        _s = QSettings("NSSL", "STORM")
+        if _s.contains("geometry"):
+            self.restoreGeometry(_s.value("geometry"))
+        if _s.contains("windowState"):
+            self.restoreState(_s.value("windowState"))
+            # keep toolbar button in sync with whatever the dock restored to
+            self.btn_vehicles.setChecked(self.vehicle_dock.isVisible())
 
         # Extra startup layout passes avoid first-paint clipping in floating pills.
         QTimer.singleShot(0, self._layout_overlays)
@@ -238,6 +247,12 @@ class MainWindow(QMainWindow):
         div.setStyleSheet("color: #394056; margin: 4px 0;")
         return div
 
+    def closeEvent(self, event):
+        _s = QSettings("NSSL", "STORM")
+        _s.setValue("geometry", self.saveGeometry())
+        _s.setValue("windowState", self.saveState())
+        super().closeEvent(event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._layout_overlays()
@@ -371,6 +386,8 @@ class MainWindow(QMainWindow):
         # start hidden — opened via toolbar toggle
         self.vehicle_dock.hide()
         self.btn_vehicles.toggled.connect(self.vehicle_dock.setVisible)
+        self.btn_vehicles.toggled.connect(self._start_layout_pulse)
+        self.vehicle_dock.visibilityChanged.connect(self._start_layout_pulse)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
 
     # ── Radar ─────────────────────────────────────────────────────────────────
@@ -395,9 +412,10 @@ class MainWindow(QMainWindow):
 
         # ── wire fetcher → decoder → overlay ─────────────────────────────
         self._radar_fetcher.new_data.connect(self._on_radar_data)
-        self._radar_fetcher.fetch_error.connect(
-            lambda msg: self.status_msg_label.setText(f"Radar: {msg}")
-        )
+        self._radar_fetcher.fetch_error.connect(self._on_radar_error)
+        self._radar_error_clear_timer = QTimer()
+        self._radar_error_clear_timer.setSingleShot(True)
+        self._radar_error_clear_timer.timeout.connect(self._clear_radar_error)
 
         # seed site list from config home location (overrides the hardcoded Norman default)
         self.radar_controls.set_reference_location(config.HOME_LAT, config.HOME_LON)
@@ -412,6 +430,16 @@ class MainWindow(QMainWindow):
     def _auto_start_radar(self):
         self._radar_fetcher.start()
         self._radar_fetcher.fetch_now()
+
+    def _on_radar_error(self, msg: str):
+        self.status_msg_label.setText(f"Radar: {msg}")
+        self._layout_overlays()
+        self._radar_error_clear_timer.start(10_000)
+
+    def _clear_radar_error(self):
+        if self.status_msg_label.text().startswith("Radar:"):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
 
     def _on_radar_toggled(self, enabled: bool):
         if enabled:

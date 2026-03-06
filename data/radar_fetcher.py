@@ -206,6 +206,7 @@ class RadarFetcher(QObject):
                 result.append((dataset_id, dataset_url))
             return result
 
+        self.fetch_error.emit(f"Radar catalog failed for {site}/{product}")
         return []
 
     def fetch_now(self):
@@ -267,6 +268,7 @@ class RadarFetcher(QObject):
                 dataset_id  = f"{product_code}:{dataset_name}"
                 return dataset_id, dataset_url
 
+        self.fetch_error.emit(f"Radar catalog failed for {site}/{product}")
         return "", ""
 
     def _download_url(self, url: str) -> bytes:
@@ -284,7 +286,7 @@ class RadarFetcher(QObject):
                 xml_text = resp.read().decode("utf-8", errors="replace")
             return ET.fromstring(xml_text)
         except (HTTPError, URLError, TimeoutError, ET.ParseError) as exc:
-            self.fetch_error.emit(f"Radar catalog failed: {exc}")
+            log.debug("catalog read failed (%s): %s", url, exc)
             return None
 
 
