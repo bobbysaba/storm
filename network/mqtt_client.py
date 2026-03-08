@@ -107,6 +107,7 @@ class MQTTClient(QObject):
                 log.info("MQTT: connecting to %s:%d (client_id=%r)", host, port, self._client_id)
             except Exception:
                 log.exception("MQTT: connect failed during setup")
+                self.disconnected.emit(-1)
 
     def publish(self, topic: str, payload: str, qos: int = 1, retain: bool = False):
         """Publish a UTF-8 string payload.  No-op if not connected."""

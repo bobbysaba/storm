@@ -82,6 +82,10 @@ def build_safe_map_html() -> str:
     window.stormMeasureActivate = _noop;
     window.stormMeasureClick = _noop;
     window.stormMeasureClear = _noop;
+    window.stormAddDrawing = _noop;
+    window.stormRemoveDrawing = _noop;
+    window.stormDrawingModeSet = _noop;
+    window.stormDrawingUpdatePreview = _noop;
   </script>
 </head>
 <body>
@@ -114,7 +118,14 @@ def build_map_html() -> str:
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html, body {{ width: 100%; height: 100%; background: #0A0A0F; overflow: hidden; }}
     #map {{ width: 100%; height: 100%; }}
-    #map.annotating, #map.measuring {{ cursor: crosshair; }}
+    #map.annotating, #map.measuring, #map.drawing {{ cursor: crosshair; }}
+    #front-canvas {{
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      z-index: 5;
+    }}
     .maplibregl-ctrl-attrib {{ opacity: 0.4; font-size: 9px; }}
     .maplibregl-ctrl-group {{
       background: #0F0F1A !important;
@@ -272,6 +283,7 @@ def build_map_html() -> str:
 </head>
 <body>
   <div id="map"></div>
+  <canvas id="front-canvas"></canvas>
 
   <!-- ── Legend ── -->
   <div id="storm-legend">
@@ -348,6 +360,15 @@ def build_map_html() -> str:
     window.stormMeasureActivate = _stormNoop;
     window.stormMeasureClick = _stormNoop;
     window.stormMeasureClear = _stormNoop;
+    window.stormAddDrawing = _stormNoop;
+    window.stormRemoveDrawing = _stormNoop;
+    window.stormDrawingModeSet = _stormNoop;
+    window.stormDrawingUpdatePreview = _stormNoop;
+    window._stormDrawings = {{}};
+    window._stormDrawingActive = false;
+    window._stormDrawingType = '';
+    window._drawingConfirmedPts = [];
+    window._drawingRubberPt = null;
 
     // Suppress MapLibre's benign AbortController warning that fires when
     // updateImage() cancels a prior in-flight radar image fetch.
@@ -803,6 +824,31 @@ def build_map_html() -> str:
           'circle-opacity': 0.85
         }}
       }});
+
+      // ── Drawing preview (rubber-band + confirmed points) ─────────────────
+      var emptyFC = {{type:'FeatureCollection',features:[]}};
+      map.addSource('drawing-preview-line', {{type:'geojson', data:emptyFC}});
+      map.addSource('drawing-preview-dots', {{type:'geojson', data:emptyFC}});
+
+      map.addLayer({{
+        id: 'drawing-preview-line', type: 'line', source: 'drawing-preview-line',
+        paint: {{
+          'line-color': '#E8EAF0',
+          'line-width': 2,
+          'line-opacity': 0.7,
+          'line-dasharray': [6, 4]
+        }}
+      }});
+      map.addLayer({{
+        id: 'drawing-preview-dots', type: 'circle', source: 'drawing-preview-dots',
+        paint: {{
+          'circle-radius': 4,
+          'circle-color': '#E8EAF0',
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': '#0A0A0F',
+          'circle-opacity': 0.85
+        }}
+      }});
     }});
 
     map.on("error", function(e) {{
@@ -829,9 +875,40 @@ def build_map_html() -> str:
             coordinates:[window._measureAnchor,[e.lngLat.lng,e.lngLat.lat]]}}}}
         ]}});
       }}
+      if (window._stormDrawingActive && window._drawingConfirmedPts && window._drawingConfirmedPts.length > 0) {{
+        window._drawingRubberPt = [e.lngLat.lng, e.lngLat.lat];
+        _updateDrawingPreviewGeoJSON();
+      }}
     }});
 
     map.on("click", function(e) {{
+      // In drawing mode: skip all hit detection, just emit map_click (point placement)
+      if (window._stormDrawingActive) {{
+        if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
+        return;
+      }}
+      // In annotation placement mode: always place, do not open existing features.
+      var mapEl = document.getElementById('map');
+      if (mapEl && mapEl.classList.contains('annotating')) {{
+        if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
+        return;
+      }}
+      // Check drawing hits (fronts + custom shapes)
+      const drawIds = Object.keys(window._stormDrawings || {{}});
+      const hitLayers = [];
+      drawIds.forEach(function(id) {{
+        ['drawing-hit-', 'drawing-hit-fill-', 'drawing-lbl-'].forEach(function(pfx) {{
+          const lid = pfx + id;
+          if (map.getLayer(lid)) hitLayers.push(lid);
+        }});
+      }});
+      if (hitLayers.length > 0) {{
+        const drawHits = map.queryRenderedFeatures(e.point, {{layers: hitLayers}});
+        if (drawHits.length > 0) {{
+          if (bridge) bridge.on_drawing_click(drawHits[0].properties.drawing_id);
+          return;
+        }}
+      }}
       // Intercept storm cone clicks before firing map_clicked
       const coneIds = Object.keys(window._stormCones || {{}});
       const fillLayers = coneIds.map(id => 'storm-cone-fill-' + id).filter(l => map.getLayer(l));
@@ -843,6 +920,13 @@ def build_map_html() -> str:
         }}
       }}
       if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
+    }});
+
+    map.on("dblclick", function(e) {{
+      if (window._stormDrawingActive) {{
+        e.preventDefault();
+        if (bridge) bridge.on_map_dblclick(e.lngLat.lat, e.lngLat.lng);
+      }}
     }});
 
     // ── Python-callable Functions ─────────────────────────────────────────
@@ -948,6 +1032,184 @@ def build_map_html() -> str:
         delete window._stormAnnotations[id];
       }}
     }};
+
+    // ── Drawing Annotations (Fronts & Custom Shapes) ──────────────────────
+    window._stormDrawings = {{}};
+
+    function _computeCentroid(coords) {{
+      var sumLon = 0, sumLat = 0;
+      coords.forEach(function(c) {{ sumLon += c[0]; sumLat += c[1]; }});
+      return [sumLon / coords.length, sumLat / coords.length];
+    }}
+
+    window.stormAddDrawing = function(id, jsonStr) {{
+      stormRemoveDrawing(id);
+      var d = JSON.parse(jsonStr);
+      window._stormDrawings[id] = d;
+
+      var coords = d.coordinates.map(function(c) {{ return [c[1], c[0]]; }});
+      var geometry;
+      if (d.drawing_type === 'polygon' && coords.length >= 3) {{
+        geometry = {{type:'Polygon', coordinates:[[...coords, coords[0]]]}};
+      }} else {{
+        geometry = {{type:'LineString', coordinates:coords}};
+      }}
+
+      map.addSource('drawing-' + id, {{
+        type: 'geojson',
+        data: {{
+          type: 'FeatureCollection',
+          features: [{{
+            type: 'Feature',
+            geometry: geometry,
+            properties: {{drawing_id: id, drawing_type: d.drawing_type, title: d.title}}
+          }}]
+        }}
+      }});
+
+      // Wide transparent line for hit detection (works for fronts and polyline edges)
+      map.addLayer({{
+        id: 'drawing-hit-' + id, type: 'line', source: 'drawing-' + id,
+        paint: {{'line-color': 'rgba(0,0,0,0)', 'line-width': 16, 'line-opacity': 0.001}}
+      }});
+
+      if (d.drawing_type === 'polyline' || d.drawing_type === 'polygon') {{
+        if (d.drawing_type === 'polygon') {{
+          // Invisible fill layer so clicking polygon interior selects the drawing.
+          map.addLayer({{
+            id: 'drawing-hit-fill-' + id, type: 'fill', source: 'drawing-' + id,
+            paint: {{'fill-color': '#000000', 'fill-opacity': 0.001}}
+          }});
+          // Visible polygon fill.
+          map.addLayer({{
+            id: 'drawing-fill-' + id, type: 'fill', source: 'drawing-' + id,
+            paint: {{'fill-color': '#E8EAF0', 'fill-opacity': 0.12}}
+          }});
+        }}
+        map.addLayer({{
+          id: 'drawing-line-' + id, type: 'line', source: 'drawing-' + id,
+          layout: {{
+            'line-join': 'round',
+            'line-cap': 'round'
+          }},
+          paint: {{
+            'line-color': '#E8EAF0',
+            'line-width': 2,
+            'line-opacity': 0.9
+          }}
+        }});
+        if (d.title) {{
+          var centroid = _computeCentroid(coords);
+          map.addSource('drawing-lbl-' + id, {{
+            type: 'geojson',
+            data: {{
+              type: 'FeatureCollection',
+              features: [{{
+                type: 'Feature',
+                geometry: {{type:'Point', coordinates:centroid}},
+                properties: {{drawing_id: id, title: d.title}}
+              }}]
+            }}
+          }});
+          map.addLayer({{
+            id: 'drawing-lbl-' + id, type: 'symbol', source: 'drawing-lbl-' + id,
+            layout: {{
+              'text-field': ['get', 'title'],
+              'text-font': ['Noto Sans Bold'],
+              'text-size': 12,
+              'text-anchor': 'center',
+              'text-offset': [0, -1.2],
+              'text-allow-overlap': false,
+              'text-ignore-placement': false
+            }},
+            paint: {{
+              'text-color': '#E8EAF0',
+              'text-halo-color': 'rgba(10,10,15,0.9)',
+              'text-halo-width': 2
+            }}
+          }});
+        }}
+      }}
+      // Fronts: canvas handles visual rendering; only the hit layer above is needed
+
+      ['drawing-hit-' + id, 'drawing-hit-fill-' + id, 'drawing-lbl-' + id]
+        .filter(function(layerId) {{ return map.getLayer(layerId); }})
+        .forEach(function(layerId) {{
+          map.on('mouseenter', layerId, function() {{
+            map.getCanvas().style.cursor = 'pointer';
+          }});
+          map.on('mouseleave', layerId, function() {{
+            map.getCanvas().style.cursor = '';
+          }});
+        }});
+    }};
+
+    window.stormRemoveDrawing = function(id) {{
+      ['drawing-hit-', 'drawing-hit-fill-', 'drawing-fill-', 'drawing-line-', 'drawing-lbl-'].forEach(function(pfx) {{
+        if (map.getLayer(pfx + id)) map.removeLayer(pfx + id);
+      }});
+      if (map.getSource('drawing-' + id)) map.removeSource('drawing-' + id);
+      if (map.getSource('drawing-lbl-' + id)) map.removeSource('drawing-lbl-' + id);
+      delete window._stormDrawings[id];
+    }};
+
+    window.stormDrawingModeSet = function(active, type) {{
+      window._stormDrawingActive = active;
+      window._stormDrawingType = type || '';
+      var mapEl = document.getElementById('map');
+      if (active) {{
+        map.doubleClickZoom.disable();
+        if (mapEl) {{ mapEl.classList.add('drawing'); mapEl.classList.remove('annotating', 'measuring'); }}
+        var FRONT_COLORS = {{
+          cold_front:'#4A9EFF', warm_front:'#E53935',
+          stationary_front:'#4A9EFF', occluded_front:'#9C27B0', dryline:'#D4872E'
+        }};
+        var color = FRONT_COLORS[type] || '#E8EAF0';
+        if (map.getLayer('drawing-preview-line')) {{
+          map.setPaintProperty('drawing-preview-line', 'line-color', color);
+        }}
+        window._drawingConfirmedPts = [];
+        window._drawingRubberPt = null;
+        _updateDrawingPreviewGeoJSON();
+      }} else {{
+        map.doubleClickZoom.enable();
+        if (mapEl) mapEl.classList.remove('drawing');
+        _clearDrawingPreview();
+      }}
+    }};
+
+    window.stormDrawingUpdatePreview = function(ptsJson) {{
+      window._drawingConfirmedPts = JSON.parse(ptsJson);
+      _updateDrawingPreviewGeoJSON();
+    }};
+
+    function _updateDrawingPreviewGeoJSON() {{
+      if (!map.getSource('drawing-preview-line')) return;
+      var pts = window._drawingConfirmedPts || [];
+      if (pts.length === 0) {{
+        map.getSource('drawing-preview-line').setData({{type:'FeatureCollection',features:[]}});
+        map.getSource('drawing-preview-dots').setData({{type:'FeatureCollection',features:[]}});
+        return;
+      }}
+      var coords = pts.map(function(p) {{ return [p[1], p[0]]; }});
+      var lineCoords = window._drawingRubberPt ? coords.concat([window._drawingRubberPt]) : coords;
+      if (lineCoords.length >= 2) {{
+        map.getSource('drawing-preview-line').setData({{type:'FeatureCollection',features:[
+          {{type:'Feature',geometry:{{type:'LineString',coordinates:lineCoords}}}}
+        ]}});
+      }} else {{
+        map.getSource('drawing-preview-line').setData({{type:'FeatureCollection',features:[]}});
+      }}
+      map.getSource('drawing-preview-dots').setData({{type:'FeatureCollection',features:
+        coords.map(function(c) {{ return {{type:'Feature',geometry:{{type:'Point',coordinates:c}}}}; }})
+      }});
+    }}
+
+    function _clearDrawingPreview() {{
+      window._drawingConfirmedPts = [];
+      window._drawingRubberPt = null;
+      _updateDrawingPreviewGeoJSON();
+    }}
 
     // ── Storm Motion Cones ────────────────────────────────────────────────
     window._stormCones = {{}};
@@ -1135,6 +1397,190 @@ def build_map_html() -> str:
       map.setLayoutProperty('deploy-locs-circles', 'visibility', visible ? 'visible' : 'none');
     }};
 
+    // ── Front Canvas Rendering ────────────────────────────────────────────
+    (function() {{
+      var frontCanvas = document.getElementById('front-canvas');
+      if (!frontCanvas) return;
+      var frontCtx = frontCanvas.getContext('2d');
+
+      function _resizeFrontCanvas() {{
+        var mc = map.getCanvas();
+        var dpr = window.devicePixelRatio || 1;
+        var w = Math.round(mc.clientWidth * dpr);
+        var h = Math.round(mc.clientHeight * dpr);
+        if (frontCanvas.width !== w || frontCanvas.height !== h) {{
+          frontCanvas.width = w;
+          frontCanvas.height = h;
+        }}
+      }}
+
+      function _projectPts(coords, dpr) {{
+        return coords.map(function(c) {{
+          var p = map.project([c[1], c[0]]);
+          return {{x: p.x * dpr, y: p.y * dpr}};
+        }});
+      }}
+
+      function _drawFrontLine(ctx, pts, color, dpr) {{
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5 * dpr;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }}
+
+      function _drawAlternatingFrontLine(ctx, pts, colorA, colorB, segmentLen, dpr) {{
+        if (!pts || pts.length < 2) return;
+        var drawA = true;
+        var carried = 0;
+        var segLen = Math.max(8 * dpr, segmentLen);
+        for (var i = 0; i < pts.length - 1; i++) {{
+          var p1 = pts[i], p2 = pts[i+1];
+          var dx = p2.x - p1.x, dy = p2.y - p1.y;
+          var len = Math.sqrt(dx*dx + dy*dy);
+          if (len < 0.5) continue;
+
+          var used = 0;
+          while (used < len) {{
+            var run = Math.min(segLen - carried, len - used);
+            var t1 = used / len;
+            var t2 = (used + run) / len;
+            var x1 = p1.x + dx * t1, y1 = p1.y + dy * t1;
+            var x2 = p1.x + dx * t2, y2 = p1.y + dy * t2;
+
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = drawA ? colorA : colorB;
+            ctx.lineWidth = 2.5 * dpr;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            used += run;
+            carried += run;
+            if (carried >= segLen - 0.001) {{
+              carried = 0;
+              drawA = !drawA;
+            }}
+          }}
+        }}
+      }}
+
+      function _walkLine(pts, spacing, cb) {{
+        var acc = 0, nextAt = spacing * 0.5, idx = 0;
+        for (var i = 0; i < pts.length - 1; i++) {{
+          var p1 = pts[i], p2 = pts[i+1];
+          var dx = p2.x - p1.x, dy = p2.y - p1.y;
+          var len = Math.sqrt(dx*dx + dy*dy);
+          if (len < 0.5) continue;
+          var ux = dx/len, uy = dy/len;
+          while (acc + len >= nextAt) {{
+            var t = (nextAt - acc) / len;
+            cb(p1.x + t*dx, p1.y + t*dy, ux, uy, idx++);
+            nextAt += spacing;
+          }}
+          acc += len;
+        }}
+      }}
+
+      function _triSym(ctx, sx, sy, tx, ty, rx, ry, size, color) {{
+        ctx.beginPath();
+        ctx.moveTo(sx + rx*size, sy + ry*size);
+        ctx.lineTo(sx - tx*size*0.65 - rx*size*0.15, sy - ty*size*0.65 - ry*size*0.15);
+        ctx.lineTo(sx + tx*size*0.65 - rx*size*0.15, sy + ty*size*0.65 - ry*size*0.15);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+      }}
+
+      function _semiSym(ctx, sx, sy, rx, ry, size, color, strokeOnly) {{
+        var ang = Math.atan2(ry, rx);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.arc(sx, sy, size * 0.85, ang - Math.PI/2, ang + Math.PI/2);
+        ctx.closePath();
+        if (strokeOnly) {{ ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); }}
+        else {{ ctx.fillStyle = color; ctx.fill(); }}
+      }}
+
+      function _drawFront(ctx, drawing, dpr) {{
+        var coords = drawing.coordinates;
+        if (!coords || coords.length < 2) return;
+        var COLORS = {{
+          cold_front:'#4A9EFF', warm_front:'#E53935',
+          stationary_front:'#4A9EFF', occluded_front:'#9C27B0', dryline:'#D4872E'
+        }};
+        var color = COLORS[drawing.drawing_type] || '#FFFFFF';
+        var side = drawing.flipped ? -1 : 1;
+        var pts = _projectPts(coords, dpr);
+        var SPACING = 40 * dpr, SIZE = 9 * dpr;
+        var type = drawing.drawing_type;
+
+        if (type === 'stationary_front') {{
+          _drawAlternatingFrontLine(ctx, pts, '#E53935', '#4A9EFF', SPACING * 0.5, dpr);
+        }} else {{
+          _drawFrontLine(ctx, pts, color, dpr);
+        }}
+        _walkLine(pts, SPACING, function(sx, sy, tx, ty, idx) {{
+          var rx = -ty * side, ry = tx * side;
+          if (type === 'cold_front') {{
+            _triSym(ctx, sx, sy, tx, ty, rx, ry, SIZE, '#4A9EFF');
+          }} else if (type === 'warm_front') {{
+            _semiSym(ctx, sx, sy, rx, ry, SIZE, '#E53935', false);
+          }} else if (type === 'stationary_front') {{
+            // Stationary front pattern: red semicircle, then blue triangle.
+            if (idx % 2 === 0) _semiSym(ctx, sx, sy, -rx, -ry, SIZE, '#E53935', false);
+            else _triSym(ctx, sx, sy, tx, ty, rx, ry, SIZE, '#4A9EFF');
+          }} else if (type === 'occluded_front') {{
+            if (idx % 2 === 0) _triSym(ctx, sx, sy, tx, ty, rx, ry, SIZE, '#9C27B0');
+            else _semiSym(ctx, sx, sy, rx, ry, SIZE, '#9C27B0', false);
+          }} else if (type === 'dryline') {{
+            _semiSym(ctx, sx, sy, rx, ry, SIZE, '#D4872E', true);
+          }}
+        }});
+      }}
+
+      function _drawPreviewFront(ctx, points, type, dpr) {{
+        if (!points || points.length < 2) return;
+        var COLORS = {{
+          cold_front:'#4A9EFF', warm_front:'#E53935',
+          stationary_front:'#4A9EFF', occluded_front:'#9C27B0', dryline:'#D4872E'
+        }};
+        var color = COLORS[type] || '#E8EAF0';
+        var pts = _projectPts(points, dpr);
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        ctx.setLineDash([8*dpr, 5*dpr]);
+        _drawFrontLine(ctx, pts, color, dpr);
+        ctx.restore();
+      }}
+
+      map.on('render', function() {{
+        _resizeFrontCanvas();
+        frontCtx.clearRect(0, 0, frontCanvas.width, frontCanvas.height);
+        var dpr = window.devicePixelRatio || 1;
+
+        Object.values(window._stormDrawings || {{}}).forEach(function(d) {{
+          if (d.drawing_type !== 'polyline' && d.drawing_type !== 'polygon') {{
+            _drawFront(frontCtx, d, dpr);
+          }}
+        }});
+
+        if (window._stormDrawingActive && window._stormDrawingType &&
+            window._stormDrawingType !== 'polyline' && window._stormDrawingType !== 'polygon') {{
+          var previewPts = (window._drawingConfirmedPts || []).slice();
+          if (window._drawingRubberPt) {{
+            previewPts.push([window._drawingRubberPt[1], window._drawingRubberPt[0]]);
+          }}
+          _drawPreviewFront(frontCtx, previewPts, window._stormDrawingType, dpr);
+        }}
+      }});
+    }})();
+
     // ── Legend Toggle ─────────────────────────────────────────────────────
     (function() {{
       const toggle = document.getElementById("legend-toggle");
@@ -1286,6 +1732,8 @@ class MapBridge(QObject):
     feature_clicked    = pyqtSignal(str)
     annotation_clicked = pyqtSignal(str)
     storm_cone_clicked = pyqtSignal(str)
+    map_double_clicked = pyqtSignal(float, float)
+    drawing_clicked    = pyqtSignal(str)
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -1307,6 +1755,14 @@ class MapBridge(QObject):
     def on_storm_cone_click(self, cone_id: str):
         self.storm_cone_clicked.emit(cone_id)
 
+    @pyqtSlot(float, float)
+    def on_map_dblclick(self, lat: float, lon: float):
+        self.map_double_clicked.emit(lat, lon)
+
+    @pyqtSlot(str)
+    def on_drawing_click(self, drawing_id: str):
+        self.drawing_clicked.emit(drawing_id)
+
 
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
@@ -1316,6 +1772,8 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     feature_clicked    = pyqtSignal(str)
     annotation_clicked = pyqtSignal(str)
     storm_cone_clicked = pyqtSignal(str)
+    map_double_clicked = pyqtSignal(float, float)
+    drawing_clicked    = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1352,6 +1810,8 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.feature_clicked.connect(self.feature_clicked)
         self.bridge.annotation_clicked.connect(self.annotation_clicked)
         self.bridge.storm_cone_clicked.connect(self.storm_cone_clicked)
+        self.bridge.map_double_clicked.connect(self.map_double_clicked)
+        self.bridge.drawing_clicked.connect(self.drawing_clicked)
 
         # Queue for JS calls that arrive before the page has loaded
         self._map_ready = False
@@ -1393,25 +1853,56 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(f"stormFlyTo({lat}, {lon}, {zoom_str});")
 
     def set_annotation_mode(self, active: bool):
-        cls = "annotating" if active else ""
-        self.run_js(
-            f"(function(){{ var el=document.getElementById('map');"
-            f" if(el) {{ el.className='{cls}'; }} }})();"
-        )
+        if active:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.add('annotating');el.classList.remove('drawing','measuring');}})();"
+            )
+        else:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.remove('annotating');}})();"
+            )
 
     def set_measure_mode(self, active: bool):
-        cls = "measuring" if active else ""
-        self.run_js(
-            f"(function(){{ var el=document.getElementById('map');"
-            f" if(el) {{ el.className='{cls}'; }} }})();"
-            f"if(window.stormMeasureActivate) stormMeasureActivate({'true' if active else 'false'});"
-        )
+        if active:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.add('measuring');el.classList.remove('annotating','drawing');}})();"
+                "if(window.stormMeasureActivate) stormMeasureActivate(true);"
+            )
+        else:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.remove('measuring');}})();"
+                "if(window.stormMeasureActivate) stormMeasureActivate(false);"
+            )
 
     def measure_click(self, lat: float, lon: float):
         self.run_js(f"if(window.stormMeasureClick) stormMeasureClick({lat},{lon});")
 
     def clear_measure(self):
         self.run_js("if(window.stormMeasureClear) stormMeasureClear();")
+
+    def set_drawing_mode(self, active: bool, type_key: str = "") -> None:
+        flag = "true" if active else "false"
+        self.run_js(
+            f"if(window.stormDrawingModeSet) stormDrawingModeSet({flag}, '{type_key}');"
+        )
+
+    def drawing_update_preview(self, points: list) -> None:
+        import json
+        self.run_js(
+            f"if(window.stormDrawingUpdatePreview) stormDrawingUpdatePreview({json.dumps(json.dumps(points))});"
+        )
+
+    def add_drawing(self, drawing) -> None:
+        import json
+        payload = json.dumps(drawing.to_dict())
+        self.run_js(f"if(window.stormAddDrawing) stormAddDrawing('{drawing.id}', {json.dumps(payload)});")
+
+    def remove_drawing(self, drawing_id: str) -> None:
+        self.run_js(f"if(window.stormRemoveDrawing) stormRemoveDrawing('{drawing_id}');")
 
     def add_annotation(self, annotation) -> None:
         if getattr(annotation, "type_key", "") == "storm_motion":

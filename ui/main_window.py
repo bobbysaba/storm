@@ -22,17 +22,20 @@ from ui.radar_controls import RadarControls
 from ui.radar_overlay import RadarOverlay
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
+from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
 from core.storm_cone import StormCone
+from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from core.observation import Observation
 from core.vehicle import Vehicle
 from network.mqtt_client import MQTTClient
 from network.annotation_sync import AnnotationSync
 from network.storm_cone_sync import StormConeSync
+from network.drawing_sync import DrawingSync
 from network.vehicle_sync import VehicleSync
 from network.vehicle_fetcher import VehicleFetcher
 from data.gps_reader import GPSReader
@@ -40,6 +43,11 @@ from data.obs_file_watcher import ObsFileWatcher, FieldMap
 from ui.station_plot_layer import StationPlotLayer
 
 log = logging.getLogger(__name__)
+
+
+def _coords_close(a, b, tol: float = 1e-4) -> bool:
+    """Return True if two [lat, lon] points are within ~10 m of each other."""
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
 
 
 class MainWindow(QMainWindow):
@@ -158,8 +166,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(220, self._layout_overlays)
 
         # ctrl+d toggles debug panel even outside --debug mode (emergency diagnostic)
-        debug_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
-        debug_shortcut.activated.connect(self._toggle_debug_panel)
+        self._debug_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
+        self._debug_shortcut.activated.connect(self._toggle_debug_panel)
+        # Esc cancels in-progress line/polygon/front drawing.
+        self._esc_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self._esc_shortcut.activated.connect(self._on_escape_pressed)
 
         # auto-init debug panel when launched with --debug flag
         if debug:
@@ -192,8 +203,9 @@ class MainWindow(QMainWindow):
 
         # ── radar ─────────────────────────────────────────────────────────
         self.btn_radar = self._toolbar_toggle("RADAR", "Show/hide radar controls", tb)
-        self.radar_controls = RadarControls()
-        tb.addWidget(self.radar_controls)
+        # Radar controls drop down below the toolbar as a separate floating pill
+        self.radar_controls = RadarControls(self._map_container)
+        self.radar_controls.setObjectName("floatingToolbar")
         self.btn_radar.toggled.connect(self.radar_controls.toggle_drawer)
         # pulse layout updates for the duration of the open/close animation
         self.btn_radar.toggled.connect(self._start_layout_pulse)
@@ -214,8 +226,9 @@ class MainWindow(QMainWindow):
         self.btn_annotate = self._toolbar_toggle(
             "ANNOTATE", "Place road annotations and storm motion cone", tb
         )
-        self.annotation_tools = AnnotationTools()
-        tb.addWidget(self.annotation_tools)
+        # Annotation tools drop down below the toolbar as a separate floating pill
+        self.annotation_tools = AnnotationTools(self._map_container)
+        self.annotation_tools.setObjectName("floatingToolbar")
         self.btn_annotate.toggled.connect(self.annotation_tools.toggle_drawer)
         self.btn_annotate.toggled.connect(self._start_layout_pulse)
 
@@ -342,6 +355,22 @@ class MainWindow(QMainWindow):
             tb_x = max(0, (r.width() - tb_w) // 2)
             self._floating_toolbar.setGeometry(tb_x, MARGIN, tb_w, tb_h)
             self._floating_toolbar.raise_()
+
+            # Radar controls and annotation tools drop down below the toolbar
+            # as separate floating pills; each centers horizontally independently.
+            _drop_y = MARGIN + tb_h + 4
+            if hasattr(self, "radar_controls"):
+                rc = self.radar_controls
+                rc_w = rc.sizeHint().width()
+                rc_x = max(0, (r.width() - rc_w) // 2)
+                rc.setGeometry(rc_x, _drop_y, rc_w, rc.sizeHint().height())
+                rc.raise_()
+            if hasattr(self, "annotation_tools"):
+                at = self.annotation_tools
+                at_w = at.sizeHint().width()
+                at_x = max(0, (r.width() - at_w) // 2)
+                at.setGeometry(at_x, _drop_y, at_w, at.sizeHint().height())
+                at.raise_()
 
         # left status pill — bottom-left corner
         if hasattr(self, "_status_left"):
@@ -620,8 +649,8 @@ class MainWindow(QMainWindow):
 
     def _init_mqtt(self):
         self._mqtt_client = MQTTClient(client_id=config.VEHICLE_ID, parent=self)
-        self._mqtt_client.connected.connect(lambda: self.set_connection_status(True))
-        self._mqtt_client.disconnected.connect(lambda _: self.set_connection_status(False))
+        self._mqtt_client.connected.connect(self._on_mqtt_connected)
+        self._mqtt_client.disconnected.connect(self._on_mqtt_disconnected)
 
         # publish-only — used by GPS-only vehicles to push position to broker
         self._vehicle_sync = VehicleSync(self._mqtt_client, parent=self)
@@ -657,6 +686,37 @@ class MainWindow(QMainWindow):
             key_file=config.MQTT_KEY_FILE,
         )
 
+    def _on_mqtt_connected(self):
+        self.set_connection_status(True)
+        if self.status_msg_label.text().startswith("MQTT:"):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+
+    def _on_mqtt_disconnected(self, code: int):
+        self.set_connection_status(False)
+        code_map = {
+            -1: "setup error (cert/key/path)",
+            7: "connection lost",
+            128: "unspecified error",
+            129: "malformed packet",
+            130: "protocol error",
+            131: "implementation-specific error",
+            132: "unsupported protocol version",
+            133: "client ID invalid",
+            134: "bad username/password",
+            135: "not authorized",
+            136: "server unavailable",
+            137: "server busy",
+            138: "banned",
+            140: "bad auth method",
+            149: "packet too large",
+            151: "quota exceeded",
+            153: "payload format invalid",
+        }
+        reason = code_map.get(code, "connection/auth error")
+        self.status_msg_label.setText(f"MQTT: offline ({code}) {reason}")
+        self._layout_overlays()
+
     # ── Annotations ───────────────────────────────────────────────────────────
 
     def _init_annotations(self):
@@ -685,6 +745,19 @@ class MainWindow(QMainWindow):
         self._annotation_sync.annotation_received.connect(self._recv_remote_annotation)
         self._annotation_sync.annotation_deleted.connect(self._recv_remote_annotation_deleted)
 
+        self._init_drawings()
+
+    def _init_drawings(self):
+        self._drawings: dict[str, DrawingAnnotation] = {}
+        self._active_drawing_type: str = ""
+        self._drawing_points: list = []
+        self._drawing_sync = DrawingSync(self._mqtt_client, parent=self)
+
+        self.map_widget.map_double_clicked.connect(self._on_map_dblclick)
+        self.map_widget.drawing_clicked.connect(self._on_drawing_clicked)
+        self._drawing_sync.drawing_received.connect(self._recv_remote_drawing)
+        self._drawing_sync.drawing_deleted.connect(self._recv_remote_drawing_deleted)
+
     def _set_placement_prompt(self, msg: str, needs_click: bool = True):
         """Show an accent-colored status prompt."""
         suffix = "  —  click map to place" if needs_click else ""
@@ -700,11 +773,27 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_annotation_tool_selected(self, type_key: str):
-        # always reset pending storm cone when tool selection changes
-        self._pending_cone_params = None
-        self._active_annotation_type = type_key
+        # cancel any in-progress drawing when tool switches
+        if getattr(self, "_active_drawing_type", ""):
+            self._cancel_drawing()
 
-        if type_key == "storm_motion":
+        self._pending_cone_params = None
+        self._active_annotation_type = ""
+        self._active_drawing_type = ""
+
+        if type_key in DRAWING_TYPE_MAP:
+            # Drawing tool (front or custom shape)
+            self._active_drawing_type = type_key
+            self.map_widget.set_annotation_mode(False)
+            self.map_widget.set_drawing_mode(True, type_key)
+            meta = DRAWING_TYPE_MAP[type_key]
+            self._set_placement_prompt(
+                f"{meta['label']} — click to add points, double-click to finish",
+                needs_click=False,
+            )
+        elif type_key == "storm_motion":
+            self._active_annotation_type = type_key
+            self.map_widget.set_drawing_mode(False)
             dlg = StormConeInputDialog(edit_mode=False, parent=self)
             if dlg.exec() == StormConeInputDialog.DialogCode.Accepted:
                 self._pending_cone_params = {
@@ -714,21 +803,26 @@ class MainWindow(QMainWindow):
                 self.map_widget.set_annotation_mode(True)
                 self._set_placement_prompt("storm cone")
             else:
-                # cancelled — deactivate the button without re-emitting
                 self._active_annotation_type = ""
                 self.annotation_tools.deactivate_tool()
                 self._clear_placement_prompt()
         elif type_key:
+            self._active_annotation_type = type_key
+            self.map_widget.set_drawing_mode(False)
             self.map_widget.set_annotation_mode(True)
             label = ANNOTATION_TYPE_MAP.get(type_key, {}).get("label", "annotation")
             self._set_placement_prompt(label)
         else:
+            self.map_widget.set_drawing_mode(False)
             self.map_widget.set_annotation_mode(False)
             self._clear_placement_prompt()
 
     def _on_map_click(self, lat: float, lon: float):
         if getattr(self, "_measure_active", False):
             self._on_measure_click(lat, lon)
+            return
+        if getattr(self, "_active_drawing_type", ""):
+            self._on_drawing_click(lat, lon)
             return
         if self._pending_cone_params is not None:
             cone = StormCone.new(lat, lon, **self._pending_cone_params)
@@ -794,6 +888,138 @@ class MainWindow(QMainWindow):
         self._annotations.pop(annotation_id, None)
         self.map_widget.remove_annotation(annotation_id)
         log.info("remote annotation deleted: %s", annotation_id)
+
+    # ── Drawing Annotations (Fronts & Custom Shapes) ──────────────────────────
+
+    def _on_drawing_click(self, lat: float, lon: float):
+        """Add a point to the in-progress drawing."""
+        self._drawing_points.append([lat, lon])
+        self.map_widget.drawing_update_preview(self._drawing_points)
+        n = len(self._drawing_points)
+        meta = DRAWING_TYPE_MAP.get(self._active_drawing_type, {})
+        self._set_placement_prompt(
+            f"{meta.get('label', '')} — {n} point{'s' if n != 1 else ''} — double-click to finish",
+            needs_click=False,
+        )
+
+    def _on_map_dblclick(self, lat: float, lon: float):
+        if not getattr(self, "_active_drawing_type", ""):
+            return
+        self._finalize_drawing(lat, lon)
+
+    def _finalize_drawing(self, lat: float, lon: float):
+        pts = self._drawing_points[:]
+        # Remove trailing duplicate(s) added by the single-click events that
+        # fire before the dblclick event.
+        while pts and _coords_close(pts[-1], (lat, lon)):
+            pts.pop()
+        pts.append([lat, lon])
+
+        drawing_type = self._active_drawing_type
+
+        if len(pts) < 2:
+            self._drawing_points = pts
+            self.map_widget.drawing_update_preview(self._drawing_points)
+            meta = DRAWING_TYPE_MAP.get(drawing_type, {})
+            self._set_placement_prompt(
+                f"{meta.get('label', 'Drawing')} needs at least 2 points — keep drawing, then double-click to finish",
+                needs_click=False,
+            )
+            return
+        if drawing_type == "polygon" and len(pts) < 3:
+            self._drawing_points = pts
+            self.map_widget.drawing_update_preview(self._drawing_points)
+            self._set_placement_prompt(
+                "Polygon needs at least 3 points — keep drawing, then double-click to finish",
+                needs_click=False,
+            )
+            return
+
+        self._cancel_drawing()   # clear state + preview before showing dialog
+
+        if drawing_type in ("polyline", "polygon"):
+            dlg = DrawingTitleDialog(drawing_type, parent=self)
+            if dlg.exec() != DrawingTitleDialog.DialogCode.Accepted:
+                return
+            title = dlg.title()
+        else:
+            title = DRAWING_TYPE_MAP.get(drawing_type, {}).get("label", drawing_type)
+
+        drawing = DrawingAnnotation.new(
+            drawing_type=drawing_type,
+            coordinates=pts,
+            title=title,
+        )
+        self._place_drawing(drawing)
+        if drawing_type in FRONT_TYPE_KEYS:
+            self.btn_annotate.setChecked(False)
+
+    def _cancel_drawing(self):
+        self._drawing_points.clear()
+        self._active_drawing_type = ""
+        self.map_widget.set_drawing_mode(False)
+        self._clear_placement_prompt()
+
+    def _on_escape_pressed(self):
+        if not getattr(self, "_active_drawing_type", ""):
+            return
+        self._cancel_drawing()
+        if hasattr(self, "annotation_tools"):
+            self.annotation_tools.deactivate_tool()
+
+    def _on_drawing_clicked(self, drawing_id: str):
+        # Ignore if a tool is currently active
+        if self._active_annotation_type or getattr(self, "_active_drawing_type", ""):
+            return
+        drawing = self._drawings.get(drawing_id)
+        if drawing is None:
+            return
+        dlg = DrawingEditDialog(drawing, parent=self)
+        if dlg.exec() != DrawingEditDialog.DialogCode.Accepted:
+            return
+        action = dlg.action()
+        if action == "delete":
+            self._delete_drawing(drawing_id)
+        elif action == "flip":
+            drawing.flipped = not drawing.flipped
+            self._update_drawing(drawing)
+        elif action == "save":
+            drawing.title = dlg.result_title()
+            self._update_drawing(drawing)
+
+    def _place_drawing(self, drawing: DrawingAnnotation):
+        self._drawings[drawing.id] = drawing
+        self.map_widget.add_drawing(drawing)
+        if not self._monitor:
+            self._drawing_sync.publish_create(drawing)
+        log.info("drawing placed: %s at %d points", drawing.drawing_type, len(drawing.coordinates))
+
+    def _delete_drawing(self, drawing_id: str):
+        self._drawings.pop(drawing_id, None)
+        self.map_widget.remove_drawing(drawing_id)
+        if not self._monitor:
+            self._drawing_sync.publish_delete(drawing_id)
+        log.info("drawing deleted: %s", drawing_id)
+
+    def _update_drawing(self, drawing: DrawingAnnotation):
+        self._drawings[drawing.id] = drawing
+        self.map_widget.remove_drawing(drawing.id)
+        self.map_widget.add_drawing(drawing)
+        if not self._monitor:
+            self._drawing_sync.publish_update(drawing)
+        log.info("drawing updated: %s", drawing.id)
+
+    def _recv_remote_drawing(self, drawing: DrawingAnnotation):
+        """Inbound from MQTT — update map/dict but do NOT republish."""
+        self._drawings[drawing.id] = drawing
+        self.map_widget.add_drawing(drawing)
+        log.info("remote drawing received: %s (%s)", drawing.id, drawing.drawing_type)
+
+    def _recv_remote_drawing_deleted(self, drawing_id: str):
+        """Inbound delete from MQTT — remove from map/dict but do NOT republish."""
+        self._drawings.pop(drawing_id, None)
+        self.map_widget.remove_drawing(drawing_id)
+        log.info("remote drawing deleted: %s", drawing_id)
 
     # ── Storm Motion Cone ─────────────────────────────────────────────────────
 

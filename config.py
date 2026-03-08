@@ -6,11 +6,11 @@
 from pathlib import Path
 
 _PROJ = Path(__file__).parent
-_AWS  = _PROJ / ".aws"
+_AWS  = _PROJ / "aws"
 
 # ── Identity (overwritten by main.py after launch dialog) ─────────────────────
 
-VEHICLE_ID: str = "STORM"
+VEHICLE_ID: str = "storm"
 
 # ── Obs file watcher (Track A) ────────────────────────────────────────────────
 # Directory containing YYYYMMDD.txt instrument logger files.
@@ -62,4 +62,3 @@ MQTT_USE_TLS:  bool = True
 MQTT_CA_CERT:  str  = str(_AWS / "storm.pem")
 MQTT_CERT_FILE: str = str(_AWS / "storm.pem.crt")
 MQTT_KEY_FILE:  str = str(_AWS / "storm-private.pem.key")
-

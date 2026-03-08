@@ -149,7 +149,7 @@ def main():
         if dialog.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
         # Push dialog values into config module so MainWindow picks them up
-        config.VEHICLE_ID   = dialog.vehicle_id() or config.VEHICLE_ID
+        config.VEHICLE_ID   = (dialog.vehicle_id() or config.VEHICLE_ID).lower()
         config.OBS_FILE_DIR = dialog.data_dir()
         monitor             = dialog.monitor()
 

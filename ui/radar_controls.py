@@ -87,27 +87,24 @@ class RadarControls(QWidget):
         self._manual_site        = ""
         self._all_sites          = list(NEXRAD_SITES)
         self._animation          = None   # hold ref to prevent GC during animation
-        self._expanded_width     = 0
+        self._expanded_height    = 0
         self._setup_ui()
         self.set_reference_location(DEFAULT_REF_LAT, DEFAULT_REF_LON)
 
     def _setup_ui(self):
-        self.setObjectName("radarControls")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(0)
 
-        # ── collapsible two-row drawer ─────────────────────────────────────
-        # the RADAR toggle button lives in the toolbar (main_window) so it
-        # sizes identically to STATIONS / VEHICLES / etc.
-        # We animate self.maximumWidth (not _drawer.maximumWidth) so the toolbar
-        # layout sees the size change and other buttons slide correctly.
-        self.setMaximumWidth(0)   # RadarControls itself starts collapsed
+        # Starts collapsed — height animates open as a dropdown pill below toolbar.
+        self.setMaximumHeight(0)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
         self._drawer = QWidget()
         self._drawer.setObjectName("radarDrawer")
         drawer_layout = QVBoxLayout(self._drawer)
-        drawer_layout.setContentsMargins(2, 0, 0, 0)
-        drawer_layout.setSpacing(2)
+        drawer_layout.setContentsMargins(0, 0, 0, 0)
+        drawer_layout.setSpacing(4)
 
         # ── Row 1: site | product | show data checkbox ────────────────────
         row1 = QWidget()
@@ -212,8 +209,8 @@ class RadarControls(QWidget):
         drawer_layout.addWidget(row2)
         layout.addWidget(self._drawer)
 
-        # measure natural width after layout settles, before first collapse
-        QTimer.singleShot(0, self._measure_expanded_width)
+        # measure natural height after layout settles, before first collapse
+        QTimer.singleShot(0, self._measure_expanded_height)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -305,11 +302,11 @@ class RadarControls(QWidget):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _measure_expanded_width(self):
-        """store the natural width of RadarControls before it was ever collapsed."""
-        self.setMaximumWidth(16777215)
-        self._expanded_width = self.sizeHint().width()
-        self.setMaximumWidth(0)
+    def _measure_expanded_height(self):
+        """store the natural height of RadarControls before it was ever collapsed."""
+        self.setMaximumHeight(16777215)
+        self._expanded_height = self.sizeHint().height()
+        self.setMaximumHeight(0)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -317,29 +314,27 @@ class RadarControls(QWidget):
         """animate RadarControls open or closed — called by the toolbar RADAR button."""
         self._radar_on = checked
 
-        target = self._expanded_width if checked else 0
+        target = self._expanded_height if checked else 0
         if checked:
-            current = self.maximumWidth()
+            current = self.maximumHeight()
             if target == 0:
-                # expanded width wasn't measured yet — measure now
-                self.setMaximumWidth(16777215)
-                target = self.sizeHint().width()
-                self.setMaximumWidth(current)
+                # expanded height wasn't measured yet — measure now
+                self.setMaximumHeight(16777215)
+                target = self.sizeHint().height()
+                self.setMaximumHeight(current)
         else:
-            # after opening, maximumWidth is 16777215 — animate from actual pixel
-            # width so the slide-back starts immediately instead of snapping
-            current = self.width()
-            self.setMaximumWidth(current)
+            # after opening, maximumHeight is 16777215 — animate from actual pixel
+            # height so the slide-back starts immediately instead of snapping
+            current = self.height()
+            self.setMaximumHeight(current)
 
-        anim = QPropertyAnimation(self, b"maximumWidth")
+        anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(180)
         anim.setStartValue(current)
         anim.setEndValue(target)
         anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         if checked:
-            # cap at measured natural width — prevents toolbar from pushing extra
-            # space into the Expanding slider
-            anim.finished.connect(lambda: self.setMaximumWidth(self._expanded_width))
+            anim.finished.connect(lambda: self.setMaximumHeight(self._expanded_height))
         anim.start()
         self._animation = anim   # keep ref alive for duration of animation
 

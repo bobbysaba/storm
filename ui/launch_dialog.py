@@ -64,6 +64,39 @@ QPushButton#browseBtn:hover {
     border-color: #00CFFF;
     color: #00CFFF;
 }
+QPushButton#lockBtn {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #5A5B6A;
+    font-size: 14px;
+    padding: 4px 8px;
+    min-width: 32px;
+}
+QPushButton#lockBtn:hover {
+    border-color: #00CFFF;
+    color: #00CFFF;
+}
+QLineEdit:read-only {
+    background-color: #12121E;
+    border: 1px solid #16162A;
+    color: #5A5B6A;
+}
+QLineEdit:disabled {
+    background-color: #12121E;
+    border: 1px solid #16162A;
+    color: #5A5B6A;
+}
+QPushButton#lockBtn:disabled {
+    background-color: #12121E;
+    border: 1px solid #16162A;
+    color: #2A2A3E;
+}
+QPushButton#browseBtn:disabled {
+    background-color: #12121E;
+    border: 1px solid #16162A;
+    color: #2A2A3E;
+}
 QPushButton#launchBtn {
     background-color: #00CFFF;
     border: none;
@@ -160,9 +193,19 @@ class LaunchDialog(QDialog):
         root.addWidget(vid_label)
         root.addSpacing(6)
 
+        vid_row = QHBoxLayout()
+        vid_row.setSpacing(6)
         self._vid_input = QLineEdit(saved.get("vehicle_id", ""))
         self._vid_input.setPlaceholderText("e.g.  lid1")
-        root.addWidget(self._vid_input)
+        vid_row.addWidget(self._vid_input)
+
+        self._lock_btn = QPushButton("🔒")
+        self._lock_btn.setObjectName("lockBtn")
+        self._lock_btn.setFixedWidth(36)
+        self._lock_btn.setToolTip("Unlock both fields")
+        self._lock_btn.clicked.connect(self._toggle_fields_lock)
+        vid_row.addWidget(self._lock_btn)
+        root.addLayout(vid_row)
         root.addSpacing(20)
 
         # Data directory
@@ -177,11 +220,12 @@ class LaunchDialog(QDialog):
         self._dir_input.setPlaceholderText("Leave blank for GPS puck")
         dir_row.addWidget(self._dir_input)
 
-        browse = QPushButton("…")
-        browse.setObjectName("browseBtn")
-        browse.setFixedWidth(36)
-        browse.clicked.connect(self._browse_dir)
-        dir_row.addWidget(browse)
+        self._browse_btn = QPushButton("…")
+        self._browse_btn.setObjectName("browseBtn")
+        self._browse_btn.setFixedWidth(36)
+        self._browse_btn.clicked.connect(self._browse_dir)
+        dir_row.addWidget(self._browse_btn)
+
         root.addLayout(dir_row)
 
         hint = QLabel(
@@ -193,10 +237,18 @@ class LaunchDialog(QDialog):
         root.addWidget(hint)
         root.addSpacing(20)
 
+        # Single lock controls both fields; lock when either value exists.
+        self._set_fields_locked(bool(saved.get("vehicle_id") or saved.get("data_dir")))
+
         # Monitor mode
         self._monitor_cb = QCheckBox("Monitor mode — no local data")
         self._monitor_cb.setChecked(bool(saved.get("monitor_mode", False)))
+        self._monitor_cb.stateChanged.connect(self._on_monitor_toggled)
         root.addWidget(self._monitor_cb)
+
+        # Apply initial monitor state
+        if self._monitor_cb.isChecked():
+            self._set_fields_monitor_disabled(True)
         root.addSpacing(28)
 
         # Launch button
@@ -209,6 +261,25 @@ class LaunchDialog(QDialog):
         btn_row.addWidget(launch)
         btn_row.addStretch()
         root.addLayout(btn_row)
+
+    # ── Lock helpers ───────────────────────────────────────────────────────────
+
+    def _set_fields_locked(self, locked: bool):
+        self._vid_input.setReadOnly(locked)
+        self._dir_input.setReadOnly(locked)
+        self._browse_btn.setEnabled(not locked)
+        self._lock_btn.setText("🔒" if locked else "🔓")
+        self._lock_btn.setToolTip("Unlock both fields" if locked else "Lock both fields")
+
+    def _toggle_fields_lock(self):
+        self._set_fields_locked(not self._vid_input.isReadOnly())
+
+    def _set_fields_monitor_disabled(self, disabled: bool):
+        for w in (self._vid_input, self._lock_btn, self._dir_input, self._browse_btn):
+            w.setEnabled(not disabled)
+
+    def _on_monitor_toggled(self):
+        self._set_fields_monitor_disabled(self._monitor_cb.isChecked())
 
     # ── Slots ──────────────────────────────────────────────────────────────────
 
@@ -230,12 +301,15 @@ class LaunchDialog(QDialog):
     # ── Accessors (read by main.py after accept) ───────────────────────────────
 
     def vehicle_id(self) -> str:
+        if self._monitor_cb.isChecked():
+            return ""
         return self._vid_input.text().strip()
 
     def data_dir(self) -> str:
+        if self._monitor_cb.isChecked():
+            return ""
         return self._dir_input.text().strip()
 
     def monitor(self) -> bool:
         return self._monitor_cb.isChecked()
-
 
