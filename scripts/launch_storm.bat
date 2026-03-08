@@ -46,6 +46,9 @@ IF "%CONDA_DEFAULT_ENV%" == "" (
 
 cd /d "%PROJECT_DIR%"
 
+REM Force normal MapLibre mode on Windows (disable Safe Map Mode fallback).
+SET "STORM_FORCE_MAPLIBRE=1"
+
 REM Use certifi's CA bundle — Windows conda envs may not inherit system SSL certs
 FOR /F "delims=" %%F IN ('dir /b /s "%CONDA_PREFIX%\Lib\site-packages\certifi\cacert.pem" 2^>nul') DO (
     SET "SSL_CERT_FILE=%%F"
