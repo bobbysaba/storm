@@ -6,6 +6,8 @@ import os
 import argparse
 import logging
 import faulthandler
+import re
+import socket
 
 # Chromium flags vary by platform:
 #   macOS: --in-process-gpu avoids Mach port rendezvous failures in unsigned bundles
@@ -54,6 +56,30 @@ from ui.main_window import MainWindow
 from ui.radar_overlay import set_render_grid_size
 from data.truck_replay import load_truck_observations
 import config
+
+
+def _default_vehicle_id() -> str:
+    """
+    Generate a stable per-machine MQTT client id to avoid cross-device collisions.
+    """
+    host = (socket.gethostname() or "device").strip().lower()
+    host = re.sub(r"[^a-z0-9-]+", "-", host).strip("-")
+    if not host:
+        host = "device"
+    return f"storm-{host}"
+
+
+def _normalize_vehicle_id(raw: str) -> str:
+    """
+    Normalize configured Vehicle ID to a safe MQTT client id.
+    Falls back to per-machine default when blank or generic 'storm'.
+    """
+    vid = (raw or "").strip().lower()
+    vid = re.sub(r"[^a-z0-9-]+", "-", vid).strip("-")
+    if not vid or vid == "storm":
+        return _default_vehicle_id()
+    return vid
+
 
 def _configure_logging(level_name: str) -> None:
     # map level name string to logging constant
@@ -127,6 +153,7 @@ def main():
     # --debug flag overrides --log-level
     log_level = "DEBUG" if args.debug else args.log_level
     _configure_logging(log_level)
+    config.VEHICLE_ID = _normalize_vehicle_id(config.VEHICLE_ID)
 
     # apply render grid size override before the window is created
     if args.render_grid_size > 0:
@@ -149,7 +176,7 @@ def main():
         if dialog.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
         # Push dialog values into config module so MainWindow picks them up
-        config.VEHICLE_ID   = (dialog.vehicle_id() or config.VEHICLE_ID).lower()
+        config.VEHICLE_ID   = _normalize_vehicle_id(dialog.vehicle_id())
         config.OBS_FILE_DIR = dialog.data_dir()
         monitor             = dialog.monitor()
 
