@@ -8,13 +8,14 @@ import sqlite3
 import threading
 import zlib
 import sys
+import runtime_flags
 
-# Windows fallback: disable WebGL map rendering by default to avoid
-# GPU/ANGLE crashes on older drivers. Set STORM_FORCE_MAPLIBRE=1
-# to force normal MapLibre mode.
+# Optional Windows fallback: disable WebGL map rendering only when explicitly
+# requested for troubleshooting unstable GPU/ANGLE setups.
+
 SAFE_MAP_MODE = (
     sys.platform == "win32"
-    and os.environ.get("STORM_FORCE_MAPLIBRE", "0") != "1"
+    and runtime_flags.FLAGS.safe_map_mode
 )
 
 from PyQt6.QtCore import QUrl, QTimer, pyqtSignal, QObject, pyqtSlot
@@ -92,8 +93,8 @@ def build_safe_map_html() -> str:
   <div class="wrap">
     <div class="card">
       <h2>Safe Map Mode Enabled</h2>
-      <p>WebGL map rendering is disabled on this Windows machine to prevent QtWebEngine GPU crashes.
-      Set <code>STORM_FORCE_MAPLIBRE=1</code> to try normal map rendering again.</p>
+      <p>Map rendering is running in safe mode for this session.
+      Relaunch without <code>--safe-map-mode</code> to restore normal map rendering.</p>
     </div>
   </div>
 </body>

@@ -3,8 +3,8 @@
 # assembles the layout: toolbar, map widget, status bar, and collapsible panels.
 
 import json
-import os
 import logging
+import runtime_flags
 import html
 from datetime import datetime, timezone
 
@@ -62,9 +62,8 @@ class MainWindow(QMainWindow):
 
         # global dark theme applied once here — all children inherit via QSS cascade
         self.setStyleSheet(DARK_THEME)
-
-        # ── build UI in dependency order ──────────────────────────────────
-        self._runtime_safe = os.environ.get("STORM_RUNTIME_SAFE", "0") == "1"
+        # build UI in dependency order
+        self._runtime_safe = runtime_flags.FLAGS.runtime_safe
 
         self._init_map()
         self._init_toolbar()
@@ -73,27 +72,12 @@ class MainWindow(QMainWindow):
 
         # Fine-grained startup toggles are for crash-isolation only.
         # Keep them opt-in so normal runs always start full functionality.
-        toggles_enabled = (
-            os.environ.get("STORM_ENABLE_STARTUP_TOGGLES", "0") == "1"
-        ) or debug
-        self._disable_radar = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_RADAR", "0") == "1"
-        )
-        self._disable_mqtt = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_MQTT", "0") == "1"
-        )
-        self._disable_vehicle_fetcher = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_VEHICLE_FETCHER", "0") == "1"
-        )
-        self._disable_annotations = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_ANNOTATIONS", "0") == "1"
-        )
-        self._disable_deploy_locs = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_DEPLOY_LOCS", "0") == "1"
-        )
-        self._disable_data_inputs = (
-            toggles_enabled and os.environ.get("STORM_DISABLE_DATA_INPUTS", "0") == "1"
-        )
+        self._disable_radar = runtime_flags.FLAGS.disable_radar
+        self._disable_mqtt = runtime_flags.FLAGS.disable_mqtt
+        self._disable_vehicle_fetcher = runtime_flags.FLAGS.disable_vehicle_fetcher
+        self._disable_annotations = runtime_flags.FLAGS.disable_annotations
+        self._disable_deploy_locs = runtime_flags.FLAGS.disable_deploy_locs
+        self._disable_data_inputs = runtime_flags.FLAGS.disable_data_inputs
 
         # Features that require MQTT should be disabled when MQTT is disabled.
         if self._disable_mqtt:
@@ -674,9 +658,9 @@ class MainWindow(QMainWindow):
         self.update_vehicle_obs(obs)
 
     def _mqtt_connect(self):
-        use_tls = config.MQTT_USE_TLS and os.environ.get("STORM_MQTT_NO_TLS", "0") != "1"
+        use_tls = config.MQTT_USE_TLS and not runtime_flags.FLAGS.mqtt_no_tls
         if not use_tls:
-            log.warning("MQTT TLS disabled via STORM_MQTT_NO_TLS=1 (diagnostic mode)")
+            log.warning("MQTT TLS disabled via --mqtt-no-tls (diagnostic mode)")
         self._mqtt_client.connect_to_broker(
             host=config.MQTT_HOST,
             port=config.MQTT_PORT,
@@ -858,23 +842,20 @@ class MainWindow(QMainWindow):
     def _place_annotation(self, annotation: Annotation):
         self._annotations[annotation.id] = annotation
         self.map_widget.add_annotation(annotation)
-        if not self._monitor:
-            self._annotation_sync.publish_create(annotation)
+        self._annotation_sync.publish_create(annotation)
         log.info("annotation placed: %s at (%.4f, %.4f)", annotation.type_key, annotation.lat, annotation.lon)
 
     def _delete_annotation(self, annotation_id: str):
         self._annotations.pop(annotation_id, None)
         self.map_widget.remove_annotation(annotation_id)
-        if not self._monitor:
-            self._annotation_sync.publish_delete(annotation_id)
+        self._annotation_sync.publish_delete(annotation_id)
         log.info("annotation deleted: %s", annotation_id)
 
     def _update_annotation(self, annotation: Annotation):
         self._annotations[annotation.id] = annotation
         # re-add marker so label tooltip reflects new text
         self.map_widget.add_annotation(annotation)
-        if not self._monitor:
-            self._annotation_sync.publish_update(annotation)
+        self._annotation_sync.publish_update(annotation)
         log.info("annotation updated: %s label=%s", annotation.id, annotation.label)
 
     def _recv_remote_annotation(self, annotation: Annotation):
@@ -990,23 +971,20 @@ class MainWindow(QMainWindow):
     def _place_drawing(self, drawing: DrawingAnnotation):
         self._drawings[drawing.id] = drawing
         self.map_widget.add_drawing(drawing)
-        if not self._monitor:
-            self._drawing_sync.publish_create(drawing)
+        self._drawing_sync.publish_create(drawing)
         log.info("drawing placed: %s at %d points", drawing.drawing_type, len(drawing.coordinates))
 
     def _delete_drawing(self, drawing_id: str):
         self._drawings.pop(drawing_id, None)
         self.map_widget.remove_drawing(drawing_id)
-        if not self._monitor:
-            self._drawing_sync.publish_delete(drawing_id)
+        self._drawing_sync.publish_delete(drawing_id)
         log.info("drawing deleted: %s", drawing_id)
 
     def _update_drawing(self, drawing: DrawingAnnotation):
         self._drawings[drawing.id] = drawing
         self.map_widget.remove_drawing(drawing.id)
         self.map_widget.add_drawing(drawing)
-        if not self._monitor:
-            self._drawing_sync.publish_update(drawing)
+        self._drawing_sync.publish_update(drawing)
         log.info("drawing updated: %s", drawing.id)
 
     def _recv_remote_drawing(self, drawing: DrawingAnnotation):

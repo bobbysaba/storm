@@ -6,6 +6,7 @@
 import io
 import base64
 import logging
+from time import perf_counter
 import numpy as np
 from typing import Optional
 
@@ -27,6 +28,12 @@ log = logging.getLogger(__name__)
 #   256 → ~20-40 ms render   (older/slower field laptop — recommended minimum)
 # Override at launch with:  python main.py --render-grid-size 256
 RENDER_GRID_SIZE = 512
+ADAPTIVE_RENDER_GRID = True
+ADAPTIVE_GRID_STEPS = (128, 192, 256, 320, 384, 512, 640, 768, 1024)
+ADAPTIVE_DOWN_MS = 280.0
+ADAPTIVE_UP_MS = 130.0
+ADAPTIVE_DOWN_SCANS = 2
+ADAPTIVE_UP_SCANS = 4
 
 
 def set_render_grid_size(n: int) -> None:
@@ -116,6 +123,10 @@ class RadarOverlay(QObject):
         self._map = map_widget
         self._active = False
         self._current_scan: Optional[RadarScan] = None
+        self._grid_size = int(RENDER_GRID_SIZE)
+        self._adaptive_grid = ADAPTIVE_RENDER_GRID
+        self._fast_render_streak = 0
+        self._slow_render_streak = 0
         # cache ScalarMappable objects keyed by (colormap, vmin, vmax)
         # avoids recreating norm+cmap on every render call
         self._mapper_cache: dict[tuple, mcm.ScalarMappable] = {}
@@ -132,7 +143,7 @@ class RadarOverlay(QObject):
 
         self._inject_into_map(png_b64, bounds)
         self._active = True
-        log.info("[RadarOverlay] updated with %s", scan.label)
+        log.info("[RadarOverlay] updated with %s (grid=%d)", scan.label, self._grid_size)
 
     def clear(self):
         """remove the radar overlay from the map."""
@@ -164,7 +175,8 @@ class RadarOverlay(QObject):
         Returns:
             (base64_png_string, [west, south, east, north])
         """
-        IMG = RENDER_GRID_SIZE   # configurable — lower = faster render
+        IMG = self._grid_size   # adaptive configurable — lower = faster render
+        t0 = perf_counter()
 
         log.debug(
             "rendering %s — grid=%dx%d, colormap=%s, vmin=%.1f vmax=%.1f",
@@ -245,10 +257,57 @@ class RadarOverlay(QObject):
         mimg.imsave(buf, rgba, format="png")
         png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-        log.debug("render complete: %.0f KB PNG", len(png_b64) * 3 / 4 / 1024)
+        elapsed_ms = (perf_counter() - t0) * 1000.0
+        self._maybe_adjust_grid(elapsed_ms)
+        log.debug(
+            "render complete: %.0f KB PNG in %.1f ms (grid=%d)",
+            len(png_b64) * 3 / 4 / 1024,
+            elapsed_ms,
+            IMG,
+        )
 
         bounds = [lon_min, lat_min, lon_max, lat_max]
         return png_b64, bounds
+
+    def _maybe_adjust_grid(self, elapsed_ms: float) -> None:
+        if not self._adaptive_grid:
+            return
+
+        steps = ADAPTIVE_GRID_STEPS
+        if self._grid_size not in steps:
+            self._grid_size = min(steps, key=lambda s: abs(s - self._grid_size))
+
+        idx = steps.index(self._grid_size)
+        changed = False
+        prev = self._grid_size
+
+        if elapsed_ms > ADAPTIVE_DOWN_MS:
+            self._slow_render_streak += 1
+            self._fast_render_streak = 0
+            if self._slow_render_streak >= ADAPTIVE_DOWN_SCANS and idx > 0:
+                self._grid_size = steps[idx - 1]
+                self._slow_render_streak = 0
+                changed = True
+        elif elapsed_ms < ADAPTIVE_UP_MS:
+            self._fast_render_streak += 1
+            self._slow_render_streak = 0
+            if self._fast_render_streak >= ADAPTIVE_UP_SCANS and idx < len(steps) - 1:
+                self._grid_size = steps[idx + 1]
+                self._fast_render_streak = 0
+                changed = True
+        else:
+            self._fast_render_streak = 0
+            self._slow_render_streak = 0
+
+        if changed:
+            log.info(
+                "[RadarOverlay] adaptive grid %d -> %d (render=%.1f ms, down>%dms up<%dms)",
+                prev,
+                self._grid_size,
+                elapsed_ms,
+                int(ADAPTIVE_DOWN_MS),
+                int(ADAPTIVE_UP_MS),
+            )
 
     def _inject_into_map(self, png_b64: str, bounds: list):
         """

@@ -124,10 +124,10 @@ python main.py --render-grid-size 256           # lower radar resolution for slo
 
 Obtain the four TLS cert files and place them at:
 ```
-.aws/storm.pem
-.aws/storm.pem.crt
-.aws/storm-private.pem.key
-.aws/storm-public.pem.key
+aws/storm.pem
+aws/storm.pem.crt
+aws/storm-private.pem.key
+aws/storm-public.pem.key
 ```
 These are distributed out-of-band and are never committed to the repo. Please contact [Bobby Saba](mailto:robert.saba@noaa.gov) for the files.
 
@@ -211,7 +211,7 @@ storm/
 ├── tiles/
 │   └── storm.mbtiles        # NOT in git — download separately
 │
-└── .aws/                    # AWS IoT TLS credentials — NOT in git
+└── aws/                    # AWS IoT TLS credentials — NOT in git
     ├── storm.pem
     ├── storm.pem.crt
     └── storm-private.pem.key

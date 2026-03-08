@@ -6,7 +6,8 @@
 from pathlib import Path
 
 _PROJ = Path(__file__).parent
-_AWS  = _PROJ / "aws"
+_AWS_CANDIDATES = (_PROJ / "aws", _PROJ / ".aws")
+_AWS = next((p for p in _AWS_CANDIDATES if p.exists()), _AWS_CANDIDATES[0])
 
 # ── Identity (overwritten by main.py after launch dialog) ─────────────────────
 
