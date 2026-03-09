@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings
+from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
@@ -55,6 +55,9 @@ def _coords_close(a, b, tol: float = 1e-4) -> bool:
 
 
 class MainWindow(QMainWindow):
+    # Emitted from background threads to update the discussion text panel safely.
+    _panel_text_ready = pyqtSignal(str, str)
+
     def __init__(self, debug: bool = False, monitor: bool = False):
         super().__init__()
         self._debug = debug
@@ -222,6 +225,7 @@ class MainWindow(QMainWindow):
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
+        self._panel_text_ready.connect(self.outlook_panel.show_text)
 
         self._add_separator(tb)
 
@@ -318,12 +322,6 @@ class MainWindow(QMainWindow):
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.clock_label)
 
-        version_label = QLabel(f"v{config.VERSION}")
-        version_label.setStyleSheet(
-            "font-size: 9px; font-weight: 400; letter-spacing: 0.5px; color: #3A3F52;"
-        )
-        version_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        right.addWidget(version_label)
 
     def _status_divider(self) -> QFrame:
         div = QFrame()
@@ -639,6 +637,27 @@ class MainWindow(QMainWindow):
         self.map_widget.set_spc_mds_visible(enabled)
         if enabled:
             self._hazard_fetcher.fetch_now()
+        self._update_hazard_legend()
+
+    def _update_hazard_legend(self):
+        """Recompute which hazard layers are active and update the pill legend."""
+        fc = self._hazard_fetcher
+        active = []
+        if any(fc._spc_categories.values()):
+            active.append("spc-cat")
+        for k in ("tor", "wind", "hail"):
+            if fc._spc_products.get(k):
+                active.append(f"spc-{k}")
+        if fc._spc_watches_enabled:
+            active.append("spc-watches")
+        if fc._spc_mds_enabled:
+            active.append("spc-mds")
+        if fc._nws_enabled:
+            active.append("nws-warnings")
+        self.hazard_controls.update_legend(active)
+        # Drive _layout_overlays during the legend resize animation so the
+        # floating overlay geometry tracks the new sizeHint().
+        self._start_layout_pulse()
 
     def _on_spc_feature_clicked(self, payload: str):
         """Handle a click on an SPC cat or MD polygon — fetch and show discussion text."""
@@ -651,13 +670,13 @@ class MainWindow(QMainWindow):
 
         if source == "spc-cat":
             title = "DAY 1 CONVECTIVE OUTLOOK"
-            url = "https://www.spc.noaa.gov/products/outlook/day1otlk.html"
+            kind, identifier = "swo", None
         elif source == "spc-mds":
             name = str(props.get("name", "")).strip()
             # name is e.g. "MD 0176" — extract the number
             num = name.replace("MD", "").strip().zfill(4)
             title = f"MESOSCALE DISCUSSION {num}"
-            url = f"https://www.spc.noaa.gov/products/md/md{num}.html"
+            kind, identifier = "mcd", num
         else:
             return
 
@@ -665,48 +684,47 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
         threading.Thread(
             target=self._fetch_outlook_text,
-            args=(url, title),
+            args=(title, kind, identifier),
             daemon=True,
         ).start()
 
-    def _fetch_outlook_text(self, url: str, title: str):
-        """Fetch and parse outlook/MD discussion text in a background thread."""
-        from urllib.request import Request, urlopen
-        from urllib.error import URLError
-        from html.parser import HTMLParser
+    def _fetch_outlook_text(self, title: str, kind: str, identifier: str | None):
+        """Fetch SPC discussion text in a background thread via IEM Mesonet AFOS API.
 
-        class _PreExtractor(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self._in_pre = False
-                self._chunks: list[str] = []
-            def handle_starttag(self, tag, attrs):
-                if tag == "pre":
-                    self._in_pre = True
-            def handle_endtag(self, tag):
-                if tag == "pre":
-                    self._in_pre = False
-            def handle_data(self, data):
-                if self._in_pre:
-                    self._chunks.append(data)
-            def text(self) -> str:
-                return "".join(self._chunks).strip()
+        Iowa State's Mesonet archives every NWS/SPC text product by AFOS PIL and
+        is much more reliable than scraping SPC's website or using the NWS products
+        API (which uses a different product-type taxonomy than the SPC AFOS PILs).
+
+        AFOS PILs used:
+          Day 1 Outlook: SWODY1   (Severe Weather Outlook, Day 1)
+          MDs:           SPCMCD{nnnn}  (e.g. SPCMCD0176)
+        """
+        from urllib.request import Request, urlopen
+
+        IEM_BASE = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+        HEADERS = {"User-Agent": "STORM/1.0 (contact: support)"}
+
+        def _iem_fetch(pil: str) -> str:
+            url = f"{IEM_BASE}?pil={pil}&limit=1&fmt=text"
+            req = Request(url, headers=HEADERS)
+            with urlopen(req, timeout=12) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            # Strip AFOS framing bytes (SOH=\x01, STX=\x02, ETX=\x03) if present
+            return raw.strip("\x01\x02\x03\r\n").strip()
 
         try:
-            req = Request(url, headers={"User-Agent": "STORM/1.0"})
-            with urlopen(req, timeout=15) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            parser = _PreExtractor()
-            parser.feed(raw)
-            text = parser.text()
+            if kind == "swo":
+                text = _iem_fetch("SWODY1")
+            elif kind == "mcd":
+                text = _iem_fetch(f"SPCMCD{identifier}")
+            else:
+                text = ""
             if not text:
                 text = "(No discussion text found)"
-        except (URLError, Exception) as exc:
+        except Exception as exc:
             text = f"Failed to load discussion:\n{exc}"
 
-        # Update panel from main thread via QTimer
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: self.outlook_panel.show_text(title, text))
+        self._panel_text_ready.emit(title, text)
 
     def _on_spc_mode_changed(self, mode: str):
         outlook_on = mode == "outlook"
@@ -721,18 +739,21 @@ class MainWindow(QMainWindow):
 
         if mode:
             self._hazard_fetcher.fetch_now()
+        self._update_hazard_legend()
 
     def _on_spc_watches_toggled(self, enabled: bool):
         self._hazard_fetcher.set_spc_watches_enabled(enabled)
         self.map_widget.set_spc_watches_visible(enabled)
         if enabled:
             self._hazard_fetcher.fetch_now()
+        self._update_hazard_legend()
 
     def _on_nws_warnings_toggled(self, enabled: bool):
         self._hazard_fetcher.set_nws_enabled(enabled)
         self.map_widget.set_nws_warnings_visible(enabled)
         if enabled:
             self._hazard_fetcher.fetch_now()
+        self._update_hazard_legend()
 
     def _on_radar_site_changed(self, site: str):
         # clear cache when site changes — old data belongs to a different location

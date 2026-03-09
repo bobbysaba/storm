@@ -237,6 +237,23 @@ def build_map_html() -> str:
       display: block;
     }}
 
+    #hazard-tooltip {{
+      display: none;
+      position: absolute;
+      pointer-events: none;
+      background: rgba(15, 15, 26, 0.92);
+      border: 1px solid #49536F;
+      border-radius: 5px;
+      padding: 5px 9px;
+      font-family: "Helvetica Neue", sans-serif;
+      font-size: 11px;
+      font-weight: 600;
+      color: #E8EDF5;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+      z-index: 200;
+    }}
+
     .maplibregl-ctrl-top-right {{
       top: 10px !important;
       right: 10px !important;
@@ -346,6 +363,9 @@ def build_map_html() -> str:
       <span class="arrow">▲</span>
     </div>
   </div>
+
+  <!-- ── Hazard Hover Tooltip ── -->
+  <div id="hazard-tooltip"></div>
 
   <script>
     window.onerror = function(msg, src, line) {{
@@ -861,14 +881,14 @@ def build_map_html() -> str:
         paint: {{
           'fill-color': [
             'match', ['get', 'cat'],
-            'MRGL', '#7FBF7F',
-            'SLGHT', '#F5D547',
-            'ENH', '#FF8C00',
-            'MDT', '#E53935',
-            'HIGH', '#FF00FF',
-            '#7FBF7F'
+            'MRGL', '#80C580',
+            'SLGHT', '#F6F67F',
+            'ENH', '#E87038',
+            'MDT', '#E84038',
+            'HIGH', '#930093',
+            '#80C580'
           ],
-          'fill-opacity': 0.22
+          'fill-opacity': 0.25
         }}
       }});
       map.addLayer({{
@@ -879,37 +899,111 @@ def build_map_html() -> str:
         paint: {{
           'line-color': [
             'match', ['get', 'cat'],
-            'MRGL', '#7FBF7F',
-            'SLGHT', '#F5D547',
-            'ENH', '#FF8C00',
-            'MDT', '#E53935',
-            'HIGH', '#FF00FF',
-            '#7FBF7F'
+            'MRGL', '#80C580',
+            'SLGHT', '#F6F67F',
+            'ENH', '#E87038',
+            'MDT', '#E84038',
+            'HIGH', '#930093',
+            '#80C580'
           ],
           'line-width': 2,
           'line-opacity': 0.85
         }}
       }});
 
-      function _addSpcProductLayers(name, color) {{
+      // ── Significant-area hatch pattern (diagonal white lines) ────────────
+      // Build the pixel array directly — no canvas API needed, so this works
+      // reliably inside QWebEngineView where canvas readback can silently fail.
+      (function() {{
+        var sz = 16;
+        var data = new Uint8Array(sz * sz * 4);
+        for (var y = 0; y < sz; y++) {{
+          for (var x = 0; x < sz; x++) {{
+            var i = (y * sz + x) * 4;
+            // NW→SE diagonal: pixels where (x - y) mod sz < 2 form a 2-px stripe
+            var d = ((x - y) % sz + sz) % sz;
+            if (d < 2) {{
+              data[i]   = 255;  // R
+              data[i+1] = 255;  // G
+              data[i+2] = 255;  // B
+              data[i+3] = 180;  // A (~70 % opacity)
+            }}
+            // else: alpha stays 0 → transparent
+          }}
+        }}
+        try {{
+          map.addImage('sig-hatch', {{width: sz, height: sz, data: data}});
+          console.log('sig-hatch registered OK');
+        }} catch(e) {{
+          console.warn('sig-hatch registration failed:', e);
+        }}
+      }})();
+
+      function _addSpcProductLayers(name, colorExpr) {{
         map.addLayer({{
           id: 'spc-' + name + '-fill',
           type: 'fill',
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
-          paint: {{'fill-color': color, 'fill-opacity': 0.16}}
+          paint: {{'fill-color': colorExpr, 'fill-opacity': 0.25}}
         }});
         map.addLayer({{
           id: 'spc-' + name + '-line',
           type: 'line',
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
-          paint: {{'line-color': color, 'line-width': 2, 'line-opacity': 0.85}}
+          paint: {{'line-color': colorExpr, 'line-width': 2, 'line-opacity': 0.85}}
+        }});
+        // Significant-area layer: white diagonal hatching over SIGN features.
+        // SIGN features are transparent in the fill layer above so only the
+        // hatch pattern renders for those polygons.
+        // Use fill-pattern if the image registered; fall back to a semi-opaque
+        // white fill so the areas are still visible even in environments where
+        // fill-pattern is unsupported.
+        var _hasPat = map.hasImage('sig-hatch');
+        console.log('sig-hatch available for spc-' + name + ':', _hasPat);
+        var _sigPaint = _hasPat
+          ? {{'fill-pattern': 'sig-hatch'}}
+          : {{'fill-color': '#FFFFFF', 'fill-opacity': 0.45}};
+        map.addLayer({{
+          id: 'spc-' + name + '-sig',
+          type: 'fill',
+          source: 'spc-' + name,
+          layout: {{'visibility': 'none'}},
+          filter: ['any',
+            ['==', ['get', 'LABEL'], 'SIGN'],
+            ['==', ['get', 'label'], 'SIGN']
+          ],
+          paint: _sigPaint
         }});
       }}
-      _addSpcProductLayers('wind', '#D68A2C');
-      _addSpcProductLayers('hail', '#39D98A');
-      _addSpcProductLayers('tor', '#FF4D4D');
+
+      // Wind/hail probability color scale (matches SPC official products)
+      // 5% = tan/brown, 15% = yellow, 30% = orange, 45% = red, 60% = magenta
+      var windHailColor = ['match', ['get', 'LABEL'],
+        'SIGN', 'rgba(0,0,0,0)',
+        '5',  '#C1A353',
+        '15', '#FFFF00',
+        '30', '#FF6600',
+        '45', '#FF0000',
+        '60', '#FF00FF',
+        '#C1A353'];
+
+      // Tornado probability color scale (matches SPC official products)
+      var torColor = ['match', ['get', 'LABEL'],
+        'SIGN', 'rgba(0,0,0,0)',
+        '2',  '#008B00',
+        '5',  '#8B4726',
+        '10', '#FFA500',
+        '15', '#FF0000',
+        '30', '#FF00FF',
+        '45', '#912CEE',
+        '60', '#104E8B',
+        '#008B00'];
+
+      _addSpcProductLayers('wind', windHailColor);
+      _addSpcProductLayers('hail', windHailColor);
+      _addSpcProductLayers('tor', torColor);
 
       map.addLayer({{
         id: 'spc-watches-fill',
@@ -1030,6 +1124,59 @@ def build_map_html() -> str:
       if (window._stormDrawingActive && window._drawingConfirmedPts && window._drawingConfirmedPts.length > 0) {{
         window._drawingRubberPt = [e.lngLat.lng, e.lngLat.lat];
         _updateDrawingPreviewGeoJSON();
+      }}
+
+      // ── Hazard hover tooltip ───────────────────────────────────────────
+      var _htip = document.getElementById('hazard-tooltip');
+      if (_htip) {{
+        var _hazardLayers = [
+          'spc-cat-fill','spc-tor-fill','spc-wind-fill','spc-hail-fill',
+          'spc-watches-fill','spc-mds-fill','nws-warnings-fill'
+        ].filter(function(l) {{
+          return map.getLayer(l) &&
+                 map.getLayoutProperty(l, 'visibility') === 'visible';
+        }});
+        var _hits = _hazardLayers.length > 0
+          ? map.queryRenderedFeatures(e.point, {{layers: _hazardLayers}})
+          : [];
+        if (_hits.length > 0) {{
+          var _f = _hits[0];
+          var _p = _f.properties || {{}};
+          var _src = _f.source || '';
+          var _lbl = '';
+          if (_src === 'spc-cat') {{
+            var _catNames = {{MRGL:'Marginal',SLGHT:'Slight',ENH:'Enhanced',MDT:'Moderate',HIGH:'High'}};
+            _lbl = _catNames[_p.cat] || _p.cat || 'Outlook';
+          }} else if (_src === 'spc-tor') {{
+            var _tv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
+            _lbl = (_tv === 'SIGN') ? 'Sig Tor (Hatched)' : 'Tor: ' + _tv;
+          }} else if (_src === 'spc-wind') {{
+            var _wv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
+            _lbl = (_wv === 'SIGN') ? 'Sig Wind (Hatched)' : 'Wind: ' + _wv;
+          }} else if (_src === 'spc-hail') {{
+            var _hv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
+            _lbl = (_hv === 'SIGN') ? 'Sig Hail (Hatched)' : 'Hail: ' + _hv;
+          }} else if (_src === 'spc-watches') {{
+            _lbl = _p.event || _p.headline || 'Watch';
+          }} else if (_src === 'spc-mds') {{
+            _lbl = _p.name || 'Mesoscale Discussion';
+          }} else if (_src === 'nws-warnings') {{
+            _lbl = _p.event || _p.headline || 'Warning';
+          }}
+          if (_lbl) {{
+            _htip.textContent = _lbl;
+            var _mx = e.originalEvent.clientX;
+            var _my = e.originalEvent.clientY;
+            var _mc = map.getContainer().getBoundingClientRect();
+            _htip.style.left = (_mx - _mc.left + 14) + 'px';
+            _htip.style.top  = (_my - _mc.top  - 10) + 'px';
+            _htip.style.display = 'block';
+          }} else {{
+            _htip.style.display = 'none';
+          }}
+        }} else {{
+          _htip.style.display = 'none';
+        }}
       }}
     }});
 
@@ -1589,6 +1736,16 @@ def build_map_html() -> str:
       if (map.getSource('spc-hail')) map.getSource('spc-hail').setData(JSON.parse(hailJson));
       if (map.getSource('spc-tor')) map.getSource('spc-tor').setData(JSON.parse(torJson));
       _applySpcCategoryFilter();
+      // Debug: log LABEL values present in each probabilistic product so we
+      // can confirm whether any SIGN features exist in today's outlook.
+      ['wind','hail','tor'].forEach(function(name) {{
+        var src = map.getSource('spc-' + name);
+        if (!src) return;
+        var fc = src._data || src.serialize().data;
+        if (!fc || !fc.features) return;
+        var labels = fc.features.map(function(f) {{ return (f.properties||{{}}).LABEL || (f.properties||{{}}).label || '?'; }});
+        console.log('spc-' + name + ' LABEL values:', labels);
+      }});
     }};
 
     window.stormSetSpcCategoryVisible = function(key, visible) {{
@@ -1603,6 +1760,7 @@ def build_map_html() -> str:
       if (['wind','hail','tor'].indexOf(k) === -1) return;
       _setLayerVisibility('spc-' + k + '-fill', !!visible);
       _setLayerVisibility('spc-' + k + '-line', !!visible);
+      _setLayerVisibility('spc-' + k + '-sig',  !!visible);
     }};
 
     window.stormSetNwsWarningsGeoJSON = function(warnJson) {{
@@ -1631,6 +1789,7 @@ def build_map_html() -> str:
       _setLayerVisibility('spc-mds-fill', !!visible);
       _setLayerVisibility('spc-mds-line', !!visible);
     }};
+
 
     // ── Front Canvas Rendering ────────────────────────────────────────────
     (function() {{
@@ -2243,3 +2402,4 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(
             f"if(window.stormSetSpcMdsVisible) stormSetSpcMdsVisible({'true' if visible else 'false'});"
         )
+

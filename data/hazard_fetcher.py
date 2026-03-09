@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import threading
@@ -183,15 +184,44 @@ class HazardFetcher(QObject):
 
     def _fetch_cycle(self):
         try:
-            if any(self._spc_categories.values()) or any(self._spc_products.values()):
-                self._fetch_spc()
-            if self._spc_watches_enabled:
-                self._fetch_spc_watches()
-            if self._spc_mds_enabled:
-                self._fetch_spc_mds()
-            if self._nws_enabled:
-                self._fetch_nws()
-        except Exception as exc:  # guard poll loop
+            need_spc = any(self._spc_categories.values()) or any(self._spc_products.values())
+            need_watches = self._spc_watches_enabled
+            need_mds = self._spc_mds_enabled
+            need_nws = self._nws_enabled
+            need_alerts = need_watches or need_nws
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                # Kick off independent network fetches in parallel.
+                spc_f = pool.submit(self._fetch_spc) if need_spc else None
+                mds_f = pool.submit(self._fetch_spc_mds) if need_mds else None
+                alerts_f = pool.submit(self._get_json, NWS_ACTIVE_ALERTS_URL) if need_alerts else None
+
+                # Block on alerts, then fan out the two lightweight filter tasks
+                # (SPC and MDs are still running concurrently in the background).
+                watches_f = nws_f = None
+                if alerts_f is not None:
+                    nws_raw = None
+                    try:
+                        nws_raw = alerts_f.result()
+                    except Exception as exc:
+                        log.warning("NWS alerts fetch failed: %s", exc)
+                        self.fetch_error.emit(f"NWS alerts fetch failed: {exc}")
+                    if need_watches:
+                        watches_f = pool.submit(self._filter_spc_watches, nws_raw)
+                    if need_nws:
+                        nws_f = pool.submit(self._filter_nws, nws_raw)
+
+                for label, f in [("spc", spc_f), ("mds", mds_f),
+                                  ("watches", watches_f), ("nws", nws_f)]:
+                    if f is None:
+                        continue
+                    try:
+                        f.result()
+                    except Exception as exc:
+                        log.exception("Hazard fetch failed for %s", label)
+                        self.fetch_error.emit(f"Hazard fetch failed ({label}): {exc}")
+
+        except Exception as exc:
             log.exception("Hazard fetch cycle failed")
             self.fetch_error.emit(f"Hazard fetch failed: {exc}")
 
@@ -257,57 +287,59 @@ class HazardFetcher(QObject):
 
         self.spc_received.emit(cat_fc, wind_fc, hail_fc, tor_fc)
 
-    def _fetch_nws(self):
+    def _filter_nws(self, nws_raw: dict | None):
+        """Filter pre-fetched NWS alerts for warnings and emit the result."""
         out = _empty_fc()
-        try:
-            raw = self._get_json(NWS_ACTIVE_ALERTS_URL)
-            feats = []
-            for f in raw.get("features", []):
-                props = dict(f.get("properties") or {})
-                event = str(props.get("event", "")).lower()
-                if "warning" not in event:
-                    continue
-                geom = f.get("geometry")
-                if not geom:
-                    continue
-                bb = _feature_bbox(geom)
-                if bb is None or not _bbox_intersects(bb, self._nws_bbox):
-                    continue
-                props["nws_color"] = _nws_color_for_event(event)
-                feats.append({
-                    "type": "Feature",
-                    "geometry": geom,
-                    "properties": props,
-                })
-            out = {"type": "FeatureCollection", "features": feats}
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            log.warning("NWS warnings fetch failed: %s", exc)
-            self.fetch_error.emit(f"NWS warnings fetch failed: {exc}")
+        if nws_raw is not None:
+            try:
+                feats = []
+                for f in nws_raw.get("features", []):
+                    props = dict(f.get("properties") or {})
+                    event = str(props.get("event", "")).lower()
+                    if "warning" not in event:
+                        continue
+                    geom = f.get("geometry")
+                    if not geom:
+                        continue
+                    bb = _feature_bbox(geom)
+                    if bb is None or not _bbox_intersects(bb, self._nws_bbox):
+                        continue
+                    props["nws_color"] = _nws_color_for_event(event)
+                    feats.append({
+                        "type": "Feature",
+                        "geometry": geom,
+                        "properties": props,
+                    })
+                out = {"type": "FeatureCollection", "features": feats}
+            except Exception as exc:
+                log.warning("NWS warnings filter failed: %s", exc)
+                self.fetch_error.emit(f"NWS warnings filter failed: {exc}")
         self.nws_received.emit(out)
 
-    def _fetch_spc_watches(self):
+    def _filter_spc_watches(self, nws_raw: dict | None):
+        """Filter pre-fetched NWS alerts for watches and emit the result."""
         out = _empty_fc()
-        try:
-            raw = self._get_json(NWS_ACTIVE_ALERTS_URL)
-            feats = []
-            for f in raw.get("features", []):
-                props = dict(f.get("properties") or {})
-                event = str(props.get("event", "")).lower()
-                if "watch" not in event:
-                    continue
-                geom = f.get("geometry")
-                if not geom:
-                    continue
-                props["watch_color"] = "#FF0000" if "tornado watch" in event else "#FFD700"
-                feats.append({
-                    "type": "Feature",
-                    "geometry": geom,
-                    "properties": props,
-                })
-            out = {"type": "FeatureCollection", "features": feats}
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            log.warning("SPC watches fetch failed: %s", exc)
-            self.fetch_error.emit(f"SPC watches fetch failed: {exc}")
+        if nws_raw is not None:
+            try:
+                feats = []
+                for f in nws_raw.get("features", []):
+                    props = dict(f.get("properties") or {})
+                    event = str(props.get("event", "")).lower()
+                    if "watch" not in event:
+                        continue
+                    geom = f.get("geometry")
+                    if not geom:
+                        continue
+                    props["watch_color"] = "#FF0000" if "tornado watch" in event else "#FFD700"
+                    feats.append({
+                        "type": "Feature",
+                        "geometry": geom,
+                        "properties": props,
+                    })
+                out = {"type": "FeatureCollection", "features": feats}
+            except Exception as exc:
+                log.warning("SPC watches filter failed: %s", exc)
+                self.fetch_error.emit(f"SPC watches filter failed: {exc}")
         self.spc_watches_received.emit(out)
 
 
