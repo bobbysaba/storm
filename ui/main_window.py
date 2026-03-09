@@ -4,6 +4,7 @@
 
 import json
 import logging
+import threading
 import runtime_flags
 import html
 from datetime import datetime, timezone
@@ -19,12 +20,15 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
 from ui.map_widget import MapWidget
 from ui.radar_controls import RadarControls
+from ui.hazard_controls import HazardControls
+from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
 from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
+from data.hazard_fetcher import HazardFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
@@ -56,7 +60,7 @@ class MainWindow(QMainWindow):
         self._debug = debug
         self._monitor = monitor
 
-        self.setWindowTitle("STORM")
+        self.setWindowTitle(f"STORM  v{config.VERSION}")
         self.setMinimumSize(1024, 680)
         self.resize(1280, 800)
 
@@ -106,6 +110,7 @@ class MainWindow(QMainWindow):
 
             if not self._disable_radar:
                 self._init_radar()
+            self._init_hazards()
             if not self._disable_mqtt:
                 self._init_mqtt()
             if not self._disable_vehicle_fetcher:
@@ -206,6 +211,20 @@ class MainWindow(QMainWindow):
 
         self._add_separator(tb)
 
+        # ── hazards ───────────────────────────────────────────────────────
+        self.btn_hazards = self._toolbar_toggle(
+            "HAZARDS", "Show/hide SPC and NWS hazard overlays", tb
+        )
+        self.hazard_controls = HazardControls(self._map_container)
+        self.hazard_controls.setObjectName("floatingToolbar")
+        self.btn_hazards.toggled.connect(self.hazard_controls.toggle_drawer)
+        self.btn_hazards.toggled.connect(self._start_layout_pulse)
+
+        self.outlook_panel = OutlookPanel(self._map_container)
+        self.outlook_panel.closed.connect(self._layout_overlays)
+
+        self._add_separator(tb)
+
         # ── annotations ───────────────────────────────────────────────────
         self.btn_annotate = self._toolbar_toggle(
             "ANNOTATE", "Place road annotations and storm motion cone", tb
@@ -299,6 +318,13 @@ class MainWindow(QMainWindow):
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.clock_label)
 
+        version_label = QLabel(f"v{config.VERSION}")
+        version_label.setStyleSheet(
+            "font-size: 9px; font-weight: 400; letter-spacing: 0.5px; color: #3A3F52;"
+        )
+        version_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right.addWidget(version_label)
+
     def _status_divider(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
@@ -355,6 +381,22 @@ class MainWindow(QMainWindow):
                 at_x = max(0, (r.width() - at_w) // 2)
                 at.setGeometry(at_x, _drop_y, at_w, at.sizeHint().height())
                 at.raise_()
+            if hasattr(self, "hazard_controls"):
+                hz = self.hazard_controls
+                hz_w = hz.sizeHint().width()
+                hz_x = max(0, (r.width() - hz_w) // 2)
+                hz.setGeometry(hz_x, _drop_y, hz_w, hz.sizeHint().height())
+                hz.raise_()
+
+        # outlook panel — right side, below toolbar, above status pill
+        if hasattr(self, "outlook_panel"):
+            op = self.outlook_panel
+            top = _drop_y if hasattr(self, "_floating_toolbar") else MARGIN
+            bottom_pad = 40  # clear status pills
+            panel_h = max(100, r.height() - top - MARGIN - bottom_pad)
+            op.setGeometry(r.width() - OutlookPanel.PANEL_WIDTH - MARGIN, top,
+                           OutlookPanel.PANEL_WIDTH, panel_h)
+            op.raise_()
 
         # left status pill — bottom-left corner
         if hasattr(self, "_status_left"):
@@ -503,6 +545,40 @@ class MainWindow(QMainWindow):
         # delay auto-start so map has time to initialize
         QTimer.singleShot(800, self._auto_start_radar)
 
+    def _init_hazards(self):
+        self._hazard_fetcher = HazardFetcher(parent=self)
+        self.hazard_controls.spc_mode_changed.connect(self._on_spc_mode_changed)
+        self.hazard_controls.spc_watches_toggled.connect(self._on_spc_watches_toggled)
+        self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
+        self.hazard_controls.nws_warnings_toggled.connect(self._on_nws_warnings_toggled)
+        self.hazard_controls.fetch_requested.connect(self._hazard_fetcher.fetch_now)
+
+        self._hazard_fetcher.spc_received.connect(self._on_spc_received)
+        self._hazard_fetcher.nws_received.connect(self._on_nws_received)
+        self._hazard_fetcher.spc_watches_received.connect(self._on_spc_watches_received)
+        self._hazard_fetcher.spc_mds_received.connect(self._on_spc_mds_received)
+        self._hazard_fetcher.fetch_error.connect(self._on_hazard_error)
+
+        self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
+
+        self._hazard_error_clear_timer = QTimer()
+        self._hazard_error_clear_timer.setSingleShot(True)
+        self._hazard_error_clear_timer.timeout.connect(self._clear_radar_error)
+        self._hazard_fetcher.start()
+
+        self.map_widget.map_moved.connect(self._on_map_moved_for_bbox)
+
+        # keep top drawers mutually exclusive for clean placement
+        self.btn_hazards.toggled.connect(
+            lambda on: self.btn_radar.setChecked(False) if on else None
+        )
+        self.btn_hazards.toggled.connect(
+            lambda on: self.btn_annotate.setChecked(False) if on else None
+        )
+        self.btn_radar.toggled.connect(
+            lambda on: self.btn_hazards.setChecked(False) if on else None
+        )
+
     def _auto_start_radar(self):
         self._radar_fetcher.start()
         self._radar_fetcher.fetch_now()
@@ -513,7 +589,7 @@ class MainWindow(QMainWindow):
         self._radar_error_clear_timer.start(10_000)
 
     def _clear_radar_error(self):
-        if self.status_msg_label.text().startswith("Radar:"):
+        if self.status_msg_label.text().startswith("Radar:") or self.status_msg_label.text().startswith("Hazards:"):
             self.status_msg_label.setText("")
             self._layout_overlays()
 
@@ -531,6 +607,132 @@ class MainWindow(QMainWindow):
             self._radar_overlay.clear()
             self.status_msg_label.setText("")
             self._layout_overlays()
+
+    def _on_hazard_error(self, msg: str):
+        self.status_msg_label.setText(f"Hazards: {msg}")
+        self._layout_overlays()
+        self._hazard_error_clear_timer.start(10_000)
+
+    def _on_map_moved_for_bbox(self, lat: float, lon: float, zoom: float):
+        # Approximate visible bounding box from map center + zoom level.
+        # lon_span ≈ 360/2^zoom; lat_span uses a modest aspect ratio estimate.
+        lon_half = 180.0 / (2 ** zoom)
+        lat_half = lon_half * 0.65
+        self._hazard_fetcher.set_nws_bbox(
+            lon - lon_half, lat - lat_half, lon + lon_half, lat + lat_half
+        )
+
+    def _on_spc_received(self, cat_fc: dict, wind_fc: dict, hail_fc: dict, tor_fc: dict):
+        self.map_widget.set_spc_geojson(cat_fc, wind_fc, hail_fc, tor_fc)
+
+    def _on_nws_received(self, warnings_fc: dict):
+        self.map_widget.set_nws_warnings_geojson(warnings_fc)
+
+    def _on_spc_watches_received(self, watches_fc: dict):
+        self.map_widget.set_spc_watches_geojson(watches_fc)
+
+    def _on_spc_mds_received(self, mds_fc: dict):
+        self.map_widget.set_spc_mds_geojson(mds_fc)
+
+    def _on_spc_mds_toggled(self, enabled: bool):
+        self._hazard_fetcher.set_spc_mds_enabled(enabled)
+        self.map_widget.set_spc_mds_visible(enabled)
+        if enabled:
+            self._hazard_fetcher.fetch_now()
+
+    def _on_spc_feature_clicked(self, payload: str):
+        """Handle a click on an SPC cat or MD polygon — fetch and show discussion text."""
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return
+        source = data.get("source", "")
+        props = data.get("properties", {})
+
+        if source == "spc-cat":
+            title = "DAY 1 CONVECTIVE OUTLOOK"
+            url = "https://www.spc.noaa.gov/products/outlook/day1otlk.html"
+        elif source == "spc-mds":
+            name = str(props.get("name", "")).strip()
+            # name is e.g. "MD 0176" — extract the number
+            num = name.replace("MD", "").strip().zfill(4)
+            title = f"MESOSCALE DISCUSSION {num}"
+            url = f"https://www.spc.noaa.gov/products/md/md{num}.html"
+        else:
+            return
+
+        self.outlook_panel.show_loading(title)
+        self._layout_overlays()
+        threading.Thread(
+            target=self._fetch_outlook_text,
+            args=(url, title),
+            daemon=True,
+        ).start()
+
+    def _fetch_outlook_text(self, url: str, title: str):
+        """Fetch and parse outlook/MD discussion text in a background thread."""
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
+        from html.parser import HTMLParser
+
+        class _PreExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self._in_pre = False
+                self._chunks: list[str] = []
+            def handle_starttag(self, tag, attrs):
+                if tag == "pre":
+                    self._in_pre = True
+            def handle_endtag(self, tag):
+                if tag == "pre":
+                    self._in_pre = False
+            def handle_data(self, data):
+                if self._in_pre:
+                    self._chunks.append(data)
+            def text(self) -> str:
+                return "".join(self._chunks).strip()
+
+        try:
+            req = Request(url, headers={"User-Agent": "STORM/1.0"})
+            with urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            parser = _PreExtractor()
+            parser.feed(raw)
+            text = parser.text()
+            if not text:
+                text = "(No discussion text found)"
+        except (URLError, Exception) as exc:
+            text = f"Failed to load discussion:\n{exc}"
+
+        # Update panel from main thread via QTimer
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self.outlook_panel.show_text(title, text))
+
+    def _on_spc_mode_changed(self, mode: str):
+        outlook_on = mode == "outlook"
+        for key in ("MRGL", "SLGHT", "ENH", "MDT", "HIGH"):
+            self._hazard_fetcher.set_spc_category_enabled(key, outlook_on)
+            self.map_widget.set_spc_category_visible(key, outlook_on)
+
+        for key in ("tor", "wind", "hail"):
+            on = mode == key
+            self._hazard_fetcher.set_spc_product_enabled(key, on)
+            self.map_widget.set_spc_product_visible(key, on)
+
+        if mode:
+            self._hazard_fetcher.fetch_now()
+
+    def _on_spc_watches_toggled(self, enabled: bool):
+        self._hazard_fetcher.set_spc_watches_enabled(enabled)
+        self.map_widget.set_spc_watches_visible(enabled)
+        if enabled:
+            self._hazard_fetcher.fetch_now()
+
+    def _on_nws_warnings_toggled(self, enabled: bool):
+        self._hazard_fetcher.set_nws_enabled(enabled)
+        self.map_widget.set_nws_warnings_visible(enabled)
+        if enabled:
+            self._hazard_fetcher.fetch_now()
 
     def _on_radar_site_changed(self, site: str):
         # clear cache when site changes — old data belongs to a different location
@@ -712,8 +914,14 @@ class MainWindow(QMainWindow):
         self.btn_radar.toggled.connect(
             lambda on: self.btn_annotate.setChecked(False) if on else None
         )
+        self.btn_hazards.toggled.connect(
+            lambda on: self.btn_annotate.setChecked(False) if on else None
+        )
         self.btn_annotate.toggled.connect(
             lambda on: self.btn_radar.setChecked(False) if on else None
+        )
+        self.btn_annotate.toggled.connect(
+            lambda on: self.btn_hazards.setChecked(False) if on else None
         )
 
         # tool selection → set cursor mode

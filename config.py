@@ -9,6 +9,8 @@ _PROJ = Path(__file__).parent
 _AWS_CANDIDATES = (_PROJ / "aws", _PROJ / ".aws")
 _AWS = next((p for p in _AWS_CANDIDATES if p.exists()), _AWS_CANDIDATES[0])
 
+VERSION: str = (_PROJ / "VERSION").read_text().strip()
+
 # ── Identity (overwritten by main.py after launch dialog) ─────────────────────
 
 VEHICLE_ID: str = "storm"

@@ -87,6 +87,15 @@ def build_safe_map_html() -> str:
     window.stormRemoveDrawing = _noop;
     window.stormDrawingModeSet = _noop;
     window.stormDrawingUpdatePreview = _noop;
+    window.stormSetSpcGeoJSON = _noop;
+    window.stormSetSpcCategoryVisible = _noop;
+    window.stormSetSpcProductVisible = _noop;
+    window.stormSetNwsWarningsGeoJSON = _noop;
+    window.stormSetNwsWarningsVisible = _noop;
+    window.stormSetSpcWatchesGeoJSON = _noop;
+    window.stormSetSpcWatchesVisible = _noop;
+    window.stormSetSpcMdsGeoJSON = _noop;
+    window.stormSetSpcMdsVisible = _noop;
   </script>
 </head>
 <body>
@@ -365,6 +374,15 @@ def build_map_html() -> str:
     window.stormRemoveDrawing = _stormNoop;
     window.stormDrawingModeSet = _stormNoop;
     window.stormDrawingUpdatePreview = _stormNoop;
+    window.stormSetSpcGeoJSON = _stormNoop;
+    window.stormSetSpcCategoryVisible = _stormNoop;
+    window.stormSetSpcProductVisible = _stormNoop;
+    window.stormSetNwsWarningsGeoJSON = _stormNoop;
+    window.stormSetNwsWarningsVisible = _stormNoop;
+    window.stormSetSpcWatchesGeoJSON = _stormNoop;
+    window.stormSetSpcWatchesVisible = _stormNoop;
+    window.stormSetSpcMdsGeoJSON = _stormNoop;
+    window.stormSetSpcMdsVisible = _stormNoop;
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
     window._stormDrawingType = '';
@@ -826,6 +844,139 @@ def build_map_html() -> str:
         }}
       }});
 
+      // ── SPC + NWS hazard overlays (all default hidden) ──────────────────
+      map.addSource('spc-cat', {{type:'geojson', data:empty}});
+      map.addSource('spc-wind', {{type:'geojson', data:empty}});
+      map.addSource('spc-hail', {{type:'geojson', data:empty}});
+      map.addSource('spc-tor', {{type:'geojson', data:empty}});
+      map.addSource('spc-watches', {{type:'geojson', data:empty}});
+      map.addSource('spc-mds', {{type:'geojson', data:empty}});
+      map.addSource('nws-warnings', {{type:'geojson', data:empty}});
+
+      map.addLayer({{
+        id: 'spc-cat-fill',
+        type: 'fill',
+        source: 'spc-cat',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'fill-color': [
+            'match', ['get', 'cat'],
+            'MRGL', '#7FBF7F',
+            'SLGHT', '#F5D547',
+            'ENH', '#FF8C00',
+            'MDT', '#E53935',
+            'HIGH', '#FF00FF',
+            '#7FBF7F'
+          ],
+          'fill-opacity': 0.22
+        }}
+      }});
+      map.addLayer({{
+        id: 'spc-cat-line',
+        type: 'line',
+        source: 'spc-cat',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'line-color': [
+            'match', ['get', 'cat'],
+            'MRGL', '#7FBF7F',
+            'SLGHT', '#F5D547',
+            'ENH', '#FF8C00',
+            'MDT', '#E53935',
+            'HIGH', '#FF00FF',
+            '#7FBF7F'
+          ],
+          'line-width': 2,
+          'line-opacity': 0.85
+        }}
+      }});
+
+      function _addSpcProductLayers(name, color) {{
+        map.addLayer({{
+          id: 'spc-' + name + '-fill',
+          type: 'fill',
+          source: 'spc-' + name,
+          layout: {{'visibility': 'none'}},
+          paint: {{'fill-color': color, 'fill-opacity': 0.16}}
+        }});
+        map.addLayer({{
+          id: 'spc-' + name + '-line',
+          type: 'line',
+          source: 'spc-' + name,
+          layout: {{'visibility': 'none'}},
+          paint: {{'line-color': color, 'line-width': 2, 'line-opacity': 0.85}}
+        }});
+      }}
+      _addSpcProductLayers('wind', '#D68A2C');
+      _addSpcProductLayers('hail', '#39D98A');
+      _addSpcProductLayers('tor', '#FF4D4D');
+
+      map.addLayer({{
+        id: 'spc-watches-fill',
+        type: 'fill',
+        source: 'spc-watches',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'fill-color': ['coalesce', ['get', 'watch_color'], '#FFD700'],
+          'fill-opacity': 0.18
+        }}
+      }});
+      map.addLayer({{
+        id: 'spc-watches-line',
+        type: 'line',
+        source: 'spc-watches',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'line-color': ['coalesce', ['get', 'watch_color'], '#FFD700'],
+          'line-width': 2,
+          'line-opacity': 0.9
+        }}
+      }});
+
+      map.addLayer({{
+        id: 'spc-mds-fill',
+        type: 'fill',
+        source: 'spc-mds',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'fill-color': '#FF66CC',
+          'fill-opacity': 0.14
+        }}
+      }});
+      map.addLayer({{
+        id: 'spc-mds-line',
+        type: 'line',
+        source: 'spc-mds',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'line-color': '#FF66CC',
+          'line-width': 2,
+          'line-opacity': 0.9
+        }}
+      }});
+
+      map.addLayer({{
+        id: 'nws-warnings-fill',
+        type: 'fill',
+        source: 'nws-warnings',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'fill-color': ['coalesce', ['get', 'nws_color'], '#FFD700'],
+          'fill-opacity': 0.18
+        }}
+      }});
+      map.addLayer({{
+        id: 'nws-warnings-line',
+        type: 'line',
+        source: 'nws-warnings',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'line-color': ['coalesce', ['get', 'nws_color'], '#FFD700'],
+          'line-width': 2,
+          'line-opacity': 0.9
+        }}
+      }});
+
       // ── Drawing preview (rubber-band + confirmed points) ─────────────────
       var emptyFC = {{type:'FeatureCollection',features:[]}};
       map.addSource('drawing-preview-line', {{type:'geojson', data:emptyFC}});
@@ -917,6 +1068,17 @@ def build_map_html() -> str:
         const hits = map.queryRenderedFeatures(e.point, {{layers: fillLayers}});
         if (hits.length > 0) {{
           if (bridge) bridge.on_storm_cone_click(hits[0].properties.cone_id);
+          return;
+        }}
+      }}
+      // Check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
+      var spcClickLayers = ['spc-cat-fill', 'spc-mds-fill'].filter(function(l) {{ return map.getLayer(l); }});
+      if (spcClickLayers.length > 0) {{
+        var spcHits = map.queryRenderedFeatures(e.point, {{layers: spcClickLayers}});
+        if (spcHits.length > 0) {{
+          var hit = spcHits[0];
+          var payload = JSON.stringify({{source: hit.source, properties: hit.properties || {{}}}});
+          if (bridge) bridge.on_feature_click(payload);
           return;
         }}
       }}
@@ -1396,6 +1558,78 @@ def build_map_html() -> str:
     }};
     window.stormSetDeployLocsVisible = function(visible) {{
       map.setLayoutProperty('deploy-locs-circles', 'visibility', visible ? 'visible' : 'none');
+    }};
+
+    // ── SPC + NWS Hazard Layers ───────────────────────────────────────────
+    window._spcCatVisible = {{MRGL:false, SLGHT:false, ENH:false, MDT:false, HIGH:false}};
+
+    function _setLayerVisibility(layerId, visible) {{
+      if (!map.getLayer(layerId)) return;
+      map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+    }}
+
+    function _applySpcCategoryFilter() {{
+      var cats = Object.keys(window._spcCatVisible).filter(function(k) {{ return window._spcCatVisible[k]; }});
+      if (!map.getLayer('spc-cat-fill') || !map.getLayer('spc-cat-line')) return;
+      if (cats.length === 0) {{
+        _setLayerVisibility('spc-cat-fill', false);
+        _setLayerVisibility('spc-cat-line', false);
+        return;
+      }}
+      _setLayerVisibility('spc-cat-fill', true);
+      _setLayerVisibility('spc-cat-line', true);
+      var filt = ['in', ['get', 'cat'], ['literal', cats]];
+      map.setFilter('spc-cat-fill', filt);
+      map.setFilter('spc-cat-line', filt);
+    }}
+
+    window.stormSetSpcGeoJSON = function(catJson, windJson, hailJson, torJson) {{
+      if (map.getSource('spc-cat')) map.getSource('spc-cat').setData(JSON.parse(catJson));
+      if (map.getSource('spc-wind')) map.getSource('spc-wind').setData(JSON.parse(windJson));
+      if (map.getSource('spc-hail')) map.getSource('spc-hail').setData(JSON.parse(hailJson));
+      if (map.getSource('spc-tor')) map.getSource('spc-tor').setData(JSON.parse(torJson));
+      _applySpcCategoryFilter();
+    }};
+
+    window.stormSetSpcCategoryVisible = function(key, visible) {{
+      var k = String(key || '').toUpperCase();
+      if (!window._spcCatVisible.hasOwnProperty(k)) return;
+      window._spcCatVisible[k] = !!visible;
+      _applySpcCategoryFilter();
+    }};
+
+    window.stormSetSpcProductVisible = function(key, visible) {{
+      var k = String(key || '').toLowerCase();
+      if (['wind','hail','tor'].indexOf(k) === -1) return;
+      _setLayerVisibility('spc-' + k + '-fill', !!visible);
+      _setLayerVisibility('spc-' + k + '-line', !!visible);
+    }};
+
+    window.stormSetNwsWarningsGeoJSON = function(warnJson) {{
+      if (map.getSource('nws-warnings')) map.getSource('nws-warnings').setData(JSON.parse(warnJson));
+    }};
+
+    window.stormSetNwsWarningsVisible = function(visible) {{
+      _setLayerVisibility('nws-warnings-fill', !!visible);
+      _setLayerVisibility('nws-warnings-line', !!visible);
+    }};
+
+    window.stormSetSpcWatchesGeoJSON = function(watchJson) {{
+      if (map.getSource('spc-watches')) map.getSource('spc-watches').setData(JSON.parse(watchJson));
+    }};
+
+    window.stormSetSpcWatchesVisible = function(visible) {{
+      _setLayerVisibility('spc-watches-fill', !!visible);
+      _setLayerVisibility('spc-watches-line', !!visible);
+    }};
+
+    window.stormSetSpcMdsGeoJSON = function(mdJson) {{
+      if (map.getSource('spc-mds')) map.getSource('spc-mds').setData(JSON.parse(mdJson));
+    }};
+
+    window.stormSetSpcMdsVisible = function(visible) {{
+      _setLayerVisibility('spc-mds-fill', !!visible);
+      _setLayerVisibility('spc-mds-line', !!visible);
     }};
 
     // ── Front Canvas Rendering ────────────────────────────────────────────
@@ -1949,3 +2183,63 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def set_deploy_locs_visible(self, visible: bool) -> None:
         self.run_js(f"stormSetDeployLocsVisible({'true' if visible else 'false'});")
+
+    def set_spc_geojson(self, cat_fc: dict, wind_fc: dict, hail_fc: dict, tor_fc: dict) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcGeoJSON) stormSetSpcGeoJSON("
+            f"{json.dumps(json.dumps(cat_fc))}, "
+            f"{json.dumps(json.dumps(wind_fc))}, "
+            f"{json.dumps(json.dumps(hail_fc))}, "
+            f"{json.dumps(json.dumps(tor_fc))}"
+            ");"
+        )
+
+    def set_spc_category_visible(self, key: str, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcCategoryVisible) stormSetSpcCategoryVisible('{key}', {'true' if visible else 'false'});"
+        )
+
+    def set_spc_product_visible(self, key: str, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcProductVisible) stormSetSpcProductVisible('{key}', {'true' if visible else 'false'});"
+        )
+
+    def set_nws_warnings_geojson(self, fc: dict) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetNwsWarningsGeoJSON) stormSetNwsWarningsGeoJSON("
+            f"{json.dumps(json.dumps(fc))}"
+            ");"
+        )
+
+    def set_nws_warnings_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetNwsWarningsVisible) stormSetNwsWarningsVisible({'true' if visible else 'false'});"
+        )
+
+    def set_spc_watches_geojson(self, fc: dict) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcWatchesGeoJSON) stormSetSpcWatchesGeoJSON("
+            f"{json.dumps(json.dumps(fc))}"
+            ");"
+        )
+
+    def set_spc_watches_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcWatchesVisible) stormSetSpcWatchesVisible({'true' if visible else 'false'});"
+        )
+
+    def set_spc_mds_geojson(self, fc: dict) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcMdsGeoJSON) stormSetSpcMdsGeoJSON("
+            f"{json.dumps(json.dumps(fc))}"
+            ");"
+        )
+
+    def set_spc_mds_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcMdsVisible) stormSetSpcMdsVisible({'true' if visible else 'false'});"
+        )

@@ -207,6 +207,7 @@ class RadarControls(QWidget):
         r2.addWidget(self._frame_time_label)
 
         drawer_layout.addWidget(row2)
+
         layout.addWidget(self._drawer)
 
         # measure natural height after layout settles, before first collapse

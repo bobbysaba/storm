@@ -62,14 +62,16 @@ QMainWindow, QWidget {
     min-height: 24px;
 }
 
-#floatingToolbar QWidget#radarDrawer {
+#floatingToolbar QWidget#radarDrawer,
+#floatingToolbar QWidget#hazardDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
     padding: 0;
 }
 
-#floatingToolbar QWidget#radarDrawer > QWidget {
+#floatingToolbar QWidget#radarDrawer > QWidget,
+#floatingToolbar QWidget#hazardDrawer > QWidget {
     background: transparent;
 }
 
@@ -87,6 +89,68 @@ QMainWindow, QWidget {
 #floatingToolbar QCheckBox::indicator {
     background: transparent;
     border: none;
+}
+
+/* ── Hazard Drawer ────────────────────────────────────── */
+/* Overrides the global floatingToolbar QToolButton:checked orange rule so  *
+ * hazard mode buttons always show blue and stay readable over the map.     */
+#floatingToolbar QWidget#hazardDrawer QToolButton {
+    background-color: transparent;
+    border: 1px solid #2E2E4E;
+    border-radius: 6px;
+    color: #B8BFCD;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    padding: 3px 8px;
+}
+
+#floatingToolbar QWidget#hazardDrawer QToolButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#hazardDrawer QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #4A9EFF;
+    font-weight: 600;
+}
+
+/* ── Outlook Panel ────────────────────────────────────── */
+#outlookPanel {
+    background-color: rgba(15, 15, 26, 0.95);
+    border-radius: 12px;
+    border: 1px solid rgba(74, 83, 108, 0.55);
+}
+
+#outlookPanelTitle {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: #4A9EFF;
+    background: transparent;
+}
+
+#outlookPanelClose {
+    background: transparent;
+    border: none;
+    color: #5A5B6A;
+    font-size: 16px;
+    padding: 0 2px;
+}
+
+#outlookPanelClose:hover {
+    color: #E8EAF0;
+}
+
+#outlookPanelText {
+    background-color: transparent;
+    border: none;
+    color: #C1C9D8;
+    font-size: 9px;
+    selection-background-color: #FF6B35;
 }
 
 /* ── Status Overlays ──────────────────────────────────── */
@@ -352,7 +416,8 @@ QToolTip {
     padding: 0;
 }
 
-#floatingToolbar QWidget#radarDrawer QCheckBox {
+#floatingToolbar QWidget#radarDrawer QCheckBox,
+#floatingToolbar QWidget#hazardDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

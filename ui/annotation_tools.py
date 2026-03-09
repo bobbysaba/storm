@@ -210,6 +210,7 @@ class AnnotationTools(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
+        self._drawer.setObjectName("radarDrawer")
         drawer_layout = QVBoxLayout(self._drawer)
         drawer_layout.setContentsMargins(0, 0, 0, 0)
         drawer_layout.setSpacing(3)
