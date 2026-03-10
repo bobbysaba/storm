@@ -1,67 +1,71 @@
-# config.py
-# Application constants. VEHICLE_ID and OBS_FILE_DIR are defaults only —
-# main.py overwrites them with values from the launch dialog before
-# MainWindow is created.
+# Bobby Saba - config file to store application constants
 
+# import required packages
 from pathlib import Path
 
+# determine the parent directory for the application
 _PROJ = Path(__file__).parent
+
+# determine the path for the aws credentials
 _AWS_CANDIDATES = (_PROJ / "aws", _PROJ / ".aws")
+
+# get the files for the aws credentials
 _AWS = next((p for p in _AWS_CANDIDATES if p.exists()), _AWS_CANDIDATES[0])
 
+# pull the application version
 VERSION: str = (_PROJ / "VERSION").read_text().strip()
 
-# ── Identity (overwritten by main.py after launch dialog) ─────────────────────
+# set a default vehicle ID (will be overwritten)
+VEHICLE_ID = "storm"
 
-VEHICLE_ID: str = "storm"
+# define the path to the obs file (will be overwritten)
+OBS_FILE_DIR = ""
 
-# ── Obs file watcher (Track A) ────────────────────────────────────────────────
-# Directory containing YYYYMMDD.txt instrument logger files.
-# Leave OBS_FILE_DIR empty to use GPS puck (Track B) instead.
+# define the interval to poll the obs file
+OBS_FILE_POLL_S = 10
 
-OBS_FILE_DIR:    str = ""
-OBS_FILE_POLL_S: int = 10
+# column header names for real-time obs file
+OBS_FILE_COL_LAT = "lat"
+OBS_FILE_COL_LON = "lon"
+OBS_FILE_COL_DATE = "gps_date"
+OBS_FILE_COL_TIME = "gps_time"
+OBS_FILE_COL_TEMP = "t_fast"
+OBS_FILE_COL_DEWP = "dewpoint"
+OBS_FILE_COL_WSPD = "sfc_wspd"
+OBS_FILE_COL_WDIR = "sfc_wdir"
+OBS_FILE_COL_PRES = "pressure"
 
-# Column name mapping — FOFS truck logger defaults (not user-configurable).
-OBS_FILE_COL_LAT:       str = "lat"
-OBS_FILE_COL_LON:       str = "lon"
-OBS_FILE_COL_DATE:      str = "gps_date"
-OBS_FILE_COL_TIME:      str = "gps_time"
-OBS_FILE_COL_TIMESTAMP: str = ""
-OBS_FILE_COL_TEMP:      str = "t_fast"
-OBS_FILE_COL_DEWP:      str = "dewpoint"
-OBS_FILE_COL_WSPD:      str = "sfc_wspd"
-OBS_FILE_COL_WDIR:      str = "sfc_wdir"
-OBS_FILE_COL_PRES:      str = "pressure"
+# GPS port (will be overwritten)
+GPS_PORT = ""
 
-# ── GPS (Track B) ─────────────────────────────────────────────────────────────
+# GPS baud rate
+GPS_BAUD = 4800
 
-GPS_PORT: str = ""
-GPS_BAUD: int = 4800
+# path to previous deployment locations
+DEPLOY_LOCS_FILE = str(_PROJ / "data" / "deployment_locations.json")
 
-# ── Previous deployment locations ─────────────────────────────────────────────
+# accent color
+ACCENT_COLOR = "#00CFFF"
 
-DEPLOY_LOCS_FILE: str = str(_PROJ / "data" / "deployment_locations.json")
+# link to the vehicle locations file (from NSSL THREDDS)
+VEHICLES_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/placefile_info/scout_locs.json"
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# how often to poll for vehicle locations
+VEHICLES_POLL_S = 10
 
-ACCENT_COLOR: str = "#00CFFF"
+# home location fallback
+HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 
-# ── Vehicle JSON fetcher (hardcoded — same endpoint for all users) ────────────
+# mqtt endpoint
+MQTT_HOST = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
 
-VEHICLES_URL:    str = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/placefile_info/scout_locs.json"
-VEHICLES_POLL_S: int = 10
+# mqtt port
+MQTT_PORT = 8883
 
-# ── Home location fallback ────────────────────────────────────────────────────
+# mqtt use tls boolean
+MQTT_USE_TLS = True
 
-HOME_LAT: float = 35.22   # Norman, OK
-HOME_LON: float = -97.44
-
-# ── MQTT (hardcoded — same broker and certs for all users) ───────────────────
-
-MQTT_HOST:     str  = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
-MQTT_PORT:     int  = 8883
-MQTT_USE_TLS:  bool = True
-MQTT_CA_CERT:  str  = str(_AWS / "storm.pem")
-MQTT_CERT_FILE: str = str(_AWS / "storm.pem.crt")
-MQTT_KEY_FILE:  str = str(_AWS / "storm-private.pem.key")
+# paths to certificates
+MQTT_CA_CERT = str(_AWS / "storm.pem")
+MQTT_CERT_FILE = str(_AWS / "storm.pem.crt")
+MQTT_KEY_FILE = str(_AWS / "storm-private.pem.key")

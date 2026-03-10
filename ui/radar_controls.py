@@ -1,8 +1,11 @@
 # ui/radar_controls.py
 # radar site selector, product toggle, and playback controls for the main toolbar.
 
+import json
 import math
 import re
+import threading
+from urllib.request import Request, urlopen
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QToolButton, QLabel,
@@ -147,7 +150,7 @@ class RadarControls(QWidget):
 
         self._btn_jump_start = QToolButton()
         self._btn_jump_start.setText("⏮")
-        self._btn_jump_start.setFixedSize(24, 22)
+        self._btn_jump_start.setFixedSize(32, 26)
         self._btn_jump_start.setEnabled(False)
         self._btn_jump_start.setToolTip("Oldest frame")
         self._btn_jump_start.clicked.connect(self._on_jump_start)
@@ -155,7 +158,7 @@ class RadarControls(QWidget):
 
         self._btn_back = QToolButton()
         self._btn_back.setText("⏪")
-        self._btn_back.setFixedSize(24, 22)
+        self._btn_back.setFixedSize(32, 26)
         self._btn_back.setEnabled(False)
         self._btn_back.setToolTip("Step back one frame")
         self._btn_back.clicked.connect(self._on_step_back)
@@ -164,7 +167,7 @@ class RadarControls(QWidget):
         self._btn_play = QToolButton()
         self._btn_play.setText("▶")
         self._btn_play.setCheckable(True)
-        self._btn_play.setFixedSize(28, 22)
+        self._btn_play.setFixedSize(32, 26)
         self._btn_play.setEnabled(False)
         self._btn_play.setToolTip("Play / Pause loop")
         self._btn_play.toggled.connect(self._on_play_toggled)
@@ -172,7 +175,7 @@ class RadarControls(QWidget):
 
         self._btn_fwd = QToolButton()
         self._btn_fwd.setText("⏩")
-        self._btn_fwd.setFixedSize(24, 22)
+        self._btn_fwd.setFixedSize(32, 26)
         self._btn_fwd.setEnabled(False)
         self._btn_fwd.setToolTip("Step forward one frame")
         self._btn_fwd.clicked.connect(self._on_step_forward)
@@ -180,7 +183,7 @@ class RadarControls(QWidget):
 
         self._btn_jump_end = QToolButton()
         self._btn_jump_end.setText("⏭")
-        self._btn_jump_end.setFixedSize(24, 22)
+        self._btn_jump_end.setFixedSize(32, 26)
         self._btn_jump_end.setEnabled(False)
         self._btn_jump_end.setToolTip("Latest (live)")
         self._btn_jump_end.clicked.connect(self._on_jump_end)
@@ -189,7 +192,7 @@ class RadarControls(QWidget):
         self._frame_slider = QSlider(Qt.Orientation.Horizontal)
         self._frame_slider.setRange(0, 0)
         self._frame_slider.setValue(0)
-        self._frame_slider.setFixedHeight(22)
+        self._frame_slider.setFixedHeight(26)
         self._frame_slider.setMinimumWidth(80)   # expand to fill available space
         self._frame_slider.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
@@ -202,7 +205,7 @@ class RadarControls(QWidget):
         # time label sits right of slider so it reads: [slider] [23:45Z]
         self._frame_time_label = QLabel("--:--Z")
         self._frame_time_label.setObjectName("radarTimeLabel")
-        self._frame_time_label.setFixedHeight(22)
+        self._frame_time_label.setFixedHeight(26)
         self._frame_time_label.setMinimumWidth(52)
         r2.addWidget(self._frame_time_label)
 
@@ -257,6 +260,25 @@ class RadarControls(QWidget):
             self._site_combo.setCurrentIndex(other_idx)
         self.site_changed.emit(normalized)
         self.fetch_requested.emit()
+        # Resolve the city name in the background and update the label.
+        threading.Thread(target=self._lookup_site_name, args=(normalized,), daemon=True).start()
+
+    def _lookup_site_name(self, site_id: str):
+        """Fetch the human-readable name for a NEXRAD site from the NWS API."""
+        try:
+            url = f"https://api.weather.gov/radar/stations/{site_id}"
+            req = Request(url, headers={
+                "User-Agent": "STORM/1.0 (contact: support)",
+                "Accept": "application/geo+json",
+            })
+            with urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+            name = data.get("properties", {}).get("name", "")
+            label = f"{site_id} - {name}" if name else site_id
+        except Exception:
+            label = site_id
+        # Qt UI updates must happen on the main thread.
+        QTimer.singleShot(0, lambda: self._set_other_label(label))
 
     def set_cache_size(self, n: int):
         """update slider range as scan cache grows; stay at live if already there."""

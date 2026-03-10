@@ -36,10 +36,15 @@ ADAPTIVE_DOWN_SCANS = 2
 ADAPTIVE_UP_SCANS = 4
 
 
+# function to set the render grid size (used on startup)
 def set_render_grid_size(n: int) -> None:
-    """Override the render grid size at startup (called from main.py)."""
+    # pylint: disable=global-statement
     global RENDER_GRID_SIZE
+
+    # clamp to 64-1024
     RENDER_GRID_SIZE = max(64, min(1024, n))
+
+    # log it
     log.info("RENDER_GRID_SIZE set to %d", RENDER_GRID_SIZE)
 
 

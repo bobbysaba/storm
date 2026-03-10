@@ -57,11 +57,11 @@ def build_safe_map_html() -> str:
     .wrap {
       width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
       font-family: "Segoe UI", sans-serif; text-align: center; padding: 24px; box-sizing: border-box;
-    }
+    }}
     .card {
       max-width: 720px; border: 1px solid #1E1E2E; border-radius: 10px;
       background: rgba(15, 15, 26, 0.92); padding: 22px 24px;
-    }
+    }}
     h2 { margin: 0 0 10px; color: #00CFFF; font-size: 20px; letter-spacing: 0.6px; }
     p { margin: 0; color: #B5BDCC; font-size: 13px; line-height: 1.45; }
   </style>
@@ -96,6 +96,11 @@ def build_safe_map_html() -> str:
     window.stormSetSpcWatchesVisible = _noop;
     window.stormSetSpcMdsGeoJSON = _noop;
     window.stormSetSpcMdsVisible = _noop;
+    window.stormSetSatelliteFrame = _noop;
+    window.stormSetSatelliteVisible = _noop;
+    window.stormSetSatelliteMode = _noop;
+    window.stormSetSatelliteOpacity = _noop;
+    window.stormSetMesoSectors = _noop;
   </script>
 </head>
 <body>
@@ -403,6 +408,11 @@ def build_map_html() -> str:
     window.stormSetSpcWatchesVisible = _stormNoop;
     window.stormSetSpcMdsGeoJSON = _stormNoop;
     window.stormSetSpcMdsVisible = _stormNoop;
+    window.stormSetSatelliteFrame = _stormNoop;
+    window.stormSetSatelliteVisible = _stormNoop;
+    window.stormSetSatelliteMode = _stormNoop;
+    window.stormSetSatelliteOpacity = _stormNoop;
+    window.stormSetMesoSectors = _stormNoop;
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
     window._stormDrawingType = '';
@@ -864,6 +874,53 @@ def build_map_html() -> str:
         }}
       }});
 
+      // ── GOES Satellite image overlay ─────────────────────────────────────
+      // Uses a single image source (like the radar overlay) rather than tiled
+      // WMS so that (a) frames can be cached and played back, and (b) nothing
+      // appears outside the downloaded bbox.  The source is created on first
+      // frame delivery by stormSetSatelliteFrame().
+
+      // MESO sector outline boxes (GeoJSON polygons drawn over the satellite)
+      map.addSource('meso-sectors', {{type:'geojson', data:empty}});
+      map.addLayer({{
+        id: 'meso-sectors-fill',
+        type: 'fill',
+        source: 'meso-sectors',
+        layout: {{ 'visibility': 'none' }},
+        paint: {{ 'fill-color': '#00CFFF', 'fill-opacity': 0.06 }}
+      }});
+      map.addLayer({{
+        id: 'meso-sectors-line',
+        type: 'line',
+        source: 'meso-sectors',
+        layout: {{ 'visibility': 'none' }},
+        paint: {{
+          'line-color': '#00CFFF',
+          'line-width': 1.5,
+          'line-dasharray': [5, 3],
+          'line-opacity': 0.7
+        }}
+      }});
+      map.addLayer({{
+        id: 'meso-sectors-label',
+        type: 'symbol',
+        source: 'meso-sectors',
+        layout: {{
+          'visibility': 'none',
+          'text-field': ['get', 'label'],
+          'text-size': 11,
+          'text-font': ['Noto Sans Bold'],
+          'text-anchor': 'top-left',
+          'text-offset': [0.4, 0.4],
+          'text-allow-overlap': true
+        }},
+        paint: {{
+          'text-color': '#00CFFF',
+          'text-halo-color': '#0A0A0F',
+          'text-halo-width': 1.5
+        }}
+      }});
+
       // ── SPC + NWS hazard overlays (all default hidden) ──────────────────
       map.addSource('spc-cat', {{type:'geojson', data:empty}});
       map.addSource('spc-wind', {{type:'geojson', data:empty}});
@@ -888,7 +945,7 @@ def build_map_html() -> str:
             'HIGH', '#930093',
             '#80C580'
           ],
-          'fill-opacity': 0.25
+          'fill-opacity': 0.18
         }}
       }});
       map.addLayer({{
@@ -911,95 +968,156 @@ def build_map_html() -> str:
         }}
       }});
 
-      // ── Significant-area hatch pattern (diagonal white lines) ────────────
-      // Build the pixel array directly — no canvas API needed, so this works
-      // reliably inside QWebEngineView where canvas readback can silently fail.
+      // ── Significant-area fill patterns ────────────────────────────────────
+      // White ink on transparent tile — readable on the dark-mode map.
+      //
+      //  sig-hatch-cig1 – short dashes along a diagonal  (CIG1)
+      //  sig-hatch-cig2 – solid continuous diagonal lines (CIG2 + SIGN)
+      //  sig-hatch-cig3 – 4×4-pixel checkerboard          (CIG3)
       (function() {{
-        var sz = 16;
-        var data = new Uint8Array(sz * sz * 4);
-        for (var y = 0; y < sz; y++) {{
-          for (var x = 0; x < sz; x++) {{
-            var i = (y * sz + x) * 4;
-            // NW→SE diagonal: pixels where (x - y) mod sz < 2 form a 2-px stripe
-            var d = ((x - y) % sz + sz) % sz;
-            if (d < 2) {{
-              data[i]   = 255;  // R
-              data[i+1] = 255;  // G
-              data[i+2] = 255;  // B
-              data[i+3] = 180;  // A (~70 % opacity)
+        function _mkImage(sz, fn) {{
+          var d = new Uint8Array(sz * sz * 4);
+          for (var y = 0; y < sz; y++) {{
+            for (var x = 0; x < sz; x++) {{
+              if (fn(x, y, sz)) {{
+                var i = (y * sz + x) * 4;
+                d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = 210;
+              }}
             }}
-            // else: alpha stays 0 → transparent
           }}
+          return {{width: sz, height: sz, data: d}};
         }}
-        try {{
-          map.addImage('sig-hatch', {{width: sz, height: sz, data: data}});
-          console.log('sig-hatch registered OK');
-        }} catch(e) {{
-          console.warn('sig-hatch registration failed:', e);
-        }}
+        // CIG1 – short dashes: 3-px dash, 9-px gap on a 24-px tile.
+        // The large gap makes these unmistakably dashed, not solid.
+        var cig1 = _mkImage(24, function(x, y, sz) {{
+          var diag = ((x - y) % sz + sz) % sz;
+          return diag < 2 && (x + y) % 12 < 3;
+        }});
+        // CIG2 – solid diagonal lines: 2-px stripe every 10 px.
+        var cig2 = _mkImage(10, function(x, y, sz) {{
+          return ((x - y + sz) % sz) < 2;
+        }});
+        // CIG3 – checkerboard: alternating 4×4-px squares.
+        var cig3 = _mkImage(16, function(x, y) {{
+          return (Math.floor(x / 4) + Math.floor(y / 4)) % 2 === 0;
+        }});
+        ['cig1','cig2','cig3'].forEach(function(k, idx) {{
+          var img = [cig1, cig2, cig3][idx];
+          try {{
+            map.addImage('sig-hatch-' + k, img);
+            console.log('sig-hatch-' + k + ' registered OK');
+          }} catch(e) {{
+            console.warn('sig-hatch-' + k + ' registration failed:', e);
+          }}
+        }});
       }})();
 
+      // Significant-area label values: SIGN (legacy tor) + CIG1/2/3 (SPC conditional intensity groups)
+      var _SIG_LABELS = ['SIGN', 'CIG1', 'CIG2', 'CIG3'];
+      var _sigFilter = ['any',
+        ['in', ['get', 'LABEL'], ['literal', ['SIGN', 'CIG1', 'CIG2', 'CIG3']]],
+        ['in', ['get', 'label'], ['literal', ['SIGN', 'CIG1', 'CIG2', 'CIG3']]]
+      ];
+      var _nonSignFilter = ['all',
+        ['!', ['in', ['get', 'LABEL'], ['literal', ['SIGN', 'CIG1', 'CIG2', 'CIG3']]]],
+        ['!', ['in', ['get', 'label'], ['literal', ['SIGN', 'CIG1', 'CIG2', 'CIG3']]]]
+      ];
+
       function _addSpcProductLayers(name, colorExpr) {{
+        // Probability fill + outline (non-sig features only)
         map.addLayer({{
           id: 'spc-' + name + '-fill',
           type: 'fill',
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
-          paint: {{'fill-color': colorExpr, 'fill-opacity': 0.25}}
+          filter: _nonSignFilter,
+          paint: {{'fill-color': colorExpr, 'fill-opacity': 0.20}}
         }});
         map.addLayer({{
           id: 'spc-' + name + '-line',
           type: 'line',
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
-          paint: {{'line-color': colorExpr, 'line-width': 2, 'line-opacity': 0.85}}
+          filter: _nonSignFilter,
+          paint: {{'line-color': colorExpr, 'line-width': 1.5, 'line-opacity': 0.85}}
         }});
-        // Significant-area layer: white diagonal hatching over SIGN features.
-        // SIGN features are transparent in the fill layer above so only the
-        // hatch pattern renders for those polygons.
-        // Use fill-pattern if the image registered; fall back to a semi-opaque
-        // white fill so the areas are still visible even in environments where
-        // fill-pattern is unsupported.
-        var _hasPat = map.hasImage('sig-hatch');
-        console.log('sig-hatch available for spc-' + name + ':', _hasPat);
-        var _sigPaint = _hasPat
-          ? {{'fill-pattern': 'sig-hatch'}}
-          : {{'fill-color': '#FFFFFF', 'fill-opacity': 0.45}};
+
+        // Shared base fill for all sig features (neutral gray so pattern shows on top)
         map.addLayer({{
-          id: 'spc-' + name + '-sig',
+          id: 'spc-' + name + '-sig-base',
           type: 'fill',
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
-          filter: ['any',
-            ['==', ['get', 'LABEL'], 'SIGN'],
-            ['==', ['get', 'label'], 'SIGN']
-          ],
-          paint: _sigPaint
+          filter: _sigFilter,
+          paint: {{'fill-color': '#AAAAAA', 'fill-opacity': 0.22}}
+        }});
+
+        // Per-type pattern layers — SIGN and each CIG level get their own pattern.
+        // SIGN (legacy) uses solid-line pattern same as CIG2.
+        var _sigTypes = [
+          {{label: 'SIGN', pat: 'sig-hatch-cig2'}},
+          {{label: 'CIG1', pat: 'sig-hatch-cig1'}},
+          {{label: 'CIG2', pat: 'sig-hatch-cig2'}},
+          {{label: 'CIG3', pat: 'sig-hatch-cig3'}}
+        ];
+        _sigTypes.forEach(function(t) {{
+          var _f = ['any',
+            ['==', ['get', 'LABEL'], t.label],
+            ['==', ['get', 'label'], t.label]
+          ];
+          var _hasPat = map.hasImage(t.pat);
+          var _paint = _hasPat
+            ? {{'fill-pattern': t.pat}}
+            : {{'fill-color': '#FFFFFF', 'fill-opacity': 0.25}};
+          map.addLayer({{
+            id: 'spc-' + name + '-' + t.label.toLowerCase(),
+            type: 'fill',
+            source: 'spc-' + name,
+            layout: {{'visibility': 'none'}},
+            filter: _f,
+            paint: _paint
+          }});
+        }});
+
+        // White outline around all sig features
+        map.addLayer({{
+          id: 'spc-' + name + '-sig-line',
+          type: 'line',
+          source: 'spc-' + name,
+          layout: {{'visibility': 'none'}},
+          filter: _sigFilter,
+          paint: {{'line-color': '#FFFFFF', 'line-width': 1.5, 'line-opacity': 0.85}}
         }});
       }}
 
-      // Wind/hail probability color scale (matches SPC official products)
-      // 5% = tan/brown, 15% = yellow, 30% = orange, 45% = red, 60% = magenta
+      // Wind/hail probability color scale (matches SPC official products).
+      // SPC GeoJSON LABEL field is a decimal string ('0.05', '0.15', …).
+      // Both decimal and integer-string keys are listed so either GeoJSON
+      // format is handled gracefully.
+      // Colors are tuned for readability on the app's dark background while
+      // matching the SPC hue progression: tan → yellow → orange → red → magenta.
       var windHailColor = ['match', ['get', 'LABEL'],
-        'SIGN', 'rgba(0,0,0,0)',
-        '5',  '#C1A353',
-        '15', '#FFFF00',
-        '30', '#FF6600',
-        '45', '#FF0000',
-        '60', '#FF00FF',
-        '#C1A353'];
+        ['SIGN', 'CIG1', 'CIG2', 'CIG3'], 'rgba(0,0,0,0)',
+        ['0.05', '5'],  '#8B5A2A',   // 5%  – warm tan/brown
+        ['0.15', '15'], '#F5F500',   // 15% – bright yellow
+        ['0.30', '30'], '#FF7700',   // 30% – orange
+        ['0.45', '45'], '#EE2222',   // 45% – red
+        ['0.60', '60'], '#EE00EE',   // 60% – magenta
+        '#8B5A2A'];
 
-      // Tornado probability color scale (matches SPC official products)
+      // Tornado probability color scale (matches SPC official products).
+      // SPC hue progression: green → brown → yellow → red → magenta → purple → blue.
+      // Dark-background-adjusted: greens and blues are brightened for visibility.
       var torColor = ['match', ['get', 'LABEL'],
-        'SIGN', 'rgba(0,0,0,0)',
-        '2',  '#008B00',
-        '5',  '#8B4726',
-        '10', '#FFA500',
-        '15', '#FF0000',
-        '30', '#FF00FF',
-        '45', '#912CEE',
-        '60', '#104E8B',
-        '#008B00'];
+        ['SIGN', 'CIG1', 'CIG2', 'CIG3'], 'rgba(0,0,0,0)',
+        ['0.02', '2'],  '#00CC00',   // 2%  – bright green
+        ['0.05', '5'],  '#A0522D',   // 5%  – sienna brown
+        ['0.10', '10'], '#F5F500',   // 10% – yellow  (SPC yellow, not orange)
+        ['0.15', '15'], '#EE2222',   // 15% – red
+        ['0.30', '30'], '#EE00EE',   // 30% – magenta
+        ['0.45', '45'], '#9922DD',   // 45% – purple
+        ['0.60', '60'], '#2266CC',   // 60% – medium blue (brightened for dark bg)
+        '#00CC00'];
 
       _addSpcProductLayers('wind', windHailColor);
       _addSpcProductLayers('hail', windHailColor);
@@ -1011,7 +1129,7 @@ def build_map_html() -> str:
         source: 'spc-watches',
         layout: {{'visibility': 'none'}},
         paint: {{
-          'fill-color': ['coalesce', ['get', 'watch_color'], '#FFD700'],
+          'fill-color': ['coalesce', ['get', 'watch_color'], '#4169E1'],
           'fill-opacity': 0.18
         }}
       }});
@@ -1021,7 +1139,7 @@ def build_map_html() -> str:
         source: 'spc-watches',
         layout: {{'visibility': 'none'}},
         paint: {{
-          'line-color': ['coalesce', ['get', 'watch_color'], '#FFD700'],
+          'line-color': ['coalesce', ['get', 'watch_color'], '#4169E1'],
           'line-width': 2,
           'line-opacity': 0.9
         }}
@@ -1112,6 +1230,47 @@ def build_map_html() -> str:
       }}
     }});
 
+    // ── SPC tooltip helpers (defined once, used in mousemove) ─────────────
+    var _SIG_LABEL_SET = {{SIGN:1, CIG1:1, CIG2:1, CIG3:1}};
+
+    // Convert a raw SPC LABEL value ('0.05', '5', 'CIG1', etc.) to a
+    // human-readable display string.
+    function _spcPctLabel(raw) {{
+      if (!raw || raw === '\u2014') return '\u2014';
+      if (_SIG_LABEL_SET[raw]) return raw;   // CIG1/CIG2/CIG3/SIGN pass through
+      var n = parseFloat(raw);
+      if (isNaN(n)) return raw;
+      var pct = (n > 0 && n < 1) ? Math.round(n * 100) : Math.round(n);
+      return pct + '%';
+    }}
+
+    // Build a tooltip label for a probabilistic product.  Handles the case
+    // where a CIG/SIGN overlay and a probability polygon both exist at the
+    // cursor (e.g. CIG1 hail over 15% hail polygon → "Hail: 15% (CIG1)").
+    function _spcProbLabel(prefix, allHits, srcName) {{
+      var srcHits = allHits.filter(function(h) {{ return h.source === srcName; }});
+      if (!srcHits.length) return '';
+      var _sigHit = null, _probHit = null;
+      srcHits.forEach(function(h) {{
+        var lv = (h.properties.LABEL || h.properties.label || '');
+        if (_SIG_LABEL_SET[lv]) {{ if (!_sigHit) _sigHit = h; }}
+        else {{ if (!_probHit) _probHit = h; }}
+      }});
+      var sigLbl = _sigHit ? (_sigHit.properties.LABEL || _sigHit.properties.label) : null;
+      var probRaw = _probHit
+        ? (_probHit.properties.LABEL || _probHit.properties.label ||
+           String(_probHit.properties.DN || _probHit.properties.dn || ''))
+        : null;
+      if (sigLbl && probRaw) {{
+        // e.g. "Hail: 15% (CIG1)"  or  "Sig Tor – 10%"
+        if (sigLbl === 'SIGN') return 'Sig ' + prefix + ' \u2013 ' + _spcPctLabel(probRaw);
+        return prefix + ': ' + _spcPctLabel(probRaw) + ' (' + sigLbl + ')';
+      }}
+      if (sigLbl) {{ return 'Sig ' + prefix + (sigLbl !== 'SIGN' ? ' \u2013 ' + sigLbl : ''); }}
+      if (probRaw) {{ return prefix + ': ' + _spcPctLabel(probRaw); }}
+      return '';
+    }}
+
     // ── Event Listeners ───────────────────────────────────────────────────
     map.on("mousemove", function(e) {{
       if (bridge) bridge.on_map_move(e.lngLat.lat, e.lngLat.lng, map.getZoom());
@@ -1126,11 +1285,13 @@ def build_map_html() -> str:
         _updateDrawingPreviewGeoJSON();
       }}
 
-      // ── Hazard hover tooltip ───────────────────────────────────────────
       var _htip = document.getElementById('hazard-tooltip');
       if (_htip) {{
         var _hazardLayers = [
-          'spc-cat-fill','spc-tor-fill','spc-wind-fill','spc-hail-fill',
+          'spc-cat-fill',
+          'spc-tor-fill','spc-tor-sig-base',
+          'spc-wind-fill','spc-wind-sig-base',
+          'spc-hail-fill','spc-hail-sig-base',
           'spc-watches-fill','spc-mds-fill','nws-warnings-fill'
         ].filter(function(l) {{
           return map.getLayer(l) &&
@@ -1140,28 +1301,28 @@ def build_map_html() -> str:
           ? map.queryRenderedFeatures(e.point, {{layers: _hazardLayers}})
           : [];
         if (_hits.length > 0) {{
-          var _f = _hits[0];
-          var _p = _f.properties || {{}};
-          var _src = _f.source || '';
           var _lbl = '';
-          if (_src === 'spc-cat') {{
+          // Determine the topmost source and build an appropriate label.
+          var _topSrc = _hits[0].source || '';
+          if (_topSrc === 'spc-cat') {{
             var _catNames = {{MRGL:'Marginal',SLGHT:'Slight',ENH:'Enhanced',MDT:'Moderate',HIGH:'High'}};
-            _lbl = _catNames[_p.cat] || _p.cat || 'Outlook';
-          }} else if (_src === 'spc-tor') {{
-            var _tv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
-            _lbl = (_tv === 'SIGN') ? 'Sig Tor (Hatched)' : 'Tor: ' + _tv;
-          }} else if (_src === 'spc-wind') {{
-            var _wv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
-            _lbl = (_wv === 'SIGN') ? 'Sig Wind (Hatched)' : 'Wind: ' + _wv;
-          }} else if (_src === 'spc-hail') {{
-            var _hv = _p.LABEL || _p.label || _p.DN || _p.dn || '—';
-            _lbl = (_hv === 'SIGN') ? 'Sig Hail (Hatched)' : 'Hail: ' + _hv;
-          }} else if (_src === 'spc-watches') {{
-            _lbl = _p.event || _p.headline || 'Watch';
-          }} else if (_src === 'spc-mds') {{
-            _lbl = _p.name || 'Mesoscale Discussion';
-          }} else if (_src === 'nws-warnings') {{
-            _lbl = _p.event || _p.headline || 'Warning';
+            var _cp = _hits[0].properties || {{}};
+            _lbl = _catNames[_cp.cat] || _cp.cat || 'Outlook';
+          }} else if (_topSrc === 'spc-tor') {{
+            _lbl = _spcProbLabel('Tor', _hits, 'spc-tor');
+          }} else if (_topSrc === 'spc-wind') {{
+            _lbl = _spcProbLabel('Wind', _hits, 'spc-wind');
+          }} else if (_topSrc === 'spc-hail') {{
+            _lbl = _spcProbLabel('Hail', _hits, 'spc-hail');
+          }} else if (_topSrc === 'spc-watches') {{
+            var _wp = _hits[0].properties || {{}};
+            _lbl = _wp.event || _wp.headline || 'Watch';
+          }} else if (_topSrc === 'spc-mds') {{
+            var _mp = _hits[0].properties || {{}};
+            _lbl = _mp.name || 'Mesoscale Discussion';
+          }} else if (_topSrc === 'nws-warnings') {{
+            var _np = _hits[0].properties || {{}};
+            _lbl = _np.prod_type || _np.event || 'Warning';
           }}
           if (_lbl) {{
             _htip.textContent = _lbl;
@@ -1219,7 +1380,7 @@ def build_map_html() -> str:
         }}
       }}
       // Check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
-      var spcClickLayers = ['spc-cat-fill', 'spc-mds-fill'].filter(function(l) {{ return map.getLayer(l); }});
+      var spcClickLayers = ['spc-cat-fill', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) {{ return map.getLayer(l); }});
       if (spcClickLayers.length > 0) {{
         var spcHits = map.queryRenderedFeatures(e.point, {{layers: spcClickLayers}});
         if (spcHits.length > 0) {{
@@ -1730,6 +1891,143 @@ def build_map_html() -> str:
       map.setFilter('spc-cat-line', filt);
     }}
 
+    // ── Satellite overlay API ─────────────────────────────────────────────
+    // Uses an image source (like radar) — Python pre-fetches frames and calls
+    // stormSetSatelliteFrame() to inject them.  This avoids white WMS tiles
+    // outside coverage areas and enables frame-by-frame playback.
+    var _satVisible = false;
+    var _satMode    = '';
+    var _satOpacity = 0.7;
+    var _mesoPreviewLabel = '';
+    var SAT_SRC = 'sat-image';
+    var SAT_LYR = 'sat-layer';
+
+    function _applySatMesoBoxes() {{
+      // Show all available sector outlines whenever satellite is on, so users
+      // can see where MESO-1 / MESO-2 are before selecting one.
+      var show = _satVisible;
+      var activeLabel = _satMode === 'meso1' ? 'MESO-1' : _satMode === 'meso2' ? 'MESO-2' : '';
+      ['meso-sectors-fill', 'meso-sectors-line', 'meso-sectors-label'].forEach(function(lid) {{
+        if (!map.getLayer(lid)) return;
+        map.setLayoutProperty(lid, 'visibility', show ? 'visible' : 'none');
+        // Remove any previous filter so all available sectors are shown
+        map.setFilter(lid, null);
+      }});
+      // Highlight the active sector with a brighter fill; dim the other
+      if (show && activeLabel) {{
+        if (map.getLayer('meso-sectors-fill')) {{
+          map.setPaintProperty('meso-sectors-fill', 'fill-opacity', [
+            'case', ['==', ['get', 'label'], activeLabel], 0.12, 0.04
+          ]);
+        }}
+        if (map.getLayer('meso-sectors-line')) {{
+          map.setPaintProperty('meso-sectors-line', 'line-opacity', [
+            'case', ['==', ['get', 'label'], activeLabel], 1.0, 0.35
+          ]);
+        }}
+      }} else if (show) {{
+        if (map.getLayer('meso-sectors-fill'))
+          map.setPaintProperty('meso-sectors-fill', 'fill-opacity', 0.06);
+        if (map.getLayer('meso-sectors-line'))
+          map.setPaintProperty('meso-sectors-line', 'line-opacity', 0.7);
+      }}
+    }}
+
+    function _applyMesoPreview() {{
+      if (!_mesoPreviewLabel) {{
+        _applySatMesoBoxes();
+        return;
+      }}
+      ['meso-sectors-fill', 'meso-sectors-line', 'meso-sectors-label'].forEach(function(lid) {{
+        if (!map.getLayer(lid)) return;
+        map.setLayoutProperty(lid, 'visibility', 'visible');
+        map.setFilter(lid, ['==', ['get', 'label'], _mesoPreviewLabel]);
+      }});
+      if (map.getLayer('meso-sectors-fill'))
+        map.setPaintProperty('meso-sectors-fill', 'fill-opacity', 0.12);
+      if (map.getLayer('meso-sectors-line'))
+        map.setPaintProperty('meso-sectors-line', 'line-opacity', 1.0);
+    }}
+
+    window.stormPreviewMesoSector = function(label) {{
+      _mesoPreviewLabel = label || '';
+      _applyMesoPreview();
+    }};
+
+    window.stormClearMesoPreview = function() {{
+      _mesoPreviewLabel = '';
+      _applySatMesoBoxes();
+    }};
+
+    window.stormSetSatelliteFrame = function(b64, west, south, east, north) {{
+      // MapLibre image source coordinates: NW, NE, SE, SW corners
+      var coords = [[west, north], [east, north], [east, south], [west, south]];
+      var dataUrl = 'data:image/png;base64,' + b64;
+      try {{
+        if (map.getSource(SAT_SRC)) {{
+          map.getSource(SAT_SRC).updateImage({{ url: dataUrl, coordinates: coords }});
+        }} else {{
+          map.addSource(SAT_SRC, {{ type: 'image', url: dataUrl, coordinates: coords }});
+          try {{
+            map.addLayer({{
+              id: SAT_LYR, type: 'raster', source: SAT_SRC,
+              paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 300 }}
+            }}, 'road-unpaved');
+          }} catch(_) {{
+            map.addLayer({{
+              id: SAT_LYR, type: 'raster', source: SAT_SRC,
+              paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 300 }}
+            }});
+          }}
+        }}
+        if (map.getLayer(SAT_LYR)) {{
+          map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
+        }}
+      }} catch(e) {{
+        console.error('[STORM] satellite frame inject error:', e.message || e);
+      }}
+    }};
+
+    window.stormSetSatelliteVisible = function(visible) {{
+      _satVisible = !!visible;
+      if (map.getLayer(SAT_LYR)) {{
+        map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
+      }}
+      _applySatMesoBoxes();
+    }};
+
+    window.stormSetSatelliteMode = function(mode) {{
+      _satMode = mode || '';
+      _applySatMesoBoxes();
+    }};
+
+    window.stormSetSatelliteOpacity = function(opacity) {{
+      _satOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      if (map.getLayer(SAT_LYR)) map.setPaintProperty(SAT_LYR, 'raster-opacity', _satOpacity);
+    }};
+
+    window.stormSetMesoSectors = function(sectorsJson) {{
+      var sectors = JSON.parse(sectorsJson);
+      var features = sectors.map(function(s) {{
+        return {{
+          type: 'Feature',
+          properties: {{ label: s.label }},
+          geometry: {{
+            type: 'Polygon',
+            coordinates: [[
+              [s.west, s.north], [s.east, s.north],
+              [s.east, s.south], [s.west, s.south],
+              [s.west, s.north]
+            ]]
+          }}
+        }};
+      }});
+      if (map.getSource('meso-sectors')) {{
+        map.getSource('meso-sectors').setData({{type:'FeatureCollection', features: features}});
+      }}
+      _applySatMesoBoxes();
+    }};
+
     window.stormSetSpcGeoJSON = function(catJson, windJson, hailJson, torJson) {{
       if (map.getSource('spc-cat')) map.getSource('spc-cat').setData(JSON.parse(catJson));
       if (map.getSource('spc-wind')) map.getSource('spc-wind').setData(JSON.parse(windJson));
@@ -1758,9 +2056,9 @@ def build_map_html() -> str:
     window.stormSetSpcProductVisible = function(key, visible) {{
       var k = String(key || '').toLowerCase();
       if (['wind','hail','tor'].indexOf(k) === -1) return;
-      _setLayerVisibility('spc-' + k + '-fill', !!visible);
-      _setLayerVisibility('spc-' + k + '-line', !!visible);
-      _setLayerVisibility('spc-' + k + '-sig',  !!visible);
+      ['fill','line','sig-base','sign','cig1','cig2','cig3','sig-line'].forEach(function(s) {{
+        _setLayerVisibility('spc-' + k + '-' + s, !!visible);
+      }});
     }};
 
     window.stormSetNwsWarningsGeoJSON = function(warnJson) {{
@@ -2242,6 +2540,47 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def remove_vehicle(self, vehicle_id: str):
         self.run_js(f"stormRemoveVehicle('{vehicle_id}');")
 
+    def set_satellite_frame(self, b64: str, west: float, south: float,
+                            east: float, north: float):
+        self.run_js(
+            f"if(window.stormSetSatelliteFrame) "
+            f"stormSetSatelliteFrame({repr(b64)},{west},{south},{east},{north});"
+        )
+
+    def set_satellite_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(f"if(window.stormSetSatelliteVisible) stormSetSatelliteVisible({flag});")
+
+    def set_satellite_mode(self, mode: str):
+        self.run_js(f"if(window.stormSetSatelliteMode) stormSetSatelliteMode('{mode}');")
+
+    def set_satellite_opacity(self, opacity: float):
+        self.run_js(f"if(window.stormSetSatelliteOpacity) stormSetSatelliteOpacity({opacity:.3f});")
+
+    def set_meso_sectors(self, sectors: dict):
+        import json
+        features = []
+        for idx, bbox in sectors.items():
+            if bbox:
+                features.append({
+                    "label": f"MESO-{idx}",
+                    "west":  bbox["west"],
+                    "south": bbox["south"],
+                    "east":  bbox["east"],
+                    "north": bbox["north"],
+                })
+        self.run_js(
+            f"if(window.stormSetMesoSectors) stormSetMesoSectors({json.dumps(json.dumps(features))});"
+        )
+
+    def preview_meso_sector(self, idx: int | None):
+        if idx in (1, 2):
+            self.run_js(
+                f"if(window.stormPreviewMesoSector) stormPreviewMesoSector('MESO-{idx}');"
+            )
+        else:
+            self.run_js("if(window.stormClearMesoPreview) stormClearMesoPreview();")
+
     def fly_to(self, lat: float, lon: float, zoom: float = None):
         zoom_str = str(zoom) if zoom is not None else "undefined"
         self.run_js(f"stormFlyTo({lat}, {lon}, {zoom_str});")
@@ -2343,14 +2682,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_deploy_locs_visible(self, visible: bool) -> None:
         self.run_js(f"stormSetDeployLocsVisible({'true' if visible else 'false'});")
 
-    def set_spc_geojson(self, cat_fc: dict, wind_fc: dict, hail_fc: dict, tor_fc: dict) -> None:
+    def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
         import json
         self.run_js(
             "if(window.stormSetSpcGeoJSON) stormSetSpcGeoJSON("
-            f"{json.dumps(json.dumps(cat_fc))}, "
-            f"{json.dumps(json.dumps(wind_fc))}, "
-            f"{json.dumps(json.dumps(hail_fc))}, "
-            f"{json.dumps(json.dumps(tor_fc))}"
+            f"{json.dumps(cat_str)}, "
+            f"{json.dumps(wind_str)}, "
+            f"{json.dumps(hail_str)}, "
+            f"{json.dumps(tor_str)}"
             ");"
         )
 
@@ -2364,11 +2703,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetSpcProductVisible) stormSetSpcProductVisible('{key}', {'true' if visible else 'false'});"
         )
 
-    def set_nws_warnings_geojson(self, fc: dict) -> None:
+    def set_nws_warnings_geojson(self, fc_str: str) -> None:
         import json
         self.run_js(
             "if(window.stormSetNwsWarningsGeoJSON) stormSetNwsWarningsGeoJSON("
-            f"{json.dumps(json.dumps(fc))}"
+            f"{json.dumps(fc_str)}"
             ");"
         )
 
@@ -2377,11 +2716,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetNwsWarningsVisible) stormSetNwsWarningsVisible({'true' if visible else 'false'});"
         )
 
-    def set_spc_watches_geojson(self, fc: dict) -> None:
+    def set_spc_watches_geojson(self, fc_str: str) -> None:
         import json
         self.run_js(
             "if(window.stormSetSpcWatchesGeoJSON) stormSetSpcWatchesGeoJSON("
-            f"{json.dumps(json.dumps(fc))}"
+            f"{json.dumps(fc_str)}"
             ");"
         )
 
@@ -2390,11 +2729,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetSpcWatchesVisible) stormSetSpcWatchesVisible({'true' if visible else 'false'});"
         )
 
-    def set_spc_mds_geojson(self, fc: dict) -> None:
+    def set_spc_mds_geojson(self, fc_str: str) -> None:
         import json
         self.run_js(
             "if(window.stormSetSpcMdsGeoJSON) stormSetSpcMdsGeoJSON("
-            f"{json.dumps(json.dumps(fc))}"
+            f"{json.dumps(fc_str)}"
             ");"
         )
 
@@ -2402,4 +2741,3 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(
             f"if(window.stormSetSpcMdsVisible) stormSetSpcMdsVisible({'true' if visible else 'false'});"
         )
-

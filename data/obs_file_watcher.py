@@ -35,17 +35,12 @@ class FieldMap:
         gps_date (DDMMYY), gps_time (HHMMSS), lat, lon
 
     Override any field by passing kwargs to the constructor.
-    If your logger writes a single ISO-style timestamp column instead of
-    split date+time columns, set date_col="" and time_col="" and set
-    timestamp_col to that column name.
     """
     lat:           str = "lat"
     lon:           str = "lon"
-    # split date + time columns (default — matches FOFS truck logger)
+    # split date + time columns (matches FOFS truck logger)
     date_col:      str = "gps_date"    # DDMMYY  e.g. "050625"
     time_col:      str = "gps_time"    # HHMMSS  e.g. "175228"
-    # single combined timestamp column (leave empty to use date_col+time_col)
-    timestamp_col: str = ""
     # met fields
     temperature_c: str = "t_fast"
     dewpoint_c:    str = "dewpoint"
@@ -238,10 +233,6 @@ class ObsFileWatcher(QObject):
     def _parse_timestamp(self, row: dict) -> datetime:
         f = self._fields
 
-        # single combined column takes priority
-        if f.timestamp_col:
-            return _parse_iso_timestamp(row.get(f.timestamp_col, ""))
-
         # split date (DDMMYY) + time (HHMMSS) columns
         date_str = (row.get(f.date_col) or "").strip()
         time_str = (row.get(f.time_col) or "").strip()
@@ -258,18 +249,6 @@ class ObsFileWatcher(QObject):
         return datetime.now(timezone.utc)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _parse_iso_timestamp(raw: str | None) -> datetime:
-    text = (raw or "").strip()
-    if not text:
-        return datetime.now(timezone.utc)
-    for fmt in ("%Y%m%d%H%M%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
 
 
 def _float_or_none(raw: str | None) -> float | None:

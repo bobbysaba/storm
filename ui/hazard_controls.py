@@ -53,7 +53,7 @@ class HazardControls(QWidget):
             ("#FF0000", "45%"),
             ("#FF00FF", "60%"),
         ],
-        "spc-watches": [("#FF0000", "TOR Watch"), ("#FFD700", "SVR Tstm Watch")],
+        "spc-watches": [("#FF0000", "TOR Watch"), ("#4169E1", "SVR Tstm Watch")],
         "spc-mds":     [("#FF66CC", "MDs")],
     }
 

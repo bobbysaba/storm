@@ -63,7 +63,8 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#radarDrawer,
-#floatingToolbar QWidget#hazardDrawer {
+#floatingToolbar QWidget#hazardDrawer,
+#floatingToolbar QWidget#satelliteDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -71,7 +72,8 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#radarDrawer > QWidget,
-#floatingToolbar QWidget#hazardDrawer > QWidget {
+#floatingToolbar QWidget#hazardDrawer > QWidget,
+#floatingToolbar QWidget#satelliteDrawer > QWidget {
     background: transparent;
 }
 
@@ -367,30 +369,36 @@ QSlider::sub-page:horizontal {
     border-radius: 2px;
 }
 
-#floatingToolbar QWidget#radarDrawer QSlider {
+#floatingToolbar QWidget#radarDrawer QSlider,
+#floatingToolbar QWidget#satelliteDrawer QSlider {
     background: transparent;
 }
 
-#floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal {
+#floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
+#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;
 }
 
-/* ── Radar playback row (small icon buttons, minimal padding) ─────── */
-QWidget#radarPlaybackRow QToolButton {
-    padding: 1px 2px;
-    font-size: 12px;
+/* ── Radar / Satellite playback rows (small icon buttons, minimal padding) ── */
+QWidget#radarPlaybackRow QToolButton,
+QWidget#satPlaybackRow QToolButton {
+    padding: 1px 3px;
+    font-size: 13px;
 }
 
-QWidget#radarPlaybackRow QToolButton:hover {
+QWidget#radarPlaybackRow QToolButton:hover,
+QWidget#satPlaybackRow QToolButton:hover {
     background-color: #1A1A2E;
     border-color: #2E2E4E;
     color: #E8EAF0;
 }
 
 QWidget#radarPlaybackRow QToolButton:checked,
-QWidget#radarPlaybackRow QToolButton:pressed {
+QWidget#radarPlaybackRow QToolButton:pressed,
+QWidget#satPlaybackRow QToolButton:checked,
+QWidget#satPlaybackRow QToolButton:pressed {
     background-color: #FF6B35;
     border-color: #FF6B35;
     color: #0A0A0F;
@@ -417,7 +425,8 @@ QToolTip {
 }
 
 #floatingToolbar QWidget#radarDrawer QCheckBox,
-#floatingToolbar QWidget#hazardDrawer QCheckBox {
+#floatingToolbar QWidget#hazardDrawer QCheckBox,
+#floatingToolbar QWidget#satelliteDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

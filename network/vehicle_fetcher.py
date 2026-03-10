@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -102,8 +102,15 @@ class VehicleFetcher(QObject):
 
 # Helpers
 
+_STALE_THRESHOLD = timedelta(hours=12)
+
+
 def _parse_entry(vid: str, entry: dict) -> Observation | None:
-    """Parse one vehicle dict from vehicles.json into an Observation."""
+    """Parse one vehicle dict from vehicles.json into an Observation.
+
+    Returns None for any entry whose timestamp is more than 12 hours old
+    so stale vehicles never reach the map layer.
+    """
     try:
         lat = float(entry["lat"])
         lon = float(entry["lon"])
@@ -111,14 +118,16 @@ def _parse_entry(vid: str, entry: dict) -> Observation | None:
         log.debug("VehicleFetcher: skipping malformed entry: %s", entry)
         return None
 
+    ts = _parse_timestamp(entry.get("gps_date", ""), entry.get("gps_time", ""))
+    if datetime.now(timezone.utc) - ts > _STALE_THRESHOLD:
+        log.debug("VehicleFetcher: skipping stale entry %s (ts=%s)", vid, ts)
+        return None
+
     return Observation(
         vehicle_id=vid,
         lat=lat,
         lon=lon,
-        timestamp=_parse_timestamp(
-            entry.get("gps_date", ""),
-            entry.get("gps_time", ""),
-        ),
+        timestamp=ts,
         wind_speed_ms=_float_or_none(entry.get("wspd")),
         wind_dir_deg=_float_or_none(entry.get("wdir")),
         temperature_c=_float_or_none(entry.get("t_fast")),

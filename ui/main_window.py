@@ -21,6 +21,7 @@ from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
 from ui.map_widget import MapWidget
 from ui.radar_controls import RadarControls
 from ui.hazard_controls import HazardControls
+from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay
 from ui.annotation_tools import AnnotationTools
@@ -29,6 +30,7 @@ from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
 from data.hazard_fetcher import HazardFetcher
+from data.satellite_fetcher import SatelliteFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
@@ -114,6 +116,7 @@ class MainWindow(QMainWindow):
             if not self._disable_radar:
                 self._init_radar()
             self._init_hazards()
+            self._init_satellite()
             if not self._disable_mqtt:
                 self._init_mqtt()
             if not self._disable_vehicle_fetcher:
@@ -226,6 +229,18 @@ class MainWindow(QMainWindow):
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
         self._panel_text_ready.connect(self.outlook_panel.show_text)
+
+        self._add_separator(tb)
+
+        # ── satellite ─────────────────────────────────────────────────────
+        self.btn_satellite = self._toolbar_toggle(
+            "SATELLITE", "Show/hide GOES satellite imagery overlay", tb
+        )
+        self.satellite_controls = SatelliteControls(self._map_container)
+        self.satellite_controls.setObjectName("floatingToolbar")
+        self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
+        self.btn_satellite.toggled.connect(self._start_layout_pulse)
+        self.btn_satellite.toggled.connect(self._on_satellite_toggled)
 
         self._add_separator(tb)
 
@@ -385,6 +400,12 @@ class MainWindow(QMainWindow):
                 hz_x = max(0, (r.width() - hz_w) // 2)
                 hz.setGeometry(hz_x, _drop_y, hz_w, hz.sizeHint().height())
                 hz.raise_()
+            if hasattr(self, "satellite_controls"):
+                sc = self.satellite_controls
+                sc_w = sc.sizeHint().width()
+                sc_x = max(0, (r.width() - sc_w) // 2)
+                sc.setGeometry(sc_x, _drop_y, sc_w, sc.sizeHint().height())
+                sc.raise_()
 
         # outlook panel — right side, below toolbar, above status pill
         if hasattr(self, "outlook_panel"):
@@ -562,9 +583,28 @@ class MainWindow(QMainWindow):
         self._hazard_error_clear_timer = QTimer()
         self._hazard_error_clear_timer.setSingleShot(True)
         self._hazard_error_clear_timer.timeout.connect(self._clear_radar_error)
-        self._hazard_fetcher.start()
 
-        self.map_widget.map_moved.connect(self._on_map_moved_for_bbox)
+        # Seed NWS bbox from MBTiles domain extent so warnings are filtered
+        # to the loaded tile set regardless of current map position.
+        try:
+            import sqlite3 as _sqlite3
+            from ui.map_widget import TILES_PATH as _TILES_PATH
+            _conn = _sqlite3.connect(_TILES_PATH)
+            _row = _conn.execute(
+                "SELECT value FROM metadata WHERE name='bounds'"
+            ).fetchone()
+            _conn.close()
+            if _row:
+                _lon_min, _lat_min, _lon_max, _lat_max = (
+                    float(x) for x in _row[0].split(",")
+                )
+                self._hazard_fetcher.set_nws_bbox(
+                    _lon_min, _lat_min, _lon_max, _lat_max
+                )
+        except Exception:
+            pass
+
+        self._hazard_fetcher.start()
 
         # keep top drawers mutually exclusive for clean placement
         self.btn_hazards.toggled.connect(
@@ -576,6 +616,123 @@ class MainWindow(QMainWindow):
         self.btn_radar.toggled.connect(
             lambda on: self.btn_hazards.setChecked(False) if on else None
         )
+
+    def _init_satellite(self):
+        self._satellite_fetcher  = SatelliteFetcher(parent=self)
+        self._satellite_cache: dict[str, list] = {"conus": [], "meso1": [], "meso2": []}
+        self._satellite_loop_timer = QTimer(self)
+        self._satellite_loop_timer.setInterval(600)   # ms per frame during loop
+        self._satellite_loop_timer.timeout.connect(self._satellite_loop_tick)
+
+        # control signals → handlers
+        self.satellite_controls.mode_changed.connect(self._on_satellite_mode_changed)
+        self.satellite_controls.opacity_changed.connect(self.map_widget.set_satellite_opacity)
+        self.satellite_controls.frame_requested.connect(self._on_satellite_frame_requested)
+        self.satellite_controls.loop_toggled.connect(self._on_satellite_loop_toggled)
+        self.satellite_controls.meso_preview.connect(self._on_meso_preview)
+
+        # fetcher signals → handlers
+        self._satellite_fetcher.meso_sectors_updated.connect(self._on_meso_sectors_updated)
+        self._satellite_fetcher.frames_updated.connect(self._on_satellite_frames_updated)
+
+        self._satellite_fetcher.start()
+
+        # drawer mutually exclusive with radar/hazards/annotate
+        for btn, other in [
+            (self.btn_satellite, self.btn_radar),
+            (self.btn_satellite, self.btn_hazards),
+            (self.btn_satellite, self.btn_annotate),
+            (self.btn_radar,     self.btn_satellite),
+            (self.btn_hazards,   self.btn_satellite),
+            (self.btn_annotate,  self.btn_satellite),
+        ]:
+            btn.toggled.connect(
+                lambda on, o=other: o.setChecked(False) if on else None
+            )
+
+    def _on_satellite_toggled(self, checked: bool):
+        if not checked:
+            self._satellite_loop_timer.stop()
+            self.satellite_controls.stop_loop()
+            self.map_widget.set_satellite_visible(False)
+        else:
+            mode = self.satellite_controls.current_mode()
+            if not mode:
+                return
+            self.map_widget.set_satellite_mode(mode)
+            frames = self._satellite_cache.get(mode, [])
+            if frames:
+                self._render_satellite_frame(frames[-1])
+                self.map_widget.set_satellite_visible(True)
+
+    def _on_satellite_mode_changed(self, mode: str):
+        self._satellite_loop_timer.stop()
+        self.satellite_controls.stop_loop()
+        self.satellite_controls.reset_cache_ui()
+
+        if not mode:
+            self.map_widget.set_satellite_visible(False)
+            return
+
+        self.map_widget.set_satellite_mode(mode)
+        frames = self._satellite_cache.get(mode, [])
+        if frames:
+            self.satellite_controls.set_cache_size(len(frames))
+            self._render_satellite_frame(frames[-1])
+            self.satellite_controls.set_scan_time(frames[-1].time_str)
+            self.map_widget.set_satellite_visible(True)
+
+    def _on_satellite_frames_updated(self, mode: str, frames: list):
+        self._satellite_cache[mode] = frames
+        active_mode = self.satellite_controls.current_mode()
+        if mode != active_mode:
+            return
+        was_live = self.satellite_controls.is_at_latest_frame()
+        self.satellite_controls.set_cache_size(len(frames))
+        if was_live:
+            self._render_satellite_frame(frames[-1])
+            self.satellite_controls.set_scan_time(frames[-1].time_str)
+            if not self.satellite_controls.is_looping():
+                self.map_widget.set_satellite_visible(True)
+
+    def _on_satellite_frame_requested(self, idx: int):
+        mode   = self.satellite_controls.current_mode()
+        frames = self._satellite_cache.get(mode, [])
+        if not frames or idx >= len(frames):
+            return
+        frame = frames[idx]
+        self._render_satellite_frame(frame)
+        self.satellite_controls.set_scan_time(frame.time_str)
+
+    def _on_satellite_loop_toggled(self, looping: bool):
+        if looping:
+            self._satellite_loop_timer.start()
+        else:
+            self._satellite_loop_timer.stop()
+
+    def _satellite_loop_tick(self):
+        mode   = self.satellite_controls.current_mode()
+        frames = self._satellite_cache.get(mode, [])
+        if not frames:
+            return
+        current = self.satellite_controls.current_frame()
+        nxt     = (current + 1) % len(frames)
+        self.satellite_controls.set_frame(nxt)
+        self._render_satellite_frame(frames[nxt])
+        self.satellite_controls.set_scan_time(frames[nxt].time_str)
+
+    def _render_satellite_frame(self, frame):
+        w, s, e, n = frame.bbox
+        self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+
+    def _on_meso_sectors_updated(self, sectors: dict):
+        for idx in (1, 2):
+            bbox = sectors.get(idx)
+            self.satellite_controls.set_meso_available(idx, bbox is not None, bbox)
+        self.map_widget.set_meso_sectors(sectors)
+
+    def _on_meso_preview(self, idx: int, active: bool):
+        self.map_widget.preview_meso_sector(idx if active else None)
 
     def _auto_start_radar(self):
         self._radar_fetcher.start()
@@ -611,32 +768,26 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
         self._hazard_error_clear_timer.start(10_000)
 
-    def _on_map_moved_for_bbox(self, lat: float, lon: float, zoom: float):
-        # Approximate visible bounding box from map center + zoom level.
-        # lon_span ≈ 360/2^zoom; lat_span uses a modest aspect ratio estimate.
-        lon_half = 180.0 / (2 ** zoom)
-        lat_half = lon_half * 0.65
-        self._hazard_fetcher.set_nws_bbox(
-            lon - lon_half, lat - lat_half, lon + lon_half, lat + lat_half
-        )
+    def _on_spc_received(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str):
+        self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str)
 
-    def _on_spc_received(self, cat_fc: dict, wind_fc: dict, hail_fc: dict, tor_fc: dict):
-        self.map_widget.set_spc_geojson(cat_fc, wind_fc, hail_fc, tor_fc)
+    def _on_nws_received(self, warnings_str: str):
+        self.map_widget.set_nws_warnings_geojson(warnings_str)
 
-    def _on_nws_received(self, warnings_fc: dict):
-        self.map_widget.set_nws_warnings_geojson(warnings_fc)
+    def _on_spc_watches_received(self, watches_str: str):
+        self.map_widget.set_spc_watches_geojson(watches_str)
 
-    def _on_spc_watches_received(self, watches_fc: dict):
-        self.map_widget.set_spc_watches_geojson(watches_fc)
-
-    def _on_spc_mds_received(self, mds_fc: dict):
-        self.map_widget.set_spc_mds_geojson(mds_fc)
+    def _on_spc_mds_received(self, mds_str: str):
+        self.map_widget.set_spc_mds_geojson(mds_str)
 
     def _on_spc_mds_toggled(self, enabled: bool):
         self._hazard_fetcher.set_spc_mds_enabled(enabled)
         self.map_widget.set_spc_mds_visible(enabled)
         if enabled:
-            self._hazard_fetcher.fetch_now()
+            if self._hazard_fetcher.is_mds_fresh():
+                self._hazard_fetcher.emit_cached_mds()
+            else:
+                self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
     def _update_hazard_legend(self):
@@ -672,11 +823,29 @@ class MainWindow(QMainWindow):
             title = "DAY 1 CONVECTIVE OUTLOOK"
             kind, identifier = "swo", None
         elif source == "spc-mds":
+            import re as _re
             name = str(props.get("name", "")).strip()
-            # name is e.g. "MD 0176" — extract the number
-            num = name.replace("MD", "").strip().zfill(4)
+            # name may be "MD 0176", "MCD 0176", "MCD0176", "176", etc.
+            # Robustly extract the numeric portion regardless of prefix.
+            _m = _re.search(r'\d+', name)
+            num = _m.group().zfill(4) if _m else "0000"
             title = f"MESOSCALE DISCUSSION {num}"
             kind, identifier = "mcd", num
+        elif source == "spc-watches":
+            watch_num = str(props.get("watch_num", "")).strip()
+            if not watch_num:
+                return
+            event_label = str(props.get("event", "Watch")).upper()
+            title = f"{event_label} {watch_num}"
+            kind, identifier = "watch", watch_num
+        elif source == "nws-warnings":
+            warning_url = str(props.get("warning_url", "")).strip()
+            if not warning_url:
+                return
+            prod_type = str(props.get("prod_type", "Warning")).title()
+            wfo = str(props.get("wfo", "")).strip()
+            title = f"{prod_type} — {wfo}" if wfo else prod_type
+            kind, identifier = "warning", warning_url
         else:
             return
 
@@ -689,34 +858,52 @@ class MainWindow(QMainWindow):
         ).start()
 
     def _fetch_outlook_text(self, title: str, kind: str, identifier: str | None):
-        """Fetch SPC discussion text in a background thread via IEM Mesonet AFOS API.
+        """Fetch SPC discussion text in a background thread.
 
-        Iowa State's Mesonet archives every NWS/SPC text product by AFOS PIL and
-        is much more reliable than scraping SPC's website or using the NWS products
-        API (which uses a different product-type taxonomy than the SPC AFOS PILs).
+        Sources:
+          Day 1 Outlook: IEM Mesonet AFOS API  (PIL: SWODY1)
+          MDs:           SPC direct .txt URL    (https://www.spc.noaa.gov/products/md/md{nnnn}.txt)
 
-        AFOS PILs used:
-          Day 1 Outlook: SWODY1   (Severe Weather Outlook, Day 1)
-          MDs:           SPCMCD{nnnn}  (e.g. SPCMCD0176)
+        IEM rejects the SPCMCD{nnnn} PIL as too long, so MDs are fetched
+        directly from SPC's own text product archive instead.
         """
         from urllib.request import Request, urlopen
 
-        IEM_BASE = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-        HEADERS = {"User-Agent": "STORM/1.0 (contact: support)"}
+        HEADERS = {
+            "User-Agent": "STORM/1.0 (contact: support)",
+            "Accept": "application/geo+json, application/ld+json, application/json, text/plain",
+        }
 
-        def _iem_fetch(pil: str) -> str:
-            url = f"{IEM_BASE}?pil={pil}&limit=1&fmt=text"
+        def _fetch(url: str) -> str:
             req = Request(url, headers=HEADERS)
             with urlopen(req, timeout=12) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
-            # Strip AFOS framing bytes (SOH=\x01, STX=\x02, ETX=\x03) if present
             return raw.strip("\x01\x02\x03\r\n").strip()
 
         try:
             if kind == "swo":
-                text = _iem_fetch("SWODY1")
+                url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SWODY1&limit=1&fmt=text"
+                text = _fetch(url)
             elif kind == "mcd":
-                text = _iem_fetch(f"SPCMCD{identifier}")
+                url = f"https://www.spc.noaa.gov/products/md/md{identifier}.txt"
+                text = _fetch(url)
+            elif kind == "watch":
+                # SEL PIL cycles on the last digit of the watch number.
+                # e.g. watch 0029 → SEL9, watch 0028 → SEL8.
+                sel_digit = str(int(identifier) % 10)
+                url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SEL{sel_digit}&limit=1&fmt=text"
+                text = _fetch(url)
+            elif kind == "warning":
+                if not identifier:
+                    text = "(No warning URL available)"
+                else:
+                    import json as _json
+                    raw_json = _json.loads(_fetch(identifier))
+                    wp = raw_json.get("properties", {})
+                    headline = wp.get("headline", "")
+                    description = wp.get("description", "")
+                    instruction = wp.get("instruction", "")
+                    text = "\n\n".join(x for x in [headline, description, instruction] if x)
             else:
                 text = ""
             if not text:
@@ -738,21 +925,30 @@ class MainWindow(QMainWindow):
             self.map_widget.set_spc_product_visible(key, on)
 
         if mode:
-            self._hazard_fetcher.fetch_now()
+            if self._hazard_fetcher.is_spc_fresh():
+                self._hazard_fetcher.emit_cached_spc()
+            else:
+                self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
     def _on_spc_watches_toggled(self, enabled: bool):
         self._hazard_fetcher.set_spc_watches_enabled(enabled)
         self.map_widget.set_spc_watches_visible(enabled)
         if enabled:
-            self._hazard_fetcher.fetch_now()
+            if self._hazard_fetcher.is_watches_fresh():
+                self._hazard_fetcher.emit_cached_watches()
+            else:
+                self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
     def _on_nws_warnings_toggled(self, enabled: bool):
         self._hazard_fetcher.set_nws_enabled(enabled)
         self.map_widget.set_nws_warnings_visible(enabled)
         if enabled:
-            self._hazard_fetcher.fetch_now()
+            if self._hazard_fetcher.is_nws_fresh():
+                self._hazard_fetcher.emit_cached_nws()
+            else:
+                self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
     def _on_radar_site_changed(self, site: str):
@@ -1497,7 +1693,6 @@ class MainWindow(QMainWindow):
                 lon=config.OBS_FILE_COL_LON,
                 date_col=config.OBS_FILE_COL_DATE,
                 time_col=config.OBS_FILE_COL_TIME,
-                timestamp_col=config.OBS_FILE_COL_TIMESTAMP,
                 temperature_c=config.OBS_FILE_COL_TEMP,
                 dewpoint_c=config.OBS_FILE_COL_DEWP,
                 wind_speed_ms=config.OBS_FILE_COL_WSPD,
