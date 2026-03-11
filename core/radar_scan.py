@@ -56,6 +56,13 @@ class RadarScan:
 # ── Product Metadata ──────────────────────────────────────────────────────────
 
 PRODUCT_META = {
+    "N0B": {
+        "name":     "Base Reflectivity (SR)",
+        "units":    "dBZ",
+        "vmin":     -32.0,
+        "vmax":     90.0,
+        "colormap": "nws_ref",
+    },
     "N0Q": {
         "name":     "Base Reflectivity",
         "units":    "dBZ",
@@ -69,5 +76,12 @@ PRODUCT_META = {
         "vmin":     -100.0,
         "vmax":     100.0,
         "colormap": "nws_vel",
+    },
+    "N0C": {
+        "name":     "Correlation Coefficient",
+        "units":    "",
+        "vmin":     0.0,
+        "vmax":     1.0,
+        "colormap": "nws_cc",
     },
 }

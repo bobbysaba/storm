@@ -96,12 +96,31 @@ def _make_nws_vel_cmap():
     return cmap
 
 
+def _make_nws_cc_cmap():
+    """Correlation coefficient colormap (low=transparent, high=blue/white)."""
+    colors = [
+        (0.00, (0.00, 0.00, 0.00, 0.00)),
+        (0.40, (0.30, 0.30, 0.30, 0.10)),
+        (0.60, (0.20, 0.50, 0.80, 0.60)),
+        (0.80, (0.20, 0.70, 1.00, 0.90)),
+        (1.00, (1.00, 1.00, 1.00, 1.00)),
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_cc",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
 NWS_REF_CMAP = _make_nws_ref_cmap()
 NWS_VEL_CMAP = _make_nws_vel_cmap()
+NWS_CC_CMAP  = _make_nws_cc_cmap()
 
 COLORMAPS = {
     "nws_ref": NWS_REF_CMAP,
     "nws_vel": NWS_VEL_CMAP,
+    "nws_cc":  NWS_CC_CMAP,
 }
 
 

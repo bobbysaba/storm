@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import urllib.request
+import ssl
 from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -65,12 +66,22 @@ class VehicleFetcher(QObject):
 
     def _fetch_worker(self):
         try:
+            ctx = None
+            try:
+                import certifi  # type: ignore
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                ctx = None
             req = urllib.request.Request(
                 self._url,
                 headers={"Accept": "application/json", "User-Agent": "storm/1.0"},
                 method="GET",
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            if ctx is not None:
+                resp = urllib.request.urlopen(req, timeout=10, context=ctx)
+            else:
+                resp = urllib.request.urlopen(req, timeout=10)
+            with resp:
                 status = getattr(resp, "status", 200)
                 if status != 200:
                     log.warning("VehicleFetcher: HTTP %s from %s", status, self._url)

@@ -1049,7 +1049,7 @@ def build_map_html() -> str:
           source: 'spc-' + name,
           layout: {{'visibility': 'none'}},
           filter: _sigFilter,
-          paint: {{'fill-color': '#AAAAAA', 'fill-opacity': 0.22}}
+          paint: {{'fill-color': '#AAAAAA', 'fill-opacity': 0.14}}
         }});
 
         // Per-type pattern layers — SIGN and each CIG level get their own pattern.
@@ -1067,8 +1067,8 @@ def build_map_html() -> str:
           ];
           var _hasPat = map.hasImage(t.pat);
           var _paint = _hasPat
-            ? {{'fill-pattern': t.pat}}
-            : {{'fill-color': '#FFFFFF', 'fill-opacity': 0.25}};
+            ? {{'fill-pattern': t.pat, 'fill-opacity': 0.16}}
+            : {{'fill-color': '#FFFFFF', 'fill-opacity': 0.16}};
           map.addLayer({{
             id: 'spc-' + name + '-' + t.label.toLowerCase(),
             type: 'fill',
@@ -1901,36 +1901,41 @@ def build_map_html() -> str:
     var _mesoPreviewLabel = '';
     var SAT_SRC = 'sat-image';
     var SAT_LYR = 'sat-layer';
+    var _satLastUrl = '';
+
+    function _updateSatSource(dataUrl, coords) {{
+      if (map.getSource(SAT_SRC)) {{
+        map.getSource(SAT_SRC).updateImage({{ url: dataUrl, coordinates: coords }});
+      }} else {{
+        map.addSource(SAT_SRC, {{ type: 'image', url: dataUrl, coordinates: coords }});
+        try {{
+          map.addLayer({{
+            id: SAT_LYR, type: 'raster', source: SAT_SRC,
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+          }}, 'road-unpaved');
+        }} catch(_) {{
+          map.addLayer({{
+            id: SAT_LYR, type: 'raster', source: SAT_SRC,
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+          }});
+        }}
+      }}
+      if (map.getLayer(SAT_LYR)) {{
+        map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
+      }}
+    }}
 
     function _applySatMesoBoxes() {{
-      // Show all available sector outlines whenever satellite is on, so users
-      // can see where MESO-1 / MESO-2 are before selecting one.
-      var show = _satVisible;
-      var activeLabel = _satMode === 'meso1' ? 'MESO-1' : _satMode === 'meso2' ? 'MESO-2' : '';
+      // Only show MESO polygons while hovering (preview); hide otherwise.
+      if (_mesoPreviewLabel) {{
+        _applyMesoPreview();
+        return;
+      }}
       ['meso-sectors-fill', 'meso-sectors-line', 'meso-sectors-label'].forEach(function(lid) {{
         if (!map.getLayer(lid)) return;
-        map.setLayoutProperty(lid, 'visibility', show ? 'visible' : 'none');
-        // Remove any previous filter so all available sectors are shown
+        map.setLayoutProperty(lid, 'visibility', 'none');
         map.setFilter(lid, null);
       }});
-      // Highlight the active sector with a brighter fill; dim the other
-      if (show && activeLabel) {{
-        if (map.getLayer('meso-sectors-fill')) {{
-          map.setPaintProperty('meso-sectors-fill', 'fill-opacity', [
-            'case', ['==', ['get', 'label'], activeLabel], 0.12, 0.04
-          ]);
-        }}
-        if (map.getLayer('meso-sectors-line')) {{
-          map.setPaintProperty('meso-sectors-line', 'line-opacity', [
-            'case', ['==', ['get', 'label'], activeLabel], 1.0, 0.35
-          ]);
-        }}
-      }} else if (show) {{
-        if (map.getLayer('meso-sectors-fill'))
-          map.setPaintProperty('meso-sectors-fill', 'fill-opacity', 0.06);
-        if (map.getLayer('meso-sectors-line'))
-          map.setPaintProperty('meso-sectors-line', 'line-opacity', 0.7);
-      }}
     }}
 
     function _applyMesoPreview() {{
@@ -1964,25 +1969,16 @@ def build_map_html() -> str:
       var coords = [[west, north], [east, north], [east, south], [west, south]];
       var dataUrl = 'data:image/png;base64,' + b64;
       try {{
-        if (map.getSource(SAT_SRC)) {{
-          map.getSource(SAT_SRC).updateImage({{ url: dataUrl, coordinates: coords }});
-        }} else {{
-          map.addSource(SAT_SRC, {{ type: 'image', url: dataUrl, coordinates: coords }});
-          try {{
-            map.addLayer({{
-              id: SAT_LYR, type: 'raster', source: SAT_SRC,
-              paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 300 }}
-            }}, 'road-unpaved');
-          }} catch(_) {{
-            map.addLayer({{
-              id: SAT_LYR, type: 'raster', source: SAT_SRC,
-              paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 300 }}
-            }});
-          }}
-        }}
-        if (map.getLayer(SAT_LYR)) {{
-          map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
-        }}
+        if (dataUrl === _satLastUrl) return;
+        _satLastUrl = dataUrl;
+        var img = new Image();
+        img.onload = function() {{
+          _updateSatSource(dataUrl, coords);
+        }};
+        img.onerror = function() {{
+          _updateSatSource(dataUrl, coords);
+        }};
+        img.src = dataUrl;
       }} catch(e) {{
         console.error('[STORM] satellite frame inject error:', e.message || e);
       }}
@@ -1994,6 +1990,14 @@ def build_map_html() -> str:
         map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
       }}
       _applySatMesoBoxes();
+    }};
+
+    window.stormClearSatelliteFrame = function() {{
+      try {{
+        if (map.getLayer(SAT_LYR)) map.removeLayer(SAT_LYR);
+        if (map.getSource(SAT_SRC)) map.removeSource(SAT_SRC);
+      }} catch(_) {{}}
+      _satLastUrl = '';
     }};
 
     window.stormSetSatelliteMode = function(mode) {{
@@ -2556,6 +2560,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def set_satellite_opacity(self, opacity: float):
         self.run_js(f"if(window.stormSetSatelliteOpacity) stormSetSatelliteOpacity({opacity:.3f});")
+
+    def clear_satellite_frame(self) -> None:
+        self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
 
     def set_meso_sectors(self, sectors: dict):
         import json

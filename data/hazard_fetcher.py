@@ -23,16 +23,25 @@ POLL_INTERVAL_ACTIVE  = 120   # watches / MDs / NWS warnings — change througho
 POLL_INTERVAL_OUTLOOK = 900   # SPC categorical + probability — updates on a fixed schedule
 SPC_CACHE_TTL         = 900   # in-memory cache TTL (aligned with outlook poll interval)
 
+_SPC_WX_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer"
+_SPC_QUERY_SUFFIX = "where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
 SPC_URLS = {
-    "cat":  "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.lyr.geojson",
-    "wind": "https://www.spc.noaa.gov/products/outlook/day1otlk_wind.lyr.geojson",
-    "hail": "https://www.spc.noaa.gov/products/outlook/day1otlk_hail.lyr.geojson",
-    "tor":  "https://www.spc.noaa.gov/products/outlook/day1otlk_torn.lyr.geojson",
+    "cat":  f"{_SPC_WX_BASE}/1/query?{_SPC_QUERY_SUFFIX}",
+    "tor":  f"{_SPC_WX_BASE}/3/query?{_SPC_QUERY_SUFFIX}",
+    "hail": f"{_SPC_WX_BASE}/5/query?{_SPC_QUERY_SUFFIX}",
+    "wind": f"{_SPC_WX_BASE}/7/query?{_SPC_QUERY_SUFFIX}",
+}
+
+SPC_SIG_URLS = {
+    "tor":  f"{_SPC_WX_BASE}/2/query?{_SPC_QUERY_SUFFIX}",
+    "hail": f"{_SPC_WX_BASE}/4/query?{_SPC_QUERY_SUFFIX}",
+    "wind": f"{_SPC_WX_BASE}/6/query?{_SPC_QUERY_SUFFIX}",
 }
 
 SPC_MD_URL = (
     "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks"
-    "/spc_mesoscale_discussion/MapServer/0/query?where=1%3D1&outFields=*&f=geojson"
+    "/spc_mesoscale_discussion/MapServer/0/query"
+    "?where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
 )
 
 # WWA MapServer — active NWS warnings (sig='W').  Layer 0 serves storm-based polygon geometry
@@ -43,7 +52,7 @@ WWA_WARNINGS_URL = (
     "/watch_warn_adv/MapServer/0/query"
     "?where=sig%3D%27W%27"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
-    "&f=geojson"
+    "&returnGeometry=true&f=geojson&outSR=4326"
 )
 
 # WWA MapServer — county-level polygons for active SPC watches (TO=tornado, SV=severe tstorm).
@@ -53,7 +62,7 @@ WWA_WATCHES_URL = (
     "/watch_warn_adv/MapServer/1/query"
     "?where=sig%3D%27A%27%20AND%20(phenom%3D%27TO%27%20OR%20phenom%3D%27SV%27)"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
-    "&f=geojson"
+    "&returnGeometry=true&f=geojson&outSR=4326"
 )
 
 _EMPTY_FC_STR = '{"type":"FeatureCollection","features":[]}'
@@ -76,6 +85,43 @@ def _spc_cat_key(props: dict[str, Any]) -> str:
     if "MRGL" in txt or "MARGINAL" in txt:
         return "MRGL"
     return ""
+
+
+def _spc_prob_label(props: dict[str, Any]) -> str | None:
+    """Return a normalized probability label string for SPC probabilistic layers."""
+    lbl2 = (props.get("label2") or props.get("LABEL2") or props.get("Label2"))
+    if lbl2:
+        s2 = str(lbl2).strip().upper()
+        if s2 in ("SIGN", "CIG1", "CIG2", "CIG3"):
+            return s2
+    lbl_raw = props.get("LABEL") or props.get("label") or props.get("Label")
+    if lbl_raw:
+        s = str(lbl_raw).strip().upper()
+        if s in ("SIGN", "CIG1", "CIG2", "CIG3"):
+            return s
+    dn = props.get("dn")
+    if dn is None:
+        dn = props.get("DN")
+    if dn is not None:
+        try:
+            return str(int(dn))
+        except (TypeError, ValueError):
+            pass
+    if lbl_raw is None:
+        return None
+    s = str(lbl_raw).strip().replace("%", "")
+    if not s:
+        return None
+    try:
+        return str(int(float(s)))
+    except (TypeError, ValueError):
+        return s
+
+    return None
+
+
+def _fc_has_features(fc_str: str) -> bool:
+    return bool(fc_str and fc_str != _EMPTY_FC_STR)
 
 
 def _feature_bbox(geom: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -209,6 +255,28 @@ class HazardFetcher(QObject):
         if self._spc_cache is not None:
             self.spc_received.emit(*self._spc_cache)
 
+    def spc_category_cached(self) -> bool:
+        if not self._spc_cache:
+            return False
+        cat_str, _, _, _ = self._spc_cache
+        return _fc_has_features(cat_str)
+
+    def spc_product_cached(self, key: str) -> bool:
+        if not self._spc_cache:
+            return False
+        _, wind_str, hail_str, tor_str = self._spc_cache
+        k = key.strip().lower()
+        if k == "wind":
+            return _fc_has_features(wind_str)
+        if k == "hail":
+            return _fc_has_features(hail_str)
+        if k == "tor":
+            return _fc_has_features(tor_str)
+        return False
+
+    def force_spc_refresh(self):
+        self._spc_last_poll = 0
+
     def emit_cached_watches(self):
         if self._watches_cache is not None:
             self.spc_watches_received.emit(self._watches_cache)
@@ -263,7 +331,7 @@ class HazardFetcher(QObject):
             # SPC outlook re-fetched on its own longer interval; active hazards every poll.
             spc_due   = (
                 (any(self._spc_categories.values()) or any(self._spc_products.values()))
-                and (now - self._spc_last_poll >= POLL_INTERVAL_OUTLOOK)
+                and ((now - self._spc_last_poll >= POLL_INTERVAL_OUTLOOK) or self._spc_cache is None)
             )
             need_watches = self._spc_watches_enabled
             need_mds     = self._spc_mds_enabled
@@ -362,14 +430,17 @@ class HazardFetcher(QObject):
                 raw, changed = self._get_raw(SPC_URLS[key])
                 if changed:
                     data = json.loads(raw.decode("utf-8", errors="replace"))
-                    feats = [
-                        {
+                    feats = []
+                    for f in data.get("features", []):
+                        props = dict(f.get("properties") or {})
+                        label = _spc_prob_label(props)
+                        if label is not None:
+                            props["LABEL"] = label
+                        feats.append({
                             "type": "Feature",
                             "geometry": f.get("geometry"),
-                            "properties": dict(f.get("properties") or {}),
-                        }
-                        for f in data.get("features", [])
-                    ]
+                            "properties": props,
+                        })
                     s = json.dumps({"type": "FeatureCollection", "features": feats})
                     if key == "wind":
                         wind_str = s
@@ -381,6 +452,45 @@ class HazardFetcher(QObject):
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                 log.warning("SPC %s fetch failed: %s", key, exc)
                 self.fetch_error.emit(f"SPC {key} fetch failed: {exc}")
+
+            # Significant layer: merge into the same product as LABEL="SIGN"
+            if self._spc_products.get(key, False) and key in SPC_SIG_URLS:
+                try:
+                    raw, changed = self._get_raw(SPC_SIG_URLS[key])
+                    if changed:
+                        data = json.loads(raw.decode("utf-8", errors="replace"))
+                        sig_feats = []
+                        for f in data.get("features", []):
+                            props = dict(f.get("properties") or {})
+                            props["LABEL"] = "SIGN"
+                            sig_feats.append({
+                                "type": "Feature",
+                                "geometry": f.get("geometry"),
+                                "properties": props,
+                            })
+
+                        current_str = (
+                            wind_str if key == "wind" else hail_str if key == "hail" else tor_str
+                        )
+                        base = json.loads(current_str or _EMPTY_FC_STR)
+                        base_feats = list(base.get("features") or [])
+                        # Replace any existing SIGN features to avoid duplicates or stale sig areas.
+                        base_feats = [
+                            bf for bf in base_feats
+                            if (bf.get("properties") or {}).get("LABEL") != "SIGN"
+                        ]
+                        base_feats.extend(sig_feats)
+                        merged = json.dumps({"type": "FeatureCollection", "features": base_feats})
+                        if key == "wind":
+                            wind_str = merged
+                        elif key == "hail":
+                            hail_str = merged
+                        else:
+                            tor_str = merged
+                        any_changed = True
+                except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+                    log.warning("SPC %s significant fetch failed: %s", key, exc)
+                    self.fetch_error.emit(f"SPC {key} significant fetch failed: {exc}")
 
         # Always update cache (preserves cached strings for non-enabled products)
         self._spc_cache      = (cat_str, wind_str, hail_str, tor_str)

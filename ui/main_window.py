@@ -559,7 +559,7 @@ class MainWindow(QMainWindow):
 
         initial_site = self.radar_controls.current_site()
         self._radar_fetcher.set_site(initial_site)
-        self._radar_fetcher.set_products(["N0Q", "N0U"])
+        self._radar_fetcher.set_products(["N0B", "N0U"])
 
         # delay auto-start so map has time to initialize
         QTimer.singleShot(800, self._auto_start_radar)
@@ -681,6 +681,13 @@ class MainWindow(QMainWindow):
             self._render_satellite_frame(frames[-1])
             self.satellite_controls.set_scan_time(frames[-1].time_str)
             self.map_widget.set_satellite_visible(True)
+        else:
+            # Clear the previous mode's frame so CONUS doesn't linger
+            # while waiting on the first MESO frame.
+            self.map_widget.clear_satellite_frame()
+            self.map_widget.set_satellite_visible(False)
+            # Backfill recent frames on first select so loop playback works immediately.
+            self._satellite_fetcher.fetch_history(mode, 10)
 
     def _on_satellite_frames_updated(self, mode: str, frames: list):
         self._satellite_cache[mode] = frames
@@ -925,7 +932,15 @@ class MainWindow(QMainWindow):
             self.map_widget.set_spc_product_visible(key, on)
 
         if mode:
-            if self._hazard_fetcher.is_spc_fresh():
+            needs_refresh = False
+            if mode == "outlook":
+                needs_refresh = not self._hazard_fetcher.spc_category_cached()
+            elif mode in ("tor", "wind", "hail"):
+                needs_refresh = not self._hazard_fetcher.spc_product_cached(mode)
+            if needs_refresh:
+                self._hazard_fetcher.force_spc_refresh()
+                self._hazard_fetcher.fetch_now()
+            elif self._hazard_fetcher.is_spc_fresh():
                 self._hazard_fetcher.emit_cached_spc()
             else:
                 self._hazard_fetcher.fetch_now()

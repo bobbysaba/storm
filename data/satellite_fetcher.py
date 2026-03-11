@@ -65,11 +65,13 @@ class SatelliteFetcher(QObject):
 
         self._meso_bboxes: dict[int, dict | None] = {1: None, 2: None}
         self._frames:      dict[str, list]         = {"conus": [], "meso1": [], "meso2": []}
+        self._layer_times: dict[str, list[str]]    = {}
         self._lock = threading.Lock()
 
         # per-key inflight guard so parallel polls don't stack up
         self._inflight: dict[str, bool] = {
-            "caps": False, "conus": False, "meso1": False, "meso2": False
+            "caps": False, "conus": False, "meso1": False, "meso2": False,
+            "conus_hist": False, "meso1_hist": False, "meso2_hist": False
         }
 
         self._caps_timer  = QTimer(self)
@@ -109,6 +111,15 @@ class SatelliteFetcher(QObject):
                 QTimer.singleShot(0, self._poll_conus)
             elif m in ("meso", "meso1", "meso2"):
                 QTimer.singleShot(0, self._poll_meso)
+
+    def fetch_history(self, mode: str, count: int = MAX_FRAMES):
+        """Backfill recent frames for a mode using WMS time positions."""
+        mode = (mode or "").strip().lower()
+        if mode not in ("conus", "meso1", "meso2"):
+            return
+        count = max(1, min(int(count), MAX_FRAMES))
+        key = f"{mode}_hist"
+        self._spawn(key, lambda: self._worker_history(mode, count))
 
     def frames(self, mode: str) -> list:
         """Return a snapshot of the cached frames for the given mode."""
@@ -152,8 +163,10 @@ class SatelliteFetcher(QObject):
             xml_bytes = resp.read()
         root    = ET.fromstring(xml_bytes.decode("utf-8", errors="replace"))
         sectors = _parse_meso_bboxes(root)
+        layer_times = _parse_layer_times(root)
         with self._lock:
             self._meso_bboxes = sectors
+            self._layer_times = layer_times
         self.meso_sectors_updated.emit(sectors)
         log.debug(
             "SatelliteFetcher: caps MESO-1=%s  MESO-2=%s",
@@ -162,12 +175,7 @@ class SatelliteFetcher(QObject):
 
     def _worker_conus(self):
         w, s, e, n = CONUS_BBOX
-        url = (
-            f"{IEM_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-            f"&LAYERS=conus_ch02&SRS=EPSG:4326"
-            f"&BBOX={w},{s},{e},{n}&WIDTH={CONUS_W}&HEIGHT={CONUS_H}"
-            f"&FORMAT=image/png&STYLES="
-        )
+        url = _wms_url("conus_ch02", w, s, e, n, CONUS_W, CONUS_H)
         b64 = self._fetch_image(url)
         if b64:
             self._push_frame("conus", SatFrame(
@@ -183,16 +191,55 @@ class SatelliteFetcher(QObject):
             return
         w = bbox["west"]; s = bbox["south"]; e = bbox["east"]; n = bbox["north"]
         layer = f"mesoscale-{idx}_ch02"
-        url = (
-            f"{IEM_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-            f"&LAYERS={layer}&SRS=EPSG:4326"
-            f"&BBOX={w},{s},{e},{n}&WIDTH={MESO_W}&HEIGHT={MESO_H}"
-            f"&FORMAT=image/png&STYLES="
-        )
+        url = _wms_url(layer, w, s, e, n, MESO_W, MESO_H)
         b64 = self._fetch_image(url)
         if b64:
             self._push_frame(f"meso{idx}", SatFrame(
                 timestamp=datetime.now(timezone.utc),
+                b64=b64,
+                bbox=[w, s, e, n],
+            ))
+
+    def _worker_history(self, mode: str, count: int):
+        layer = "conus_ch02" if mode == "conus" else f"mesoscale-{1 if mode == 'meso1' else 2}_ch02"
+        with self._lock:
+            times = list(self._layer_times.get(layer, []))
+            bbox = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+
+        # Caps may not have arrived yet — fetch them now so we have time positions.
+        if not times:
+            try:
+                self._worker_caps()
+            except Exception as exc:
+                log.warning("SatelliteFetcher: caps fetch in history worker failed: %s", exc)
+            with self._lock:
+                times = list(self._layer_times.get(layer, []))
+                bbox = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+
+        if not times or not bbox:
+            # fall back to a single fetch if we still don't have time positions
+            if mode == "conus":
+                self._worker_conus()
+            else:
+                self._worker_meso(1 if mode == "meso1" else 2)
+            return
+
+        times = times[-count:]
+        w = bbox[0] if mode == "conus" else bbox["west"]
+        s = bbox[1] if mode == "conus" else bbox["south"]
+        e = bbox[2] if mode == "conus" else bbox["east"]
+        n = bbox[3] if mode == "conus" else bbox["north"]
+        width, height = (CONUS_W, CONUS_H) if mode == "conus" else (MESO_W, MESO_H)
+
+        # Fetch oldest→newest so the cache builds in chronological order.
+        for tstr in times:
+            url = _wms_url(layer, w, s, e, n, width, height, time_str=tstr)
+            b64 = self._fetch_image(url)
+            if not b64:
+                continue
+            ts = _parse_time(tstr)
+            self._push_frame(mode, SatFrame(
+                timestamp=ts,
                 b64=b64,
                 bbox=[w, s, e, n],
             ))
@@ -253,6 +300,61 @@ def _parse_meso_bboxes(root: ET.Element) -> dict:
         except (KeyError, ValueError):
             pass
     return sectors
+
+
+def _parse_layer_times(root: ET.Element) -> dict[str, list[str]]:
+    """Extract WMS time positions per layer name, respecting inherited Dimensions."""
+    _strip_ns(root)
+    out: dict[str, list[str]] = {}
+
+    def _direct_time(layer_el: ET.Element) -> str:
+        """Return the time string on this element's own Dimension/Extent, or ''."""
+        for dim in layer_el.findall("Dimension"):
+            if (dim.attrib.get("name") or "").lower() == "time":
+                return (dim.text or "").strip()
+        for ext in layer_el.findall("Extent"):
+            if (ext.attrib.get("name") or "").lower() == "time":
+                return (ext.text or "").strip()
+        return ""
+
+    def _walk(layer_el: ET.Element, inherited: str):
+        time_text = _direct_time(layer_el) or inherited
+        name_el = layer_el.find("Name")
+        if name_el is not None and (name_el.text or "").strip() and time_text:
+            times = [t.strip() for t in time_text.split(",") if t.strip()]
+            if times:
+                out[name_el.text.strip()] = times
+        for child in layer_el.findall("Layer"):
+            _walk(child, time_text)
+
+    cap = root.find("Capability")
+    top = cap if cap is not None else root
+    for layer in top.findall("Layer"):
+        _walk(layer, "")
+    return out
+
+
+def _parse_time(tstr: str) -> datetime:
+    s = (tstr or "").strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _wms_url(layer: str, west: float, south: float, east: float, north: float,
+             width: int, height: int, time_str: str | None = None) -> str:
+    base = (
+        f"{IEM_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+        f"&LAYERS={layer}&SRS=EPSG:4326"
+        f"&BBOX={west},{south},{east},{north}&WIDTH={width}&HEIGHT={height}"
+        f"&FORMAT=image/png&TRANSPARENT=TRUE&STYLES="
+    )
+    if time_str:
+        base += f"&TIME={time_str}"
+    return base
 
 
 def _strip_ns(el: ET.Element):

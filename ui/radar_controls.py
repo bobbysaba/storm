@@ -5,6 +5,7 @@ import json
 import math
 import re
 import threading
+import xml.etree.ElementTree as ET
 from urllib.request import Request, urlopen
 
 from PyQt6.QtWidgets import (
@@ -51,7 +52,9 @@ NEXRAD_SITES = [
     ("KDMX", "Des Moines, IA", 41.731, -93.723),
 ]
 
-PRODUCTS = [("N0Q", "REFLECTIVITY"), ("N0U", "VELOCITY")]
+PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
+OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF")]
+THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
 DEFAULT_REF_LAT = 35.22
 DEFAULT_REF_LON = -97.44
 DEFAULT_NEAREST_COUNT = 5
@@ -85,7 +88,8 @@ class RadarControls(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._radar_on           = False
-        self._product            = "N0Q"
+        self._product            = "N0B"
+        self._product_availability: dict[tuple[str, str], bool] = {}
         self._updating_site_list = False
         self._manual_site        = ""
         self._all_sites          = list(NEXRAD_SITES)
@@ -126,8 +130,7 @@ class RadarControls(QWidget):
         self._product_combo.setFixedHeight(22)
         self._product_combo.setMinimumWidth(128)
         self._product_combo.setObjectName("radarProductCombo")
-        for code, label in PRODUCTS:
-            self._product_combo.addItem(label, userData=code)
+        self._set_product_items(PRODUCTS, preserve_code=self._product)
         self._product_combo.currentIndexChanged.connect(self._on_product_changed)
         r1.addWidget(self._product_combo)
 
@@ -262,6 +265,7 @@ class RadarControls(QWidget):
         self.fetch_requested.emit()
         # Resolve the city name in the background and update the label.
         threading.Thread(target=self._lookup_site_name, args=(normalized,), daemon=True).start()
+        threading.Thread(target=self._refresh_product_availability, args=(normalized,), daemon=True).start()
 
     def _lookup_site_name(self, site_id: str):
         """Fetch the human-readable name for a NEXRAD site from the NWS API."""
@@ -279,6 +283,24 @@ class RadarControls(QWidget):
             label = site_id
         # Qt UI updates must happen on the main thread.
         QTimer.singleShot(0, lambda: self._set_other_label(label))
+
+    def _set_product_items(self, items: list[tuple[str, str]], preserve_code: str | None = None):
+        self._product_combo.blockSignals(True)
+        self._product_combo.clear()
+        for code, label in items:
+            self._product_combo.addItem(label, userData=code)
+        if preserve_code:
+            idx = self._product_combo.findData(preserve_code)
+            if idx >= 0:
+                self._product_combo.setCurrentIndex(idx)
+            else:
+                self._product_combo.setCurrentIndex(0)
+        else:
+            self._product_combo.setCurrentIndex(0)
+        self._product_combo.blockSignals(False)
+        # Sync internal product state to the combo selection
+        current_code = self._product_combo.currentData() or ""
+        self._product = current_code
 
     def set_cache_size(self, n: int):
         """update slider range as scan cache grows; stay at live if already there."""
@@ -331,6 +353,48 @@ class RadarControls(QWidget):
         self._expanded_height = self.sizeHint().height()
         self.setMaximumHeight(0)
 
+    def _refresh_product_availability(self, site_id: str):
+        site = _normalize_site(site_id)
+        if not site:
+            return
+
+        optional = []
+        for code, label in OPTIONAL_PRODUCTS:
+            available = self._is_product_available(site, code)
+            self._product_availability[(site, code)] = available
+            if available:
+                optional.append((code, label))
+
+        def _apply():
+            items = list(PRODUCTS) + optional
+            prev = self._product
+            self._set_product_items(items, preserve_code=prev)
+            if prev != self._product:
+                self.product_changed.emit(self._product)
+                self.fetch_requested.emit()
+
+        QTimer.singleShot(0, _apply)
+
+    def _is_product_available(self, site: str, product: str) -> bool:
+        key = (site, product)
+        if key in self._product_availability:
+            return self._product_availability[key]
+
+        site_token = _thredds_site_token(site)
+        url = f"{THREDDS_CATALOG_ROOT}/{product}/{site_token}/catalog.xml"
+        try:
+            with urlopen(url, timeout=6) as resp:
+                xml_text = resp.read().decode("utf-8", errors="replace")
+            root = ET.fromstring(xml_text)
+            ns = {"cat": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
+            # If any dataset entries exist, treat as available
+            for ds in root.findall(".//cat:dataset", ns):
+                if ds.attrib.get("urlPath"):
+                    return True
+        except Exception:
+            return False
+        return False
+
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def toggle_drawer(self, checked: bool):
@@ -378,6 +442,7 @@ class RadarControls(QWidget):
         if site_id and site_id != OTHER_SITE_VALUE:
             self.site_changed.emit(site_id)
             self.fetch_requested.emit()
+            threading.Thread(target=self._refresh_product_availability, args=(site_id,), daemon=True).start()
             return
         if site_id == OTHER_SITE_VALUE:
             self._prompt_for_manual_site()
@@ -463,6 +528,13 @@ def _normalize_site(site_id: str) -> str:
         return ""
     match = re.search(r"\b[A-Z][A-Z0-9]{3}\b", text)
     return match.group(0) if match else ""
+
+
+def _thredds_site_token(site: str) -> str:
+    site = site.upper()
+    if site.startswith("K") and len(site) == 4:
+        return site[1:]
+    return site
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
