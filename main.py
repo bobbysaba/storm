@@ -22,7 +22,7 @@ from data.truck_replay import load_truck_observations
 try:
     from PyQt6.QtCore import QTimer
     from PyQt6.QtGui import QFont
-    from PyQt6.QtWidgets import QApplication, QDialog
+    from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 # if there is a failure, show an error message
 except ModuleNotFoundError as exc:
     if exc.name == "PyQt6":
@@ -31,6 +31,34 @@ except ModuleNotFoundError as exc:
         # exit with error
         sys.exit(1)
     raise
+
+# port used exclusively as a single-instance lock (not a real server)
+_INSTANCE_LOCK_PORT = 19876
+
+# reference kept alive so the OS doesn't release the bound port
+_instance_lock_socket = None
+
+
+def _acquire_instance_lock() -> bool:
+    """Bind a localhost socket as a single-instance guard.
+
+    Returns True if this is the first instance; False if one is already running.
+    The socket is intentionally kept alive (stored in _instance_lock_socket) for
+    the entire process lifetime — closing it would release the lock.
+    """
+    global _instance_lock_socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Disable SO_REUSEADDR so a recently-closed instance can't be re-bound
+        # before Python's GC collects the socket.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        sock.bind(("127.0.0.1", _INSTANCE_LOCK_PORT))
+        sock.listen(1)
+        _instance_lock_socket = sock  # keep alive
+        return True
+    except OSError:
+        return False
+
 
 # function to parse command line arguments (if run from the command line)
 def _build_parser() -> argparse.ArgumentParser:
@@ -205,6 +233,55 @@ def _configure_logging(level_name: str) -> None:
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
         logging.getLogger("metpy").setLevel(logging.WARNING)
 
+# function to check for missing required files and show user-visible warnings
+def _warn_missing_files() -> None:
+    """Show QMessageBox warnings for any missing required files.
+
+    Called after QApplication is created but before the main window is built, so
+    dialogs render correctly.  Warnings are non-fatal — the app continues in a
+    degraded state so the user can at least see what is wrong.
+    """
+    # ── Map tiles ──────────────────────────────────────────────────────────────
+    tiles_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "tiles", "storm.mbtiles")
+    )
+    if not os.path.exists(tiles_path):
+        QMessageBox.warning(
+            None,
+            "Missing Map Tiles",
+            f"Map tiles file not found:\n\n  {tiles_path}\n\n"
+            "The map will not render correctly.\n"
+            "Ensure 'tiles/storm.mbtiles' is present in the application directory.",
+        )
+
+    # ── AWS / MQTT certificates ────────────────────────────────────────────────
+    # Skip entirely if MQTT was disabled via a flag or debug-run profile.
+    if runtime_flags.FLAGS.disable_mqtt:
+        return
+
+    aws_dir = os.path.dirname(config.MQTT_CA_CERT)
+    cert_files = [config.MQTT_CA_CERT, config.MQTT_CERT_FILE, config.MQTT_KEY_FILE]
+
+    if not os.path.isdir(aws_dir):
+        QMessageBox.warning(
+            None,
+            "Missing AWS Credentials Folder",
+            f"The AWS credentials directory was not found:\n\n  {aws_dir}\n\n"
+            "MQTT features (annotation sync, vehicle tracking) will be unavailable.\n"
+            "Create the 'aws/' folder and add your certificates to enable them.",
+        )
+    else:
+        missing = [f for f in cert_files if not os.path.isfile(f)]
+        if missing:
+            names = "\n".join(f"  \u2022 {os.path.basename(f)}" for f in missing)
+            QMessageBox.warning(
+                None,
+                "Missing AWS Certificate Files",
+                f"The following MQTT certificate files were not found:\n\n{names}\n\n"
+                "MQTT features (annotation sync, vehicle tracking) will be unavailable.",
+            )
+
+
 # main function
 def main() -> None:
     # try to configure fault handler
@@ -277,6 +354,17 @@ def main() -> None:
     # set application quit behavior
     app.setQuitOnLastWindowClosed(False)
 
+    # ── Single-instance guard ──────────────────────────────────────────────────
+    # Must happen after QApplication exists so the warning dialog can be shown.
+    if not _acquire_instance_lock():
+        QMessageBox.warning(
+            None,
+            "STORM Already Running",
+            "STORM is already running on this machine.\n\n"
+            "Please close all existing STORM instances before opening a new one.",
+        )
+        sys.exit(0)
+
     # pull whether or not we're in monitor mode
     monitor = args.monitor
 
@@ -298,6 +386,11 @@ def main() -> None:
 
         # get whether or not we're in monitor mode (from the user-selected window)
         monitor = dialog.monitor()
+
+    # ── File presence checks ───────────────────────────────────────────────────
+    # Warn about missing tiles / certificates before the window is built so the
+    # user understands why certain features may be broken.
+    _warn_missing_files()
 
     # create the main window
     window = MainWindow(debug = args.debug, monitor = monitor)

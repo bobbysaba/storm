@@ -8,7 +8,9 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 ## Current Features
 
 - **Offline vector map** — OpenStreetMap tiles served locally from MBTiles via a bundled Flask server; no internet required for the base map
-- **NEXRAD radar overlay** — fetches Level 3 reflectivity and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map
+- **NEXRAD radar overlay** — fetches Level 3 super‑res reflectivity (N0B fallback to N0Q/N0R) and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map
+- **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection)
+- **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
 
@@ -176,6 +178,8 @@ storm/
 ├── data/                    # Background I/O and decoding
 │   ├── radar_fetcher.py     # Polls Unidata THREDDS; backfills 12 scans
 │   ├── radar_decoder.py     # MetPy Level 3 decode → RadarScan
+│   ├── satellite_fetcher.py # WMS satellite imagery fetch + cache
+│   ├── hazard_fetcher.py    # SPC/NWS hazard polygons
 │   ├── obs_file_watcher.py  # Watches FOFS instrument logger file (Track A)
 │   ├── gps_reader.py        # NMEA via pyserial — auto-detects GPS puck (Track B)
 │   ├── obs_history_store.py # 10-min rolling obs buffer per vehicle
@@ -194,9 +198,12 @@ storm/
 │   ├── map_widget.py        # MapLibre GL map + Flask tile server
 │   ├── radar_controls.py    # Radar site/product/playback drawer
 │   ├── radar_overlay.py     # RadarScan → PNG → MapLibre raster layer
+│   ├── satellite_controls.py # Satellite mode/playback drawer
+│   ├── hazard_controls.py   # SPC/NWS hazard toggle drawer
 │   ├── station_plot_layer.py # MetPy station plot PNG markers
 │   ├── annotation_tools.py  # Annotation type selector drawer
 │   ├── annotation_dialog.py # Place / edit annotation dialogs
+│   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
 │   ├── history_widget.py    # Time series chart (obs history)
 │   └── theme.py             # QSS dark theme + color constants

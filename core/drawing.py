@@ -1,28 +1,28 @@
-# core/drawing.py
-# DrawingAnnotation dataclass for meteorological fronts and custom polylines/polygons.
+# Bobby Saba - script that handles custom drawn annotations
 
+# import required packages
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+# define the front types, their labels, symbols, and colors
+FRONT_TYPES = [{"key": "cold_front",       "label": "Cold Front",       "color": "#4A9EFF", "symbol": "▼"},
+               {"key": "warm_front",       "label": "Warm Front",       "color": "#E53935", "symbol": "●"},
+               {"key": "stationary_front", "label": "Stationary Front", "color": "#4A9EFF", "symbol": "◆"},
+               {"key": "occluded_front",   "label": "Occluded Front",   "color": "#9C27B0", "symbol": "◆"},
+               {"key": "dryline",          "label": "Dryline",          "color": "#D4872E", "symbol": "~"}]
 
-FRONT_TYPES = [
-    {"key": "cold_front",       "label": "Cold Front",       "color": "#4A9EFF", "symbol": "▼"},
-    {"key": "warm_front",       "label": "Warm Front",       "color": "#E53935", "symbol": "●"},
-    {"key": "stationary_front", "label": "Stationary Front", "color": "#4A9EFF", "symbol": "◆"},
-    {"key": "occluded_front",   "label": "Occluded Front",   "color": "#9C27B0", "symbol": "◆"},
-    {"key": "dryline",          "label": "Dryline",          "color": "#D4872E", "symbol": "~"},
-]
+# define the custom types, their labels, symbols, and colors
+CUSTOM_TYPES = [{"key": "polyline", "label": "Polyline", "color": "#E8EAF0", "symbol": "—"},
+                {"key": "polygon",  "label": "Polygon",  "color": "#E8EAF0", "symbol": "□"}]
 
-CUSTOM_TYPES = [
-    {"key": "polyline", "label": "Polyline", "color": "#E8EAF0", "symbol": "—"},
-    {"key": "polygon",  "label": "Polygon",  "color": "#E8EAF0", "symbol": "□"},
-]
-
+# combine the front and custom types to a master list
 ALL_DRAWING_TYPES = FRONT_TYPES + CUSTOM_TYPES
-DRAWING_TYPE_MAP: dict[str, dict] = {t["key"]: t for t in ALL_DRAWING_TYPES}
-FRONT_TYPE_KEYS: set[str] = {t["key"] for t in FRONT_TYPES}
-CUSTOM_TYPE_KEYS: set[str] = {t["key"] for t in CUSTOM_TYPES}
+
+
+DRAWING_TYPE_MAP = {t["key"]: t for t in ALL_DRAWING_TYPES}
+FRONT_TYPE_KEYS = {t["key"] for t in FRONT_TYPES}
+CUSTOM_TYPE_KEYS = {t["key"] for t in CUSTOM_TYPES}
 
 
 def _short_uuid() -> str:

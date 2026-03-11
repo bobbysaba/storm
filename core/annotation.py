@@ -1,12 +1,12 @@
-# core/annotation.py
-# Annotation dataclass + type registry for STORM road-condition annotations.
+# Bobby Saba - define annotation dataclass
 
+# import required packages
 import uuid
+from typing import Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
-
+# define the annotation types and their labels, symbols, and colors
 ANNOTATION_TYPES = [
     {"key": "road_closure",   "label": "Road Closure",       "symbol": "\u2715", "color": "#E53935"},
     {"key": "construction",   "label": "Construction",        "symbol": "\u25B2", "color": "#FFD166"},
@@ -18,11 +18,11 @@ ANNOTATION_TYPES = [
 # quick lookup by key
 ANNOTATION_TYPE_MAP: dict[str, dict] = {t["key"]: t for t in ANNOTATION_TYPES}
 
-
+# function to generate a short uuid
 def _short_uuid() -> str:
     return uuid.uuid4().hex[:8]
 
-
+# define the annotation dataclass
 @dataclass
 class Annotation:
     id: str
@@ -34,6 +34,7 @@ class Annotation:
     created_at: datetime
     ttl_hours: Optional[float] = None
 
+    # method to create a new annotation
     @classmethod
     def new(cls, type_key: str, lat: float, lon: float,
             label: str = "", creator: str = "local",
@@ -50,6 +51,7 @@ class Annotation:
             ttl_hours=ttl_hours,
         )
 
+    # method to convert annotation information to a dictionary
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -62,6 +64,7 @@ class Annotation:
             "ttl_hours": self.ttl_hours,
         }
 
+    # method to create an annotation from a dictionary
     @classmethod
     def from_dict(cls, d: dict) -> "Annotation":
         created_at = d.get("created_at")
