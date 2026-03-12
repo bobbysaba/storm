@@ -113,14 +113,22 @@ class MainWindow(QMainWindow):
                 "off" if self._disable_data_inputs else "on",
             )
 
+            # 1) Local data sources first (requires MQTT to be ready for publish)
+            if not self._disable_mqtt:
+                self._init_mqtt()
+            if not self._disable_data_inputs:
+                self._init_data_inputs()
+
+            # 2) Vehicle locations fetcher (after local data)
+            if not self._disable_vehicle_fetcher:
+                self._init_vehicle_fetcher()
+
+            # 3) Heavier network fetchers after vehicles are live
             if not self._disable_radar:
                 self._init_radar()
             self._init_hazards()
             self._init_satellite()
-            if not self._disable_mqtt:
-                self._init_mqtt()
-            if not self._disable_vehicle_fetcher:
-                self._init_vehicle_fetcher()
+
             if not self._disable_annotations:
                 self._init_annotations()
                 self._init_storm_cone()
@@ -130,8 +138,6 @@ class MainWindow(QMainWindow):
 
             if not self._disable_deploy_locs:
                 self._init_deploy_locs()
-            if not self._disable_data_inputs:
-                self._init_data_inputs()
 
         # wire map mousemove → status bar coordinate and zoom display
         self.map_widget.map_moved.connect(

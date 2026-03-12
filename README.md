@@ -233,6 +233,8 @@ storm/
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context. Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
 - **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both feed the same `ObsHistoryStore` and publish via `VehicleSync`.
 - **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`.
+- **Vehicle locations** — `config.VEHICLES_URL` points to the NSSL THREDDS JSON feed (currently `storm_locs.json`). In monitor mode, the app polls this feed and plots all vehicles. When not in monitor mode, the local vehicle ID prefers local data over fetched JSON.
+- **TLS note** — The vehicle fetcher prefers `STORM_SSL_CERT_FILE` or `certifi` for HTTPS CA bundles and will retry once without verification if TLS validation fails (a warning is logged). This prevents public HTTPS feeds from failing on machines without proper CA bundles.
 - **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0Q (super-res reflectivity) with N0B fallback; N0U (velocity) with N0S fallback.
 
 ---
