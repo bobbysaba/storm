@@ -1,6 +1,8 @@
 # data/satellite_fetcher.py
 # Polls IEM GOES-East WMS for sector metadata and downloads satellite imagery
 # frames as single GetMap PNG images, caching up to MAX_FRAMES per mode.
+# IEM's goes_east.cgi dynamically serves the current operational GOES-East
+# satellite (GOES-19 as of 2025), so no satellite-specific URL changes are needed.
 # Mirrors the radar caching model so the UI can offer identical playback controls.
 
 import base64
@@ -16,23 +18,23 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-IEM_WMS    = "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes_east.cgi"
-CAPS_URL   = IEM_WMS + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities"
+IEM_WMS  = "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes_east.cgi"
+CAPS_URL = IEM_WMS + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities"
 
 CAPS_POLL_MS  = 5 * 60 * 1000   # 5 min — matches CONUS scan cadence
 CONUS_POLL_MS = 5 * 60 * 1000
 MESO_POLL_MS  =      60 * 1000  # 1 min — matches MESO scan cadence
 
-MAX_FRAMES = 10
+MAX_FRAMES      = 10
 REQUEST_TIMEOUT = 20
 
 # Fixed CONUS image extent (west, south, east, north) and pixel size.
 # Covers the GOES-East CONUS domain at a 2:1 aspect ratio.
 CONUS_BBOX   = [-126.0, 22.0, -64.0, 52.0]
-CONUS_W, CONUS_H = 1024, 512
+CONUS_W, CONUS_H = 1600, 800
 
-# MESO images are roughly square (sector ≈ 1000×1000 km)
-MESO_W, MESO_H = 512, 512
+# MESO images are square (sector ≈ 1000×1000 km)
+MESO_W, MESO_H = 1024, 1024
 
 
 @dataclass
@@ -92,8 +94,6 @@ class SatelliteFetcher(QObject):
         # stagger initial fetches to avoid simultaneous TLS handshakes
         QTimer.singleShot(2_000, self._poll_caps)
         QTimer.singleShot(4_000, self._poll_conus)
-        # MESO fetches naturally start on the first _meso_timer tick once
-        # _poll_caps has populated _meso_bboxes
         log.info("SatelliteFetcher: started")
 
     def stop(self):
@@ -161,8 +161,8 @@ class SatelliteFetcher(QObject):
     def _worker_caps(self):
         with urlopen(CAPS_URL, timeout=REQUEST_TIMEOUT) as resp:
             xml_bytes = resp.read()
-        root    = ET.fromstring(xml_bytes.decode("utf-8", errors="replace"))
-        sectors = _parse_meso_bboxes(root)
+        root        = ET.fromstring(xml_bytes.decode("utf-8", errors="replace"))
+        sectors     = _parse_meso_bboxes(root)
         layer_times = _parse_layer_times(root)
         with self._lock:
             self._meso_bboxes = sectors
@@ -204,7 +204,7 @@ class SatelliteFetcher(QObject):
         layer = "conus_ch02" if mode == "conus" else f"mesoscale-{1 if mode == 'meso1' else 2}_ch02"
         with self._lock:
             times = list(self._layer_times.get(layer, []))
-            bbox = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+            bbox  = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
 
         # Caps may not have arrived yet — fetch them now so we have time positions.
         if not times:
@@ -214,7 +214,7 @@ class SatelliteFetcher(QObject):
                 log.warning("SatelliteFetcher: caps fetch in history worker failed: %s", exc)
             with self._lock:
                 times = list(self._layer_times.get(layer, []))
-                bbox = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+                bbox  = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
 
         if not times or not bbox:
             # fall back to a single fetch if we still don't have time positions
@@ -308,7 +308,6 @@ def _parse_layer_times(root: ET.Element) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
 
     def _direct_time(layer_el: ET.Element) -> str:
-        """Return the time string on this element's own Dimension/Extent, or ''."""
         for dim in layer_el.findall("Dimension"):
             if (dim.attrib.get("name") or "").lower() == "time":
                 return (dim.text or "").strip()
