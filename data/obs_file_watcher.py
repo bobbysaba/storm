@@ -9,6 +9,10 @@
 #
 # Runs on a QTimer in the main thread (file I/O at 10 s intervals is
 # too brief to justify a background thread).
+#
+# Note: We parse all new rows each poll, but emit only the most recent
+# observation (last row). This avoids sending a burst of 10 one-second
+# observations every 10 seconds when the logger writes at 1 Hz.
 
 import csv
 import io
@@ -190,15 +194,21 @@ class ObsFileWatcher(QObject):
             rows = list(csv.DictReader(io.StringIO(text), fieldnames=self._header_cache))
 
         parsed = 0
+        last_obs: Observation | None = None
         for row in rows:
             obs = self._parse_row(row)
             if obs is not None:
-                self.obs_ready.emit(obs)
                 parsed += 1
+                last_obs = obs
 
-        if parsed:
+        if parsed and last_obs is not None:
+            self.obs_ready.emit(last_obs)
             self._last_pos = new_pos
-            log.debug("ObsFileWatcher: emitted %d obs from %s", parsed, path.name)
+            log.debug(
+                "ObsFileWatcher: parsed %d obs, emitted latest from %s",
+                parsed,
+                path.name,
+            )
 
     @staticmethod
     def _read_header(path: Path) -> list[str] | None:

@@ -5,6 +5,7 @@
 
 import json
 import logging
+import os
 import threading
 import urllib.request
 import ssl
@@ -66,21 +67,29 @@ class VehicleFetcher(QObject):
 
     def _fetch_worker(self):
         try:
-            ctx = None
-            try:
-                import certifi  # type: ignore
-                ctx = ssl.create_default_context(cafile=certifi.where())
-            except Exception:
-                ctx = None
+            ctx, ctx_label = _build_ssl_context()
             req = urllib.request.Request(
                 self._url,
                 headers={"Accept": "application/json", "User-Agent": "storm/1.0"},
                 method="GET",
             )
-            if ctx is not None:
-                resp = urllib.request.urlopen(req, timeout=10, context=ctx)
-            else:
-                resp = urllib.request.urlopen(req, timeout=10)
+            try:
+                if ctx is not None:
+                    log.debug("VehicleFetcher: TLS context = %s", ctx_label)
+                    resp = urllib.request.urlopen(req, timeout=10, context=ctx)
+                else:
+                    log.debug("VehicleFetcher: TLS context = system default")
+                    resp = urllib.request.urlopen(req, timeout=10)
+            except Exception as e:
+                if _is_cert_error(e):
+                    log.warning(
+                        "VehicleFetcher: TLS verify failed (%s); retrying without verification",
+                        e,
+                    )
+                    insecure_ctx = ssl._create_unverified_context()  # noqa: SLF001
+                    resp = urllib.request.urlopen(req, timeout=10, context=insecure_ctx)
+                else:
+                    raise
             with resp:
                 status = getattr(resp, "status", 200)
                 if status != 200:
@@ -114,6 +123,38 @@ class VehicleFetcher(QObject):
 # Helpers
 
 _STALE_THRESHOLD = timedelta(hours=12)
+
+
+def _build_ssl_context() -> tuple[ssl.SSLContext | None, str]:
+    """
+    Build an SSL context for HTTPS requests.
+    Preference order:
+      1) STORM_SSL_CERT_FILE (explicit override)
+      2) certifi bundle (if available)
+      3) system default (None)
+    """
+    override = os.environ.get("STORM_SSL_CERT_FILE", "").strip()
+    if override and os.path.isfile(override):
+        return ssl.create_default_context(cafile=override), f"override:{override}"
+
+    try:
+        import certifi  # type: ignore
+        cafile = certifi.where()
+        if cafile:
+            return ssl.create_default_context(cafile=cafile), f"certifi:{cafile}"
+    except Exception:
+        pass
+
+    return None, "system-default"
+
+
+def _is_cert_error(err: Exception) -> bool:
+    if isinstance(err, ssl.SSLCertVerificationError):
+        return True
+    reason = getattr(err, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    return "CERTIFICATE_VERIFY_FAILED" in str(err)
 
 
 def _parse_entry(vid: str, entry: dict) -> Observation | None:
