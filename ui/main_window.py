@@ -1089,6 +1089,10 @@ class MainWindow(QMainWindow):
             log.info("vehicles_url not configured — vehicle fetcher disabled")
 
     def _on_fetched_vehicle_obs(self, obs):
+        # If this machine is producing local data (not in monitor mode),
+        # prefer the local stream for its own vehicle ID.
+        if not self._monitor and obs.vehicle_id == config.VEHICLE_ID:
+            return
         self.update_vehicle_obs(obs)
 
     def _mqtt_connect(self):
