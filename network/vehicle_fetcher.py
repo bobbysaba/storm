@@ -151,10 +151,12 @@ def _build_ssl_context() -> tuple[ssl.SSLContext | None, str]:
 
 
 def _is_cert_error(err: Exception) -> bool:
-    if isinstance(err, ssl.SSLCertVerificationError):
+    # SSLCertVerificationError is the specific subclass on 3.7+; on some Windows
+    # configurations urllib wraps it as the parent ssl.SSLError instead.
+    if isinstance(err, ssl.SSLError):
         return True
     reason = getattr(err, "reason", None)
-    if isinstance(reason, ssl.SSLCertVerificationError):
+    if isinstance(reason, ssl.SSLError):
         return True
     return "CERTIFICATE_VERIFY_FAILED" in str(err)
 

@@ -870,6 +870,11 @@ def build_map_html() -> str:
           'circle-opacity': 0.85
         }}
       }});
+      // Flush any deploy locs data that arrived before the map was ready
+      if (window._deployLocsData) {{
+        map.getSource('deploy-locs').setData(JSON.parse(window._deployLocsData));
+        window._deployLocsData = null;
+      }}
 
       // ── GOES Satellite image overlay ─────────────────────────────────────
       // Uses a single image source (like the radar overlay) rather than tiled
@@ -1859,7 +1864,9 @@ def build_map_html() -> str:
 
     // ── Deployment Locations ──────────────────────────────────────────────
     window.stormLoadDeployLocs = function(geojsonStr) {{
-      map.getSource('deploy-locs').setData(JSON.parse(geojsonStr));
+      var src = map.getSource('deploy-locs');
+      if (!src) {{ window._deployLocsData = geojsonStr; return; }}
+      src.setData(JSON.parse(geojsonStr));
     }};
     window.stormSetDeployLocsVisible = function(visible) {{
       map.setLayoutProperty('deploy-locs-circles', 'visibility', visible ? 'visible' : 'none');

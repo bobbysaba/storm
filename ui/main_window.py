@@ -757,9 +757,9 @@ class MainWindow(QMainWindow):
 
     def _on_satellite_toggled(self, checked: bool):
         if not checked:
+            # Closing the drawer stops playback but leaves the overlay visible.
             self._satellite_loop_timer.stop()
             self.satellite_controls.stop_loop()
-            self.map_widget.set_satellite_visible(False)
         else:
             mode = self.satellite_controls.current_mode()
             if not mode:
