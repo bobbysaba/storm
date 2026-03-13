@@ -2,18 +2,24 @@
 # Startup dialog — shown on every launch to confirm vehicle ID and data
 # directory.  Persists settings via QSettings so they survive across sessions.
 
+import json
 import os
+import ssl
 import sys
 import hashlib
 import threading
 import subprocess
+import urllib.request
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QCheckBox, QFileDialog, QFrame,
-    QTextEdit, QApplication,
+    QTextEdit, QApplication, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QSettings, QObject, QTimer, pyqtSignal
+
+import config
 
 _DIALOG_STYLE = """
 QDialog {
@@ -384,6 +390,9 @@ class LaunchDialog(QDialog):
     is pre-populated automatically.
     """
 
+    # Emitted from background thread with (vehicle_id, is_conflict)
+    _id_check_done = pyqtSignal(str, bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("STORM")
@@ -401,6 +410,7 @@ class LaunchDialog(QDialog):
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
+        self._id_check_done.connect(self._on_id_check_done)
         self._start_update_check()
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -503,6 +513,7 @@ class LaunchDialog(QDialog):
         launch.setObjectName("launchBtn")
         launch.clicked.connect(self._on_launch)
         launch.setDefault(True)
+        self._launch_btn = launch
         btn_row.addWidget(launch)
         btn_row.addStretch()
         root.addLayout(btn_row)
@@ -611,6 +622,81 @@ class LaunchDialog(QDialog):
             self._dir_input.setText(chosen)
 
     def _on_launch(self):
+        vid = self._vid_input.text().strip()
+        # In monitor mode there's no local vehicle ID, so no conflict is possible.
+        if self._monitor_cb.isChecked():
+            self._do_accept()
+            return
+
+        # Vehicle ID is required when not in monitor mode.
+        if not vid:
+            QMessageBox.warning(
+                self,
+                "Vehicle ID Required",
+                "Please enter a vehicle ID before launching.",
+            )
+            self._vid_input.setFocus()
+            return
+
+        # Disable the button while we check the live feed for a conflicting ID.
+        self._launch_btn.setEnabled(False)
+        self._launch_btn.setText("CHECKING ID...")
+        self._launch_btn.setStyleSheet(_UPD_CHECKING)
+        threading.Thread(target=self._check_vehicle_id_worker, args=(vid,), daemon=True).start()
+
+    def _check_vehicle_id_worker(self, vid: str):
+        """Background thread: fetch the live vehicles feed and look for vid."""
+        conflict = False
+        try:
+            ctx = ssl._create_unverified_context()  # noqa: SLF001
+            req = urllib.request.Request(
+                config.VEHICLES_URL,
+                headers={"Accept": "application/json", "User-Agent": "storm/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+            if isinstance(data, dict) and vid in data:
+                entry = data[vid]
+                gps_date = (entry.get("gps_date") or "").strip()
+                gps_time = (entry.get("gps_time") or "").strip()
+                try:
+                    ts = datetime.strptime(gps_date + gps_time, "%d%m%y%H%M%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                except (ValueError, TypeError):
+                    ts = datetime.now(timezone.utc)
+                if datetime.now(timezone.utc) - ts <= timedelta(hours=12):
+                    conflict = True
+        except Exception:
+            # Network failure — don't block the user, just proceed.
+            pass
+        self._id_check_done.emit(vid, conflict)
+
+    def _on_id_check_done(self, vid: str, conflict: bool):
+        """Called on the main thread with the result of the vehicle ID check."""
+        # Restore button appearance regardless of outcome.
+        self._launch_btn.setEnabled(True)
+        self._launch_btn.setText("LAUNCH STORM")
+        self._launch_btn.setStyleSheet("")
+
+        if conflict:
+            result = QMessageBox.warning(
+                self,
+                "Vehicle ID Already In Use",
+                f"Vehicle ID <b>{vid}</b> appears to be active in the live feed.\n\n"
+                "Launching with a duplicate ID will cause two vehicles to share the same "
+                "marker on the map and may overwrite each other's position data.\n\n"
+                "Are you sure you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return
+
+        self._do_accept()
+
+    def _do_accept(self):
         s = QSettings()
         s.setValue("launch/vehicle_id",   self._vid_input.text().strip())
         s.setValue("launch/data_dir",     self._dir_input.text().strip())
