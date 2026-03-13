@@ -179,6 +179,7 @@ class HazardFetcher(QObject):
     spc_watches_received = pyqtSignal(object)
     spc_mds_received     = pyqtSignal(object)
     fetch_error          = pyqtSignal(str)
+    connectivity_changed = pyqtSignal(bool)   # True = back online, False = offline
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -212,6 +213,10 @@ class HazardFetcher(QObject):
 
         # Per-URL SHA-256 hashes for change detection — skip map push when unchanged
         self._response_hashes: dict[str, str] = {}
+
+        # Connectivity tracking — go offline after 2 consecutive failed poll cycles
+        self._consecutive_failures = 0
+        self._is_offline = False
 
     # ── Enable/disable setters ─────────────────────────────────────────────────
 
@@ -315,6 +320,18 @@ class HazardFetcher(QObject):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _record_success(self):
+        self._consecutive_failures = 0
+        if self._is_offline:
+            self._is_offline = False
+            self.connectivity_changed.emit(True)
+
+    def _record_failure(self):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 2 and not self._is_offline:
+            self._is_offline = True
+            self.connectivity_changed.emit(False)
+
     def _poll_loop(self):
         while self._running:
             if self._fetch_lock.acquire(blocking=False):
@@ -343,15 +360,26 @@ class HazardFetcher(QObject):
                 watches_f = pool.submit(self._fetch_spc_watches)    if need_watches else None
                 nws_f     = pool.submit(self._fetch_nws_warnings)   if need_nws     else None
 
-                for label, f in [("spc", spc_f), ("mds", mds_f),
-                                  ("watches", watches_f), ("nws", nws_f)]:
-                    if f is None:
-                        continue
+                futures = [
+                    (lbl, f) for lbl, f in [
+                        ("spc", spc_f), ("mds", mds_f),
+                        ("watches", watches_f), ("nws", nws_f),
+                    ] if f is not None
+                ]
+                any_success = False
+                for label, f in futures:
                     try:
                         f.result()
+                        any_success = True
                     except Exception as exc:
                         log.exception("Hazard fetch failed for %s", label)
                         self.fetch_error.emit(f"Hazard fetch failed ({label}): {exc}")
+
+                if futures:
+                    if any_success:
+                        self._record_success()
+                    else:
+                        self._record_failure()
 
         except Exception as exc:
             log.exception("Hazard fetch cycle failed")

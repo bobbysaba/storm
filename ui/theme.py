@@ -32,7 +32,7 @@ QMainWindow, QWidget {
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
-    color: #B8BFCD;
+    color: #C8D0DE;
 }
 
 #floatingToolbar QToolButton:hover {
@@ -101,9 +101,13 @@ QMainWindow, QWidget {
     min-width: 280px;
 }
 
+#vehiclePill QWidget, #vehiclePill QFrame {
+    background: transparent;
+}
+
 #vehiclePill QLabel {
     background: transparent;
-    color: #C2C9D8;
+    color: #C8D0DE;
 }
 
 #vehiclePill QLabel#vehiclePillTitle {
@@ -118,29 +122,32 @@ QMainWindow, QWidget {
     color: #4A9EFF;
     border-radius: 8px;
     padding: 1px 6px;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.6px;
 }
 
 #vehiclePill QCheckBox#vehiclePillToggle {
     font-size: 10px;
-    color: #8E97AB;
+    color: #9DA6B8;
     background: transparent;
 }
 
 #vehiclePill QLabel#vehiclePillEmpty {
-    color: #8E97AB;
+    color: #9DA6B8;
     font-size: 10px;
     padding: 6px 0;
 }
 
-#vehiclePill QLabel#vehiclePillBody {
-    color: #B5BDCC;
-    font-size: 10px;
+#vehiclePill QWidget#vehicleRowsContainer {
+    background: transparent;
 }
 
 /* ── Vehicle Detail Pill ─────────────────────────────── */
+#vehicleDetailPill QWidget, #vehicleDetailPill QFrame {
+    background: transparent;
+}
+
 #vehicleDetailPill {
     background-color: rgba(10, 12, 20, 0.98);
     border-radius: 12px;
@@ -153,11 +160,6 @@ QMainWindow, QWidget {
     font-weight: 700;
     letter-spacing: 0.8px;
     color: #E8EAF0;
-}
-
-#vehicleDetailPill QLabel#vehicleDetailBody {
-    color: #B5BDCC;
-    font-size: 10px;
 }
 
 /* ── Hazard Drawer ────────────────────────────────────── */
@@ -232,9 +234,10 @@ QWidget#statusOverlayLeft, QWidget#statusOverlayRight {
 QWidget#statusOverlayLeft QLabel, QWidget#statusOverlayRight QLabel {
     background: transparent;
     font-size: 10px;
+    font-weight: 500;
     letter-spacing: 0.5px;
     padding: 0;
-    color: #C2C9D8;
+    color: #C8D0DE;
 }
 
 /* ── Side Panel ───────────────────────────────────────── */
@@ -253,7 +256,7 @@ QDockWidget::title {
     font-weight: 600;
     letter-spacing: 1.5px;
     text-transform: uppercase;
-    color: #5A5B6A;
+    color: #6E7A8F;
 }
 
 QDockWidget QWidget {
@@ -309,7 +312,7 @@ QLabel#sectionHeader {
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1.5px;
-    color: #5A5B6A;
+    color: #6E7A8F;
     padding: 4px 0px;
 }
 
@@ -321,7 +324,7 @@ QLabel#vehicleCallsign {
 
 QLabel#vehicleMeta {
     font-size: 10px;
-    color: #5A5B6A;
+    color: #6E7A8F;
 }
 
 QLabel#obsValue {
@@ -548,4 +551,4 @@ BG_PANEL      = "#0F0F1A"
 BG_ELEVATED   = "#1A1A2E"
 BORDER_COLOR  = "#1E1E2E"
 TEXT_PRIMARY  = "#E8EAF0"
-TEXT_MUTED    = "#5A5B6A"
+TEXT_MUTED    = "#6E7A8F"

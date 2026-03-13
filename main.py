@@ -226,6 +226,19 @@ def _configure_logging(level_name: str) -> None:
         datefmt="%H:%M:%S",
     )
 
+    # write WARNING+ logs to a persistent file for post-session review
+    try:
+        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storm_errors.log")
+        _fh = logging.FileHandler(_log_path, mode="a", encoding="utf-8")
+        _fh.setLevel(logging.WARNING)
+        _fh.setFormatter(logging.Formatter(
+            "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logging.getLogger().addHandler(_fh)
+    except Exception:
+        pass
+
     # set logging levels (if the level is greater than DEBUG)
     if level > logging.DEBUG:
         # set logging levels

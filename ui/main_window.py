@@ -6,13 +6,12 @@ import json
 import logging
 import threading
 import runtime_flags
-import html
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
-    QToolButton, QFrame, QCheckBox, QSizePolicy
+    QToolButton, QFrame, QCheckBox, QSizePolicy, QPushButton, QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -54,6 +53,15 @@ log = logging.getLogger(__name__)
 def _coords_close(a, b, tol: float = 1e-4) -> bool:
     """Return True if two [lat, lon] points are within ~10 m of each other."""
     return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+
+def _clear_layout(layout):
+    """Remove and schedule deletion of all widgets in a layout."""
+    while layout.count():
+        item = layout.takeAt(0)
+        w = item.widget()
+        if w is not None:
+            w.deleteLater()
 
 
 class MainWindow(QMainWindow):
@@ -169,6 +177,9 @@ class MainWindow(QMainWindow):
         # ctrl+d toggles debug panel even outside --debug mode (emergency diagnostic)
         self._debug_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
         self._debug_shortcut.activated.connect(self._toggle_debug_panel)
+        # Ctrl+E toggles error log panel
+        self._error_log_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
+        self._error_log_shortcut.activated.connect(self._toggle_error_log_panel)
         # Esc cancels in-progress line/polygon/front drawing.
         self._esc_shortcut = QShortcut(QKeySequence("Escape"), self)
         self._esc_shortcut.activated.connect(self._on_escape_pressed)
@@ -299,7 +310,7 @@ class MainWindow(QMainWindow):
         self.status_msg_label = QLabel("")
 
         for lbl in [self.coord_label, self.vehicle_count_label]:
-            lbl.setStyleSheet("color: #B5BDCC; font-size: 10px; letter-spacing: 0.5px;")
+            lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;")
 
         if self._monitor:
             monitor_badge = QLabel("● OBSERVER")
@@ -329,16 +340,24 @@ class MainWindow(QMainWindow):
         self.conn_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.conn_indicator)
 
+        self.hazard_indicator = QLabel("● DATA OFFLINE")
+        self.hazard_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
+        )
+        self.hazard_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.hazard_indicator.setVisible(False)
+        right.addWidget(self.hazard_indicator)
+
         self.date_label = QLabel("-- --- ----")
         self.date_label.setStyleSheet(
-            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #B5BDCC;"
+            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
         )
         self.date_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.date_label)
 
         self.clock_label = QLabel("--:--:-- UTC")
         self.clock_label.setStyleSheet(
-            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #B5BDCC;"
+            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
         )
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.clock_label)
@@ -516,20 +535,13 @@ class MainWindow(QMainWindow):
         self._vehicle_placeholder = placeholder
         layout.addWidget(placeholder)
 
-        self._vehicle_info_label = QLabel("")
-        self._vehicle_info_label.setWordWrap(False)
-        self._vehicle_info_label.setTextFormat(Qt.TextFormat.RichText)
-        self._vehicle_info_label.setObjectName("vehiclePillBody")
-        self._vehicle_info_label.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-        )
-        self._vehicle_info_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._vehicle_info_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
-        )
-        self._vehicle_info_label.linkActivated.connect(self._on_vehicle_panel_link)
-        self._vehicle_info_label.setVisible(False)
-        layout.addWidget(self._vehicle_info_label)
+        self._vehicle_rows_widget = QWidget()
+        self._vehicle_rows_widget.setObjectName("vehicleRowsContainer")
+        self._vehicle_rows_layout = QVBoxLayout(self._vehicle_rows_widget)
+        self._vehicle_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._vehicle_rows_layout.setSpacing(0)
+        self._vehicle_rows_widget.setVisible(False)
+        layout.addWidget(self._vehicle_rows_widget)
 
         # no stretch so the pill shrink-wraps to content
 
@@ -552,14 +564,11 @@ class MainWindow(QMainWindow):
         self._vehicle_detail_title.setObjectName("vehicleDetailTitle")
         detail_layout.addWidget(self._vehicle_detail_title)
 
-        self._vehicle_detail_body = QLabel("")
-        self._vehicle_detail_body.setWordWrap(False)
-        self._vehicle_detail_body.setTextFormat(Qt.TextFormat.RichText)
-        self._vehicle_detail_body.setObjectName("vehicleDetailBody")
-        self._vehicle_detail_body.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-        )
-        detail_layout.addWidget(self._vehicle_detail_body)
+        self._vehicle_detail_body_widget = QWidget()
+        self._vehicle_detail_body_layout = QVBoxLayout(self._vehicle_detail_body_widget)
+        self._vehicle_detail_body_layout.setContentsMargins(0, 0, 0, 0)
+        self._vehicle_detail_body_layout.setSpacing(0)
+        detail_layout.addWidget(self._vehicle_detail_body_widget)
 
         self.vehicle_detail_panel.hide()
         self.btn_vehicles.toggled.connect(self._sync_vehicle_detail_visibility)
@@ -614,6 +623,7 @@ class MainWindow(QMainWindow):
         self._hazard_fetcher.spc_watches_received.connect(self._on_spc_watches_received)
         self._hazard_fetcher.spc_mds_received.connect(self._on_spc_mds_received)
         self._hazard_fetcher.fetch_error.connect(self._on_hazard_error)
+        self._hazard_fetcher.connectivity_changed.connect(self._on_hazard_connectivity)
 
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
 
@@ -811,6 +821,10 @@ class MainWindow(QMainWindow):
         self.status_msg_label.setText(f"Hazards: {msg}")
         self._layout_overlays()
         self._hazard_error_clear_timer.start(10_000)
+
+    def _on_hazard_connectivity(self, online: bool):
+        self.hazard_indicator.setVisible(not online)
+        self._layout_overlays()
 
     def _on_spc_received(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str):
         self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str)
@@ -1660,48 +1674,64 @@ class MainWindow(QMainWindow):
         return f"{hours:.1f}h"
 
     def _refresh_vehicle_panel(self):
-        if not hasattr(self, "_vehicle_info_label"):
+        if not hasattr(self, "_vehicle_rows_layout"):
             return
+        _clear_layout(self._vehicle_rows_layout)
         if not self._vehicles:
-            self._vehicle_info_label.setText("")
+            self._vehicle_rows_widget.setVisible(False)
             return
-
-        blocks: list[str] = []
+        self._vehicle_rows_widget.setVisible(True)
         for vid in sorted(self._vehicles.keys()):
             v = self._vehicles[vid]
-            obs = v.latest_obs
-            if obs is None:
-                blocks.append(
-                    "<div style='padding:6px 0;'>"
-                    f"<span style='color:#5A5B6A'>●</span> "
-                    f"<a href='focus:{html.escape(v.id)}' style='color:#E8EAF0; font-weight:600; text-decoration:none;'>{html.escape(v.id)}</a>"
-                    "<span style='color:#5A5B6A; margin-left:6px;'>no observations</span>"
-                    "</div>"
-                )
-                continue
-
-            badge_color = self._obs_age_color(obs)
-            age_label = self._obs_age_label(obs)
-            selected = "background-color: rgba(74, 158, 255, 0.08);" if v.id in self._selected_vehicle_ids else ""
-
-            blocks.append(
-                f"<div style='padding:6px 0; border-bottom:1px solid #1E2434; {selected}'>"
-                f"<span style='color:{badge_color}; font-size:12px;'>●</span> "
-                f"<a href='focus:{html.escape(v.id)}' style='color:#E8EAF0; font-weight:600; text-decoration:none;'>{html.escape(v.id)}</a>"
-                f"<span style='color:#5A5B6A; margin:0 6px;'>·</span>"
-                f"<span style='color:#8E97AB; font-size:9px;'>{age_label} old</span>"
-                f"<span style='color:{TEXT_MUTED}; font-size:9px;'> ↗</span>"
-                "</div>"
-            )
-        self._vehicle_info_label.setText("".join(blocks))
-        self._vehicle_info_label.setVisible(bool(self._vehicles))
+            self._vehicle_rows_layout.addWidget(self._make_vehicle_row(v))
         self._layout_overlays()
 
-    def _on_vehicle_panel_link(self, href: str):
-        """Called when a vehicle name link is clicked in the vehicle panel."""
-        if not href.startswith("focus:"):
-            return
-        vid = href[len("focus:"):]
+    def _make_vehicle_row(self, v) -> QWidget:
+        obs = v.latest_obs
+        selected = v.id in self._selected_vehicle_ids
+
+        row = QFrame()
+        row.setStyleSheet(
+            "QFrame { background-color: rgba(74,158,255,0.08); border-bottom: 1px solid #1E2434; }"
+            if selected else
+            "QFrame { background: transparent; border-bottom: 1px solid #1E2434; }"
+        )
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 5, 0, 5)
+        rl.setSpacing(6)
+
+        badge_color = self._obs_age_color(obs) if obs else "#6E7A8F"
+        badge = QLabel("●")
+        badge.setStyleSheet(f"color: {badge_color}; font-size: 12px; background: transparent; border: none;")
+        rl.addWidget(badge)
+
+        name_btn = QPushButton(v.id)
+        name_btn.setFlat(True)
+        name_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #E8EAF0; "
+            "font-weight: 600; font-size: 10px; padding: 0; text-align: left; }"
+            "QPushButton:hover { color: #4A9EFF; }"
+        )
+        name_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        name_btn.clicked.connect(lambda checked=False, vid=v.id: self._on_vehicle_row_clicked(vid))
+        rl.addWidget(name_btn)
+
+        if obs is None:
+            no_obs = QLabel("no observations")
+            no_obs.setStyleSheet("color: #9DA6B8; font-size: 10px; background: transparent; border: none;")
+            rl.addWidget(no_obs)
+        else:
+            sep = QLabel("·")
+            sep.setStyleSheet("color: #6E7A8F; background: transparent; border: none;")
+            rl.addWidget(sep)
+            age = QLabel(f"{self._obs_age_label(obs)} old")
+            age.setStyleSheet("color: #C8D0DE; font-size: 10px; background: transparent; border: none;")
+            rl.addWidget(age)
+
+        rl.addStretch()
+        return row
+
+    def _on_vehicle_row_clicked(self, vid: str):
         if vid in self._selected_vehicle_ids:
             self._selected_vehicle_ids.remove(vid)
         else:
@@ -1710,6 +1740,7 @@ class MainWindow(QMainWindow):
         v = self._vehicles.get(vid)
         if v is not None:
             self.map_widget.fly_to(v.lat, v.lon, zoom=13)
+        self._refresh_vehicle_panel()
         self._refresh_vehicle_detail()
         self._sync_vehicle_detail_visibility()
         self._layout_overlays()
@@ -1730,76 +1761,104 @@ class MainWindow(QMainWindow):
             return
         if not self._selected_vehicle_ids:
             self._vehicle_detail_title.setText("VEHICLE")
-            self._vehicle_detail_body.setText("")
+            _clear_layout(self._vehicle_detail_body_layout)
             return
         self._vehicle_detail_title.setText(
             f"DETAILS ({len(self._selected_vehicle_ids)})"
         )
-
-        sections = []
+        _clear_layout(self._vehicle_detail_body_layout)
         for vid in self._selected_vehicle_ids:
-            v = self._vehicles.get(vid)
-            if v is None or v.latest_obs is None:
-                sections.append(
-                    f"<div style='padding:6px 0; border-bottom:1px solid #1E2434;'>"
-                    f"<span style='color:#E8EAF0; font-weight:600;'>{html.escape(vid)}</span>"
-                    "<span style='color:#5A5B6A; margin-left:6px;'>no observations</span>"
-                    "</div>"
-                )
-                continue
-
-            obs = v.latest_obs
-            badge_color = self._obs_age_color(obs)
-            age_label = self._obs_age_label(obs)
-
-            temp_txt = "--"
-            if obs.temperature_c is not None:
-                temp_txt = f"{obs.temperature_c * 9 / 5 + 32:.0f}F"
-            dew_txt = "--"
-            if obs.dewpoint_c is not None:
-                dew_txt = f"{obs.dewpoint_c * 9 / 5 + 32:.0f}F"
-            wind_txt = "--"
-            if obs.wind_speed_ms is not None and obs.wind_dir_deg is not None:
-                wind_kts = obs.wind_speed_ms * 1.94384
-                wind_txt = f"{wind_kts:.0f}kt @ {obs.wind_dir_deg:.0f}"
-            pres_txt = "--"
-            if obs.pressure_mb is not None:
-                pres_txt = f"{obs.pressure_mb:.1f}mb"
-            ts = obs.timestamp.astimezone(timezone.utc).strftime("%d %b %Y %H%M UTC")
-
-            sections.append(
-                "<div style='padding:6px 0; border-bottom:1px solid #1E2434;'>"
-                "<table style='border-collapse:collapse; width:100%;'>"
-                "<tr>"
-                f"<td style='padding:0 10px 4px 0; color:{badge_color}; font-size:12px;'>●</td>"
-                f"<td style='padding:0 14px 4px 0; color:#E8EAF0; font-weight:600;'>{html.escape(vid)}</td>"
-                f"<td style='padding:0 18px 4px 0; color:#8E97AB;'>{age_label} old</td>"
-                f"<td style='padding:0 10px 4px 0; color:#8E97AB;'>lat</td>"
-                f"<td style='padding:0 18px 4px 0; color:#E8EAF0;'>{obs.lat:.4f}</td>"
-                f"<td style='padding:0 10px 4px 0; color:#8E97AB;'>lon</td>"
-                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{obs.lon:.4f}</td>"
-                "</tr>"
-                "</table>"
-                f"<div style='color:#8E97AB; margin-bottom:8px;'>{ts}</div>"
-                "<table style='border-collapse:collapse;'>"
-                "<tr>"
-                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Temp</td>"
-                f"<td style='padding:0 16px 4px 0; color:#E8EAF0;'>{temp_txt}</td>"
-                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Dew</td>"
-                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{dew_txt}</td>"
-                "</tr>"
-                "<tr>"
-                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Wind</td>"
-                f"<td style='padding:0 16px 4px 0; color:#E8EAF0;'>{wind_txt}</td>"
-                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Pres</td>"
-                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{pres_txt}</td>"
-                "</tr>"
-                "</table>"
-                "</div>"
-            )
-
-        self._vehicle_detail_body.setText("".join(sections))
+            vehicle = self._vehicles.get(vid)
+            section = self._make_vehicle_detail_section(vid, vehicle)
+            self._vehicle_detail_body_layout.addWidget(section)
         self._layout_overlays()
+
+    def _make_vehicle_detail_section(self, vid: str, vehicle) -> QWidget:
+        obs = vehicle.latest_obs if vehicle else None
+
+        section = QFrame()
+        section.setStyleSheet("QFrame { background: transparent; border-bottom: 1px solid #1E2434; }")
+        sl = QVBoxLayout(section)
+        sl.setContentsMargins(0, 6, 0, 6)
+        sl.setSpacing(4)
+
+        if obs is None:
+            top = QHBoxLayout()
+            name = QLabel(vid)
+            name.setStyleSheet("color: #E8EAF0; font-weight: 600; background: transparent; border: none;")
+            top.addWidget(name)
+            no_obs = QLabel("no observations")
+            no_obs.setStyleSheet("color: #9DA6B8; margin-left: 6px; background: transparent; border: none;")
+            top.addWidget(no_obs)
+            top.addStretch()
+            sl.addLayout(top)
+            return section
+
+        badge_color = self._obs_age_color(obs)
+
+        # Top row: badge · name · age · lat/lon
+        top = QHBoxLayout()
+        top.setSpacing(8)
+
+        badge = QLabel("●")
+        badge.setStyleSheet(f"color: {badge_color}; font-size: 12px; background: transparent; border: none;")
+        top.addWidget(badge)
+
+        name_lbl = QLabel(vid)
+        name_lbl.setStyleSheet("color: #E8EAF0; font-weight: 600; background: transparent; border: none;")
+        top.addWidget(name_lbl)
+
+        age_lbl = QLabel(f"{self._obs_age_label(obs)} old")
+        age_lbl.setStyleSheet("color: #C8D0DE; background: transparent; border: none;")
+        top.addWidget(age_lbl)
+
+        top.addStretch()
+
+        for key, val in [("lat", f"{obs.lat:.4f}"), ("lon", f"{obs.lon:.4f}")]:
+            k_lbl = QLabel(key)
+            k_lbl.setStyleSheet("color: #C8D0DE; background: transparent; border: none;")
+            top.addWidget(k_lbl)
+            v_lbl = QLabel(val)
+            v_lbl.setStyleSheet("color: #E8EAF0; background: transparent; border: none;")
+            top.addWidget(v_lbl)
+
+        sl.addLayout(top)
+
+        # Timestamp
+        ts = obs.timestamp.astimezone(timezone.utc).strftime("%d %b %Y %H%M UTC")
+        ts_lbl = QLabel(ts)
+        ts_lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; background: transparent; border: none;")
+        sl.addWidget(ts_lbl)
+
+        # Obs values grid
+        temp_txt = f"{obs.temperature_c * 9/5 + 32:.0f}°F" if obs.temperature_c is not None else "--"
+        dew_txt  = f"{obs.dewpoint_c   * 9/5 + 32:.0f}°F" if obs.dewpoint_c   is not None else "--"
+        wind_txt = (
+            f"{obs.wind_speed_ms * 1.94384:.0f}kt @ {obs.wind_dir_deg:.0f}°"
+            if obs.wind_speed_ms is not None and obs.wind_dir_deg is not None else "--"
+        )
+        pres_txt = f"{obs.pressure_mb:.1f}mb" if obs.pressure_mb is not None else "--"
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(2)
+
+        for row_idx, (lbl1, val1, lbl2, val2) in enumerate([
+            ("Temp", temp_txt, "Dew",  dew_txt),
+            ("Wind", wind_txt, "Pres", pres_txt),
+        ]):
+            for col, (text, is_val) in enumerate([(lbl1, False), (val1, True), (lbl2, False), (val2, True)]):
+                cell = QLabel(text)
+                cell.setStyleSheet(
+                    "color: #E8EAF0; background: transparent; border: none;"
+                    if is_val else
+                    "color: #C8D0DE; background: transparent; border: none;"
+                )
+                grid.addWidget(cell, row_idx, col)
+
+        sl.addLayout(grid)
+        return section
 
     # ── Data inputs (GPS + file watcher) ──────────────────────────────────────
 
@@ -1974,3 +2033,63 @@ class MainWindow(QMainWindow):
             self._init_debug_panel()
         else:
             self._debug_dock.setVisible(not self._debug_dock.isVisible())
+
+    # ── Error Log Panel ────────────────────────────────────────────────────────
+
+    def _init_error_log_panel(self):
+        import os
+        self._error_log_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "storm_errors.log"
+        )
+
+        self._error_log_dock = QDockWidget("ERROR LOG  (Ctrl+E to close)", self)
+        self._error_log_dock.setObjectName("errorLogDock")
+        self._error_log_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        self._error_log_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        self._error_log_text = QLabel("no errors logged")
+        self._error_log_text.setFont(QFont("Courier New", 9))
+        self._error_log_text.setStyleSheet(
+            "color: #FFD166; background: #050508; padding: 6px; border-radius: 4px;"
+        )
+        self._error_log_text.setWordWrap(True)
+        self._error_log_text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self._error_log_text)
+
+        self._error_log_dock.setWidget(container)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._error_log_dock)
+
+        self._error_log_timer = QTimer()
+        self._error_log_timer.timeout.connect(self._refresh_error_log_panel)
+        self._error_log_timer.start(3000)
+        self._refresh_error_log_panel()
+
+    def _refresh_error_log_panel(self):
+        if not hasattr(self, "_error_log_text"):
+            return
+        import os
+        path = self._error_log_path
+        if not os.path.exists(path):
+            self._error_log_text.setText("no errors logged yet")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            tail = lines[-50:] if len(lines) > 50 else lines
+            self._error_log_text.setText("".join(tail).rstrip() or "no errors logged yet")
+        except Exception as exc:
+            self._error_log_text.setText(f"(could not read log: {exc})")
+
+    def _toggle_error_log_panel(self):
+        if not hasattr(self, "_error_log_dock"):
+            self._init_error_log_panel()
+        else:
+            self._error_log_dock.setVisible(not self._error_log_dock.isVisible())
