@@ -1,5 +1,5 @@
 @echo off
-REM scripts/create_app_windows.bat — creates a STORM shortcut on the Windows desktop.
+REM scripts/create_app_windows.bat — creates a STORM shortcut on the Desktop and attempts to pin to taskbar.
 REM Run once from the project root after cloning the repo.
 REM
 REM Requirements:
@@ -12,16 +12,38 @@ SET "SCRIPTS_DIR=%~dp0"
 
 SET "LAUNCHER=%SCRIPTS_DIR%launch_storm.bat"
 SET "ICON=%PROJECT_DIR%\storm.ico"
-SET "SHORTCUT=%USERPROFILE%\Desktop\STORM.lnk"
+SET "DESKTOP_SHORTCUT=%USERPROFILE%\Desktop\STORM.lnk"
+SET "STARTMENU_SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\STORM.lnk"
 
 IF NOT EXIST "%LAUNCHER%" (
     echo ERROR: launch_storm.bat not found in %SCRIPTS_DIR%
     EXIT /B 1
 )
 
-echo Creating STORM shortcut on Desktop...
+echo Creating STORM shortcuts on Desktop and Start Menu...
 
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT%'); $s.TargetPath = '%LAUNCHER%'; $s.WorkingDirectory = '%PROJECT_DIR%'; $s.WindowStyle = 1; if (Test-Path '%ICON%') { $s.IconLocation = '%ICON%,0' }; $s.Save()"
+powershell -NoProfile -Command ^
+  "$ws = New-Object -ComObject WScript.Shell; " ^
+  "$targets = @('%DESKTOP_SHORTCUT%','%STARTMENU_SHORTCUT%'); " ^
+  "foreach ($t in $targets) { " ^
+  "  $s = $ws.CreateShortcut($t); " ^
+  "  $s.TargetPath = '%LAUNCHER%'; " ^
+  "  $s.WorkingDirectory = '%PROJECT_DIR%'; " ^
+  "  $s.WindowStyle = 1; " ^
+  "  if (Test-Path '%ICON%') { $s.IconLocation = '%ICON%,0' }; " ^
+  "  $s.Save(); " ^
+  "} " ^
+  "$pinned = $false; " ^
+  "try { " ^
+  "  $shell = New-Object -ComObject Shell.Application; " ^
+  "  $folder = $shell.Namespace((Split-Path '%STARTMENU_SHORTCUT%')); " ^
+  "  $item = $folder.ParseName((Split-Path '%STARTMENU_SHORTCUT%' -Leaf)); " ^
+  "  if ($item) { " ^
+  "    $verb = $item.Verbs() | Where-Object { $_.Name -match 'Pin to Taskbar' -or $_.Name -match 'Taskbar' } | Select-Object -First 1; " ^
+  "    if ($verb) { $verb.DoIt(); $pinned = $true } " ^
+  "  } " ^
+  "} catch { } " ^
+  "if (-not $pinned) { Write-Host 'Note: Taskbar pin was not applied automatically. You can pin STORM from the Start Menu shortcut.' }"
 
 IF ERRORLEVEL 1 (
     echo ERROR: Could not create shortcut.
@@ -29,7 +51,7 @@ IF ERRORLEVEL 1 (
 )
 
 echo.
-echo Done.  STORM shortcut created on your Desktop.
+echo Done.  STORM shortcuts created on Desktop and Start Menu.
 echo.
 IF NOT EXIST "%ICON%" (
     echo Note: no storm.ico found — the shortcut will use the default icon.

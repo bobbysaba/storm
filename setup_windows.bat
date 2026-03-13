@@ -5,7 +5,7 @@ REM
 REM What it does:
 REM   1. Installs Miniforge (if conda is not already available)
 REM   2. Creates the 'storm' conda environment from storm_windows.yml
-REM   3. Builds the storm icon and creates a STORM shortcut on the Desktop
+REM   3. Builds the storm icon and creates STORM shortcuts (Desktop + Start Menu, attempt taskbar pin)
 
 SETLOCAL ENABLEDELAYEDEXPANSION
 
@@ -80,9 +80,9 @@ IF %ERRORLEVEL% EQU 0 (
     echo storm environment created.
 )
 
-REM ── 3. Create Desktop shortcut ───────────────────────────────────────────────
+REM ── 3. Create shortcuts (Desktop + Start Menu, attempt taskbar pin) ──────────
 
-echo Creating Desktop shortcut...
+echo Creating shortcuts (Desktop + Start Menu, attempt taskbar pin)...
 CALL "%PROJECT_DIR%\scripts\create_app_windows.bat"
 
 echo.
