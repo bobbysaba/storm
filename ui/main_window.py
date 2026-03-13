@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
-    QToolButton, QFrame, QCheckBox
+    QToolButton, QFrame, QCheckBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -159,8 +159,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(_s.value("geometry"))
         if _s.contains("windowState"):
             self.restoreState(_s.value("windowState"))
-            # keep toolbar button in sync with whatever the dock restored to
-            self.btn_vehicles.setChecked(self.vehicle_dock.isVisible())
+            # keep toolbar button in sync with current vehicle panel visibility
+            self.btn_vehicles.setChecked(self.vehicle_panel.isVisible())
 
         # Extra startup layout passes avoid first-paint clipping in floating pills.
         QTimer.singleShot(0, self._layout_overlays)
@@ -385,33 +385,34 @@ class MainWindow(QMainWindow):
             self._floating_toolbar.setGeometry(tb_x, MARGIN, tb_w, tb_h)
             self._floating_toolbar.raise_()
 
-            # Radar controls and annotation tools drop down below the toolbar
-            # as separate floating pills; each centers horizontally independently.
+            # stack open pills below the toolbar to avoid overlap
             _drop_y = MARGIN + tb_h + 4
-            if hasattr(self, "radar_controls"):
-                rc = self.radar_controls
-                rc_w = rc.sizeHint().width()
-                rc_x = max(0, (r.width() - rc_w) // 2)
-                rc.setGeometry(rc_x, _drop_y, rc_w, rc.sizeHint().height())
-                rc.raise_()
-            if hasattr(self, "annotation_tools"):
-                at = self.annotation_tools
-                at_w = at.sizeHint().width()
-                at_x = max(0, (r.width() - at_w) // 2)
-                at.setGeometry(at_x, _drop_y, at_w, at.sizeHint().height())
-                at.raise_()
-            if hasattr(self, "hazard_controls"):
-                hz = self.hazard_controls
-                hz_w = hz.sizeHint().width()
-                hz_x = max(0, (r.width() - hz_w) // 2)
-                hz.setGeometry(hz_x, _drop_y, hz_w, hz.sizeHint().height())
-                hz.raise_()
-            if hasattr(self, "satellite_controls"):
-                sc = self.satellite_controls
-                sc_w = sc.sizeHint().width()
-                sc_x = max(0, (r.width() - sc_w) // 2)
-                sc.setGeometry(sc_x, _drop_y, sc_w, sc.sizeHint().height())
-                sc.raise_()
+            _stack_y = _drop_y
+
+            def _stack(widget):
+                nonlocal _stack_y
+                if widget is None:
+                    return
+                widget.adjustSize()
+                w = widget.width()
+                x = max(0, (r.width() - w) // 2)
+                h = widget.height()
+                widget.setGeometry(x, _stack_y, w, h)
+                widget.raise_()
+                _stack_y += h + 6
+
+            if hasattr(self, "radar_controls") and self.btn_radar.isChecked():
+                _stack(self.radar_controls)
+            if hasattr(self, "vehicle_panel") and self.vehicle_panel.isVisible():
+                _stack(self.vehicle_panel)
+            if hasattr(self, "vehicle_detail_panel") and self.vehicle_detail_panel.isVisible():
+                _stack(self.vehicle_detail_panel)
+            if hasattr(self, "hazard_controls") and self.btn_hazards.isChecked():
+                _stack(self.hazard_controls)
+            if hasattr(self, "satellite_controls") and self.btn_satellite.isChecked():
+                _stack(self.satellite_controls)
+            if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
+                _stack(self.annotation_tools)
 
         # outlook panel — right side, below toolbar, above status pill
         if hasattr(self, "outlook_panel"):
@@ -452,6 +453,7 @@ class MainWindow(QMainWindow):
         self._pulse_timer.start()
         QTimer.singleShot(220, self._pulse_timer.stop)
 
+
     def update_coordinates(self, lat: float, lon: float):
         self.coord_label.setText(f"LAT: {lat:>9.4f}  LON: {lon:>10.4f}")
 
@@ -461,6 +463,8 @@ class MainWindow(QMainWindow):
 
     def update_vehicle_count(self, count: int):
         self.vehicle_count_label.setText(f"VEHICLES: {count}")
+        if hasattr(self, "_vehicle_count_badge"):
+            self._vehicle_count_badge.setText(str(count))
 
     def set_connection_status(self, connected: bool):
         if connected:
@@ -474,64 +478,91 @@ class MainWindow(QMainWindow):
                 "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
             )
 
-    # ── Vehicle Panel (Dock) ──────────────────────────────────────────────────
+    # ── Vehicle Panel (Floating Pill) ─────────────────────────────────────────
 
     def _init_vehicle_panel(self):
-        self.vehicle_dock = QDockWidget("", self)
-        self.vehicle_dock.setObjectName("vehicleDock")
-        self.vehicle_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
-        self.vehicle_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-        )
+        self.vehicle_panel = QWidget(self._map_container)
+        self.vehicle_panel.setObjectName("vehiclePill")
+        layout = QVBoxLayout(self.vehicle_panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
 
-        container = QWidget()
-        container.setStyleSheet(f"background-color: {BG_PANEL};")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        # header row
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
 
-        header = QLabel("ACTIVE VEHICLES")
-        header.setObjectName("sectionHeader")
-        layout.addWidget(header)
+        header = QLabel("VEHICLES")
+        header.setObjectName("vehiclePillTitle")
+        header_row.addWidget(header)
 
-        self._chk_station_plots = QCheckBox("show station plots")
+        self._vehicle_count_badge = QLabel("0")
+        self._vehicle_count_badge.setObjectName("vehiclePillCount")
+        header_row.addWidget(self._vehicle_count_badge)
+
+        header_row.addStretch()
+
+        self._chk_station_plots = QCheckBox("station plots")
         self._chk_station_plots.setChecked(True)
-        self._chk_station_plots.setStyleSheet(
-            f"font-size: 11px; color: {TEXT_MUTED}; padding: 2px 0;"
-        )
-        layout.addWidget(self._chk_station_plots)
+        self._chk_station_plots.setObjectName("vehiclePillToggle")
+        header_row.addWidget(self._chk_station_plots)
+
+        layout.addLayout(header_row)
 
         # placeholder until vehicle list is populated via MQTT
-        placeholder = QLabel("No vehicles connected")
-        placeholder.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; padding: 8px 0;")
+        placeholder = QLabel("")
+        placeholder.setObjectName("vehiclePillEmpty")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._vehicle_placeholder = placeholder
         layout.addWidget(placeholder)
 
         self._vehicle_info_label = QLabel("")
-        self._vehicle_info_label.setWordWrap(True)
+        self._vehicle_info_label.setWordWrap(False)
         self._vehicle_info_label.setTextFormat(Qt.TextFormat.RichText)
-        self._vehicle_info_label.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 10px; padding: 2px 0;"
+        self._vehicle_info_label.setObjectName("vehiclePillBody")
+        self._vehicle_info_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
         self._vehicle_info_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._vehicle_info_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         self._vehicle_info_label.linkActivated.connect(self._on_vehicle_panel_link)
+        self._vehicle_info_label.setVisible(False)
         layout.addWidget(self._vehicle_info_label)
 
-        layout.addStretch()
-
-        self.vehicle_dock.setWidget(container)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.vehicle_dock)
+        # no stretch so the pill shrink-wraps to content
 
         # start hidden — opened via toolbar toggle
-        self.vehicle_dock.hide()
-        self.btn_vehicles.toggled.connect(self.vehicle_dock.setVisible)
+        self.vehicle_panel.hide()
+        self.btn_vehicles.toggled.connect(self.vehicle_panel.setVisible)
         self.btn_vehicles.toggled.connect(self._start_layout_pulse)
-        self.vehicle_dock.visibilityChanged.connect(self._start_layout_pulse)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
+
+        # detail pill (hidden until a vehicle is selected)
+        self._selected_vehicle_ids = []
+        self._last_selected_vehicle_id = None
+        self.vehicle_detail_panel = QWidget(self._map_container)
+        self.vehicle_detail_panel.setObjectName("vehicleDetailPill")
+        detail_layout = QVBoxLayout(self.vehicle_detail_panel)
+        detail_layout.setContentsMargins(14, 12, 14, 12)
+        detail_layout.setSpacing(6)
+
+        self._vehicle_detail_title = QLabel("VEHICLE")
+        self._vehicle_detail_title.setObjectName("vehicleDetailTitle")
+        detail_layout.addWidget(self._vehicle_detail_title)
+
+        self._vehicle_detail_body = QLabel("")
+        self._vehicle_detail_body.setWordWrap(False)
+        self._vehicle_detail_body.setTextFormat(Qt.TextFormat.RichText)
+        self._vehicle_detail_body.setObjectName("vehicleDetailBody")
+        self._vehicle_detail_body.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        detail_layout.addWidget(self._vehicle_detail_body)
+
+        self.vehicle_detail_panel.hide()
+        self.btn_vehicles.toggled.connect(self._sync_vehicle_detail_visibility)
 
     # ── Radar ─────────────────────────────────────────────────────────────────
 
@@ -1600,14 +1631,10 @@ class MainWindow(QMainWindow):
         count = len(self._vehicles)
         self.update_vehicle_count(count)
         if hasattr(self, "_vehicle_placeholder"):
-            if count == 0:
-                self._vehicle_placeholder.setText("No vehicles connected")
-            elif count == 1:
-                self._vehicle_placeholder.setText("1 vehicle connected")
-            else:
-                self._vehicle_placeholder.setText(f"{count} vehicles connected")
+            self._vehicle_placeholder.setVisible(False)
         self._refresh_vehicle_panel()
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
+        self._refresh_vehicle_detail()
 
     def _obs_age_minutes(self, obs: Observation) -> float:
         age = datetime.now(timezone.utc) - obs.timestamp
@@ -1623,6 +1650,15 @@ class MainWindow(QMainWindow):
             return "#FF9F43"  # aging
         return "#E53935"      # stale
 
+    def _obs_age_label(self, obs: Observation) -> str:
+        age_min = self._obs_age_minutes(obs)
+        if age_min < 1.0:
+            return "<1m"
+        if age_min < 60.0:
+            return f"{age_min:.0f}m"
+        hours = age_min / 60.0
+        return f"{hours:.1f}h"
+
     def _refresh_vehicle_panel(self):
         if not hasattr(self, "_vehicle_info_label"):
             return
@@ -1636,16 +1672,86 @@ class MainWindow(QMainWindow):
             obs = v.latest_obs
             if obs is None:
                 blocks.append(
-                    "<div style='margin-bottom:10px'>"
+                    "<div style='padding:6px 0;'>"
                     f"<span style='color:#5A5B6A'>●</span> "
-                    f"<span style='color:#E8EAF0; font-weight:600;'>{html.escape(v.id)}</span><br/>"
-                    "<span style='color:#394056;'>----------------------------------</span><br/>"
-                    "<span style='color:#8E97AB;'>No observations yet</span>"
+                    f"<a href='focus:{html.escape(v.id)}' style='color:#E8EAF0; font-weight:600; text-decoration:none;'>{html.escape(v.id)}</a>"
+                    "<span style='color:#5A5B6A; margin-left:6px;'>no observations</span>"
                     "</div>"
                 )
                 continue
 
             badge_color = self._obs_age_color(obs)
+            age_label = self._obs_age_label(obs)
+            selected = "background-color: rgba(74, 158, 255, 0.08);" if v.id in self._selected_vehicle_ids else ""
+
+            blocks.append(
+                f"<div style='padding:6px 0; border-bottom:1px solid #1E2434; {selected}'>"
+                f"<span style='color:{badge_color}; font-size:12px;'>●</span> "
+                f"<a href='focus:{html.escape(v.id)}' style='color:#E8EAF0; font-weight:600; text-decoration:none;'>{html.escape(v.id)}</a>"
+                f"<span style='color:#5A5B6A; margin:0 6px;'>·</span>"
+                f"<span style='color:#8E97AB; font-size:9px;'>{age_label} old</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:9px;'> ↗</span>"
+                "</div>"
+            )
+        self._vehicle_info_label.setText("".join(blocks))
+        self._vehicle_info_label.setVisible(bool(self._vehicles))
+        self._layout_overlays()
+
+    def _on_vehicle_panel_link(self, href: str):
+        """Called when a vehicle name link is clicked in the vehicle panel."""
+        if not href.startswith("focus:"):
+            return
+        vid = href[len("focus:"):]
+        if vid in self._selected_vehicle_ids:
+            self._selected_vehicle_ids.remove(vid)
+        else:
+            self._selected_vehicle_ids.append(vid)
+        self._last_selected_vehicle_id = vid
+        v = self._vehicles.get(vid)
+        if v is not None:
+            self.map_widget.fly_to(v.lat, v.lon, zoom=13)
+        self._refresh_vehicle_detail()
+        self._sync_vehicle_detail_visibility()
+        self._layout_overlays()
+
+    def _sync_vehicle_detail_visibility(self):
+        if not hasattr(self, "vehicle_detail_panel"):
+            return
+        if not self.btn_vehicles.isChecked():
+            self.vehicle_detail_panel.hide()
+            return
+        if not self._selected_vehicle_ids:
+            self.vehicle_detail_panel.hide()
+            return
+        self.vehicle_detail_panel.show()
+
+    def _refresh_vehicle_detail(self):
+        if not hasattr(self, "vehicle_detail_panel"):
+            return
+        if not self._selected_vehicle_ids:
+            self._vehicle_detail_title.setText("VEHICLE")
+            self._vehicle_detail_body.setText("")
+            return
+        self._vehicle_detail_title.setText(
+            f"DETAILS ({len(self._selected_vehicle_ids)})"
+        )
+
+        sections = []
+        for vid in self._selected_vehicle_ids:
+            v = self._vehicles.get(vid)
+            if v is None or v.latest_obs is None:
+                sections.append(
+                    f"<div style='padding:6px 0; border-bottom:1px solid #1E2434;'>"
+                    f"<span style='color:#E8EAF0; font-weight:600;'>{html.escape(vid)}</span>"
+                    "<span style='color:#5A5B6A; margin-left:6px;'>no observations</span>"
+                    "</div>"
+                )
+                continue
+
+            obs = v.latest_obs
+            badge_color = self._obs_age_color(obs)
+            age_label = self._obs_age_label(obs)
+
             temp_txt = "--"
             if obs.temperature_c is not None:
                 temp_txt = f"{obs.temperature_c * 9 / 5 + 32:.0f}F"
@@ -1661,30 +1767,39 @@ class MainWindow(QMainWindow):
                 pres_txt = f"{obs.pressure_mb:.1f}mb"
             ts = obs.timestamp.astimezone(timezone.utc).strftime("%d %b %Y %H%M UTC")
 
-            blocks.append(
-                "<div style='margin-bottom:8px'>"
-                f"<span style='color:{badge_color}; font-size:12px;'>●</span> "
-                f"<a href='focus:{html.escape(v.id)}' style='color:#E8EAF0; font-weight:600; text-decoration:none;'>{html.escape(v.id)}</a>"
-                f"<span style='color:{TEXT_MUTED}; font-size:9px;'> ↗</span><br/>"
-                "<span style='color:#394056;'>----------------------------------</span><br/>"
-                f"<span style='color:#B5BDCC;'>{ts}</span><br/>"
-                f"<span style='color:#8E97AB;'>{obs.lat:.4f}, {obs.lon:.4f}</span><br/>"
-                f"<span style='color:#B5BDCC;'>P: {pres_txt}</span><br/>"
-                f"<span style='color:#B5BDCC;'>T: {temp_txt}</span><br/>"
-                f"<span style='color:#B5BDCC;'>Td: {dew_txt}</span><br/>"
-                f"<span style='color:#B5BDCC;'>Wind: {wind_txt}</span>"
+            sections.append(
+                "<div style='padding:6px 0; border-bottom:1px solid #1E2434;'>"
+                "<table style='border-collapse:collapse; width:100%;'>"
+                "<tr>"
+                f"<td style='padding:0 10px 4px 0; color:{badge_color}; font-size:12px;'>●</td>"
+                f"<td style='padding:0 14px 4px 0; color:#E8EAF0; font-weight:600;'>{html.escape(vid)}</td>"
+                f"<td style='padding:0 18px 4px 0; color:#8E97AB;'>{age_label} old</td>"
+                f"<td style='padding:0 10px 4px 0; color:#8E97AB;'>lat</td>"
+                f"<td style='padding:0 18px 4px 0; color:#E8EAF0;'>{obs.lat:.4f}</td>"
+                f"<td style='padding:0 10px 4px 0; color:#8E97AB;'>lon</td>"
+                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{obs.lon:.4f}</td>"
+                "</tr>"
+                "</table>"
+                f"<div style='color:#8E97AB; margin-bottom:8px;'>{ts}</div>"
+                "<table style='border-collapse:collapse;'>"
+                "<tr>"
+                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Temp</td>"
+                f"<td style='padding:0 16px 4px 0; color:#E8EAF0;'>{temp_txt}</td>"
+                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Dew</td>"
+                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{dew_txt}</td>"
+                "</tr>"
+                "<tr>"
+                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Wind</td>"
+                f"<td style='padding:0 16px 4px 0; color:#E8EAF0;'>{wind_txt}</td>"
+                "<td style='padding:0 12px 4px 0; color:#8E97AB;'>Pres</td>"
+                f"<td style='padding:0 0 4px 0; color:#E8EAF0;'>{pres_txt}</td>"
+                "</tr>"
+                "</table>"
                 "</div>"
             )
-        self._vehicle_info_label.setText("".join(blocks))
 
-    def _on_vehicle_panel_link(self, href: str):
-        """Called when a vehicle name link is clicked in the vehicle panel."""
-        if not href.startswith("focus:"):
-            return
-        vid = href[len("focus:"):]
-        v = self._vehicles.get(vid)
-        if v is not None:
-            self.map_widget.fly_to(v.lat, v.lon, zoom=13)
+        self._vehicle_detail_body.setText("".join(sections))
+        self._layout_overlays()
 
     # ── Data inputs (GPS + file watcher) ──────────────────────────────────────
 

@@ -1,26 +1,48 @@
 # core/observation.py
-# One meteorological observation record from a vehicle.
+# one meteorological observation record from a vehicle.
 
-from __future__ import annotations
-from dataclasses import dataclass, field
+# import required packages
 from datetime import datetime, timezone
 
 
-@dataclass
+# observation record
 class Observation:
-    vehicle_id:    str
-    lat:           float
-    lon:           float
-    timestamp:     datetime
-    temperature_c: float | None = None   # °C; displayed as °F
-    dewpoint_c:    float | None = None   # °C; displayed as °F
-    wind_speed_ms: float | None = None   # m/s; converted to knots for MetPy
-    wind_dir_deg:  float | None = None   # meteorological degrees (from)
-    pressure_mb:   float | None = None   # mb / hPa
+    # create a new observation instance
+    def __init__(
+        self,
+        vehicle_id,
+        lat,
+        lon,
+        timestamp,
+        temperature_c=None,
+        dewpoint_c=None,
+        wind_speed_ms=None,
+        wind_dir_deg=None,
+        pressure_mb=None,
+    ):
+        # assign vehicle id
+        self.vehicle_id = vehicle_id
+        # assign latitude
+        self.lat = lat
+        # assign longitude
+        self.lon = lon
+        # assign timestamp (utc)
+        self.timestamp = timestamp
+        # assign temperature (c)
+        self.temperature_c = temperature_c
+        # assign dewpoint (c)
+        self.dewpoint_c = dewpoint_c
+        # assign wind speed (m/s)
+        self.wind_speed_ms = wind_speed_ms
+        # assign wind direction (deg, from)
+        self.wind_dir_deg = wind_dir_deg
+        # assign pressure (mb/hpa)
+        self.pressure_mb = pressure_mb
 
+    # factory: create an observation timestamped to now (utc)
     @classmethod
-    def new(cls, vehicle_id: str, lat: float, lon: float, **kwargs) -> "Observation":
-        """Factory: create an Observation timestamped to now (UTC)."""
+    def new(cls, vehicle_id, lat, lon, **kwargs):
+        # build a new record
         return cls(
             vehicle_id=vehicle_id,
             lat=lat,
@@ -29,26 +51,33 @@ class Observation:
             **kwargs,
         )
 
-    def to_dict(self) -> dict:
+    # convert to a json-serializable dict
+    def to_dict(self):
+        # return a json-friendly dict
         return {
-            "vehicle_id":    self.vehicle_id,
-            "lat":           self.lat,
-            "lon":           self.lon,
-            "timestamp":     self.timestamp.isoformat(),
+            "vehicle_id": self.vehicle_id,
+            "lat": self.lat,
+            "lon": self.lon,
+            "timestamp": self.timestamp.isoformat(),
             "temperature_c": self.temperature_c,
-            "dewpoint_c":    self.dewpoint_c,
+            "dewpoint_c": self.dewpoint_c,
             "wind_speed_ms": self.wind_speed_ms,
-            "wind_dir_deg":  self.wind_dir_deg,
-            "pressure_mb":   self.pressure_mb,
+            "wind_dir_deg": self.wind_dir_deg,
+            "pressure_mb": self.pressure_mb,
         }
 
+    # build an observation from a dict
     @classmethod
-    def from_dict(cls, d: dict) -> "Observation":
+    def from_dict(cls, d):
+        # pull the timestamp (if present)
         ts = d.get("timestamp")
+        # if timestamp is an iso string, parse it
         if isinstance(ts, str):
             ts = datetime.fromisoformat(ts)
+        # if no timestamp, use now
         elif ts is None:
             ts = datetime.now(timezone.utc)
+        # return the record
         return cls(
             vehicle_id=d["vehicle_id"],
             lat=d["lat"],

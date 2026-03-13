@@ -282,6 +282,8 @@ def _warn_missing_files() -> None:
             )
 
 
+
+
 # main function
 def main() -> None:
     # try to configure fault handler
@@ -364,6 +366,7 @@ def main() -> None:
             "Please close all existing STORM instances before opening a new one.",
         )
         sys.exit(0)
+
 
     # pull whether or not we're in monitor mode
     monitor = args.monitor

@@ -1,55 +1,71 @@
 # core/radar_scan.py
-# Dataclass representing a single decoded NEXRAD Level 3 radar scan.
+# record representing a single decoded nexrad level 3 radar scan.
 
-from dataclasses import dataclass, field
+# import required packages
 from datetime import datetime
 import numpy as np
 
 
-@dataclass
+# radar scan record
 class RadarScan:
-    """
-    A single decoded NEXRAD Level 3 scan ready for display.
+    # create a new radar scan
+    def __init__(
+        self,
+        site,
+        product,
+        scan_time,
+        data,
+        lats,
+        lons,
+        vmin,
+        vmax,
+        units,
+        colormap,
+        az_offset=0.0,
+    ):
+        # assign site id
+        self.site = site
+        # assign product code
+        self.product = product
+        # assign scan time
+        self.scan_time = scan_time
+        # assign data array
+        self.data = data
+        # assign latitude grid
+        self.lats = lats
+        # assign longitude grid
+        self.lons = lons
+        # assign display min
+        self.vmin = vmin
+        # assign display max
+        self.vmax = vmax
+        # assign units label
+        self.units = units
+        # assign colormap name
+        self.colormap = colormap
+        # assign azimuth offset
+        self.az_offset = az_offset
 
-    Attributes:
-        site        — 4-letter NEXRAD site ID (e.g. "KTLX")
-        product     — product code (e.g. "N0Q", "N0U")
-        scan_time   — UTC time of the scan
-        data        — 2D numpy array of data values (reflectivity dBZ or velocity kt)
-        lats        — 2D numpy array of latitudes matching data shape
-        lons        — 2D numpy array of longitudes matching data shape
-        vmin        — display minimum value
-        vmax        — display maximum value
-        units       — string label for the data units
-        colormap    — name hint for the colormap to use
-    """
-    site:      str
-    product:   str
-    scan_time: datetime
-    data:      np.ndarray
-    lats:      np.ndarray
-    lons:      np.ndarray
-    vmin:      float
-    vmax:      float
-    units:     str
-    colormap:  str
-    az_offset: float = 0.0   # azimuth of row 0 in degrees (0 = North, clockwise)
-
+    # how many seconds old this scan is
     @property
-    def age_seconds(self) -> float:
-        """How many seconds old this scan is."""
+    def age_seconds(self):
+        # local import to avoid global timezone import
         from datetime import timezone
+        # compute age
         return (datetime.now(timezone.utc) - self.scan_time).total_seconds()
 
+    # whether the scan is older than 10 minutes
     @property
-    def is_stale(self) -> bool:
-        """True if the scan is older than 10 minutes."""
+    def is_stale(self):
+        # compare age against 10 minutes
         return self.age_seconds > 600
 
+    # human-readable label for ui display
     @property
-    def label(self) -> str:
-        """Human-readable label for UI display."""
+    def label(self):
+        # get friendly product name
         name = PRODUCT_META.get(self.product, {}).get("name", self.product)
+        # return label
         return f"{self.site} {name} {self.scan_time.strftime('%H:%M')}Z"
 
 

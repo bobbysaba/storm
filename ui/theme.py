@@ -93,6 +93,73 @@ QMainWindow, QWidget {
     border: none;
 }
 
+/* ── Vehicle Pill ─────────────────────────────────────── */
+#vehiclePill {
+    background-color: rgba(12, 14, 22, 0.98);
+    border-radius: 12px;
+    border: 1px solid rgba(74, 83, 108, 0.6);
+    min-width: 280px;
+}
+
+#vehiclePill QLabel {
+    background: transparent;
+    color: #C2C9D8;
+}
+
+#vehiclePill QLabel#vehiclePillTitle {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.3px;
+    color: #4A9EFF;
+}
+
+#vehiclePill QLabel#vehiclePillCount {
+    background-color: rgba(74, 158, 255, 0.16);
+    color: #4A9EFF;
+    border-radius: 8px;
+    padding: 1px 6px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}
+
+#vehiclePill QCheckBox#vehiclePillToggle {
+    font-size: 10px;
+    color: #8E97AB;
+    background: transparent;
+}
+
+#vehiclePill QLabel#vehiclePillEmpty {
+    color: #8E97AB;
+    font-size: 10px;
+    padding: 6px 0;
+}
+
+#vehiclePill QLabel#vehiclePillBody {
+    color: #B5BDCC;
+    font-size: 10px;
+}
+
+/* ── Vehicle Detail Pill ─────────────────────────────── */
+#vehicleDetailPill {
+    background-color: rgba(10, 12, 20, 0.98);
+    border-radius: 12px;
+    border: 1px solid rgba(74, 83, 108, 0.6);
+    min-width: 280px;
+}
+
+#vehicleDetailPill QLabel#vehicleDetailTitle {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: #E8EAF0;
+}
+
+#vehicleDetailPill QLabel#vehicleDetailBody {
+    color: #B5BDCC;
+    font-size: 10px;
+}
+
 /* ── Hazard Drawer ────────────────────────────────────── */
 /* Overrides the global floatingToolbar QToolButton:checked orange rule so  *
  * hazard mode buttons always show blue and stay readable over the map.     */
