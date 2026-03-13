@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox, QSizePolicy, QPushButton, QGridLayout
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
@@ -62,6 +62,21 @@ def _clear_layout(layout):
         w = item.widget()
         if w is not None:
             w.deleteLater()
+
+
+class _NetChecker(QObject):
+    """Worker that checks internet connectivity from a background thread."""
+    result_ready = pyqtSignal(str)   # "ok", "slow", or "none"
+
+    def check(self):
+        import socket, time
+        try:
+            t0 = time.monotonic()
+            s  = socket.create_connection(("1.1.1.1", 53), timeout=2)
+            s.close()
+            self.result_ready.emit("slow" if time.monotonic() - t0 > 1.0 else "ok")
+        except OSError:
+            self.result_ready.emit("none")
 
 
 class MainWindow(QMainWindow):
@@ -160,6 +175,9 @@ class MainWindow(QMainWindow):
         self._clock_timer.start(1000)
         self._clock_layout_synced = False
         self._update_clock()
+
+        # internet connectivity indicator — checks every 30 seconds
+        self._start_net_check()
 
         # Restore window geometry and dock layout from last session.
         _s = QSettings("NSSL", "STORM")
@@ -313,7 +331,7 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;")
 
         if self._monitor:
-            monitor_badge = QLabel("● OBSERVER")
+            monitor_badge = QLabel("● MONITOR")
             monitor_badge.setStyleSheet(
                 "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
             )
@@ -333,7 +351,7 @@ class MainWindow(QMainWindow):
         right.setContentsMargins(10, 6, 10, 6)
         right.setSpacing(2)
 
-        self.conn_indicator = QLabel("● OFFLINE")
+        self.conn_indicator = QLabel("● AWS OFFLINE")
         self.conn_indicator.setStyleSheet(
             "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
         )
@@ -347,6 +365,14 @@ class MainWindow(QMainWindow):
         self.hazard_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.hazard_indicator.setVisible(False)
         right.addWidget(self.hazard_indicator)
+
+        self.net_indicator = QLabel("")
+        self.net_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #3A3B4A;"
+        )
+        self.net_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.net_indicator.setVisible(False)
+        right.addWidget(self.net_indicator)
 
         self.date_label = QLabel("-- --- ----")
         self.date_label.setStyleSheet(
@@ -485,14 +511,45 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_vehicle_count_badge"):
             self._vehicle_count_badge.setText(str(count))
 
+    def _start_net_check(self):
+        """Start periodic internet connectivity check (TCP to 1.1.1.1:53 every 30s)."""
+        self._net_check_timer = QTimer(self)
+        self._net_check_timer.timeout.connect(self._run_net_check)
+        self._net_check_timer.start(30_000)
+        self._run_net_check()  # immediate first check
+
+    def _run_net_check(self):
+        checker = _NetChecker()
+        checker.result_ready.connect(self._on_net_result)
+        threading.Thread(target=checker.check, daemon=True).start()
+
+    def _on_net_result(self, state: str):
+        if state == "ok":
+            self.net_indicator.setText("● NET OK")
+            self.net_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
+            )
+        elif state == "slow":
+            self.net_indicator.setText("● NET SLOW")
+            self.net_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #FFD166;"
+            )
+        else:
+            self.net_indicator.setText("● NO INTERNET")
+            self.net_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
+            )
+        self.net_indicator.setVisible(True)
+        self._layout_overlays()
+
     def set_connection_status(self, connected: bool):
         if connected:
-            self.conn_indicator.setText("● CONNECTED")
+            self.conn_indicator.setText("● AWS OK")
             self.conn_indicator.setStyleSheet(
                 "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
             )
         else:
-            self.conn_indicator.setText("● OFFLINE")
+            self.conn_indicator.setText("● AWS OFFLINE")
             self.conn_indicator.setStyleSheet(
                 "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
             )
@@ -528,10 +585,11 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(header_row)
 
-        # placeholder until vehicle list is populated via MQTT
-        placeholder = QLabel("")
+        # placeholder until vehicle list is populated
+        placeholder = QLabel("AWAITING VEHICLES...")
         placeholder.setObjectName("vehiclePillEmpty")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignTop)
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setStyleSheet("color: #3A3B5A; font-size: 10px; font-weight: 500; letter-spacing: 0.5px; padding: 6px 0;")
         self._vehicle_placeholder = placeholder
         layout.addWidget(placeholder)
 
@@ -629,7 +687,7 @@ class MainWindow(QMainWindow):
 
         self._hazard_error_clear_timer = QTimer()
         self._hazard_error_clear_timer.setSingleShot(True)
-        self._hazard_error_clear_timer.timeout.connect(self._clear_radar_error)
+        self._hazard_error_clear_timer.timeout.connect(self._clear_hazard_error)
 
         # Seed NWS bbox from MBTiles domain extent so warnings are filtered
         # to the loaded tile set regardless of current map position.
@@ -798,7 +856,12 @@ class MainWindow(QMainWindow):
         self._radar_error_clear_timer.start(10_000)
 
     def _clear_radar_error(self):
-        if self.status_msg_label.text().startswith("Radar:") or self.status_msg_label.text().startswith("Hazards:"):
+        if self.status_msg_label.text().startswith("Radar:"):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+
+    def _clear_hazard_error(self):
+        if self.status_msg_label.text().startswith("Hazards:"):
             self.status_msg_label.setText("")
             self._layout_overlays()
 
@@ -1079,6 +1142,7 @@ class MainWindow(QMainWindow):
     def _show_scan(self, scan):
         self._radar_overlay.update(scan)
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
+        self._radar_error_clear_timer.stop()
         self.status_msg_label.setText(scan.label)
         self._layout_overlays()
 
@@ -1134,10 +1198,18 @@ class MainWindow(QMainWindow):
     def _init_vehicle_fetcher(self):
         self._vehicle_fetcher = VehicleFetcher(parent=self)
         self._vehicle_fetcher.obs_ready.connect(self._on_fetched_vehicle_obs)
+        self._vehicle_fetcher.fetch_done.connect(self._on_vehicle_fetch_done)
         if config.VEHICLES_URL:
             self._vehicle_fetcher.start(config.VEHICLES_URL, config.VEHICLES_POLL_S)
         else:
             log.info("vehicles_url not configured — vehicle fetcher disabled")
+
+    def _on_vehicle_fetch_done(self):
+        """Hide the 'awaiting vehicles' placeholder after the first fetch completes."""
+        if hasattr(self, "_vehicle_placeholder"):
+            self._vehicle_placeholder.setVisible(False)
+        # disconnect after first fire — no need to run on every subsequent poll
+        self._vehicle_fetcher.fetch_done.disconnect(self._on_vehicle_fetch_done)
 
     def _on_fetched_vehicle_obs(self, obs):
         # If this machine is producing local data (not in monitor mode),
@@ -1994,7 +2066,7 @@ class MainWindow(QMainWindow):
         lines.append("─── MQTT ────────────────────────────────")
         mqtt = getattr(self, "_mqtt_client", None)
         if mqtt:
-            connected = self.conn_indicator.text().startswith("● C")
+            connected = self.conn_indicator.text() == "● AWS OK"
             lines.append(
                 f"host: {config.MQTT_HOST or '(not configured)'}:{config.MQTT_PORT}  "
                 f"connected: {connected}"

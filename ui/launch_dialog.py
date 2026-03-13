@@ -253,7 +253,7 @@ class _UpdateWorker(QObject):
         try:
             subprocess.run(
                 ["git", "fetch", "--quiet"],
-                cwd=self._root, timeout=10,
+                cwd=self._root, timeout=5,
                 capture_output=True, check=True,
             )
             # Local uncommitted changes?
@@ -562,14 +562,14 @@ class LaunchDialog(QDialog):
             self._update_btn.setText("DEV BUILD")
             self._update_btn.setStyleSheet(_UPD_CURRENT)
         elif commits_behind < 0:
-            self._update_btn.setText("COULD NOT CHECK FOR UPDATES")
-            self._update_btn.setStyleSheet(_UPD_ERROR)
+            self._update_btn.setText("⚠   UPDATE CHECK FAILED — PROCEED AND TRY AGAIN LATER")
+            self._update_btn.setStyleSheet(_UPD_WARNING)
         elif commits_behind == 0:
             self._update_btn.setText("✓   UP TO DATE")
             self._update_btn.setStyleSheet(_UPD_CURRENT)
         else:
             n = commits_behind
-            label = f"{n} UPDATE{'S' if n > 1 else ''} AVAILABLE — CLICK TO UPDATE"
+            label = "UPDATE AVAILABLE — CLICK TO UPDATE"
             self._update_btn.setText(label)
             self._update_btn.setStyleSheet(_UPD_AVAILABLE)
             self._update_btn.setEnabled(True)

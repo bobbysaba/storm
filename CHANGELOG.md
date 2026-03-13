@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.0] - 2026-03-13
+### Added
+- Internet connectivity indicator in status pill (● NET OK / ● NET SLOW / ● NO INTERNET) — TCP check to 1.1.1.1:53 every 30 seconds
+- "AWAITING VEHICLES..." placeholder in vehicle panel that auto-hides after first fetch completes
+
+### Changed
+- Tile and asset serving migrated from Flask (localhost:8765) to QWebEngineUrlSchemeHandler (storm://app/) — no open TCP port, no firewall exposure, faster startup
+- Flask and Werkzeug removed as dependencies from both Mac and Windows env files
+- MQTT status indicator renamed: CONNECTED → AWS OK, OFFLINE → AWS OFFLINE
+- Monitor mode badge in status pill renamed: OBSERVER → MONITOR
+- Update check failure message changed from red error to amber warning with "PROCEED AND TRY AGAIN LATER" guidance
+- Update available text simplified from "N updates available" to "UPDATE AVAILABLE"
+- Git fetch timeout in launch dialog reduced from 10s to 5s for faster failure on slow connections
+
+### Fixed
+- Hazard error clear timer was incorrectly wired to the radar error clear method — each now only clears its own prefix
+- Radar error in status bar now clears immediately when a successful scan arrives instead of waiting for the timer
+- Vehicle panel placeholder visibility check used `isVisible()` which returned False when panel was closed — now hides unconditionally after first fetch
+- Net connectivity indicator used `QTimer.singleShot` from a background thread (unreliable) — replaced with `_NetChecker` QObject using a proper pyqtSignal
+
+---
+
 ## [0.5.0] - 2026-03-08
 ### Added
 - Hazard overlay panel (SPC and NWS layers accessible via HAZARDS toolbar button)

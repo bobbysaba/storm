@@ -159,7 +159,28 @@ def _build_parser() -> argparse.ArgumentParser:
     # return the parsed arguments
     return parser
 
-# function to configure qt webengine 
+# function to register the custom storm:// URL scheme with WebEngine.
+# MUST be called before QApplication is created.
+def _register_storm_scheme() -> None:
+    try:
+        from PyQt6.QtWebEngineCore import QWebEngineUrlScheme
+        scheme = QWebEngineUrlScheme(b"storm")
+        scheme.setSyntax(QWebEngineUrlScheme.Syntax.Host)
+        flags = (
+            QWebEngineUrlScheme.Flag.SecureScheme
+            | QWebEngineUrlScheme.Flag.CorsEnabled
+        )
+        # FetchApiAllowed lets JS fetch() use the storm:// scheme (Qt 6.2+)
+        fetch_flag = getattr(QWebEngineUrlScheme.Flag, "FetchApiAllowed", None)
+        if fetch_flag is not None:
+            flags |= fetch_flag
+        scheme.setFlags(flags)
+        QWebEngineUrlScheme.registerScheme(scheme)
+    except Exception as exc:
+        print(f"[STORM] WARNING: could not register storm:// scheme: {exc}", flush=True)
+
+
+# function to configure qt webengine
 def _configure_qt_webengine_env() -> None:
     # if the platform is windows, force software rendering
     if sys.platform == "win32":
@@ -241,8 +262,6 @@ def _configure_logging(level_name: str) -> None:
 
     # set logging levels (if the level is greater than DEBUG)
     if level > logging.DEBUG:
-        # set logging levels
-        logging.getLogger("werkzeug").setLevel(logging.ERROR)
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
         logging.getLogger("metpy").setLevel(logging.WARNING)
 
@@ -352,6 +371,10 @@ def main() -> None:
 
     # configure the Qt webengine environment
     _configure_qt_webengine_env()
+
+    # register storm:// URL scheme — must happen before QApplication
+    if not runtime_flags.FLAGS.safe_map_mode:
+        _register_storm_scheme()
 
     # set the render grid size for radar overlays
     if args.render_grid_size > 0:

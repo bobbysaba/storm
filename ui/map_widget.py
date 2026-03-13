@@ -1,11 +1,10 @@
 # ui/map_widget.py
 # Embeds a MapLibre GL JS map inside a QWebEngineView.
-# Spins up a local Flask server serving the map HTML, static assets,
-# and vector tiles from MBTiles — all from the same HTTP origin.
+# Assets and vector tiles are served via a QWebEngineUrlSchemeHandler
+# (storm://app/...) — no Flask server or open TCP port required.
 
 import os
 import sqlite3
-import threading
 import zlib
 import sys
 import runtime_flags
@@ -26,16 +25,14 @@ if not SAFE_MAP_MODE:
     from PyQt6.QtWebEngineCore import QWebEngineSettings
     from PyQt6.QtWebChannel import QWebChannel
 
-from flask import Flask, Response, jsonify, send_from_directory
-
 from config import ACCENT_COLOR
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-DEFAULT_LAT      = 35.22
-DEFAULT_LON      = -97.44
-DEFAULT_ZOOM     = 6
-TILE_SERVER_PORT = 8765
+DEFAULT_LAT  = 35.22
+DEFAULT_LON  = -97.44
+DEFAULT_ZOOM = 6
+_STORM_BASE  = "storm://app"   # base for all asset/tile URLs
 
 TILES_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "tiles", "storm.mbtiles")
@@ -119,15 +116,15 @@ def build_safe_map_html() -> str:
 
 def build_map_html() -> str:
     """Build the full HTML page for the MapLibre map."""
-    tile_url = f"http://localhost:{TILE_SERVER_PORT}/tiles/{{z}}/{{x}}/{{y}}.pbf"
+    tile_url = f"{_STORM_BASE}/tiles/{{z}}/{{x}}/{{y}}.pbf"
 
     return f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <title>STORM</title>
-  <script src="http://localhost:{TILE_SERVER_PORT}/static/maplibre-gl.js"></script>
-  <link href="http://localhost:{TILE_SERVER_PORT}/static/maplibre-gl.css" rel="stylesheet"/>
+  <script src="{_STORM_BASE}/static/maplibre-gl.js"></script>
+  <link href="{_STORM_BASE}/static/maplibre-gl.css" rel="stylesheet"/>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <style>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -441,7 +438,7 @@ def build_map_html() -> str:
     const STORM_STYLE = {{
       version: 8,
       name: "STORM Dark",
-      glyphs: "http://localhost:{TILE_SERVER_PORT}/static/fonts/{{fontstack}}/{{range}}.pbf",
+      glyphs: "{_STORM_BASE}/static/fonts/{{fontstack}}/{{range}}.pbf",
       sources: {{
         "storm-tiles": {{
           type: "vector",
@@ -832,7 +829,7 @@ def build_map_html() -> str:
 
     map.on("load", function() {{
       console.log("STORM map loaded.");
-      const glyphCheck = "http://localhost:{TILE_SERVER_PORT}/static/fonts/Noto%20Sans%20Regular/0-255.pbf";
+      const glyphCheck = "{_STORM_BASE}/static/fonts/Noto%20Sans%20Regular/0-255.pbf";
       fetch(glyphCheck).then(r => console.log("Glyph check:", r.status, glyphCheck))
         .catch(err => console.error("Glyph check failed:", err));
 
@@ -2293,131 +2290,6 @@ def build_map_html() -> str:
 </html>"""
 
 
-# ── Local Flask Server ────────────────────────────────────────────────────────
-
-def create_server(mbtiles_path: str, static_path: str) -> Flask:
-    """
-    Flask server serving:
-      GET /                        — map HTML page
-      GET /static/<file>           — MapLibre JS/CSS assets
-      GET /fonts/<stack>/<range>   — placeholder (fonts served via fallback)
-      GET /tiles/metadata.json     — tile metadata
-      GET /tiles/{z}/{x}/{y}.pbf   — vector tiles from MBTiles
-    """
-    app = Flask(__name__, static_folder=None)
-    app.logger.disabled = True
-
-    import logging
-    logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-    html = build_map_html()
-    fonts_path = os.path.join(static_path, "fonts")
-
-    @app.route("/")
-    def serve_map():
-        return Response(html, mimetype="text/html")
-
-    @app.route("/static/<path:filename>")
-    def serve_static(filename):
-        try:
-            return send_from_directory(static_path, filename)
-        except Exception:
-            # Missing glyph range (trimmed font set) — return empty PBF so
-            # MapLibre skips silently instead of logging an error.
-            if filename.endswith(".pbf"):
-                return Response(b"", mimetype="application/x-protobuf")
-            raise
-
-    @app.route("/fonts/<path:filename>")
-    def serve_fonts(filename):
-        # Serve local glyph PBF files for MapLibre text labels.
-        return send_from_directory(fonts_path, filename)
-
-    @app.route("/tiles/metadata.json")
-    def serve_metadata():
-        try:
-            conn = sqlite3.connect(mbtiles_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name, value FROM metadata")
-            meta = dict(cursor.fetchall())
-            conn.close()
-        except Exception:
-            meta = {}
-
-        bounds = meta.get("bounds", "-116.0,28.0,-82.0,49.0").split(",")
-        center = meta.get("center", f"{DEFAULT_LON},{DEFAULT_LAT},6").split(",")
-
-        resp = jsonify({
-            "tilejson": "2.2.0",
-            "tiles": [f"http://localhost:{TILE_SERVER_PORT}/tiles/{{z}}/{{x}}/{{y}}.pbf"],
-            "minzoom": int(meta.get("minzoom", 0)),
-            "maxzoom": int(meta.get("maxzoom", 14)),
-            "bounds": [float(b) for b in bounds],
-            "center": [float(c) for c in center],
-            "format": "pbf",
-            "name": meta.get("name", "STORM Plains")
-        })
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
-
-    @app.route("/tiles/<int:z>/<int:x>/<int:y>.pbf")
-    def serve_tile(z, x, y):
-        # Flip Y: MBTiles TMS -> XYZ
-        y_tms = (1 << z) - 1 - y
-
-        try:
-            conn = sqlite3.connect(mbtiles_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT tile_data FROM tiles "
-                "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, y_tms)
-            )
-            row = cursor.fetchone()
-            conn.close()
-        except Exception as e:
-            return Response(f"DB error: {e}", status=500)
-
-        if row is None:
-            return Response("", status=204)
-
-        tile_data = bytes(row[0])
-
-        try:
-            tile_data = zlib.decompress(tile_data, 32 + zlib.MAX_WBITS)
-        except Exception:
-            pass
-
-        return Response(
-            tile_data,
-            status=200,
-            headers={
-                "Content-Type": "application/x-protobuf",
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "max-age=3600"
-            }
-        )
-
-    return app
-
-
-def start_server(mbtiles_path: str, static_path: str, port: int):
-    """Start the Flask server in a background daemon thread."""
-    if not os.path.exists(mbtiles_path):
-        print(f"[STORM] WARNING: MBTiles not found at {mbtiles_path}")
-        return
-
-    app = create_server(mbtiles_path, static_path)
-
-    def run():
-        try:
-            app.run(host="127.0.0.1", port=port, threaded=True)
-        except Exception as e:
-            print(f"[STORM] Server ERROR: {e}")
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    print(f"[STORM] Server running at http://localhost:{port}/")
 
 
 # ── Qt Bridge ─────────────────────────────────────────────────────────────────
@@ -2487,7 +2359,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             self._js_queue = []
             return
 
-        start_server(TILES_PATH, STATIC_PATH, TILE_SERVER_PORT)
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+        from ui.tile_scheme_handler import StormSchemeHandler
+        self._scheme_handler = StormSchemeHandler(
+            TILES_PATH, STATIC_PATH, build_map_html()
+        )
+        QWebEngineProfile.defaultProfile().installUrlSchemeHandler(
+            b"storm", self._scheme_handler
+        )
 
         settings = self.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -2514,11 +2393,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self._js_queue: list[str] = []
         self.loadFinished.connect(self._on_page_loaded)
 
-        # Delay load to give Flask time to start
-        QTimer.singleShot(600, self._load_map)
+        QTimer.singleShot(0, self._load_map)
 
     def _load_map(self):
-        self.load(QUrl(f"http://localhost:{TILE_SERVER_PORT}/"))
+        self.load(QUrl("storm://app/"))
 
     def _on_page_loaded(self, ok: bool):
         if ok:

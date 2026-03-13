@@ -27,7 +27,8 @@ class VehicleFetcher(QObject):
     platform-specific SSL/network crashes seen on some Windows setups.
     """
 
-    obs_ready = pyqtSignal(object)   # Observation
+    obs_ready  = pyqtSignal(object)   # Observation
+    fetch_done = pyqtSignal()         # fired after each fetch cycle, even if 0 vehicles
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -118,6 +119,7 @@ class VehicleFetcher(QObject):
         finally:
             with self._inflight_lock:
                 self._inflight = False
+            self.fetch_done.emit()
 
 
 # Helpers
