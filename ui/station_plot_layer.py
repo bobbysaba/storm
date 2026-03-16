@@ -64,39 +64,42 @@ def _render(obs: Observation) -> bytes:
     fig.patch.set_alpha(0.0)
     ax.patch.set_alpha(0.0)
 
-    sp = StationPlot(ax, [0.0], [0.0], fontsize=9, spacing=22)
+    sp = StationPlot(ax, [0.0], [0.0], fontsize=11, spacing=17)
 
     # Temperature (°F) — upper-left, red
     if obs.temperature_c is not None:
         t_f = round(obs.temperature_c * 9 / 5 + 32)
-        sp.plot_parameter("NW", [t_f], color="#FF6464")
+        sp.plot_parameter("NW", [t_f], color="#FF6464", fontweight="bold")
 
     # Dewpoint (°F) — lower-left, green
     if obs.dewpoint_c is not None:
         dp_f = round(obs.dewpoint_c * 9 / 5 + 32)
-        sp.plot_parameter("SW", [dp_f], color="#64FF96")
+        sp.plot_parameter("SW", [dp_f], color="#64FF96", fontweight="bold")
 
     # Pressure encoding — upper-right, white
     # Standard station plot encoding: last 3 digits of (mb × 10), zero-padded.
     # e.g. 1013.2 mb → 1132 → "132"  |  965.8 mb → 9658 → "658"
     if obs.pressure_mb is not None:
         pres_code = int(round(obs.pressure_mb * 10)) % 1000
-        sp.plot_parameter("NE", [float(pres_code)], color="#E8EAF0",
+        sp.plot_parameter("NE", [float(pres_code)], color="#E8EAF0", fontweight="bold",
                           formatter=lambda v: f"{int(round(v)) % 1000:03d}")
 
     # Wind barb — white
     # MetPy expects u/v components in knots pointing *into* the station
     # (meteorological convention: u/v point toward where the wind is going FROM).
     # Negate sin/cos to convert "wind coming from" direction to "wind going to".
-    if obs.wind_speed_ms is not None and obs.wind_dir_deg is not None:
+    # Skip barb (and center dot) for calm/near-calm winds (<2 kt) — MetPy renders
+    # a plain circle for calm which clashes visually with the vehicle marker dot.
+    _CALM_KT = 2.0
+    if (obs.wind_speed_ms is not None and obs.wind_dir_deg is not None
+            and obs.wind_speed_ms * 1.94384 >= _CALM_KT):
         spd_kts = obs.wind_speed_ms * 1.94384   # m/s → knots for MetPy barbs
         dir_rad = math.radians(obs.wind_dir_deg)
         u = -spd_kts * math.sin(dir_rad)
         v = -spd_kts * math.cos(dir_rad)
         sp.plot_barb([u], [v], color="#E8EAF0")
-
-    # Center station dot
-    ax.plot([0], [0], "o", color="white", markersize=3, zorder=5)
+        # Center station dot (only needed as barb anchor when a barb is drawn)
+        ax.plot([0], [0], "o", color="white", markersize=3, zorder=5)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", transparent=True, bbox_inches="tight",
