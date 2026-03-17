@@ -17,6 +17,7 @@ import logging
 
 from PyQt6.QtCore import QObject
 
+import config
 from core.observation import Observation
 from network.mqtt_client import MQTTClient
 
@@ -60,6 +61,9 @@ def _build_payload(obs: Observation) -> dict:
         "gps_time":   obs.timestamp.strftime("%H%M%S"),   # HHMMSS
     }
 
+    icon_type = obs.icon_type or config.VEHICLE_ICON
+    if icon_type:
+        payload["icon_type"] = icon_type
     if obs.wind_speed_ms  is not None: payload["wspd"]     = obs.wind_speed_ms
     if obs.wind_dir_deg   is not None: payload["wdir"]     = obs.wind_dir_deg
     if obs.temperature_c  is not None: payload["t_fast"]   = obs.temperature_c

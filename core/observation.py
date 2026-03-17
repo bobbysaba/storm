@@ -14,6 +14,7 @@ class Observation:
         lat,
         lon,
         timestamp,
+        icon_type=None,
         temperature_c=None,
         dewpoint_c=None,
         wind_speed_ms=None,
@@ -28,6 +29,8 @@ class Observation:
         self.lon = lon
         # assign timestamp (utc)
         self.timestamp = timestamp
+        # assign icon type when available
+        self.icon_type = icon_type
         # assign temperature (c)
         self.temperature_c = temperature_c
         # assign dewpoint (c)
@@ -59,6 +62,7 @@ class Observation:
             "lat": self.lat,
             "lon": self.lon,
             "timestamp": self.timestamp.isoformat(),
+            "icon_type": self.icon_type,
             "temperature_c": self.temperature_c,
             "dewpoint_c": self.dewpoint_c,
             "wind_speed_ms": self.wind_speed_ms,
@@ -83,6 +87,7 @@ class Observation:
             lat=d["lat"],
             lon=d["lon"],
             timestamp=ts,
+            icon_type=d.get("icon_type"),
             temperature_c=d.get("temperature_c"),
             dewpoint_c=d.get("dewpoint_c"),
             wind_speed_ms=d.get("wind_speed_ms"),

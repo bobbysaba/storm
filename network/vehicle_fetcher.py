@@ -184,6 +184,7 @@ def _parse_entry(vid: str, entry: dict) -> Observation | None:
         lat=lat,
         lon=lon,
         timestamp=ts,
+        icon_type=(entry.get("icon_type") or "").strip() or None,
         wind_speed_ms=_float_or_none(entry.get("wspd")),
         wind_dir_deg=_float_or_none(entry.get("wdir")),
         temperature_c=_float_or_none(entry.get("t_fast")),
