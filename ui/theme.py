@@ -220,8 +220,34 @@ QMainWindow, QWidget {
     background-color: transparent;
     border: none;
     color: #C1C9D8;
-    font-size: 9px;
+    font-size: 11px;
     selection-background-color: #FF6B35;
+}
+
+QWidget#outlookTabRow {
+    background: transparent;
+}
+
+#outlookTabBtn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(74, 83, 108, 0.5);
+    border-radius: 4px;
+    color: #8A92A8;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+}
+
+#outlookTabBtn:hover {
+    background: rgba(74, 158, 255, 0.12);
+    border-color: rgba(74, 158, 255, 0.4);
+    color: #C1C9D8;
+}
+
+#outlookTabBtn:checked {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #4A9EFF;
 }
 
 /* ── Status Overlays ──────────────────────────────────── */

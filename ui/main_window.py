@@ -81,7 +81,7 @@ class _NetChecker(QObject):
 
 class MainWindow(QMainWindow):
     # Emitted from background threads to update the discussion text panel safely.
-    _panel_text_ready = pyqtSignal(str, str)
+    _panel_text_ready = pyqtSignal(int, str, str)
 
     def __init__(self, debug: bool = False, monitor: bool = False):
         super().__init__()
@@ -263,7 +263,8 @@ class MainWindow(QMainWindow):
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
-        self._panel_text_ready.connect(self.outlook_panel.show_text)
+        self._fetch_generation = 0
+        self._panel_text_ready.connect(self._on_panel_text_ready)
 
         self._add_separator(tb)
 
@@ -932,53 +933,58 @@ class MainWindow(QMainWindow):
         self._start_layout_pulse()
 
     def _on_spc_feature_clicked(self, payload: str):
-        """Handle a click on an SPC cat or MD polygon — fetch and show discussion text."""
+        """Handle a click on one or more overlapping hazard polygons."""
+        import re as _re
         try:
-            data = json.loads(payload)
+            raw = json.loads(payload)
         except (json.JSONDecodeError, ValueError):
             return
-        source = data.get("source", "")
-        props = data.get("properties", {})
 
-        if source == "spc-cat":
-            title = "DAY 1 CONVECTIVE OUTLOOK"
-            kind, identifier = "swo", None
-        elif source == "spc-mds":
-            import re as _re
-            name = str(props.get("name", "")).strip()
-            # name may be "MD 0176", "MCD 0176", "MCD0176", "176", etc.
-            # Robustly extract the numeric portion regardless of prefix.
-            _m = _re.search(r'\d+', name)
-            num = _m.group().zfill(4) if _m else "0000"
-            title = f"MESOSCALE DISCUSSION {num}"
-            kind, identifier = "mcd", num
-        elif source == "spc-watches":
-            watch_num = str(props.get("watch_num", "")).strip()
-            if not watch_num:
-                return
-            event_label = str(props.get("event", "Watch")).upper()
-            title = f"{event_label} {watch_num}"
-            kind, identifier = "watch", watch_num
-        elif source == "nws-warnings":
-            warning_url = str(props.get("warning_url", "")).strip()
-            if not warning_url:
-                return
-            prod_type = str(props.get("prod_type", "Warning")).title()
-            wfo = str(props.get("wfo", "")).strip()
-            title = f"{prod_type} — {wfo}" if wfo else prod_type
-            kind, identifier = "warning", warning_url
-        else:
+        # JS sends a list of all unique features under the click point.
+        items = raw if isinstance(raw, list) else [raw]
+
+        fetch_targets: list[tuple[str, str, str | None]] = []  # (title, kind, identifier)
+        for data in items:
+            source = data.get("source", "")
+            props = data.get("properties", {})
+
+            if source == "spc-cat":
+                fetch_targets.append(("DAY 1 CONVECTIVE OUTLOOK", "swo", None))
+            elif source == "spc-mds":
+                name = str(props.get("name", "")).strip()
+                _m = _re.search(r'\d+', name)
+                num = _m.group().zfill(4) if _m else "0000"
+                fetch_targets.append((f"MESOSCALE DISCUSSION {num}", "mcd", num))
+            elif source == "spc-watches":
+                watch_num = str(props.get("watch_num", "")).strip()
+                if not watch_num:
+                    continue
+                event_label = str(props.get("event", "Watch")).upper()
+                fetch_targets.append((f"{event_label} {watch_num}", "watch", watch_num))
+            elif source == "nws-warnings":
+                warning_url = str(props.get("warning_url", "")).strip()
+                if not warning_url:
+                    continue
+                prod_type = str(props.get("prod_type", "Warning")).title()
+                wfo = str(props.get("wfo", "")).strip()
+                title = f"{prod_type} — {wfo}" if wfo else prod_type
+                fetch_targets.append((title, "warning", warning_url))
+
+        if not fetch_targets:
             return
 
-        self.outlook_panel.show_loading(title)
+        self._fetch_generation += 1
+        gen = self._fetch_generation
+        self.outlook_panel.show_loading([t[0] for t in fetch_targets])
         self._layout_overlays()
-        threading.Thread(
-            target=self._fetch_outlook_text,
-            args=(title, kind, identifier),
-            daemon=True,
-        ).start()
+        for title, kind, identifier in fetch_targets:
+            threading.Thread(
+                target=self._fetch_outlook_text,
+                args=(gen, title, kind, identifier),
+                daemon=True,
+            ).start()
 
-    def _fetch_outlook_text(self, title: str, kind: str, identifier: str | None):
+    def _fetch_outlook_text(self, generation: int, title: str, kind: str, identifier: str | None):
         """Fetch SPC discussion text in a background thread.
 
         Sources:
@@ -996,10 +1002,19 @@ class MainWindow(QMainWindow):
         }
 
         def _fetch(url: str) -> str:
-            req = Request(url, headers=HEADERS)
-            with urlopen(req, timeout=12) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            return raw.strip("\x01\x02\x03\r\n").strip()
+            import time as _time
+            last_exc = None
+            for attempt in range(3):
+                if attempt:
+                    _time.sleep(0.8)
+                try:
+                    req = Request(url, headers=HEADERS)
+                    with urlopen(req, timeout=15) as resp:
+                        raw = resp.read().decode("utf-8", errors="replace")
+                    return raw.strip("\x01\x02\x03\r\n").strip()
+                except Exception as _e:
+                    last_exc = _e
+            raise last_exc
 
         try:
             if kind == "swo":
@@ -1032,7 +1047,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             text = f"Failed to load discussion:\n{exc}"
 
-        self._panel_text_ready.emit(title, text)
+        self._panel_text_ready.emit(generation, title, text)
+
+    def _on_panel_text_ready(self, generation: int, title: str, text: str):
+        if generation == self._fetch_generation:
+            self.outlook_panel.show_text(title, text)
 
     def _on_spc_mode_changed(self, mode: str):
         outlook_on = mode == "outlook"

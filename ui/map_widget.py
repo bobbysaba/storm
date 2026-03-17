@@ -1303,29 +1303,40 @@ def build_map_html() -> str:
           ? map.queryRenderedFeatures(e.point, {{layers: _hazardLayers}})
           : [];
         if (_hits.length > 0) {{
-          var _lbl = '';
-          // Determine the topmost source and build an appropriate label.
-          var _topSrc = _hits[0].source || '';
-          if (_topSrc === 'spc-cat') {{
-            var _catNames = {{MRGL:'Marginal',SLGHT:'Slight',ENH:'Enhanced',MDT:'Moderate',HIGH:'High'}};
-            var _cp = _hits[0].properties || {{}};
-            _lbl = _catNames[_cp.cat] || _cp.cat || 'Outlook';
-          }} else if (_topSrc === 'spc-tor') {{
-            _lbl = _spcProbLabel('Tor', _hits, 'spc-tor');
-          }} else if (_topSrc === 'spc-wind') {{
-            _lbl = _spcProbLabel('Wind', _hits, 'spc-wind');
-          }} else if (_topSrc === 'spc-hail') {{
-            _lbl = _spcProbLabel('Hail', _hits, 'spc-hail');
-          }} else if (_topSrc === 'spc-watches') {{
-            var _wp = _hits[0].properties || {{}};
-            _lbl = _wp.event || _wp.headline || 'Watch';
-          }} else if (_topSrc === 'spc-mds') {{
-            var _mp = _hits[0].properties || {{}};
-            _lbl = _mp.name || 'Mesoscale Discussion';
-          }} else if (_topSrc === 'nws-warnings') {{
-            var _np = _hits[0].properties || {{}};
-            _lbl = _np.prod_type || _np.event || 'Warning';
-          }}
+          // Build a label for every unique product under the cursor.
+          var _tipParts = [];
+          var _tipSeen = {{}};
+          // Probabilistic layers first (tor/wind/hail) — _spcProbLabel merges sig+prob.
+          [['spc-tor','Tor'],['spc-wind','Wind'],['spc-hail','Hail']].forEach(function(pv) {{
+            var l = _spcProbLabel(pv[1], _hits, pv[0]);
+            if (l) _tipParts.push(l);
+          }});
+          _hits.forEach(function(h) {{
+            var src = h.source || '';
+            var props = h.properties || {{}};
+            var lbl = '', key = '';
+            if (src === 'spc-cat') {{
+              key = 'spc-cat';
+              if (!_tipSeen[key]) {{
+                var _catNames = {{MRGL:'Marginal',SLGHT:'Slight',ENH:'Enhanced',MDT:'Moderate',HIGH:'High'}};
+                lbl = _catNames[props.cat] || props.cat || 'Outlook';
+              }}
+            }} else if (src === 'spc-watches') {{
+              key = 'watch:' + (props.watch_num || props.event || '');
+              if (!_tipSeen[key]) lbl = props.event || 'Watch';
+            }} else if (src === 'spc-mds') {{
+              key = 'md:' + (props.name || '');
+              if (!_tipSeen[key]) lbl = props.name || 'Mesoscale Discussion';
+            }} else if (src === 'nws-warnings') {{
+              key = 'warn:' + (props.event || '') + ':' + (props.wfo || '');
+              if (!_tipSeen[key]) lbl = props.prod_type || props.event || 'Warning';
+            }}
+            if (key && lbl && !_tipSeen[key]) {{
+              _tipSeen[key] = true;
+              _tipParts.push(lbl);
+            }}
+          }});
+          var _lbl = _tipParts.join(' \u2502 ');
           if (_lbl) {{
             _htip.textContent = _lbl;
             var _mx = e.originalEvent.clientX;
@@ -1386,10 +1397,27 @@ def build_map_html() -> str:
       if (spcClickLayers.length > 0) {{
         var spcHits = map.queryRenderedFeatures(e.point, {{layers: spcClickLayers}});
         if (spcHits.length > 0) {{
-          var hit = spcHits[0];
-          var payload = JSON.stringify({{source: hit.source, properties: hit.properties || {{}}}});
-          if (bridge) bridge.on_feature_click(payload);
-          return;
+          // Collect one entry per unique text product (deduplicate overlapping polygons).
+          var _clickSeen = {{}};
+          var _clickFeatures = [];
+          spcHits.forEach(function(hit) {{
+            var src = hit.source;
+            var props = hit.properties || {{}};
+            var key;
+            if (src === 'spc-cat')          key = 'spc-cat';
+            else if (src === 'spc-mds')     key = 'spc-mds:'      + (props.name      || '');
+            else if (src === 'spc-watches') key = 'spc-watches:'   + (props.watch_num || props.event || '');
+            else if (src === 'nws-warnings') key = 'nws-warnings:' + (props.event     || '') + ':' + (props.wfo || '');
+            else return;
+            if (!_clickSeen[key]) {{
+              _clickSeen[key] = true;
+              _clickFeatures.push({{source: src, properties: props}});
+            }}
+          }});
+          if (_clickFeatures.length > 0) {{
+            if (bridge) bridge.on_feature_click(JSON.stringify(_clickFeatures));
+            return;
+          }}
         }}
       }}
       if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
