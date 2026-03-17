@@ -5,7 +5,7 @@
 # vehicle state container
 class Vehicle:
     # create a new vehicle object
-    def __init__(self, id, lat, lon, color="#FF6B35", latest_obs=None):
+    def __init__(self, id, lat, lon, color="#FF6B35", latest_obs=None, icon_type="car"):
         # assign id
         self.id = id
         # assign latitude
@@ -16,3 +16,5 @@ class Vehicle:
         self.color = color
         # assign latest observation
         self.latest_obs = latest_obs
+        # assign icon type (car, drone, mesonet, lidar, radar)
+        self.icon_type = icon_type

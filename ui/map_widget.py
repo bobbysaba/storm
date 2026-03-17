@@ -1431,21 +1431,49 @@ def build_map_html() -> str:
     }});
 
     // ── Python-callable Functions ─────────────────────────────────────────
-    window.stormAddVehicle = function(id, lat, lon, color) {{
+    var _vIcons = {{
+      car: function(c) {{ return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="9" width="18" height="8" rx="2" fill="'+c+'"/><rect x="6" y="5" width="12" height="7" rx="2" fill="'+c+'" opacity="0.85"/><circle cx="7.5" cy="18" r="2.2" fill="'+c+'"/><circle cx="16.5" cy="18" r="2.2" fill="'+c+'"/></svg>'; }},
+      radar: function(c) {{ return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="9" r="7" fill="'+c+'"/><rect x="11" y="16" width="2" height="3" fill="'+c+'"/><rect x="7" y="19" width="10" height="2" rx="1" fill="'+c+'"/></svg>'; }},
+      lidar: function(c) {{ return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="7" y="14" width="10" height="7" fill="'+c+'"/><line x1="7" y1="14" x2="2" y2="14" stroke="'+c+'" stroke-width="4" stroke-linecap="square"/><line x1="17" y1="14" x2="22" y2="14" stroke="'+c+'" stroke-width="4" stroke-linecap="square"/><circle cx="12" cy="11" r="2.5" fill="'+c+'"/><rect x="11" y="21" width="2" height="3" fill="'+c+'"/></svg>'; }},
+      mesonet: function(c) {{ return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="11" y="12" width="2" height="10" rx="1" fill="'+c+'"/><line x1="3" y1="10" x2="22" y2="10" stroke="'+c+'" stroke-width="1.5"/><circle cx="12" cy="10" r="1.5" fill="'+c+'"/><line x1="3" y1="5" x2="3" y2="15" stroke="'+c+'" stroke-width="3" stroke-linecap="round"/><polygon points="17,10 22,10 22,4" fill="'+c+'"/></svg>'; }},
+      drone: function(c) {{ return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><line x1="7" y1="7" x2="17" y2="17" stroke="'+c+'" stroke-width="2"/><line x1="17" y1="7" x2="7" y2="17" stroke="'+c+'" stroke-width="2"/><rect x="10" y="10" width="4" height="4" rx="1" fill="'+c+'"/><circle cx="5.5" cy="5.5" r="2.5" fill="'+c+'" opacity="0.85"/><circle cx="18.5" cy="5.5" r="2.5" fill="'+c+'" opacity="0.85"/><circle cx="5.5" cy="18.5" r="2.5" fill="'+c+'" opacity="0.85"/><circle cx="18.5" cy="18.5" r="2.5" fill="'+c+'" opacity="0.85"/></svg>'; }},
+    }};
+
+    window.stormAddVehicle = function(id, lat, lon, color, iconType) {{
       const existing = document.getElementById("vehicle-" + id);
       if (existing) existing.remove();
 
+      var _iconFn = _vIcons[iconType] || _vIcons.car;
+      var _c = color || "{ACCENT_COLOR}";
       const el = document.createElement("div");
       el.id = "vehicle-" + id;
-      el.style.cssText = `
-        width: 12px; height: 12px; border-radius: 50%;
-        background-color: ${{color || "{ACCENT_COLOR}"}};
-        box-shadow: 0 0 8px ${{color || "{ACCENT_COLOR}"}};
-        cursor: pointer;
-      `;
-      new maplibregl.Marker({{ element: el }})
+      el.style.cssText = "width:28px;height:28px;cursor:pointer;";
+      el.style.filter = "drop-shadow(0 0 5px " + _c + ")";
+      el.innerHTML = _iconFn(_c);
+
+      el.addEventListener("mouseenter", function(e) {{
+        var tip = document.getElementById("hazard-tooltip");
+        if (tip) {{
+          tip.textContent = id;
+          tip.style.display = "block";
+          tip.style.left = (e.clientX + 14) + "px";
+          tip.style.top  = (e.clientY - 36) + "px";
+        }}
+      }});
+      el.addEventListener("mousemove", function(e) {{
+        var tip = document.getElementById("hazard-tooltip");
+        if (tip && tip.style.display !== "none") {{
+          tip.style.left = (e.clientX + 14) + "px";
+          tip.style.top  = (e.clientY - 36) + "px";
+        }}
+      }});
+      el.addEventListener("mouseleave", function() {{
+        var tip = document.getElementById("hazard-tooltip");
+        if (tip) tip.style.display = "none";
+      }});
+
+      new maplibregl.Marker({{ element: el, anchor: "center" }})
         .setLngLat([lon, lat])
-        .setPopup(new maplibregl.Popup({{ offset: 16 }}).setText(id))
         .addTo(map);
     }};
 
@@ -2449,9 +2477,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             self._js_queue.append(script)
 
     def add_vehicle(self, vehicle_id: str, lat: float, lon: float,
-                    color: str = ACCENT_COLOR):
+                    color: str = ACCENT_COLOR, icon_type: str = "car"):
         self.run_js(
-            f"stormAddVehicle('{vehicle_id}', {lat}, {lon}, '{color}');"
+            f"stormAddVehicle('{vehicle_id}', {lat}, {lon}, '{color}', '{icon_type}');"
         )
 
     def remove_vehicle(self, vehicle_id: str):

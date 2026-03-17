@@ -420,6 +420,9 @@ def main() -> None:
         # get the vehicle ID
         config.VEHICLE_ID = _normalize_vehicle_id(dialog.vehicle_id())
 
+        # get the vehicle icon type selected by the user
+        config.VEHICLE_ICON = dialog.vehicle_icon()
+
         # get the directory for real-time observation files (if any)
         config.OBS_FILE_DIR = dialog.data_dir()
 

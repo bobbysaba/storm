@@ -1726,13 +1726,14 @@ class MainWindow(QMainWindow):
 
     def update_vehicle_obs(self, obs: Observation) -> None:
         """Public entry point for all vehicle observation updates (MQTT, file watcher, GPS)."""
+        _icon = config.VEHICLE_ICON if obs.vehicle_id == config.VEHICLE_ID else "car"
         v = self._vehicles.setdefault(
             obs.vehicle_id,
-            Vehicle(id=obs.vehicle_id, lat=obs.lat, lon=obs.lon),
+            Vehicle(id=obs.vehicle_id, lat=obs.lat, lon=obs.lon, icon_type=_icon),
         )
         v.lat, v.lon, v.latest_obs = obs.lat, obs.lon, obs
         marker_color = self._obs_age_color(obs)
-        self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color)
+        self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
         count = len(self._vehicles)
         self.update_vehicle_count(count)
         if hasattr(self, "_vehicle_placeholder"):

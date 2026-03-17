@@ -98,8 +98,6 @@ def _render(obs: Observation) -> bytes:
         u = -spd_kts * math.sin(dir_rad)
         v = -spd_kts * math.cos(dir_rad)
         sp.plot_barb([u], [v], color="#E8EAF0")
-        # Center station dot (only needed as barb anchor when a barb is drawn)
-        ax.plot([0], [0], "o", color="white", markersize=3, zorder=5)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", transparent=True, bbox_inches="tight",

@@ -18,6 +18,9 @@ VERSION: str = (_PROJ / "VERSION").read_text().strip()
 # set a default vehicle ID (will be overwritten)
 VEHICLE_ID = "storm"
 
+# set a default vehicle icon type (will be overwritten from launch dialog)
+VEHICLE_ICON = "car"
+
 # define the path to the obs file (will be overwritten)
 OBS_FILE_DIR = ""
 

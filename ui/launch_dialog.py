@@ -14,12 +14,40 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QCheckBox, QFileDialog, QFrame,
+    QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QSettings, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QSettings, QObject, QTimer, pyqtSignal, QByteArray, QSize
+from PyQt6.QtGui import QPixmap, QPainter, QIcon
 
 import config
+
+# SVG icon definitions for the vehicle icon picker (same shapes as the map markers).
+# Color is substituted at render time so selected/unselected states differ.
+_ICON_SVGS = {
+    "car":     '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="9" width="18" height="8" rx="2" fill="{c}"/><rect x="6" y="5" width="12" height="7" rx="2" fill="{c}" opacity="0.85"/><circle cx="7.5" cy="18" r="2.2" fill="{c}"/><circle cx="16.5" cy="18" r="2.2" fill="{c}"/></svg>',
+    "drone":   '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><line x1="7" y1="7" x2="17" y2="17" stroke="{c}" stroke-width="2"/><line x1="17" y1="7" x2="7" y2="17" stroke="{c}" stroke-width="2"/><rect x="10" y="10" width="4" height="4" rx="1" fill="{c}"/><circle cx="5.5" cy="5.5" r="2.5" fill="{c}" opacity="0.85"/><circle cx="18.5" cy="5.5" r="2.5" fill="{c}" opacity="0.85"/><circle cx="5.5" cy="18.5" r="2.5" fill="{c}" opacity="0.85"/><circle cx="18.5" cy="18.5" r="2.5" fill="{c}" opacity="0.85"/></svg>',
+    "mesonet": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="11" y="12" width="2" height="10" rx="1" fill="{c}"/><line x1="3" y1="10" x2="22" y2="10" stroke="{c}" stroke-width="1.5"/><circle cx="12" cy="10" r="1.5" fill="{c}"/><line x1="3" y1="5" x2="3" y2="15" stroke="{c}" stroke-width="3" stroke-linecap="round"/><polygon points="17,10 22,10 22,4" fill="{c}"/></svg>',
+    "lidar":   '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="7" y="14" width="10" height="7" fill="{c}"/><line x1="7" y1="14" x2="2" y2="14" stroke="{c}" stroke-width="4" stroke-linecap="square"/><line x1="17" y1="14" x2="22" y2="14" stroke="{c}" stroke-width="4" stroke-linecap="square"/><circle cx="12" cy="11" r="2.5" fill="{c}"/><rect x="11" y="21" width="2" height="3" fill="{c}"/></svg>',
+    "radar":   '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="9" r="7" fill="{c}"/><rect x="11" y="16" width="2" height="3" fill="{c}"/><rect x="7" y="19" width="10" height="2" rx="1" fill="{c}"/></svg>',
+}
+
+
+def _svg_pixmap(key: str, color: str, size: int = 28) -> QPixmap:
+    """Render one of the _ICON_SVGS to a QPixmap at *size* × *size* pixels."""
+    try:
+        from PyQt6.QtSvg import QSvgRenderer
+        svg_bytes = QByteArray(_ICON_SVGS[key].replace("{c}", color).encode())
+        renderer = QSvgRenderer(svg_bytes)
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return pixmap
+    except Exception:
+        return QPixmap()
+
 
 _DIALOG_STYLE = """
 QDialog {
@@ -141,6 +169,40 @@ QCheckBox::indicator:checked {
 }
 QFrame#divider {
     color: #1E1E2E;
+}
+QToolButton#iconBtn {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #5A5B6A;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 6px 4px 4px 4px;
+    min-width: 52px;
+}
+QToolButton#iconBtn:hover {
+    border-color: #4A9EFF;
+    color: #4A9EFF;
+}
+QToolButton#iconBtn:disabled {
+    background-color: #12121E;
+    border: 1px solid #16162A;
+    color: #2A2A3E;
+}
+"""
+
+_ICON_SELECTED_STYLE = """
+QToolButton {
+    background-color: #0D1A2E;
+    border: 2px solid #00CFFF;
+    border-radius: 6px;
+    color: #00CFFF;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 5px 3px 3px 3px;
+    min-width: 52px;
 }
 """
 
@@ -404,9 +466,10 @@ class LaunchDialog(QDialog):
 
         s = QSettings()
         saved = {
-            "vehicle_id":  s.value("launch/vehicle_id",  "",    type=str),
-            "data_dir":    s.value("launch/data_dir",    "",    type=str),
+            "vehicle_id":   s.value("launch/vehicle_id",   "",    type=str),
+            "data_dir":     s.value("launch/data_dir",     "",    type=str),
             "monitor_mode": s.value("launch/monitor_mode", False, type=bool),
+            "vehicle_icon": s.value("launch/vehicle_icon", "car", type=str),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
@@ -492,7 +555,32 @@ class LaunchDialog(QDialog):
         root.addWidget(hint)
         root.addSpacing(20)
 
-        # Single lock controls both fields; lock when either value exists.
+        # Vehicle icon picker
+        icon_label = QLabel("VEHICLE ICON")
+        icon_label.setObjectName("fieldLabel")
+        root.addWidget(icon_label)
+        root.addSpacing(6)
+
+        icon_row = QHBoxLayout()
+        icon_row.setSpacing(6)
+        self._icon_btns: dict[str, QToolButton] = {}
+        for key, label in [("car", "CAR"), ("drone", "DRONE"), ("mesonet", "MESO"),
+                           ("lidar", "LIDAR"), ("radar", "RADAR")]:
+            btn = QToolButton()
+            btn.setText(label)
+            btn.setObjectName("iconBtn")
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setIconSize(QSize(28, 28))
+            btn.setIcon(QIcon(_svg_pixmap(key, "#5A5B6A")))
+            btn.clicked.connect(lambda _checked, k=key: self._select_icon(k))
+            icon_row.addWidget(btn)
+            self._icon_btns[key] = btn
+        root.addLayout(icon_row)
+        root.addSpacing(20)
+
+        self._set_icon_selected(saved.get("vehicle_icon", "car"))
+
+        # Single lock controls all vehicle config fields; lock when either value exists.
         self._set_fields_locked(bool(saved.get("vehicle_id") or saved.get("data_dir")))
 
         # Monitor mode
@@ -548,7 +636,9 @@ class LaunchDialog(QDialog):
         self._dir_input.setReadOnly(locked)
         self._browse_btn.setEnabled(not locked)
         self._lock_btn.setText("🔒" if locked else "🔓")
-        self._lock_btn.setToolTip("Unlock both fields" if locked else "Lock both fields")
+        self._lock_btn.setToolTip("Unlock all fields" if locked else "Lock all fields")
+        for btn in self._icon_btns.values():
+            btn.setEnabled(not locked)
 
     def _toggle_fields_lock(self):
         self._set_fields_locked(not self._vid_input.isReadOnly())
@@ -556,9 +646,21 @@ class LaunchDialog(QDialog):
     def _set_fields_monitor_disabled(self, disabled: bool):
         for w in (self._vid_input, self._lock_btn, self._dir_input, self._browse_btn):
             w.setEnabled(not disabled)
+        for btn in self._icon_btns.values():
+            btn.setEnabled(not disabled)
 
     def _on_monitor_toggled(self):
         self._set_fields_monitor_disabled(self._monitor_cb.isChecked())
+
+    def _select_icon(self, key: str):
+        self._set_icon_selected(key)
+
+    def _set_icon_selected(self, key: str):
+        self._selected_icon = key if key in self._icon_btns else "car"
+        for k, btn in self._icon_btns.items():
+            selected = (k == self._selected_icon)
+            btn.setStyleSheet(_ICON_SELECTED_STYLE if selected else "")
+            btn.setIcon(QIcon(_svg_pixmap(k, "#00CFFF" if selected else "#5A5B6A")))
 
     # ── Update check ───────────────────────────────────────────────────────────
 
@@ -701,6 +803,7 @@ class LaunchDialog(QDialog):
         s.setValue("launch/vehicle_id",   self._vid_input.text().strip())
         s.setValue("launch/data_dir",     self._dir_input.text().strip())
         s.setValue("launch/monitor_mode", self._monitor_cb.isChecked())
+        s.setValue("launch/vehicle_icon", getattr(self, "_selected_icon", "car"))
         self.accept()
 
     # ── Accessors (read by main.py after accept) ───────────────────────────────
@@ -717,3 +820,8 @@ class LaunchDialog(QDialog):
 
     def monitor(self) -> bool:
         return self._monitor_cb.isChecked()
+
+    def vehicle_icon(self) -> str:
+        if self._monitor_cb.isChecked():
+            return "car"
+        return getattr(self, "_selected_icon", "car")
