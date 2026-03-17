@@ -22,7 +22,6 @@ class RuntimeFlags:
     enable_startup_toggles: bool = False
     disable_radar: bool = False
     disable_mqtt: bool = False
-    disable_vehicle_fetcher: bool = False
     disable_annotations: bool = False
     disable_deploy_locs: bool = False
     disable_data_inputs: bool = False
@@ -67,7 +66,6 @@ def apply_debug_run_profile(level: int | None) -> None:
         FLAGS.safe_map_mode = True
         FLAGS.disable_radar = True
         FLAGS.disable_mqtt = True
-        FLAGS.disable_vehicle_fetcher = True
         FLAGS.disable_annotations = True
         FLAGS.disable_deploy_locs = True
         FLAGS.disable_data_inputs = True
@@ -95,7 +93,6 @@ def finalize_flags() -> None:
     if any([
         FLAGS.disable_radar,
         FLAGS.disable_mqtt,
-        FLAGS.disable_vehicle_fetcher,
         FLAGS.disable_annotations,
         FLAGS.disable_deploy_locs,
         FLAGS.disable_data_inputs,
@@ -104,6 +101,5 @@ def finalize_flags() -> None:
 
     # MQTT-off implies dependent systems off.
     if FLAGS.disable_mqtt:
-        FLAGS.disable_vehicle_fetcher = True
         FLAGS.disable_annotations = True
         FLAGS.disable_data_inputs = True

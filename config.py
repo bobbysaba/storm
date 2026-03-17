@@ -50,12 +50,6 @@ DEPLOY_LOCS_FILE = str(_PROJ / "data" / "deployment_locations.json")
 # accent color
 ACCENT_COLOR = "#00CFFF"
 
-# link to the vehicle locations file (from NSSL THREDDS)
-VEHICLES_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/placefile_info/storm_locs.json"
-
-# how often to poll for vehicle locations
-VEHICLES_POLL_S = 10
-
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 

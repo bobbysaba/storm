@@ -675,14 +675,6 @@ Automatically detects and reads NMEA sentences from a connected serial GPS devic
 
 Receives observations from other vehicles via the `storm/vehicles/{id}` topic. Active whenever MQTT is connected and not disabled.
 
-### NSSL External Vehicle Fetcher
-
-Polls an external NSSL JSON feed every 10 seconds to display the locations of other chase vehicles on the map. These vehicles show as markers but do not have history graphs (no obs data, position only).
-
-**URL:** `https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/placefile_info/storm_locs.json`
-
-**Disabled by:** `--disable-vehicle-fetcher`
-
 ### Observation History Buffer
 
 Each vehicle maintains a 10-minute rolling buffer of observations. This buffer drives the history graph in the vehicle panel. The buffer is kept in memory only — it does not persist across STORM restarts.
@@ -723,7 +715,6 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | NWS Warnings | Every 2 minutes | All active VTEC phenomenons |
 | GOES Satellite (CONUS) | Every 5 minutes | Full CONUS, up to 10 frames |
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
-| NSSL Vehicle Feed | Every 10 seconds | External chase vehicle positions |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
 | GPS (Track B) | Real-time / continuous | NMEA sentences |
 | MQTT Inbound | Real-time | Vehicle obs, annotations, drawings, cones |
@@ -748,7 +739,6 @@ Run `python main.py --help` for the full list. Key options:
 ```
 --disable-radar                Hide the RADAR control; disable all radar fetching
 --disable-mqtt                 Disable all MQTT features (sync, vehicle obs)
---disable-vehicle-fetcher      Disable NSSL external vehicle location polling
 --disable-annotations          Disable annotations, drawings, station plots, and cones
 --disable-deploy-locs          Disable deployment location markers
 --disable-data-inputs          Disable local file watcher and GPS reader
@@ -801,7 +791,6 @@ Edit `config.py` for persistent defaults:
 | `MQTT_HOST` | AWS IoT endpoint hostname |
 | `MQTT_PORT` | MQTT port (default: 8883 for TLS) |
 | `MQTT_USE_TLS` | Whether to require TLS (default: True) |
-| `VEHICLES_URL` | NSSL external vehicle location feed URL |
 
 ### Persistent Session State (QSettings)
 
@@ -963,7 +952,6 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | MQTT Vehicle Obs (inbound) | ✅ Enabled | `--disable-mqtt` |
 | Local File Watcher (Track A) | ✅ Enabled (if dir set) | `--disable-data-inputs` or no dir selected |
 | GPS Reader (Track B) | ✅ Enabled (if device present) | `--disable-data-inputs` |
-| NSSL External Vehicle Fetcher | ✅ Enabled | `--disable-vehicle-fetcher` |
 | Radar Playback (loop mode) | ✅ Enabled | `--disable-radar` |
 | Satellite Playback (loop mode) | ✅ Enabled | n/a |
 

@@ -42,7 +42,6 @@ from network.annotation_sync import AnnotationSync
 from network.storm_cone_sync import StormConeSync
 from network.drawing_sync import DrawingSync
 from network.vehicle_sync import VehicleSync
-from network.vehicle_fetcher import VehicleFetcher
 from data.gps_reader import GPSReader
 from data.obs_file_watcher import ObsFileWatcher, FieldMap
 from ui.station_plot_layer import StationPlotLayer
@@ -106,14 +105,12 @@ class MainWindow(QMainWindow):
         # Keep them opt-in so normal runs always start full functionality.
         self._disable_radar = runtime_flags.FLAGS.disable_radar
         self._disable_mqtt = runtime_flags.FLAGS.disable_mqtt
-        self._disable_vehicle_fetcher = runtime_flags.FLAGS.disable_vehicle_fetcher
         self._disable_annotations = runtime_flags.FLAGS.disable_annotations
         self._disable_deploy_locs = runtime_flags.FLAGS.disable_deploy_locs
         self._disable_data_inputs = runtime_flags.FLAGS.disable_data_inputs
 
         # Features that require MQTT should be disabled when MQTT is disabled.
         if self._disable_mqtt:
-            self._disable_vehicle_fetcher = True
             self._disable_annotations = True
             self._disable_data_inputs = True
 
@@ -127,10 +124,9 @@ class MainWindow(QMainWindow):
             )
         else:
             log.warning(
-                "Startup toggles: radar=%s mqtt=%s fetcher=%s annotations=%s deploy_locs=%s data_inputs=%s",
+                "Startup toggles: radar=%s mqtt=%s annotations=%s deploy_locs=%s data_inputs=%s",
                 "off" if self._disable_radar else "on",
                 "off" if self._disable_mqtt else "on",
-                "off" if self._disable_vehicle_fetcher else "on",
                 "off" if self._disable_annotations else "on",
                 "off" if self._disable_deploy_locs else "on",
                 "off" if self._disable_data_inputs else "on",
@@ -141,10 +137,6 @@ class MainWindow(QMainWindow):
                 self._init_mqtt()
             if not self._disable_data_inputs:
                 self._init_data_inputs()
-
-            # 2) Vehicle locations fetcher (after local data)
-            if not self._disable_vehicle_fetcher:
-                self._init_vehicle_fetcher()
 
             # 3) Heavier network fetchers after vehicles are live
             if not self._disable_radar:
@@ -1204,8 +1196,9 @@ class MainWindow(QMainWindow):
         self._mqtt_client.connected.connect(self._on_mqtt_connected)
         self._mqtt_client.disconnected.connect(self._on_mqtt_disconnected)
 
-        # publish-only — used by GPS-only vehicles to push position to broker
+        # local vehicles publish to the broker; remote vehicles subscribe back in
         self._vehicle_sync = VehicleSync(self._mqtt_client, parent=self)
+        self._vehicle_sync.vehicle_received.connect(self._on_remote_vehicle_obs)
         self._storm_cone_sync = StormConeSync(self._mqtt_client, parent=self)
 
         # connect after a short delay so the window is fully painted first
@@ -1214,23 +1207,7 @@ class MainWindow(QMainWindow):
         else:
             log.info("MQTT host not configured — running offline")
 
-    def _init_vehicle_fetcher(self):
-        self._vehicle_fetcher = VehicleFetcher(parent=self)
-        self._vehicle_fetcher.obs_ready.connect(self._on_fetched_vehicle_obs)
-        self._vehicle_fetcher.fetch_done.connect(self._on_vehicle_fetch_done)
-        if config.VEHICLES_URL:
-            self._vehicle_fetcher.start(config.VEHICLES_URL, config.VEHICLES_POLL_S)
-        else:
-            log.info("vehicles_url not configured — vehicle fetcher disabled")
-
-    def _on_vehicle_fetch_done(self):
-        """Hide the 'awaiting vehicles' placeholder after the first fetch completes."""
-        if hasattr(self, "_vehicle_placeholder"):
-            self._vehicle_placeholder.setVisible(False)
-        # disconnect after first fire — no need to run on every subsequent poll
-        self._vehicle_fetcher.fetch_done.disconnect(self._on_vehicle_fetch_done)
-
-    def _on_fetched_vehicle_obs(self, obs):
+    def _on_remote_vehicle_obs(self, obs):
         # If this machine is producing local data (not in monitor mode),
         # prefer the local stream for its own vehicle ID.
         if not self._monitor and obs.vehicle_id == config.VEHICLE_ID:

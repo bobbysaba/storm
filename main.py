@@ -150,7 +150,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-startup-toggles", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--disable-radar", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--disable-mqtt", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--disable-vehicle-fetcher", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--disable-annotations", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--disable-deploy-locs", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--disable-data-inputs", action=argparse.BooleanOptionalAction, default=None)
@@ -347,7 +346,6 @@ def main() -> None:
         enable_startup_toggles = args.enable_startup_toggles,
         disable_radar = args.disable_radar,
         disable_mqtt = args.disable_mqtt,
-        disable_vehicle_fetcher = args.disable_vehicle_fetcher,
         disable_annotations = args.disable_annotations,
         disable_deploy_locs = args.disable_deploy_locs,
         disable_data_inputs = args.disable_data_inputs,

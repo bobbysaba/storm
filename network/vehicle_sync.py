@@ -1,6 +1,8 @@
 # network/vehicle_sync.py
-# Publishes vehicle surface obs to MQTT.
-# Used by both Track A (obs file watcher) and Track B (GPS reader).
+# Syncs vehicle observations over MQTT.
+#
+# Outbound (local -> broker): publish_obs()
+# Inbound  (broker -> local): vehicle_received signal
 #
 # Topic layout: storm/vehicles/{vehicle_id}
 #
@@ -14,8 +16,9 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, pyqtSignal
 
 import config
 from core.observation import Observation
@@ -28,13 +31,21 @@ _TOPIC_PREFIX = "storm/vehicles"
 
 class VehicleSync(QObject):
     """
-    Publishes vehicle observations to MQTT.
+    Bidirectional vehicle observation sync over MQTT.
     Used by both Track A (obs file watcher) and Track B (GPS reader).
     """
+
+    vehicle_received = pyqtSignal(object)   # Observation instance
 
     def __init__(self, mqtt_client: MQTTClient, parent=None):
         super().__init__(parent)
         self._mqtt = mqtt_client
+        self._mqtt.connected.connect(self._on_mqtt_connected)
+        self._mqtt.message_received.connect(self._on_message)
+
+    def _on_mqtt_connected(self):
+        self._mqtt.subscribe(f"{_TOPIC_PREFIX}/+")
+        log.info("VehicleSync: subscribed to %s/+", _TOPIC_PREFIX)
 
     def publish_obs(self, obs: Observation):
         topic = f"{_TOPIC_PREFIX}/{obs.vehicle_id}"
@@ -44,6 +55,22 @@ class VehicleSync(QObject):
             log.debug("VehicleSync: published %s", topic)
         except Exception as e:
             log.warning("VehicleSync: publish failed: %s", e)
+
+    def _on_message(self, topic: str, raw: bytes):
+        if not topic.startswith(_TOPIC_PREFIX + "/"):
+            return
+        try:
+            data = json.loads(raw.decode())
+        except Exception as e:
+            log.warning("VehicleSync: JSON parse error: %s", e)
+            return
+
+        try:
+            obs = _observation_from_payload(data)
+            log.debug("VehicleSync: remote vehicle %s", obs.vehicle_id)
+            self.vehicle_received.emit(obs)
+        except Exception as e:
+            log.warning("VehicleSync: payload parse failed: %s", e)
 
 
 def _build_payload(obs: Observation) -> dict:
@@ -71,3 +98,40 @@ def _build_payload(obs: Observation) -> dict:
     if obs.pressure_mb    is not None: payload["pressure"] = obs.pressure_mb
 
     return payload
+
+
+def _observation_from_payload(payload: dict) -> Observation:
+    return Observation(
+        vehicle_id=payload["vehicle_id"],
+        lat=float(payload["lat"]),
+        lon=float(payload["lon"]),
+        timestamp=_parse_timestamp(payload.get("gps_date"), payload.get("gps_time")),
+        icon_type=(payload.get("icon_type") or "").strip() or None,
+        wind_speed_ms=_float_or_none(payload.get("wspd")),
+        wind_dir_deg=_float_or_none(payload.get("wdir")),
+        temperature_c=_float_or_none(payload.get("t_fast")),
+        dewpoint_c=_float_or_none(payload.get("dewpoint")),
+        pressure_mb=_float_or_none(payload.get("pressure")),
+    )
+
+
+def _parse_timestamp(gps_date: str | None, gps_time: str | None) -> datetime:
+    date_s = (gps_date or "").strip()
+    time_s = (gps_time or "").strip()
+    if date_s and time_s:
+        try:
+            return datetime.strptime(date_s + time_s, "%d%m%y%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _float_or_none(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
