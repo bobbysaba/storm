@@ -1731,6 +1731,7 @@ class MainWindow(QMainWindow):
             obs.vehicle_id,
             Vehicle(id=obs.vehicle_id, lat=obs.lat, lon=obs.lon, icon_type=_icon),
         )
+        v.icon_type = _icon
         v.lat, v.lon, v.latest_obs = obs.lat, obs.lon, obs
         marker_color = self._obs_age_color(obs)
         self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
