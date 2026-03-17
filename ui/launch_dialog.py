@@ -4,16 +4,13 @@
 
 import os
 import sys
-import hashlib
-import threading
-import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
-    QTextEdit, QApplication, QMessageBox,
+    QTextEdit, QApplication, QMessageBox, QProgressBar, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QSettings, QObject, QTimer, pyqtSignal, QByteArray, QSize
+from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize
 from PyQt6.QtGui import QPixmap, QPainter, QIcon
 
 # SVG icon definitions for the vehicle icon picker (same shapes as the map markers).
@@ -24,6 +21,7 @@ _ICON_SVGS = {
     "mesonet": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="11" y="12" width="2" height="10" rx="1" fill="{c}"/><line x1="3" y1="10" x2="22" y2="10" stroke="{c}" stroke-width="1.5"/><circle cx="12" cy="10" r="1.5" fill="{c}"/><line x1="3" y1="5" x2="3" y2="15" stroke="{c}" stroke-width="3" stroke-linecap="round"/><polygon points="17,10 22,10 22,4" fill="{c}"/></svg>',
     "lidar":   '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="7" y="14" width="10" height="7" fill="{c}"/><line x1="7" y1="14" x2="2" y2="14" stroke="{c}" stroke-width="4" stroke-linecap="square"/><line x1="17" y1="14" x2="22" y2="14" stroke="{c}" stroke-width="4" stroke-linecap="square"/><circle cx="12" cy="11" r="2.5" fill="{c}"/><rect x="11" y="21" width="2" height="3" fill="{c}"/></svg>',
     "radar":   '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="9" r="7" fill="{c}"/><rect x="11" y="16" width="2" height="3" fill="{c}"/><rect x="7" y="19" width="10" height="2" rx="1" fill="{c}"/></svg>',
+    "hailcam": '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M21.5,12 L18.1,15.5 L16.8,20.2 L12,19 L7.2,20.2 L5.9,15.5 L2.5,12 L5.9,8.5 L7.2,3.8 L12,5 L16.8,3.8 L18.1,8.5 Z" fill="{c}"/></svg>',
 }
 
 
@@ -295,76 +293,7 @@ _LOG_BTN_STYLE = """
 """
 
 
-class _UpdateWorker(QObject):
-    """Runs git operations on a daemon thread and signals results back."""
-
-    check_done = pyqtSignal(int)         # commits behind origin/main; -1 = error
-    pull_done  = pyqtSignal(bool, bool)  # success, deps_changed
-
-    def __init__(self):
-        super().__init__()
-        self._root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    def start_check(self):
-        threading.Thread(target=self._do_check, daemon=True).start()
-
-    def start_pull(self):
-        threading.Thread(target=self._do_pull, daemon=True).start()
-
-    def _do_check(self):
-        try:
-            subprocess.run(
-                ["git", "fetch", "--quiet"],
-                cwd=self._root, timeout=5,
-                capture_output=True, check=True,
-            )
-            # Local uncommitted changes?
-            dirty = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            # Local commits not yet pushed?
-            ahead = subprocess.run(
-                ["git", "rev-list", "origin/main..HEAD", "--count"],
-                cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            if dirty or int(ahead) > 0:
-                self.check_done.emit(-2)  # dev build
-                return
-            r = subprocess.run(
-                ["git", "rev-list", "HEAD..origin/main", "--count"],
-                cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
-            )
-            self.check_done.emit(int(r.stdout.strip()))
-        except Exception:
-            self.check_done.emit(-1)
-
-    def _env_hash(self) -> str:
-        """SHA-256 of the platform-appropriate conda env file, or '' on error."""
-        fname = "storm_windows.yml" if sys.platform == "win32" else "storm_mac.yml"
-        path = os.path.join(self._root, "envs", fname)
-        try:
-            with open(path, "rb") as f:
-                return hashlib.sha256(f.read()).hexdigest()
-        except Exception:
-            return ""
-
-    def _do_pull(self):
-        try:
-            hash_before = self._env_hash()
-            subprocess.run(
-                ["git", "pull"],
-                cwd=self._root, timeout=30,
-                capture_output=True, check=True,
-            )
-            hash_after = self._env_hash()
-            deps_changed = bool(hash_before) and hash_before != hash_after
-            self.pull_done.emit(True, deps_changed)
-        except Exception:
-            self.pull_done.emit(False, False)
+from data.update_checker import UpdateWorker as _UpdateWorker
 
 
 class _LogViewerDialog(QDialog):
@@ -437,6 +366,61 @@ class _LogViewerDialog(QDialog):
 
     def _copy(self):
         QApplication.clipboard().setText(self._text.toPlainText())
+
+
+class LoadingScreen(QDialog):
+    """Frameless loading screen shown while MainWindow + WebEngine initialize."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("STORM")
+        self.setFixedSize(380, 180)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+        )
+        self.setStyleSheet(_DIALOG_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 36, 32, 32)
+        layout.setSpacing(0)
+
+        title = QLabel("STORM")
+        title.setObjectName("title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        layout.addSpacing(20)
+
+        self._status = QLabel("Initializing...")
+        self._status.setObjectName("hint")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._status)
+
+        layout.addSpacing(14)
+
+        bar = QProgressBar()
+        bar.setRange(0, 0)          # indeterminate / marquee
+        bar.setFixedHeight(4)
+        bar.setTextVisible(False)
+        bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #1A1A2E;
+                border: none;
+                border-radius: 2px;
+            }
+            QProgressBar::chunk {
+                background-color: #00CFFF;
+                border-radius: 2px;
+            }
+        """)
+        layout.addWidget(bar)
+
+    def set_status(self, text: str) -> None:
+        self._status.setText(text)
+        QApplication.processEvents()
 
 
 class LaunchDialog(QDialog):
@@ -551,11 +535,17 @@ class LaunchDialog(QDialog):
         root.addWidget(icon_label)
         root.addSpacing(6)
 
-        icon_row = QHBoxLayout()
-        icon_row.setSpacing(6)
+        icon_grid = QGridLayout()
+        icon_grid.setSpacing(6)
+        icon_grid.setColumnStretch(0, 1)
+        icon_grid.setColumnStretch(1, 1)
+        icon_grid.setColumnStretch(2, 1)
         self._icon_btns: dict[str, QToolButton] = {}
-        for key, label in [("car", "CAR"), ("drone", "DRONE"), ("mesonet", "MESO"),
-                           ("lidar", "LIDAR"), ("radar", "RADAR")]:
+        _icons = [
+            ("car", "CAR"),    ("drone", "DRONE"), ("mesonet", "MESO"),
+            ("lidar", "LIDAR"), ("radar", "RADAR"), ("hailcam", "HAIL"),
+        ]
+        for i, (key, label) in enumerate(_icons):
             btn = QToolButton()
             btn.setText(label)
             btn.setObjectName("iconBtn")
@@ -563,9 +553,10 @@ class LaunchDialog(QDialog):
             btn.setIconSize(QSize(28, 28))
             btn.setIcon(QIcon(_svg_pixmap(key, "#5A5B6A")))
             btn.clicked.connect(lambda _checked, k=key: self._select_icon(k))
-            icon_row.addWidget(btn)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            icon_grid.addWidget(btn, i // 3, i % 3)
             self._icon_btns[key] = btn
-        root.addLayout(icon_row)
+        root.addLayout(icon_grid)
         root.addSpacing(20)
 
         self._set_icon_selected(saved.get("vehicle_icon", "car"))

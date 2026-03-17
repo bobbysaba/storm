@@ -214,6 +214,11 @@ class HazardFetcher(QObject):
         # Per-URL SHA-256 hashes for change detection — skip map push when unchanged
         self._response_hashes: dict[str, str] = {}
 
+        # ETag conditional-request support — store server ETag + last raw bytes per URL
+        # so we can return cached data on HTTP 304 without re-downloading the body.
+        self._etags: dict[str, str] = {}
+        self._raw_cache: dict[str, bytes] = {}
+
         # Connectivity tracking — go offline after 2 consecutive failed poll cycles
         self._consecutive_failures = 0
         self._is_offline = False
@@ -388,29 +393,85 @@ class HazardFetcher(QObject):
     # ── Network primitive ──────────────────────────────────────────────────────
 
     def _get_raw(self, url: str) -> tuple[bytes, bool]:
-        """Fetch URL with gzip support.  Returns (bytes, changed).
+        """Fetch URL with gzip + ETag conditional-request support.
 
-        changed=False means the response is byte-for-byte identical to the
-        previous fetch (SHA-256 match); callers can skip processing entirely.
+        Returns (bytes, changed).  changed=False means the response is
+        byte-for-byte identical to the previous fetch (HTTP 304 from the server
+        or a local SHA-256 match); callers can skip parsing entirely.
         """
-        req = Request(
-            url,
-            headers={
-                "User-Agent": "STORM/1.0 (contact: support)",
-                "Accept": "application/geo+json, application/json",
-                "Accept-Encoding": "gzip",
-            },
-        )
-        with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
-            raw = resp.read()
-            if resp.headers.get("Content-Encoding") == "gzip":
-                raw = gzip.decompress(raw)
+        headers = {
+            "User-Agent": "STORM/1.0 (contact: support)",
+            "Accept": "application/geo+json, application/json",
+            "Accept-Encoding": "gzip",
+        }
+        if url in self._etags:
+            headers["If-None-Match"] = self._etags[url]
+
+        req = Request(url, headers=headers)
+        try:
+            with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    raw = gzip.decompress(raw)
+                new_etag = resp.headers.get("ETag")
+                if new_etag:
+                    self._etags[url] = new_etag
+                self._raw_cache[url] = raw
+        except HTTPError as exc:
+            if exc.code == 304:
+                # Server confirms nothing changed — return cached bytes, unchanged.
+                return self._raw_cache.get(url, b""), False
+            raise
 
         h = hashlib.sha256(raw).hexdigest()
         changed = self._response_hashes.get(url) != h
         if changed:
             self._response_hashes[url] = h
         return raw, changed
+
+    # ── Local expiry helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _esri_ts_to_epoch(val) -> float | None:
+        """Convert an ESRI millisecond timestamp to Unix seconds, or None if unparseable."""
+        if val is None:
+            return None
+        try:
+            return float(val) / 1000.0
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _feature_active(feat: dict, now: float) -> bool:
+        """Return True if the feature has not yet expired per its ESRI timestamp fields."""
+        props = feat.get("properties") or {}
+        for key in ("expiration", "ends"):
+            ts = HazardFetcher._esri_ts_to_epoch(props.get(key))
+            if ts is not None:
+                return ts > now
+        return True  # no expiration info — assume still active
+
+    def _expire_cached_fc(self, cache_attr: str, cache_time_attr: str, signal, now: float):
+        """Prune expired features from a cached FeatureCollection and re-emit if any were removed.
+
+        Called on unchanged poll cycles so that locally-expired features are
+        removed from the map without waiting for the server feed to update.
+        """
+        cached: str | None = getattr(self, cache_attr)
+        if not cached:
+            return
+        try:
+            data = json.loads(cached)
+            feats = data.get("features", [])
+            active = [f for f in feats if self._feature_active(f, now)]
+            if len(active) == len(feats):
+                return  # nothing expired yet
+            filtered = json.dumps({"type": "FeatureCollection", "features": active})
+            setattr(self, cache_attr, filtered)
+            setattr(self, cache_time_attr, now)
+            signal.emit(filtered)
+        except Exception:
+            pass
 
     # ── Fetch methods ──────────────────────────────────────────────────────────
 
@@ -538,6 +599,9 @@ class HazardFetcher(QObject):
             raw, changed = self._get_raw(WWA_WARNINGS_URL)
             if not changed:
                 self._nws_cache_time = now  # refresh TTL even when data is stable
+                # Server confirmed no new warnings — but some cached ones may have
+                # expired locally.  Prune them so the map stays accurate.
+                self._expire_cached_fc("_nws_cache", "_nws_cache_time", self.nws_received, now)
                 return
             data = json.loads(raw.decode("utf-8", errors="replace"))
             feats = []
@@ -570,6 +634,7 @@ class HazardFetcher(QObject):
             raw, changed = self._get_raw(WWA_WATCHES_URL)
             if not changed:
                 self._watches_cache_time = now
+                self._expire_cached_fc("_watches_cache", "_watches_cache_time", self.spc_watches_received, now)
                 return
             data = json.loads(raw.decode("utf-8", errors="replace"))
             feats = []

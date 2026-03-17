@@ -14,7 +14,7 @@ import runtime_flags
 from dataclasses import replace
 from ui.main_window import MainWindow
 from datetime import datetime, timezone
-from ui.launch_dialog import LaunchDialog
+from ui.launch_dialog import LaunchDialog, LoadingScreen
 from ui.radar_overlay import set_render_grid_size
 from data.truck_replay import load_truck_observations
 
@@ -427,12 +427,19 @@ def main() -> None:
         # get whether or not we're in monitor mode (from the user-selected window)
         monitor = dialog.monitor()
 
+    # ── Loading screen ─────────────────────────────────────────────────────────
+    # Show immediately so there is visible feedback while WebEngine initializes.
+    loading = LoadingScreen()
+    loading.show()
+    app.processEvents()
+
     # ── File presence checks ───────────────────────────────────────────────────
     # Warn about missing tiles / certificates before the window is built so the
     # user understands why certain features may be broken.
     _warn_missing_files()
 
     # create the main window
+    loading.set_status("Loading map engine...")
     window = MainWindow(debug = args.debug, monitor = monitor)
 
     # define the JS console message handler
@@ -453,7 +460,8 @@ def main() -> None:
     # define last window closed handler
     app.lastWindowClosed.connect(lambda: print("DEBUG: lastWindowClosed signal fired", flush=True))
 
-    # show the window
+    # close loading screen and show the main window
+    loading.close()
     print("DEBUG: calling window.show()", flush=True)
     window.show()
 

@@ -29,6 +29,7 @@ from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
 from data.hazard_fetcher import HazardFetcher
+from data.update_checker import UpdateWorker
 from data.satellite_fetcher import SatelliteFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
@@ -170,6 +171,9 @@ class MainWindow(QMainWindow):
 
         # internet connectivity indicator — checks every 30 seconds
         self._start_net_check()
+
+        # in-ops update checker — background, non-blocking, no dialogs
+        self._start_update_check()
 
         # Restore window geometry and dock layout from last session.
         _s = QSettings("NSSL", "STORM")
@@ -343,6 +347,19 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout(self._status_right)
         right.setContentsMargins(10, 6, 10, 6)
         right.setSpacing(2)
+
+        # in-ops update indicator — hidden until an update is detected
+        self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
+        self.update_indicator.setFlat(True)
+        self.update_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+            "color: #00CFFF; background: transparent; border: none; padding: 0;"
+        )
+        self.update_indicator.setToolTip("Click to apply update and restart STORM")
+        self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_indicator.setVisible(False)
+        self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
+        right.addWidget(self.update_indicator)
 
         self.conn_indicator = QLabel("● AWS OFFLINE")
         self.conn_indicator.setStyleSheet(
@@ -534,6 +551,81 @@ class MainWindow(QMainWindow):
             )
         self.net_indicator.setVisible(True)
         self._layout_overlays()
+
+    # ── In-ops update check ───────────────────────────────────────────────────
+
+    def _start_update_check(self):
+        """Check for updates at startup and then every 30 minutes."""
+        self._update_worker = UpdateWorker()
+        self._update_worker.check_done.connect(self._on_update_check_done)
+        self._update_worker.pull_done.connect(self._on_update_pull_done)
+        self._update_worker.start_check()
+
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.timeout.connect(self._update_worker.start_check)
+        self._update_check_timer.start(10 * 60 * 1000)   # 10 min
+
+    def _on_update_check_done(self, commits_behind: int):
+        if commits_behind > 0:
+            self.update_indicator.setText("↑ UPDATE AVAILABLE")
+            self.update_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+                "color: #00CFFF; background: transparent; border: none; padding: 0;"
+            )
+            self.update_indicator.setEnabled(True)
+        elif commits_behind == -2:
+            self.update_indicator.setText("DEV BUILD")
+            self.update_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; "
+                "color: #3A3B4A; background: transparent; border: none; padding: 0;"
+            )
+            self.update_indicator.setEnabled(False)
+        else:
+            # -1 (error) or 0 (current) — stay silent
+            self.update_indicator.setVisible(False)
+            self._layout_overlays()
+            return
+        self.update_indicator.setVisible(True)
+        self._layout_overlays()
+
+    def _on_update_indicator_clicked(self):
+        self.update_indicator.setEnabled(False)
+        self.update_indicator.setText("↑ UPDATING...")
+        self.update_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+            "color: #5A5B6A; background: transparent; border: none; padding: 0;"
+        )
+        self._update_worker.start_pull()
+
+    def _on_update_pull_done(self, success: bool, deps_changed: bool):
+        import os, sys
+        if success and deps_changed:
+            # Can't auto-restart safely if conda env changed — tell the user
+            self.update_indicator.setText("↑ RESTART + conda env update REQUIRED")
+            self.update_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+                "color: #FFB800; background: transparent; border: none; padding: 0;"
+            )
+            self.update_indicator.setEnabled(False)
+            self.update_indicator.setVisible(True)
+            self._layout_overlays()
+        elif success:
+            self.update_indicator.setText("↑ RESTARTING...")
+            self.update_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+                "color: #39D98A; background: transparent; border: none; padding: 0;"
+            )
+            self._layout_overlays()
+            QTimer.singleShot(600, lambda: os.execv(sys.executable, [sys.executable] + sys.argv))
+        else:
+            self.update_indicator.setText("↑ UPDATE FAILED — RETRY")
+            self.update_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+                "color: #E53935; background: transparent; border: none; padding: 0;"
+            )
+            self.update_indicator.setEnabled(True)
+            self.update_indicator.setVisible(True)
+            self._layout_overlays()
 
     def set_connection_status(self, connected: bool):
         if connected:
