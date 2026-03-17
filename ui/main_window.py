@@ -2030,7 +2030,7 @@ class MainWindow(QMainWindow):
         for v in self._vehicles.values():
             if v.latest_obs is not None:
                 self.map_widget.add_vehicle(
-                    v.id, v.lat, v.lon, self._obs_age_color(v.latest_obs)
+                    v.id, v.lat, v.lon, self._obs_age_color(v.latest_obs), v.icon_type
                 )
         self._refresh_vehicle_panel()
         if not self._clock_layout_synced:
