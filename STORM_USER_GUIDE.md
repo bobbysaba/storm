@@ -132,7 +132,7 @@ Click Launch to proceed. Your vehicle ID and data directory are saved to persist
 |--------|-------------|
 | **Floating Toolbar** | Top-left collapsible drawer strip — all overlay and tool controls |
 | **Map** | Full-window interactive map; all overlays render here |
-| **Vehicle Panel** | Right-side dock — vehicle list and history graphs |
+| **Vehicle Panel** | Right-side dock — vehicle list and selected-vehicle details |
 | **Outlook Panel** | Left-side slide-out — SPC/NWS text discussion viewer |
 | **Status Bar** | Bottom strip — mouse coordinates, zoom, status messages, clock, network indicator |
 
@@ -589,19 +589,6 @@ Click a vehicle row to **zoom the map to that vehicle's location**.
 
 Vehicles are sorted by most-recently-updated first.
 
-#### History Graph (lower section)
-
-Selecting a vehicle (or when your own vehicle is the only one) shows a 4-panel time-series chart of the last 10 minutes of observations:
-
-| Panel | Data | Color |
-|-------|------|-------|
-| Top | Temperature (°F) | Orange line with dots |
-| 2nd | Dewpoint (°F) | Blue line with dots |
-| 3rd | Wind Speed (knots) | Green line with dots |
-| Bottom | Pressure (mb/hPa) | Yellow line with dots |
-
-The bottom panel shows a UTC time axis (HH:MM format). Subtle gray grid lines span all panels. The chart updates in real-time as new observations arrive.
-
 ---
 
 ## 7. Status Bar
@@ -645,7 +632,7 @@ Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, t
 
 ## 9. Vehicle Tracking & Observations
 
-STORM tracks vehicles through several parallel data input channels. All inputs feed into a common observation store that drives the vehicle panel, station plots, and map markers.
+STORM tracks vehicles through several parallel data input channels. All inputs feed into the live vehicle state used by the vehicle panel, station plots, and map markers.
 
 ### Track A — Local File Watcher
 
@@ -674,12 +661,6 @@ Automatically detects and reads NMEA sentences from a connected serial GPS devic
 ### MQTT — Inbound Vehicle Observations
 
 Receives observations from other vehicles via the `storm/vehicles/{id}` topic. Active whenever MQTT is connected and not disabled.
-
-### Observation History Buffer
-
-Each vehicle maintains a 10-minute rolling buffer of observations. This buffer drives the history graph in the vehicle panel. The buffer is kept in memory only — it does not persist across STORM restarts.
-
----
 
 ## 10. Network & MQTT Sync
 

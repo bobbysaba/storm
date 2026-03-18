@@ -715,7 +715,6 @@ class MainWindow(QMainWindow):
 
         # detail pill (hidden until a vehicle is selected)
         self._selected_vehicle_ids = []
-        self._last_selected_vehicle_id = None
         self._vehicle_age_display_state: dict[str, tuple[str, str]] = {}
         self.vehicle_detail_panel = QWidget(self._map_container)
         self.vehicle_detail_panel.setObjectName("vehicleDetailPill")
@@ -1815,6 +1814,10 @@ class MainWindow(QMainWindow):
 
     def update_vehicle_obs(self, obs: Observation) -> None:
         """Public entry point for all vehicle observation updates (MQTT, file watcher, GPS)."""
+        if not self._should_display_vehicle_obs(obs):
+            self._hide_vehicle(obs.vehicle_id)
+            return
+
         existing = self._vehicles.get(obs.vehicle_id)
         if obs.vehicle_id == config.VEHICLE_ID:
             icon_type = config.VEHICLE_ICON
@@ -1837,6 +1840,24 @@ class MainWindow(QMainWindow):
         self._refresh_vehicle_panel()
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
         self._refresh_vehicle_detail()
+
+    def _should_display_vehicle_obs(self, obs: Observation) -> bool:
+        return self._obs_age_minutes(obs) <= 10.0 * 60.0
+
+    def _hide_vehicle(self, vehicle_id: str) -> None:
+        removed = self._vehicles.pop(vehicle_id, None)
+        self._vehicle_age_display_state.pop(vehicle_id, None)
+        if removed is None:
+            return
+
+        self.map_widget.remove_vehicle(vehicle_id)
+        self._station_layer.remove(vehicle_id)
+        if vehicle_id in self._selected_vehicle_ids:
+            self._selected_vehicle_ids = [vid for vid in self._selected_vehicle_ids if vid != vehicle_id]
+        self.update_vehicle_count(len(self._vehicles))
+        self._refresh_vehicle_panel()
+        self._refresh_vehicle_detail()
+        self._sync_vehicle_detail_visibility()
 
     def _obs_age_minutes(self, obs: Observation) -> float:
         age = datetime.now(timezone.utc) - obs.timestamp
@@ -1924,7 +1945,6 @@ class MainWindow(QMainWindow):
             self._selected_vehicle_ids.remove(vid)
         else:
             self._selected_vehicle_ids.append(vid)
-        self._last_selected_vehicle_id = vid
         v = self._vehicles.get(vid)
         if v is not None:
             self.map_widget.fly_to(v.lat, v.lon, zoom=13)
@@ -2117,11 +2137,15 @@ class MainWindow(QMainWindow):
         now = datetime.now(timezone.utc)
         self.clock_label.setText(now.strftime("%H:%M:%S UTC"))
         self.date_label.setText(f"{now.day} {now.strftime('%b %Y')}")
+        hidden_vehicle_ids: list[str] = []
         vehicle_panel_needs_refresh = False
         vehicle_detail_needs_refresh = False
-        for v in self._vehicles.values():
+        for v in list(self._vehicles.values()):
             obs = v.latest_obs
             if obs is None:
+                continue
+            if not self._should_display_vehicle_obs(obs):
+                hidden_vehicle_ids.append(v.id)
                 continue
             color = self._obs_age_color(obs)
             age_label = self._obs_age_label(obs)
@@ -2133,6 +2157,9 @@ class MainWindow(QMainWindow):
             vehicle_panel_needs_refresh = True
             if v.id in self._selected_vehicle_ids:
                 vehicle_detail_needs_refresh = True
+
+        for vehicle_id in hidden_vehicle_ids:
+            self._hide_vehicle(vehicle_id)
 
         if vehicle_panel_needs_refresh:
             self._refresh_vehicle_panel()

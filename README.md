@@ -78,21 +78,14 @@ Windows: double-click `scripts\create_app_windows.bat`
 
 ## Updating
 
-To pull the latest code and sync your conda environment, run the update script before a chase day. It does **not** run automatically — you control when updates are applied.
+Pull the latest code and sync your conda environment using your normal git/conda workflow for this checkout. The repository does not currently include a dedicated update script.
 
-**macOS:**
-```bash
-bash scripts/update.sh
-```
+Typical steps:
+1. Run `git pull`
+2. Run `conda env update --prune -f envs/storm_mac.yml` on macOS or `conda env update --prune -f envs/storm_windows.yml` on Windows
+3. Rebuild the app bundle or refresh the shortcut only if you use those packaging flows
 
-**Windows:** double-click `scripts\update.bat` or run it from a terminal.
-
-The script:
-1. Runs `git pull` to fetch the latest code
-2. Updates the conda environment (`conda env update --prune`)
-3. Rebuilds `STORM.app` (macOS) / refreshes the Desktop shortcut (Windows)
-
-> If `git pull` fails, it usually means you have local uncommitted changes that conflict. Run `git status` to see what's changed, resolve any conflicts, and re-run the script.
+> If `git pull` fails, it usually means you have local uncommitted changes that conflict. Run `git status` to see what's changed, resolve any conflicts, and re-run the update steps.
 
 ---
 
@@ -164,8 +157,6 @@ storm/
 │   ├── create_app.sh        # Builds STORM.app macOS bundle
 │   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
 │   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
-│   ├── update.sh            # Pulls latest code + updates conda env (macOS)
-│   ├── update.bat           # Pulls latest code + updates conda env (Windows)
 │   └── test_mqtt_send.py    # CLI tool — sends test obs payloads to MQTT broker
 │
 ├── core/                    # Pure data types (no Qt, no I/O)
@@ -182,7 +173,6 @@ storm/
 │   ├── hazard_fetcher.py    # SPC/NWS hazard polygons
 │   ├── obs_file_watcher.py  # Watches FOFS instrument logger file (Track A)
 │   ├── gps_reader.py        # NMEA via pyserial — auto-detects GPS puck (Track B)
-│   ├── obs_history_store.py # 10-min rolling obs buffer per vehicle
 │   └── truck_replay.py      # Offline CSV replay for testing
 │
 ├── network/
@@ -194,7 +184,7 @@ storm/
 ├── ui/                      # Qt widgets
 │   ├── launch_dialog.py     # Pre-launch config dialog
 │   ├── main_window.py       # Top-level QMainWindow
-│   ├── map_widget.py        # MapLibre GL map + Flask tile server
+│   ├── map_widget.py        # MapLibre GL map + custom storm:// asset/tile scheme
 │   ├── radar_controls.py    # Radar site/product/playback drawer
 │   ├── radar_overlay.py     # RadarScan → PNG → MapLibre raster layer
 │   ├── satellite_controls.py # Satellite mode/playback drawer
@@ -204,7 +194,6 @@ storm/
 │   ├── annotation_dialog.py # Place / edit annotation dialogs
 │   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
-│   ├── history_widget.py    # Time series chart (obs history)
 │   └── theme.py             # QSS dark theme + color constants
 │
 ├── static/                  # Bundled offline assets (no CDN)
@@ -227,10 +216,10 @@ storm/
 
 ## Architecture Notes
 
-- **Tile server** — Flask runs on `http://localhost:8765` in a background daemon thread, serving the map HTML, MapLibre assets, fonts, and MBTiles vector tiles. MapLibre GL JS is bundled locally — no internet required.
+- **Tile/asset serving** — A custom `storm://` URL scheme serves the map HTML, MapLibre assets, fonts, and MBTiles vector tiles entirely in-process. MapLibre GL JS is bundled locally — no internet required.
 - **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context. Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
-- **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both feed the same `ObsHistoryStore` and publish via `VehicleSync`.
+- **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both update the live vehicle state and publish via `VehicleSync`.
 - **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`.
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
 - **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0Q (super-res reflectivity) with N0B fallback; N0U (velocity) with N0S fallback.
