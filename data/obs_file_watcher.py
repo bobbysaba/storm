@@ -97,6 +97,7 @@ class ObsFileWatcher(QObject):
 
     def start(self):
         self._roll_to_today()
+        self._poll()
         self._timer.start(self._poll_ms)
         log.info("ObsFileWatcher: watching %s every %ds",
                  self._data_dir, self._poll_ms // 1000)

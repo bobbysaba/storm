@@ -3,6 +3,7 @@
 # Assets and vector tiles are served via a QWebEngineUrlSchemeHandler
 # (storm://app/...) — no Flask server or open TCP port required.
 
+import json
 import os
 import sqlite3
 import zlib
@@ -98,6 +99,8 @@ def build_safe_map_html() -> str:
     window.stormSetSatelliteMode = _noop;
     window.stormSetSatelliteOpacity = _noop;
     window.stormSetMesoSectors = _noop;
+    window.stormSetRadarStations = _noop;
+    window.stormSetRadarStationsVisible = _noop;
   </script>
 </head>
 <body>
@@ -410,6 +413,9 @@ def build_map_html() -> str:
     window.stormSetSatelliteMode = _stormNoop;
     window.stormSetSatelliteOpacity = _stormNoop;
     window.stormSetMesoSectors = _stormNoop;
+    window.stormSetRadarStations = _stormNoop;
+    window.stormSetRadarStationsVisible = _stormNoop;
+    window._radarStationsVisible = false;
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
     window._stormDrawingType = '';
@@ -875,6 +881,52 @@ def build_map_html() -> str:
         map.getSource('deploy-locs').setData(JSON.parse(window._deployLocsData));
         window._deployLocsData = null;
       }}
+
+      map.addSource('radar-stations', {{type:'geojson', data:empty}});
+      map.addLayer({{
+        id: 'radar-stations-circle',
+        type: 'circle',
+        source: 'radar-stations',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'circle-radius': 7,
+          'circle-color': '#00CFFF',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#0A0A0F',
+          'circle-opacity': 0.92
+        }}
+      }});
+      map.addLayer({{
+        id: 'radar-stations-label',
+        type: 'symbol',
+        source: 'radar-stations',
+        layout: {{
+          'visibility': 'none',
+          'text-field': ['get', 'site_id'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 11,
+          'text-anchor': 'top',
+          'text-offset': [0, 1.1],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        }},
+        paint: {{
+          'text-color': '#E8EDF5',
+          'text-halo-color': '#0A0A0F',
+          'text-halo-width': 2
+        }}
+      }});
+      map.on('mouseenter', 'radar-stations-circle', function() {{
+        map.getCanvas().style.cursor = 'pointer';
+      }});
+      map.on('mouseleave', 'radar-stations-circle', function() {{
+        map.getCanvas().style.cursor = '';
+      }});
+      if (window._radarStationsData) {{
+        map.getSource('radar-stations').setData(JSON.parse(window._radarStationsData));
+        window._radarStationsData = null;
+      }}
+      window.stormSetRadarStationsVisible(window._radarStationsVisible);
 
       // ── GOES Satellite image overlay ─────────────────────────────────────
       // Uses a single image source (like the radar overlay) rather than tiled
@@ -1392,6 +1444,20 @@ def build_map_html() -> str:
           return;
         }}
       }}
+      const radarStationLayers = ['radar-stations-circle', 'radar-stations-label'].filter(function(l) {{
+        return map.getLayer(l) && map.getLayoutProperty(l, 'visibility') === 'visible';
+      }});
+      if (radarStationLayers.length > 0) {{
+        const radarHits = map.queryRenderedFeatures(e.point, {{layers: radarStationLayers}});
+        if (radarHits.length > 0) {{
+          const siteId = radarHits[0].properties && radarHits[0].properties.site_id;
+          if (siteId) {{
+            window.stormSetRadarStationsVisible(false);
+            if (bridge) bridge.on_radar_station_click(siteId);
+            return;
+          }}
+        }}
+      }}
       // Check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
       var spcClickLayers = ['spc-cat-fill', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) {{ return map.getLayer(l); }});
       if (spcClickLayers.length > 0) {{
@@ -1862,6 +1928,25 @@ def build_map_html() -> str:
       Object.values(window._stormStationPlots).forEach(function(m) {{
         m.getElement().style.display = visible ? '' : 'none';
       }});
+    }};
+
+    // ── Radar Station Picker ─────────────────────────────────────────────
+    window.stormSetRadarStations = function(stationsJson) {{
+      var src = map.getSource('radar-stations');
+      if (!src) {{
+        window._radarStationsData = stationsJson;
+        return;
+      }}
+      src.setData(JSON.parse(stationsJson));
+    }};
+
+    window.stormSetRadarStationsVisible = function(visible) {{
+      window._radarStationsVisible = !!visible;
+      ['radar-stations-circle', 'radar-stations-label'].forEach(function(layerId) {{
+        if (!map.getLayer(layerId)) return;
+        map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+      }});
+      if (!visible) map.getCanvas().style.cursor = '';
     }};
 
     // ── Measure Tool ─────────────────────────────────────────────────────
@@ -2366,6 +2451,7 @@ class MapBridge(QObject):
     storm_cone_clicked = pyqtSignal(str)
     map_double_clicked = pyqtSignal(float, float)
     drawing_clicked    = pyqtSignal(str)
+    radar_station_clicked = pyqtSignal(str)
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -2395,10 +2481,15 @@ class MapBridge(QObject):
     def on_drawing_click(self, drawing_id: str):
         self.drawing_clicked.emit(drawing_id)
 
+    @pyqtSlot(str)
+    def on_radar_station_click(self, site_id: str):
+        self.radar_station_clicked.emit(site_id)
+
 
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
 class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
+    map_ready          = pyqtSignal()
     map_clicked        = pyqtSignal(float, float)
     map_moved          = pyqtSignal(float, float, float)
     feature_clicked    = pyqtSignal(str)
@@ -2406,6 +2497,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     storm_cone_clicked = pyqtSignal(str)
     map_double_clicked = pyqtSignal(float, float)
     drawing_clicked    = pyqtSignal(str)
+    radar_station_clicked = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2421,6 +2513,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             layout.addWidget(msg)
             self._map_ready = True
             self._js_queue = []
+            QTimer.singleShot(0, self.map_ready.emit)
             return
 
         from PyQt6.QtWebEngineCore import QWebEngineProfile
@@ -2451,6 +2544,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.storm_cone_clicked.connect(self.storm_cone_clicked)
         self.bridge.map_double_clicked.connect(self.map_double_clicked)
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
+        self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
 
         # Queue for JS calls that arrive before the page has loaded
         self._map_ready = False
@@ -2468,6 +2562,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             for script in self._js_queue:
                 self.page().runJavaScript(script)
             self._js_queue.clear()
+            self.map_ready.emit()
 
     def run_js(self, script: str):
         if SAFE_MAP_MODE:
@@ -2507,7 +2602,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
 
     def set_meso_sectors(self, sectors: dict):
-        import json
         features = []
         for idx, bbox in sectors.items():
             if bbox:
@@ -2520,6 +2614,31 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
                 })
         self.run_js(
             f"if(window.stormSetMesoSectors) stormSetMesoSectors({json.dumps(json.dumps(features))});"
+        )
+
+    def set_radar_stations(self, stations: list[dict]):
+        features = []
+        for station in stations:
+            features.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [station["lon"], station["lat"]],
+                },
+                "properties": {
+                    "site_id": station["site_id"],
+                    "name": station.get("name", ""),
+                },
+            })
+        geojson = {"type": "FeatureCollection", "features": features}
+        self.run_js(
+            f"if(window.stormSetRadarStations) stormSetRadarStations({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_radar_stations_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(
+            f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
         )
 
     def preview_meso_sector(self, idx: int | None):

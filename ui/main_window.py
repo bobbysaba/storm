@@ -4,6 +4,7 @@
 
 import json
 import logging
+import sqlite3
 import threading
 import runtime_flags
 from datetime import datetime, timezone
@@ -17,8 +18,8 @@ from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
-from ui.map_widget import MapWidget
-from ui.radar_controls import RadarControls
+from ui.map_widget import MapWidget, TILES_PATH
+from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
@@ -101,6 +102,20 @@ class MainWindow(QMainWindow):
         self._init_toolbar()
         self._init_statusbar()
         self._init_vehicle_panel()
+        self._radar_station_sites = self._load_radar_station_sites()
+        self._radar_station_picker_visible = False
+        self._radar_auto_site_pending = not monitor
+        self._startup_sequence_started = False
+        self._startup_local_pending = False
+        self._startup_mqtt_pending = False
+        self._post_startup_fetchers_started = False
+        self._local_startup_timer = QTimer(self)
+        self._local_startup_timer.setSingleShot(True)
+        self._local_startup_timer.timeout.connect(self._complete_local_startup_phase)
+        self._mqtt_startup_timer = QTimer(self)
+        self._mqtt_startup_timer.setSingleShot(True)
+        self._mqtt_startup_timer.timeout.connect(self._complete_mqtt_startup_phase)
+        self.map_widget.map_ready.connect(self._begin_startup_sequence)
 
         # Fine-grained startup toggles are for crash-isolation only.
         # Keep them opt-in so normal runs always start full functionality.
@@ -132,22 +147,6 @@ class MainWindow(QMainWindow):
                 "off" if self._disable_deploy_locs else "on",
                 "off" if self._disable_data_inputs else "on",
             )
-
-            # 1) Local data sources first (requires MQTT to be ready for publish)
-            if not self._disable_mqtt:
-                self._init_mqtt()
-            if not self._disable_data_inputs:
-                self._init_data_inputs()
-
-            # 3) Heavier network fetchers after vehicles are live
-            if not self._disable_radar:
-                self._init_radar()
-            self._init_hazards()
-            self._init_satellite()
-
-            if not self._disable_annotations:
-                self._init_annotations()
-                self._init_storm_cone()
 
             self._init_measure()
             self._init_stations()
@@ -217,6 +216,56 @@ class MainWindow(QMainWindow):
         # defer initial geometry until after all overlay widgets exist
         QTimer.singleShot(0, self._layout_overlays)
 
+    def _begin_startup_sequence(self):
+        if self._runtime_safe or self._startup_sequence_started:
+            return
+        self._startup_sequence_started = True
+        self._begin_local_data_phase()
+
+    def _begin_local_data_phase(self):
+        if self._disable_data_inputs or self._monitor:
+            self._complete_local_startup_phase()
+            return
+        self._startup_local_pending = True
+        self._init_data_inputs()
+        self._local_startup_timer.start(3000)
+
+    def _complete_local_startup_phase(self):
+        if self._startup_local_pending:
+            self._startup_local_pending = False
+            self._local_startup_timer.stop()
+        self._begin_mqtt_phase()
+
+    def _begin_mqtt_phase(self):
+        if self._startup_mqtt_pending or hasattr(self, "_mqtt_client") or self._disable_mqtt:
+            if self._disable_mqtt:
+                self._complete_mqtt_startup_phase()
+            return
+        self._startup_mqtt_pending = True
+        self._init_mqtt()
+        if not self._disable_annotations:
+            self._init_annotations()
+            self._init_storm_cone()
+        if not config.MQTT_HOST:
+            self._complete_mqtt_startup_phase()
+        else:
+            self._mqtt_startup_timer.start(4000)
+
+    def _complete_mqtt_startup_phase(self):
+        if self._startup_mqtt_pending:
+            self._startup_mqtt_pending = False
+            self._mqtt_startup_timer.stop()
+        self._start_post_startup_fetchers()
+
+    def _start_post_startup_fetchers(self):
+        if self._post_startup_fetchers_started:
+            return
+        self._post_startup_fetchers_started = True
+        if not self._disable_radar:
+            self._init_radar()
+        self._init_hazards()
+        self._init_satellite()
+
     # ── Toolbar ───────────────────────────────────────────────────────────────
 
     def _init_toolbar(self):
@@ -233,6 +282,9 @@ class MainWindow(QMainWindow):
         self.radar_controls = RadarControls(self._map_container)
         self.radar_controls.setObjectName("floatingToolbar")
         self.btn_radar.toggled.connect(self.radar_controls.toggle_drawer)
+        self.btn_radar.toggled.connect(
+            lambda on: self._set_radar_station_picker_visible(False) if not on else None
+        )
         # pulse layout updates for the duration of the open/close animation
         self.btn_radar.toggled.connect(self._start_layout_pulse)
 
@@ -750,10 +802,12 @@ class MainWindow(QMainWindow):
         # ── wire radar controls → fetcher ─────────────────────────────────
         self.radar_controls.radar_toggled.connect(self._on_radar_toggled)
         self.radar_controls.site_changed.connect(self._on_radar_site_changed)
+        self.radar_controls.stations_requested.connect(self._toggle_radar_station_picker)
         self.radar_controls.product_changed.connect(self._on_radar_product_changed)
         self.radar_controls.fetch_requested.connect(self._radar_fetcher.fetch_now)
         self.radar_controls.frame_requested.connect(self._display_cached_frame)
         self.radar_controls.loop_toggled.connect(self._on_loop_toggled)
+        self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
 
         # ── wire fetcher → decoder → overlay ─────────────────────────────
         self._radar_fetcher.new_data.connect(self._on_radar_data)
@@ -762,15 +816,14 @@ class MainWindow(QMainWindow):
         self._radar_error_clear_timer.setSingleShot(True)
         self._radar_error_clear_timer.timeout.connect(self._clear_radar_error)
 
-        # seed site list from config home location (overrides the hardcoded Norman default)
-        self.radar_controls.set_reference_location(config.HOME_LAT, config.HOME_LON)
+        self.map_widget.set_radar_stations(self._radar_station_sites)
+        self.radar_controls.set_selected_site("KTLX")
 
         initial_site = self.radar_controls.current_site()
         self._radar_fetcher.set_site(initial_site)
         self._radar_fetcher.set_products(["N0B", "N0U"])
 
-        # delay auto-start so map has time to initialize
-        QTimer.singleShot(800, self._auto_start_radar)
+        self._auto_start_radar()
 
     def _init_hazards(self):
         self._hazard_fetcher = HazardFetcher(parent=self)
@@ -975,6 +1028,7 @@ class MainWindow(QMainWindow):
             self._radar_fetcher.fetch_now()
         else:
             # stop everything and clear all state when disabled
+            self._set_radar_station_picker_visible(False)
             self._loop_timer.stop()
             self.radar_controls.reset_cache_ui()
             self._scan_cache.clear()
@@ -1210,6 +1264,25 @@ class MainWindow(QMainWindow):
         self._scan_cache.clear()
         self._radar_overlay.clear()
 
+    def _toggle_radar_station_picker(self):
+        self._set_radar_station_picker_visible(not self._radar_station_picker_visible)
+
+    def _set_radar_station_picker_visible(self, visible: bool):
+        self._radar_station_picker_visible = visible
+        self.map_widget.set_radar_stations_visible(visible)
+
+    def _on_radar_station_clicked(self, site: str):
+        self._set_radar_station_picker_visible(False)
+        self._select_radar_site(site, user_selected=True)
+
+    def _select_radar_site(self, site: str, user_selected: bool):
+        if user_selected:
+            self._radar_auto_site_pending = False
+        if site == self.radar_controls.current_site():
+            self.radar_controls.set_selected_site(site, emit=False)
+            return
+        self.radar_controls.set_selected_site(site, emit=True)
+
     def _on_radar_product_changed(self, product: str):
         # both products are always cached — just switch what's displayed
         self._loop_timer.stop()
@@ -1325,6 +1398,14 @@ class MainWindow(QMainWindow):
             return
         self.update_vehicle_obs(obs)
 
+    def _on_local_vehicle_obs(self, obs: Observation):
+        if self._startup_local_pending and obs.vehicle_id == config.VEHICLE_ID:
+            self._complete_local_startup_phase()
+        self.update_vehicle_obs(obs)
+        vehicle_sync = getattr(self, "_vehicle_sync", None)
+        if vehicle_sync is not None:
+            vehicle_sync.publish_obs(obs)
+
     def _mqtt_connect(self):
         use_tls = config.MQTT_USE_TLS and not runtime_flags.FLAGS.mqtt_no_tls
         if not use_tls:
@@ -1340,12 +1421,16 @@ class MainWindow(QMainWindow):
 
     def _on_mqtt_connected(self):
         self.set_connection_status(True)
+        if self._startup_mqtt_pending:
+            self._mqtt_startup_timer.start(1500)
         if self.status_msg_label.text().startswith("MQTT:"):
             self.status_msg_label.setText("")
             self._layout_overlays()
 
     def _on_mqtt_disconnected(self, code: int):
         self.set_connection_status(False)
+        if self._startup_mqtt_pending:
+            self._complete_mqtt_startup_phase()
         code_map = {
             -1: "setup error (cert/key/path)",
             7: "connection lost",
@@ -1814,6 +1899,7 @@ class MainWindow(QMainWindow):
 
     def update_vehicle_obs(self, obs: Observation) -> None:
         """Public entry point for all vehicle observation updates (MQTT, file watcher, GPS)."""
+        self._maybe_seed_initial_radar_site(obs)
         if not self._should_display_vehicle_obs(obs):
             self._hide_vehicle(obs.vehicle_id)
             return
@@ -1840,6 +1926,18 @@ class MainWindow(QMainWindow):
         self._refresh_vehicle_panel()
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
         self._refresh_vehicle_detail()
+
+    def _maybe_seed_initial_radar_site(self, obs: Observation) -> None:
+        if not self._radar_auto_site_pending or self._monitor:
+            return
+        if obs.vehicle_id != config.VEHICLE_ID:
+            return
+        if not hasattr(self, "radar_controls"):
+            return
+        nearest = self._nearest_radar_site(obs.lat, obs.lon)
+        self._radar_auto_site_pending = False
+        if nearest != self.radar_controls.current_site():
+            self._select_radar_site(nearest, user_selected=False)
 
     def _should_display_vehicle_obs(self, obs: Observation) -> bool:
         return self._obs_age_minutes(obs) <= 10.0 * 60.0
@@ -2088,8 +2186,7 @@ class MainWindow(QMainWindow):
                 baud=config.GPS_BAUD,
                 parent=self,
             )
-            self._gps_reader.obs_ready.connect(self.update_vehicle_obs)
-            self._gps_reader.obs_ready.connect(self._vehicle_sync.publish_obs)
+            self._gps_reader.obs_ready.connect(self._on_local_vehicle_obs)
             self._gps_reader.start()
             log.info("GPS reader started in auto-detect mode")
 
@@ -2113,8 +2210,7 @@ class MainWindow(QMainWindow):
                 poll_interval_s=config.OBS_FILE_POLL_S,
                 parent=self,
             )
-            self._obs_watcher.obs_ready.connect(self.update_vehicle_obs)
-            self._obs_watcher.obs_ready.connect(self._vehicle_sync.publish_obs)
+            self._obs_watcher.obs_ready.connect(self._on_local_vehicle_obs)
             self._obs_watcher.start()
             log.info("Obs file watcher started: dir=%s", config.OBS_FILE_DIR)
         else:
@@ -2130,6 +2226,67 @@ class MainWindow(QMainWindow):
             "color: #4A9EFF; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
         )
         self._layout_overlays()
+
+    def _load_radar_station_sites(self) -> list[dict]:
+        bounds = self._load_mbtiles_bounds()
+        sites: list[dict] = []
+        for site_id, name, lat, lon in NEXRAD_SITES:
+            if bounds and not self._point_in_bounds(lat, lon, bounds):
+                continue
+            sites.append({
+                "site_id": site_id,
+                "name": name,
+                "lat": lat,
+                "lon": lon,
+            })
+        return sites
+
+    def _nearest_radar_site(self, lat: float, lon: float) -> str:
+        candidates = self._radar_station_sites or [
+            {"site_id": site_id, "lat": site_lat, "lon": site_lon}
+            for site_id, _, site_lat, site_lon in NEXRAD_SITES
+        ]
+        nearest = min(
+            candidates,
+            key=lambda site: self._haversine_km(lat, lon, site["lat"], site["lon"]),
+        )
+        return nearest["site_id"]
+
+    def _load_mbtiles_bounds(self) -> tuple[float, float, float, float] | None:
+        try:
+            conn = sqlite3.connect(TILES_PATH)
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE name='bounds'"
+            ).fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return None
+            west, south, east, north = (float(value) for value in row[0].split(","))
+            return west, south, east, north
+        except Exception:
+            return None
+
+    @staticmethod
+    def _point_in_bounds(
+        lat: float,
+        lon: float,
+        bounds: tuple[float, float, float, float],
+    ) -> bool:
+        west, south, east, north = bounds
+        return west <= lon <= east and south <= lat <= north
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        import math
+
+        r = 6371.0
+        lat1r = math.radians(lat1)
+        lat2r = math.radians(lat2)
+        dlat = lat2r - lat1r
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return r * c
 
     # ── Clock ─────────────────────────────────────────────────────────────────
 

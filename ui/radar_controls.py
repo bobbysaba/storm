@@ -1,16 +1,15 @@
 # ui/radar_controls.py
 # radar site selector, product toggle, and playback controls for the main toolbar.
 
-import json
 import math
 import re
 import threading
 import xml.etree.ElementTree as ET
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QToolButton, QLabel,
-    QCheckBox, QInputDialog, QSlider, QFrame, QSizePolicy,
+    QCheckBox, QSlider, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer, Qt
 
@@ -55,23 +54,18 @@ NEXRAD_SITES = [
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
 OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF")]
 THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
-DEFAULT_REF_LAT = 35.22
-DEFAULT_REF_LON = -97.44
-DEFAULT_NEAREST_COUNT = 5
-OTHER_SITE_VALUE = "__OTHER__"
-
-
 class RadarControls(QWidget):
     """
     Toolbar widget containing:
       - RADAR toggle button — slides the two-row control drawer in/out
       - collapsible two-row drawer:
-          Row 1: site selector | product selector | show data checkbox | stretch
+          Row 1: stations button | product selector | show data checkbox | stretch
           Row 2: ⏮ ⏪ ▶/⏸ ⏩ ⏭  +  expanding timeline slider  +  time label
 
     Signals:
         radar_toggled(bool)    — data fetch enabled/disabled (from show data checkbox)
         site_changed(str)      — new site ID selected
+        stations_requested()   — toggle/open the map station picker overlay
         product_changed(str)   — selected product code (e.g. "N0Q")
         fetch_requested()      — trigger immediate fetch
         frame_requested(int)   — user selected a specific cache frame index
@@ -80,6 +74,7 @@ class RadarControls(QWidget):
 
     radar_toggled   = pyqtSignal(bool)
     site_changed    = pyqtSignal(str)
+    stations_requested = pyqtSignal()
     product_changed = pyqtSignal(str)
     fetch_requested = pyqtSignal()
     frame_requested = pyqtSignal(int)
@@ -90,13 +85,12 @@ class RadarControls(QWidget):
         self._radar_on           = False
         self._product            = "N0B"
         self._product_availability: dict[tuple[str, str], bool] = {}
-        self._updating_site_list = False
-        self._manual_site        = ""
+        self._site               = "KTLX"
         self._all_sites          = list(NEXRAD_SITES)
         self._animation          = None   # hold ref to prevent GC during animation
         self._expanded_height    = 0
         self._setup_ui()
-        self.set_reference_location(DEFAULT_REF_LAT, DEFAULT_REF_LON)
+        self.set_selected_site("KTLX")
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -113,18 +107,19 @@ class RadarControls(QWidget):
         drawer_layout.setContentsMargins(0, 0, 0, 0)
         drawer_layout.setSpacing(4)
 
-        # ── Row 1: site | product | show data checkbox ────────────────────
+        # ── Row 1: stations | product | show data checkbox ────────────────
         row1 = QWidget()
         r1 = QHBoxLayout(row1)
         r1.setContentsMargins(0, 0, 0, 0)
         r1.setSpacing(4)
 
-        self._site_combo = QComboBox()
-        self._site_combo.setFixedHeight(22)
-        self._site_combo.setMinimumWidth(220)
-        self._site_combo.setObjectName("radarSiteCombo")
-        self._site_combo.currentIndexChanged.connect(self._on_site_changed)
-        r1.addWidget(self._site_combo)
+        self._stations_button = QToolButton()
+        self._stations_button.setFixedHeight(22)
+        self._stations_button.setMinimumWidth(140)
+        self._stations_button.setObjectName("radarStationsButton")
+        self._stations_button.setToolTip("Show radar station picker on the map")
+        self._stations_button.clicked.connect(self.stations_requested.emit)
+        r1.addWidget(self._stations_button)
 
         self._product_combo = QComboBox()
         self._product_combo.setFixedHeight(22)
@@ -222,15 +217,23 @@ class RadarControls(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def current_site(self) -> str:
-        site_id = self._site_combo.currentData()
-        if site_id and site_id != OTHER_SITE_VALUE:
-            return site_id
-        if self._manual_site:
-            return self._manual_site
-        return "KTLX"
+        return self._site
 
     def current_product(self) -> str:
         return self._product
+
+    def set_selected_site(self, site_id: str, emit: bool = False):
+        normalized = _normalize_site(site_id) or "KTLX"
+        self._site = normalized
+        self._stations_button.setText(f"Stations: {normalized}")
+        if emit:
+            self.site_changed.emit(normalized)
+            self.fetch_requested.emit()
+            threading.Thread(
+                target=self._refresh_product_availability,
+                args=(normalized,),
+                daemon=True,
+            ).start()
 
     def set_scan_time(self, time_str: str):
         # update the time label next to the slider
@@ -241,48 +244,12 @@ class RadarControls(QWidget):
         if active != self._radar_on:
             self.toggle_drawer(active)
 
-    def set_reference_location(self, lat: float, lon: float, top_n: int = DEFAULT_NEAREST_COUNT):
-        """update the dropdown list with nearest N radar sites for a location."""
-        current = self.current_site()
+    def nearest_site_for_location(self, lat: float, lon: float) -> str:
         ranked = sorted(
             self._all_sites,
             key=lambda site: _haversine_km(lat, lon, site[2], site[3])
         )
-        nearest = ranked[:top_n]
-        self._set_site_items(nearest, preserve=current)
-
-    def set_manual_site(self, site_id: str):
-        """set a custom site code selected via the OTHER flow."""
-        normalized = _normalize_site(site_id)
-        if not normalized:
-            return
-        self._manual_site = normalized
-        self._set_other_label(normalized)
-        other_idx = self._site_combo.findData(OTHER_SITE_VALUE)
-        if other_idx >= 0:
-            self._site_combo.setCurrentIndex(other_idx)
-        self.site_changed.emit(normalized)
-        self.fetch_requested.emit()
-        # Resolve the city name in the background and update the label.
-        threading.Thread(target=self._lookup_site_name, args=(normalized,), daemon=True).start()
-        threading.Thread(target=self._refresh_product_availability, args=(normalized,), daemon=True).start()
-
-    def _lookup_site_name(self, site_id: str):
-        """Fetch the human-readable name for a NEXRAD site from the NWS API."""
-        try:
-            url = f"https://api.weather.gov/radar/stations/{site_id}"
-            req = Request(url, headers={
-                "User-Agent": "STORM/1.0 (contact: support)",
-                "Accept": "application/geo+json",
-            })
-            with urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read())
-            name = data.get("properties", {}).get("name", "")
-            label = f"{site_id} - {name}" if name else site_id
-        except Exception:
-            label = site_id
-        # Qt UI updates must happen on the main thread.
-        QTimer.singleShot(0, lambda: self._set_other_label(label))
+        return ranked[0][0] if ranked else "KTLX"
 
     def _set_product_items(self, items: list[tuple[str, str]], preserve_code: str | None = None):
         self._product_combo.blockSignals(True)
@@ -435,18 +402,6 @@ class RadarControls(QWidget):
         self._btn_play.setText("⏸" if checked else "▶")
         self.loop_toggled.emit(checked)
 
-    def _on_site_changed(self, index: int):
-        if self._updating_site_list:
-            return
-        site_id = self._site_combo.itemData(index)
-        if site_id and site_id != OTHER_SITE_VALUE:
-            self.site_changed.emit(site_id)
-            self.fetch_requested.emit()
-            threading.Thread(target=self._refresh_product_availability, args=(site_id,), daemon=True).start()
-            return
-        if site_id == OTHER_SITE_VALUE:
-            self._prompt_for_manual_site()
-
     def _on_product_changed(self, index: int):
         product = self._product_combo.itemData(index)
         if not product:
@@ -478,47 +433,6 @@ class RadarControls(QWidget):
         new_val = min(self._frame_slider.maximum(), self._frame_slider.value() + 1)
         self.set_frame(new_val)
         self.frame_requested.emit(new_val)
-
-    def _prompt_for_manual_site(self):
-        current = self._manual_site or "KTLX"
-        text, ok = QInputDialog.getText(
-            self,
-            "Custom Radar Site",
-            "Enter 4-letter radar code (e.g., KTLX):",
-            text=current
-        )
-        if not ok:
-            return
-        manual = _normalize_site(text)
-        if manual:
-            self.set_manual_site(manual)
-
-    def _set_site_items(self, sites: list[tuple[str, str, float, float]], preserve: str = ""):
-        self._updating_site_list = True
-        try:
-            self._site_combo.clear()
-            for site_id, name, _, _ in sites:
-                self._site_combo.addItem(f"{site_id} - {name}", userData=site_id)
-            self._site_combo.addItem("OTHER...", userData=OTHER_SITE_VALUE)
-
-            desired = _normalize_site(preserve) or "KTLX"
-            idx = self._site_combo.findData(desired)
-            if idx >= 0:
-                self._site_combo.setCurrentIndex(idx)
-            elif self._manual_site:
-                self._set_other_label(self._manual_site)
-                other_idx = self._site_combo.findData(OTHER_SITE_VALUE)
-                self._site_combo.setCurrentIndex(other_idx if other_idx >= 0 else 0)
-            else:
-                self._site_combo.setCurrentIndex(0)
-        finally:
-            self._updating_site_list = False
-
-    def _set_other_label(self, manual_site: str):
-        other_idx = self._site_combo.findData(OTHER_SITE_VALUE)
-        if other_idx >= 0:
-            self._site_combo.setItemText(other_idx, f"OTHER ({manual_site})")
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

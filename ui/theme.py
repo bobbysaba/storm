@@ -58,7 +58,8 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar[wide="true"] QComboBox#radarSiteCombo,
-#floatingToolbar[wide="true"] QComboBox#radarProductCombo {
+#floatingToolbar[wide="true"] QComboBox#radarProductCombo,
+#floatingToolbar[wide="true"] QToolButton#radarStationsButton {
     min-height: 24px;
 }
 
@@ -78,13 +79,15 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QComboBox#radarSiteCombo,
-#floatingToolbar QComboBox#radarProductCombo {
+#floatingToolbar QComboBox#radarProductCombo,
+#floatingToolbar QToolButton#radarStationsButton {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
 }
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
-#floatingToolbar QComboBox#radarProductCombo:hover {
+#floatingToolbar QComboBox#radarProductCombo:hover,
+#floatingToolbar QToolButton#radarStationsButton:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
 
@@ -404,7 +407,7 @@ QPushButton#dangerButton:hover {
     color: #0A0A0F;
 }
 
-QComboBox#radarProductCombo, QComboBox#radarSiteCombo {
+QComboBox#radarProductCombo, QComboBox#radarSiteCombo, QToolButton#radarStationsButton {
     padding: 4px 8px;
 }
 
