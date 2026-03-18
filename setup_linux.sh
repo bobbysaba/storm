@@ -15,15 +15,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ── 0. System library check ────────────────────────────────────────────────────
-echo ""
-echo "NOTE: Qt6 WebEngine requires system libraries not bundled by conda."
-echo "On Debian/Ubuntu, install them with:"
-echo "  sudo apt-get install -y libnss3 libxss1 libasound2 libatk-bridge2.0-0 \\"
-echo "      libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2"
-echo "On RHEL/Fedora:"
-echo "  sudo dnf install -y nss libXScrnSaver alsa-lib atk gtk3"
-echo ""
-read -r -p "Press Enter to continue once dependencies are installed, or Ctrl+C to exit..."
+echo "Installing Qt6 WebEngine system dependencies..."
+
+if command -v apt-get &>/dev/null; then
+    sudo apt-get install -y \
+        libnss3 libxss1 libasound2 libatk-bridge2.0-0 \
+        libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2
+elif command -v dnf &>/dev/null; then
+    sudo dnf install -y nss libXScrnSaver alsa-lib atk gtk3 \
+        libX11-xcb libXcomposite libXdamage libXrandr
+elif command -v yum &>/dev/null; then
+    sudo yum install -y nss libXScrnSaver alsa-lib atk gtk3 \
+        libX11-xcb libXcomposite libXdamage libXrandr
+else
+    echo "WARNING: Could not detect package manager (apt/dnf/yum)."
+    echo "You may need to manually install Qt6 WebEngine system libraries."
+    echo "See: https://doc.qt.io/qt-6/linux-requirements.html"
+fi
 
 # ── 1. Ensure conda is available ───────────────────────────────────────────────
 
