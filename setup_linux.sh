@@ -20,13 +20,20 @@ echo "Installing Qt6 WebEngine system dependencies..."
 if command -v apt-get &>/dev/null; then
     sudo apt-get install -y \
         libnss3 libxss1 libasound2 libatk-bridge2.0-0 \
-        libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2
+        libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 \
+        desktop-file-utils
 elif command -v dnf &>/dev/null; then
-    sudo dnf install -y nss libXScrnSaver alsa-lib atk gtk3 \
-        libX11-xcb libXcomposite libXdamage libXrandr
+    sudo dnf install -y nss libXScrnSaver alsa-lib at-spi2-atk gtk3 \
+        libX11 libXcomposite libXdamage libXrandr \
+        libxkbcommon libxkbcommon-x11 \
+        xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
+        desktop-file-utils
 elif command -v yum &>/dev/null; then
-    sudo yum install -y nss libXScrnSaver alsa-lib atk gtk3 \
-        libX11-xcb libXcomposite libXdamage libXrandr
+    sudo yum install -y nss libXScrnSaver alsa-lib at-spi2-atk gtk3 \
+        libX11 libXcomposite libXdamage libXrandr \
+        libxkbcommon libxkbcommon-x11 \
+        xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
+        desktop-file-utils
 else
     echo "WARNING: Could not detect package manager (apt/dnf/yum)."
     echo "You may need to manually install Qt6 WebEngine system libraries."
@@ -111,24 +118,48 @@ EOF
 chmod +x "$LAUNCHER"
 echo "Launcher written to $LAUNCHER"
 
-# ── 4. Optional .desktop shortcut ─────────────────────────────────────────────
+# ── 4. .desktop shortcut + desktop icon ───────────────────────────────────────
 
 DESKTOP_DIR="$HOME/.local/share/applications"
 DESKTOP_FILE="$DESKTOP_DIR/storm.desktop"
 mkdir -p "$DESKTOP_DIR"
+
+# Find best available icon
+ICON_PATH="$SCRIPT_DIR/storm.png"
+if [ ! -f "$ICON_PATH" ]; then
+    ICON_PATH="storm"   # fallback to theme icon name
+fi
 
 cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Name=STORM
 Comment=Severe-weather Tactical Operations and Response Manager
 Exec=$LAUNCHER
-Icon=$SCRIPT_DIR/assets/icon.png
+Icon=$ICON_PATH
 Terminal=false
 Type=Application
 Categories=Science;
 EOF
 
+chmod +x "$DESKTOP_FILE"
+
+# Refresh the application menu database
+if command -v update-desktop-database &>/dev/null; then
+    update-desktop-database "$DESKTOP_DIR"
+fi
+
 echo ".desktop entry written to $DESKTOP_FILE"
+
+# Also place a shortcut on ~/Desktop if it exists
+if [ -d "$HOME/Desktop" ]; then
+    cp "$DESKTOP_FILE" "$HOME/Desktop/storm.desktop"
+    chmod +x "$HOME/Desktop/storm.desktop"
+    # Mark as trusted on GNOME (allows double-click to launch)
+    if command -v gio &>/dev/null; then
+        gio set "$HOME/Desktop/storm.desktop" metadata::trusted true 2>/dev/null || true
+    fi
+    echo "STORM shortcut placed on Desktop."
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
