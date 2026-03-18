@@ -409,6 +409,25 @@ class MainWindow(QMainWindow):
         _s = QSettings("NSSL", "STORM")
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
+
+        # Stop all background workers before closing so threads don't outlive
+        # the window and fire signals on deleted objects.
+        self._clock_timer.stop()
+        if hasattr(self, "_update_check_timer"):
+            self._update_check_timer.stop()
+        if hasattr(self, "_radar_fetcher"):
+            self._radar_fetcher.stop()
+        if hasattr(self, "_hazard_fetcher"):
+            self._hazard_fetcher.stop()
+        if hasattr(self, "_satellite_fetcher"):
+            self._satellite_fetcher.stop()
+        if hasattr(self, "_gps_reader") and self._gps_reader is not None:
+            self._gps_reader.stop()
+        if hasattr(self, "_obs_watcher") and self._obs_watcher is not None:
+            self._obs_watcher.stop()
+        if hasattr(self, "_mqtt_client"):
+            self._mqtt_client.disconnect()
+
         super().closeEvent(event)
         QApplication.quit()
 
@@ -697,6 +716,7 @@ class MainWindow(QMainWindow):
         # detail pill (hidden until a vehicle is selected)
         self._selected_vehicle_ids = []
         self._last_selected_vehicle_id = None
+        self._vehicle_age_display_state: dict[str, tuple[str, str]] = {}
         self.vehicle_detail_panel = QWidget(self._map_container)
         self.vehicle_detail_panel.setObjectName("vehicleDetailPill")
         detail_layout = QVBoxLayout(self.vehicle_detail_panel)
@@ -1807,6 +1827,8 @@ class MainWindow(QMainWindow):
         v.icon_type = icon_type
         v.lat, v.lon, v.latest_obs = obs.lat, obs.lon, obs
         marker_color = self._obs_age_color(obs)
+        age_label = self._obs_age_label(obs)
+        self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
         self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
         count = len(self._vehicles)
         self.update_vehicle_count(count)
@@ -2095,13 +2117,27 @@ class MainWindow(QMainWindow):
         now = datetime.now(timezone.utc)
         self.clock_label.setText(now.strftime("%H:%M:%S UTC"))
         self.date_label.setText(f"{now.day} {now.strftime('%b %Y')}")
-        # Refresh freshness color + panel age text even without new incoming samples.
+        vehicle_panel_needs_refresh = False
+        vehicle_detail_needs_refresh = False
         for v in self._vehicles.values():
-            if v.latest_obs is not None:
-                self.map_widget.add_vehicle(
-                    v.id, v.lat, v.lon, self._obs_age_color(v.latest_obs), v.icon_type
-                )
-        self._refresh_vehicle_panel()
+            obs = v.latest_obs
+            if obs is None:
+                continue
+            color = self._obs_age_color(obs)
+            age_label = self._obs_age_label(obs)
+            prev_state = self._vehicle_age_display_state.get(v.id)
+            if prev_state == (color, age_label):
+                continue
+            self._vehicle_age_display_state[v.id] = (color, age_label)
+            self.map_widget.add_vehicle(v.id, v.lat, v.lon, color, v.icon_type)
+            vehicle_panel_needs_refresh = True
+            if v.id in self._selected_vehicle_ids:
+                vehicle_detail_needs_refresh = True
+
+        if vehicle_panel_needs_refresh:
+            self._refresh_vehicle_panel()
+        if vehicle_detail_needs_refresh:
+            self._refresh_vehicle_detail()
         if not self._clock_layout_synced:
             self._layout_overlays()
             self._clock_layout_synced = True
@@ -2141,21 +2177,26 @@ class MainWindow(QMainWindow):
             return
 
         lines = ["─── RADAR ───────────────────────────────"]
-        fetcher = self._radar_fetcher
-        lines.append(
-            f"fetcher running: {fetcher._running}  "
-            f"site: {fetcher._site}  products: {fetcher._products}"
-        )
-        lines.append(
-            f"map ready: {getattr(self.map_widget, '_map_ready', '?')}  "
-            f"loop active: {self._loop_timer.isActive()}  "
-            f"interval: {self._loop_timer.interval()}ms"
-        )
-        lines.append(f"cache keys: {list(self._scan_cache.keys())}")
-        for key, scans in self._scan_cache.items():
-            if scans:
-                ages = [f"{s.age_seconds:.0f}s" for s in scans]
-                lines.append(f"  {key}: {len(scans)} frames  ages=[{', '.join(ages)}]")
+        fetcher = getattr(self, "_radar_fetcher", None)
+        if fetcher is None:
+            lines.append("radar disabled or not initialized")
+        else:
+            loop_timer = getattr(self, "_loop_timer", None)
+            scan_cache = getattr(self, "_scan_cache", {})
+            lines.append(
+                f"fetcher running: {fetcher._running}  "
+                f"site: {fetcher._site}  products: {fetcher._products}"
+            )
+            lines.append(
+                f"map ready: {getattr(self.map_widget, '_map_ready', '?')}  "
+                f"loop active: {loop_timer.isActive() if loop_timer else False}  "
+                f"interval: {loop_timer.interval() if loop_timer else 0}ms"
+            )
+            lines.append(f"cache keys: {list(scan_cache.keys())}")
+            for key, scans in scan_cache.items():
+                if scans:
+                    ages = [f"{s.age_seconds:.0f}s" for s in scans]
+                    lines.append(f"  {key}: {len(scans)} frames  ages=[{', '.join(ages)}]")
 
         lines.append("─── MQTT ────────────────────────────────")
         mqtt = getattr(self, "_mqtt_client", None)

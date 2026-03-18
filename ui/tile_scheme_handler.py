@@ -106,15 +106,17 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
 
         try:
             # Open a new connection per request — safe across WebEngine IO threads
-            conn   = sqlite3.connect(self._mbtiles_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT tile_data FROM tiles "
-                "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                (z, x, y_tms),
-            )
-            row = cursor.fetchone()
-            conn.close()
+            conn = sqlite3.connect(self._mbtiles_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT tile_data FROM tiles "
+                    "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, y_tms),
+                )
+                row = cursor.fetchone()
+            finally:
+                conn.close()
         except Exception as exc:
             log.warning("scheme handler: tile DB error z=%d x=%d y=%d: %s", z, x, y, exc)
             job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)

@@ -5,14 +5,13 @@ import os
 import re
 import sys
 import uuid
-import config
 import socket
+import config
 import logging
 import argparse
 import faulthandler
 import runtime_flags
 from dataclasses import replace
-from ui.main_window import MainWindow
 from datetime import datetime, timezone
 from ui.launch_dialog import LaunchDialog, LoadingScreen
 from ui.radar_overlay import set_render_grid_size
@@ -32,29 +31,32 @@ except ModuleNotFoundError as exc:
         sys.exit(1)
     raise
 
-# port used exclusively as a single-instance lock (not a real server)
-_INSTANCE_LOCK_PORT = 19876
-
 # reference kept alive so the OS doesn't release the bound port
-_instance_lock_socket = None
+_instance_lock_file = None
 
 
 def _acquire_instance_lock() -> bool:
-    """Bind a localhost socket as a single-instance guard.
+    """Use an exclusive lockfile as a single-instance guard.
 
     Returns True if this is the first instance; False if one is already running.
-    The socket is intentionally kept alive (stored in _instance_lock_socket) for
-    the entire process lifetime — closing it would release the lock.
+    The file handle is kept alive in _instance_lock_file for the entire process
+    lifetime — closing it would release the lock. The OS releases the lock
+    automatically on crash, so no stale lockfiles accumulate.
     """
-    global _instance_lock_socket
+    global _instance_lock_file
+    import tempfile, os  # noqa: PLC0415
+
+    lock_path = os.path.join(tempfile.gettempdir(), "storm_instance.lock")
+
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Disable SO_REUSEADDR so a recently-closed instance can't be re-bound
-        # before Python's GC collects the socket.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-        sock.bind(("127.0.0.1", _INSTANCE_LOCK_PORT))
-        sock.listen(1)
-        _instance_lock_socket = sock  # keep alive
+        fh = open(lock_path, "w")
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _instance_lock_file = fh  # keep alive to hold the lock
         return True
     except OSError:
         return False
@@ -390,9 +392,17 @@ def main() -> None:
     # set application quit behavior
     app.setQuitOnLastWindowClosed(False)
 
+    # ── Loading screen (early) ─────────────────────────────────────────────────
+    # Show immediately so there is visible feedback while the app finishes
+    # initializing — on Windows this startup period can be several seconds.
+    loading = LoadingScreen()
+    loading.show()
+    app.processEvents()
+
     # ── Single-instance guard ──────────────────────────────────────────────────
     # Must happen after QApplication exists so the warning dialog can be shown.
     if not _acquire_instance_lock():
+        loading.close()
         QMessageBox.warning(
             None,
             "STORM Already Running",
@@ -407,6 +417,9 @@ def main() -> None:
 
     # if not in monitor mode
     if not monitor:
+        # dismiss loading screen before the launch dialog appears
+        loading.close()
+
         # show the launch dialog
         dialog = LaunchDialog()
 
@@ -427,11 +440,10 @@ def main() -> None:
         # get whether or not we're in monitor mode (from the user-selected window)
         monitor = dialog.monitor()
 
-    # ── Loading screen ─────────────────────────────────────────────────────────
-    # Show immediately so there is visible feedback while WebEngine initializes.
-    loading = LoadingScreen()
-    loading.show()
-    app.processEvents()
+    # Deferred import — QWebEngineView (and Chromium DLLs) load here, after the
+    # loading screen is already visible instead of freezing before any UI appears.
+    loading.set_status("Loading map engine...")
+    from ui.main_window import MainWindow  # noqa: PLC0415
 
     # ── File presence checks ───────────────────────────────────────────────────
     # Warn about missing tiles / certificates before the window is built so the
@@ -439,7 +451,6 @@ def main() -> None:
     _warn_missing_files()
 
     # create the main window
-    loading.set_status("Loading map engine...")
     window = MainWindow(debug = args.debug, monitor = monitor)
 
     # define the JS console message handler
@@ -454,31 +465,18 @@ def main() -> None:
         # set the JS console message handler
         window.map_widget.page().javaScriptConsoleMessage = handle_js_message
 
-    # define before-quit handler
-    app.aboutToQuit.connect(lambda: print("DEBUG: aboutToQuit signal fired", flush=True))
-
-    # define last window closed handler
-    app.lastWindowClosed.connect(lambda: print("DEBUG: lastWindowClosed signal fired", flush=True))
-
     # close loading screen and show the main window
     loading.close()
-    print("DEBUG: calling window.show()", flush=True)
     window.show()
-
-    print("DEBUG: entering app.exec()", flush=True)
 
     # if a truck replay file is specified
     if args.truck_replay_file:
         # start the truck replay
-        _start_truck_replay(window=window, file_path=args.truck_replay_file, interval_ms = max(50, args.truck_replay_interval_ms), 
+        _start_truck_replay(window=window, file_path=args.truck_replay_file, interval_ms = max(50, args.truck_replay_interval_ms),
                             restamp=args.truck_replay_restamp)
 
     # run the application
-    exit_code = app.exec()
-
-    # print the exit code
-    print(f"DEBUG: app.exec() returned {exit_code}", flush=True)
-    sys.exit(exit_code)
+    sys.exit(app.exec())
 
 # function to start a truck replay
 def _start_truck_replay(window, file_path: str, interval_ms: int, restamp: bool = False) -> None:

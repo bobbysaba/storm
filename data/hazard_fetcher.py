@@ -374,8 +374,11 @@ class HazardFetcher(QObject):
                 any_success = False
                 for label, f in futures:
                     try:
-                        f.result()
+                        f.result(timeout=REQUEST_TIMEOUT_SECONDS + 5)
                         any_success = True
+                    except concurrent.futures.TimeoutError:
+                        log.warning("Hazard fetch timed out for %s", label)
+                        self.fetch_error.emit(f"Hazard fetch timed out ({label})")
                     except Exception as exc:
                         log.exception("Hazard fetch failed for %s", label)
                         self.fetch_error.emit(f"Hazard fetch failed ({label}): {exc}")
@@ -470,8 +473,8 @@ class HazardFetcher(QObject):
             setattr(self, cache_attr, filtered)
             setattr(self, cache_time_attr, now)
             signal.emit(filtered)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("_filter_expired failed for %s: %s", cache_attr, exc)
 
     # ── Fetch methods ──────────────────────────────────────────────────────────
 
@@ -486,6 +489,12 @@ class HazardFetcher(QObject):
             else (_EMPTY_FC_STR, _EMPTY_FC_STR, _EMPTY_FC_STR, _EMPTY_FC_STR)
         )
         any_changed = False
+
+        prev_prob_strings = {
+            "wind": wind_str,
+            "hail": hail_str,
+            "tor": tor_str,
+        }
 
         # Categorical outlook
         if any(self._spc_categories.values()):
@@ -577,6 +586,31 @@ class HazardFetcher(QObject):
                         else:
                             tor_str = merged
                         any_changed = True
+                    elif prev_prob_strings[key] != (
+                        wind_str if key == "wind" else hail_str if key == "hail" else tor_str
+                    ):
+                        base = json.loads(
+                            (wind_str if key == "wind" else hail_str if key == "hail" else tor_str)
+                            or _EMPTY_FC_STR
+                        )
+                        prev_base = json.loads(prev_prob_strings[key] or _EMPTY_FC_STR)
+                        sig_feats = [
+                            bf for bf in (prev_base.get("features") or [])
+                            if (bf.get("properties") or {}).get("LABEL") == "SIGN"
+                        ]
+                        if sig_feats:
+                            base_feats = [
+                                bf for bf in (base.get("features") or [])
+                                if (bf.get("properties") or {}).get("LABEL") != "SIGN"
+                            ]
+                            base_feats.extend(sig_feats)
+                            merged = json.dumps({"type": "FeatureCollection", "features": base_feats})
+                            if key == "wind":
+                                wind_str = merged
+                            elif key == "hail":
+                                hail_str = merged
+                            else:
+                                tor_str = merged
                 except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                     log.warning("SPC %s significant fetch failed: %s", key, exc)
                     self.fetch_error.emit(f"SPC {key} significant fetch failed: {exc}")

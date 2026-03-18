@@ -112,16 +112,18 @@ class MQTTClient(QObject):
     def publish(self, topic: str, payload: str, qos: int = 1, retain: bool = False):
         """Publish a UTF-8 string payload.  No-op if not connected."""
         with self._lock:
-            if self._client is None:
+            client = self._client
+            if client is None:
                 return
-        self._client.publish(topic, payload.encode(), qos=qos, retain=retain)
+        client.publish(topic, payload.encode(), qos=qos, retain=retain)
 
     def subscribe(self, topic: str, qos: int = 1):
         """Subscribe to a topic (wildcards supported).  No-op if not connected."""
         with self._lock:
-            if self._client is None:
+            client = self._client
+            if client is None:
                 return
-        self._client.subscribe(topic, qos=qos)
+        client.subscribe(topic, qos=qos)
         log.debug("MQTT: subscribed to %s", topic)
 
     def disconnect(self):
