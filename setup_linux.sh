@@ -91,6 +91,13 @@ else
     echo "storm environment created."
 fi
 
+# ── 2b. Install PyQt6 via pip (upgrade pip first to ensure manylinux wheel support) ──
+
+echo "Upgrading pip and installing PyQt6..."
+conda run -n storm pip install --upgrade pip setuptools wheel
+conda run -n storm pip install --prefer-binary \
+    pyqt6 pyqt6-qt6 pyqt6-sip pyqt6-webengine pyqt6-webengine-qt6
+
 # ── 3. Launcher script ─────────────────────────────────────────────────────────
 
 LAUNCHER="$SCRIPT_DIR/storm_launcher.sh"
