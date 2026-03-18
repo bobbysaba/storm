@@ -22,6 +22,11 @@ dependencies:
   # Utilities
   - pyserial             # GPS (NMEA via serial port)
   - pynmea2              # NMEA sentence parsing
-  # Qt UI — conda-forge builds handle system Qt6 libs on Linux
-  - pyqt6
-  - pyqt6-webengine
+  - pip
+  - pip:
+      # Qt UI — pyqt6-webengine is not on conda-forge for Linux; use pip manylinux wheels
+      - pyqt6
+      - pyqt6-qt6
+      - pyqt6-sip
+      - pyqt6-webengine
+      - pyqt6-webengine-qt6
