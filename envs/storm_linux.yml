@@ -1,0 +1,27 @@
+name: storm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  # Scientific / meteorology stack
+  - metpy=1.7.1
+  - scipy=1.17.1
+  - numpy=2.4.2
+  - matplotlib-base=3.10.8
+  - pandas=3.0.1
+  - xarray=2026.2.0
+  - cartopy=0.25.0
+  - pyproj=3.7.2
+  - shapely=2.1.2
+  - pillow=12.1.1
+  # Networking
+  - paho-mqtt=2.1.0
+  - requests=2.32.5
+  - boto3=1.42.59         # AWS S3 (future use)
+  # Utilities
+  - pyserial             # GPS (NMEA via serial port)
+  - pynmea2              # NMEA sentence parsing
+  # Qt UI — conda-forge builds handle system Qt6 libs on Linux
+  - pyqt6
+  - pyqt6-webengine
