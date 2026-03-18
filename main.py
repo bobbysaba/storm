@@ -19,7 +19,7 @@ from data.truck_replay import load_truck_observations
 
 # try to import PyQt packages
 try:
-    from PyQt6.QtCore import QTimer
+    from PyQt6.QtCore import QCoreApplication, QTimer, Qt
     from PyQt6.QtGui import QFont
     from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 # if there is a failure, show an error message
@@ -200,6 +200,16 @@ def _configure_qt_webengine_env() -> None:
     else:
         os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
 
+
+def _configure_qt_application_attributes() -> None:
+    """Set Qt attributes that must be configured before QApplication exists."""
+    if runtime_flags.FLAGS.safe_map_mode:
+        return
+    QCoreApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_ShareOpenGLContexts,
+        True,
+    )
+
 # function to generate a default vehicle ID (if in monitor mode)
 # NOTE: this is needed because if multiple people are in monitor mode, then the MQTT connection will fail
 def _default_vehicle_id() -> str:
@@ -371,6 +381,9 @@ def main() -> None:
 
     # configure the Qt webengine environment
     _configure_qt_webengine_env()
+
+    # set Qt application attributes required before QApplication exists
+    _configure_qt_application_attributes()
 
     # register storm:// URL scheme — must happen before QApplication
     if not runtime_flags.FLAGS.safe_map_mode:
