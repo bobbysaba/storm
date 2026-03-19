@@ -214,11 +214,8 @@ class RadarFetcher(QObject):
         if not self._site or not self._products:
             return
 
-        log.debug("fetch_now: triggering immediate fetch for %s / %s", self._site, self._products)
-
         # non-blocking tryacquire — skip if poll_loop is already mid-fetch
         if not self._fetch_lock.acquire(blocking=False):
-            log.debug("fetch_now: skipped — fetch already in progress")
             return
 
         def _run():

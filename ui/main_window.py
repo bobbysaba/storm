@@ -23,7 +23,7 @@ from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
-from ui.radar_overlay import RadarOverlay
+from ui.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
 from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
@@ -83,6 +83,14 @@ class _NetChecker(QObject):
 class MainWindow(QMainWindow):
     # Emitted from background threads to update the discussion text panel safely.
     _panel_text_ready = pyqtSignal(int, str, str)
+    # Emitted from the decode thread when a scan has been decoded — carries
+    # (generation, site, product, RadarScan) so main thread can cache it.
+    _scan_decoded = pyqtSignal(int, str, str, object)
+    # Emitted from the decode thread on a decode failure — site, product.
+    _radar_decode_failed = pyqtSignal(str, str)
+    # Emitted from the render thread when a PNG is ready — carries a dict with
+    # gen, site, product, scan, png_b64, bounds so main thread can inject it.
+    _render_ready = pyqtSignal(object)
 
     def __init__(self, debug: bool = False, monitor: bool = False):
         super().__init__()
@@ -794,10 +802,55 @@ class MainWindow(QMainWindow):
         self._radar_fetcher = RadarFetcher()
         self._scan_cache: dict[str, list] = {}   # key: "site/product" → list of RadarScan
 
+        # background thread pool for NEXRAD decode+render — keeps heavy MetPy/numpy/scipy
+        # work off the main thread so the UI stays responsive during backfill bursts.
+        # Two separate pools: decode is sequential (order matters for cache), render can
+        # run concurrently with the next decode but we keep it single-threaded to avoid
+        # multiple large numpy arrays in memory simultaneously.
+        from concurrent.futures import ThreadPoolExecutor
+        self._render_scan_to_png = _render_scan_to_png
+        self._decode_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="radar-decode"
+        )
+        self._render_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="radar-render"
+        )
+        # incremented on site change so in-flight decodes/renders for old site are discarded
+        self._render_generation = 0
+
+        # wire decoded-scan and render-ready signals (emitted from bg threads → main thread)
+        self._scan_decoded.connect(self._on_scan_decoded)
+        self._render_ready.connect(self._on_render_ready)
+        self._radar_decode_failed.connect(
+            lambda site, prod: self.status_msg_label.setText(
+                f"Radar decode failed: {site}/{prod}"
+            )
+        )
+
         # 500 ms between loop frames — fast enough to feel animated, slow enough to read
         self._loop_timer = QTimer()
         self._loop_timer.setInterval(500)
         self._loop_timer.timeout.connect(self._advance_loop_frame)
+
+        # pending render scan — latest scan waiting to be rendered.
+        # With URL-based PNG injection (storm://app/radar/overlay.png?t=...) each
+        # inject call sends only a short URL over IPC, so there is no Chromium
+        # congestion concern.  The _render_in_flight guard ensures at most one
+        # background render runs at a time; when it completes, any pending scan
+        # is submitted immediately.  No debounce needed.
+        self._pending_render_scan = None
+
+        # guard: only one background render in flight at a time.
+        self._render_in_flight = False
+
+        # Inject throttle — rate-limits updateImage calls to MapLibre so the
+        # Chromium renderer isn't overwhelmed during backfill.  Without this,
+        # 6 rapid image updates freeze the renderer (can't process mouse/keyboard).
+        self._last_inject_time = 0.0
+        self._deferred_inject_result = None
+        self._inject_throttle_timer = QTimer()
+        self._inject_throttle_timer.setSingleShot(True)
+        self._inject_throttle_timer.timeout.connect(self._flush_deferred_inject)
 
         # ── wire radar controls → fetcher ─────────────────────────────────
         self.radar_controls.radar_toggled.connect(self._on_radar_toggled)
@@ -1032,6 +1085,7 @@ class MainWindow(QMainWindow):
             self._loop_timer.stop()
             self.radar_controls.reset_cache_ui()
             self._scan_cache.clear()
+            self._pending_render_scan = None
             self._radar_fetcher.reset_history()   # force full backfill on re-enable
             self._radar_fetcher.stop()
             self._radar_overlay.clear()
@@ -1257,12 +1311,28 @@ class MainWindow(QMainWindow):
         self._update_hazard_legend()
 
     def _on_radar_site_changed(self, site: str):
+        # increment generation so any in-flight decodes/renders for old site are discarded
+        self._render_generation += 1
+        self._pending_render_scan = None
+        self._render_in_flight = False   # previous render's result will be discarded by gen check
         # clear cache when site changes — old data belongs to a different location
         self._radar_fetcher.set_site(site)
         self._loop_timer.stop()
         self.radar_controls.reset_cache_ui()
         self._scan_cache.clear()
-        self._radar_overlay.clear()
+        if getattr(self, '_site_change_from_map_click', False):
+            # JS click handler already set raster-opacity to 0 — just sync
+            # Python state.  Sending JS here would freeze the renderer (the
+            # Chromium process is still processing the click event).
+            self._radar_overlay._hidden = True
+            self._radar_overlay._current_scan = None
+        else:
+            # Non-click path (auto-site, etc.) — safe to send JS
+            self._radar_overlay.hide()
+        # Reset inject throttle so the first frame for the new site appears immediately
+        self._last_inject_time = 0.0
+        self._deferred_inject_result = None
+        self._inject_throttle_timer.stop()
 
     def _toggle_radar_station_picker(self):
         self._set_radar_station_picker_visible(not self._radar_station_picker_visible)
@@ -1272,8 +1342,13 @@ class MainWindow(QMainWindow):
         self.map_widget.set_radar_stations_visible(visible)
 
     def _on_radar_station_clicked(self, site: str):
-        self._set_radar_station_picker_visible(False)
+        # JS already called stormSetRadarStationsVisible(false) and set
+        # radar-overlay opacity to 0 before the bridge call — just update
+        # Python-side flags without any redundant runJavaScript calls.
+        self._radar_station_picker_visible = False
+        self._site_change_from_map_click = True
         self._select_radar_site(site, user_selected=True)
+        self._site_change_from_map_click = False
 
     def _select_radar_site(self, site: str, user_selected: bool):
         if user_selected:
@@ -1296,11 +1371,34 @@ class MainWindow(QMainWindow):
             self._radar_overlay.clear()
 
     def _on_radar_data(self, site: str, product: str, raw_bytes: bytes):
+        """Called on the main thread by the fetcher signal.  Returns immediately —
+        the actual decode is submitted to a background thread so the UI is never
+        blocked by MetPy/numpy work."""
         log.debug("radar data received: %s/%s (%d bytes)", site, product, len(raw_bytes))
+        gen = self._render_generation
+        self._decode_executor.submit(self._bg_decode, gen, site, product, raw_bytes)
 
+    def _bg_decode(self, gen: int, site: str, product: str, raw_bytes: bytes):
+        """Runs in the decode thread pool — NOT on the main thread.
+        Decodes raw NEXRAD bytes and emits _scan_decoded (auto-queued to main thread)."""
+        # bail early if the site was changed while we were queued
+        if gen != self._render_generation:
+            log.debug("bg_decode: discarding stale decode gen=%d (current=%d)", gen, self._render_generation)
+            return
         scan = decode_nexrad_l3(site, product, raw_bytes)
         if scan is None:
-            self.status_msg_label.setText(f"Radar decode failed: {site}/{product}")
+            self._radar_decode_failed.emit(site, product)
+            return
+        # check again after decode in case site changed mid-decode
+        if gen != self._render_generation:
+            log.debug("bg_decode: discarding post-decode stale result gen=%d", gen)
+            return
+        self._scan_decoded.emit(gen, site, product, scan)
+
+    def _on_scan_decoded(self, gen: int, site: str, product: str, scan):
+        """Runs on the main thread (PyQt queues the signal from the decode thread).
+        Updates the scan cache and submits a background render for the latest frame."""
+        if gen != self._render_generation:
             return
 
         key = f"{site}/{product}"
@@ -1322,7 +1420,7 @@ class MainWindow(QMainWindow):
 
         log.debug("cache updated: key=%s, n=%d frames", key, len(cache))
 
-        # only update UI and display for the currently visible product;
+        # only update display for the currently visible product;
         # background product data is still cached above for instant switching
         if product != self.radar_controls.current_product():
             return
@@ -1330,9 +1428,111 @@ class MainWindow(QMainWindow):
         was_live = self.radar_controls.is_at_latest_frame()
         self.radar_controls.set_cache_size(len(cache))
 
-        # only auto-advance display if not looping and user was viewing live frame
+        # Update the pending scan and submit a render immediately if none is in
+        # flight.  The _render_in_flight guard ensures at most one background
+        # render runs at a time; if one is already running, the latest scan is
+        # kept as pending and submitted the moment the current render completes.
         if not self.radar_controls.is_looping() and was_live:
-            self._show_scan(scan)
+            self._pending_render_scan = scan
+            self._submit_pending_render()
+
+    def _submit_pending_render(self):
+        """Submit a background render for the latest pending scan.
+        No-op if a render is already in flight — the pending scan will be
+        submitted by _on_render_ready when the current render completes."""
+        scan = self._pending_render_scan
+        if scan is None:
+            return
+        if self._render_in_flight:
+            # Don't queue a second render — _on_render_ready will re-check pending
+            return
+        self._pending_render_scan = None
+        self._render_in_flight = True
+        gen = self._render_generation
+        grid_size = self._radar_overlay._grid_size
+        self._render_executor.submit(self._bg_render, gen, scan, grid_size)
+
+    def _bg_render(self, gen: int, scan, grid_size: int):
+        """Runs in the render thread pool — NOT on the main thread.
+        Renders scan to PNG then emits _render_ready (auto-queued to main thread)."""
+        if gen != self._render_generation:
+            log.debug("bg_render: discarding stale render gen=%d (current=%d)", gen, self._render_generation)
+            return
+        try:
+            png_bytes, bounds, elapsed_ms = self._render_scan_to_png(scan, grid_size)
+        except Exception as e:
+            log.error("bg_render: render failed: %s", e, exc_info=True)
+            return
+        if gen != self._render_generation:
+            log.debug("bg_render: discarding post-render stale result gen=%d", gen)
+            return
+        self._render_ready.emit({
+            "gen":        gen,
+            "scan":       scan,
+            "png_bytes":  png_bytes,
+            "bounds":     bounds,
+            "elapsed_ms": elapsed_ms,
+        })
+
+    # Minimum interval between inject calls (ms).  MapLibre's renderer runs in
+    # Chromium's renderer process — each updateImage triggers image fetch + decode
+    # + GPU re-render, all on the renderer's main thread where mouse/keyboard
+    # events are also processed.  Without throttling, 6 rapid injects during
+    # backfill saturate the renderer and freeze the map for 1-2 seconds.
+    _INJECT_COOLDOWN_MS = 600
+
+    def _on_render_ready(self, result: dict):
+        """Runs on the main thread — injects the pre-rendered PNG into the map."""
+        import time as _time
+        self._render_in_flight = False
+        if result["gen"] != self._render_generation:
+            if self._pending_render_scan is not None:
+                self._submit_pending_render()
+            return
+        scan = result["scan"]
+        if scan.product != self.radar_controls.current_product():
+            if self._pending_render_scan is not None:
+                self._submit_pending_render()
+            return
+
+        now = _time.monotonic()
+        elapsed_since_inject = (now - self._last_inject_time) * 1000
+
+        if elapsed_since_inject >= self._INJECT_COOLDOWN_MS:
+            # Enough time has passed — inject immediately
+            self._do_inject(result)
+        else:
+            # Too soon — defer this result; timer will flush it
+            self._deferred_inject_result = result
+            if not self._inject_throttle_timer.isActive():
+                remaining = self._INJECT_COOLDOWN_MS - int(elapsed_since_inject)
+                self._inject_throttle_timer.start(max(20, remaining))
+
+        # Keep the render pipeline moving regardless of inject throttle
+        if self._pending_render_scan is not None:
+            self._submit_pending_render()
+
+    def _flush_deferred_inject(self):
+        """Timer callback — inject the most recent deferred render result."""
+        result = self._deferred_inject_result
+        self._deferred_inject_result = None
+        if result is None:
+            return
+        if result["gen"] != self._render_generation:
+            return
+        self._do_inject(result)
+
+    def _do_inject(self, result: dict):
+        """Actually inject the rendered PNG into the map."""
+        import time as _time
+        scan = result["scan"]
+        self._radar_overlay.inject(result["png_bytes"], result["bounds"])
+        self._last_inject_time = _time.monotonic()
+        self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
+        self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
+        self._radar_error_clear_timer.stop()
+        self.status_msg_label.setText(scan.label)
+        self._layout_overlays()
 
     def _show_scan(self, scan):
         self._radar_overlay.update(scan)

@@ -124,6 +124,85 @@ COLORMAPS = {
 }
 
 
+# ── Standalone render function (thread-safe, no instance state) ───────────────
+
+def render_scan_to_png(scan: RadarScan, grid_size: int) -> tuple[bytes, list, float]:
+    """
+    Convert a RadarScan to a PNG.  Fully thread-safe — takes all inputs
+    as parameters and creates its own ScalarMappable; never touches shared state.
+
+    Returns:
+        (png_bytes, [west, south, east, north], elapsed_ms)
+    """
+    IMG = grid_size
+    t0 = perf_counter()
+
+    num_az, num_rng = scan.data.shape
+
+    radar_lat = float(scan.lats[:, 0].mean())
+    radar_lon = float(scan.lons[:, 0].mean())
+
+    lat_min = float(np.nanmin(scan.lats))
+    lat_max = float(np.nanmax(scan.lats))
+    lon_min = float(np.nanmin(scan.lons))
+    lon_max = float(np.nanmax(scan.lons))
+
+    out_lats = np.linspace(lat_max, lat_min, IMG)
+    out_lons = np.linspace(lon_min, lon_max, IMG)
+    lon_grid, lat_grid = np.meshgrid(out_lons, out_lats)
+
+    cos_lat = np.cos(np.deg2rad(radar_lat))
+    dlat = lat_grid - radar_lat
+    dlon = (lon_grid - radar_lon) * cos_lat
+    range_km = np.sqrt(dlat ** 2 + dlon ** 2) * 111.32
+
+    az_deg = np.degrees(np.arctan2(dlon, dlat)) % 360.0
+
+    max_range_km = float(np.nanmax(
+        np.sqrt(((scan.lats - radar_lat) ** 2 +
+                 ((scan.lons - radar_lon) * cos_lat) ** 2)) * 111.32
+    ))
+
+    az_idx  = ((az_deg - scan.az_offset) % 360.0) * num_az / 360.0
+    rng_idx = range_km / max_range_km * (num_rng - 1)
+
+    outside = range_km > max_range_km
+
+    sentinel    = scan.vmin - 999.0
+    data_filled = np.where(np.isnan(scan.data), sentinel, scan.data)
+
+    coords   = np.array([az_idx.ravel(), rng_idx.ravel()])
+    data_out = map_coordinates(
+        data_filled, coords, order=0, prefilter=False, mode="constant", cval=sentinel
+    ).reshape(IMG, IMG)
+
+    data_out[outside | (data_out <= sentinel + 1.0)] = np.nan
+    if scan.colormap != "nws_vel":
+        data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
+
+    cmap   = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
+    norm   = mcolors.Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
+    mapper = mcm.ScalarMappable(norm=norm, cmap=cmap)
+
+    rgba = mapper.to_rgba(data_out, bytes=True)
+    rgba[np.isnan(data_out), 3] = 0
+
+    buf = io.BytesIO()
+    mimg.imsave(buf, rgba, format="png")
+    png_bytes = buf.getvalue()
+
+    elapsed_ms = (perf_counter() - t0) * 1000.0
+    log.debug(
+        "render_scan_to_png: %.0f KB PNG in %.1f ms (grid=%d)",
+        len(png_bytes) / 1024,
+        elapsed_ms,
+        IMG,
+    )
+
+    bounds = [lon_min, lat_min, lon_max, lat_max]
+    return png_bytes, bounds, elapsed_ms
+
+
 # ── Radar Overlay ─────────────────────────────────────────────────────────────
 
 class RadarOverlay(QObject):
@@ -146,6 +225,7 @@ class RadarOverlay(QObject):
         super().__init__(parent)
         self._map = map_widget
         self._active = False
+        self._hidden = False
         self._current_scan: Optional[RadarScan] = None
         self._grid_size = int(RENDER_GRID_SIZE)
         self._adaptive_grid = ADAPTIVE_RENDER_GRID
@@ -156,17 +236,16 @@ class RadarOverlay(QObject):
         self._mapper_cache: dict[tuple, mcm.ScalarMappable] = {}
 
     def update(self, scan: RadarScan):
-        """render and display a new radar scan."""
+        """render and display a new radar scan (synchronous, for loop playback)."""
         self._current_scan = scan
 
         try:
-            png_b64, bounds = self._render_to_png(scan)
+            png_bytes, bounds = self._render_to_png(scan)
         except Exception as e:
             log.error("[RadarOverlay] render failed: %s", e, exc_info=True)
             return
 
-        self._inject_into_map(png_b64, bounds)
-        self._active = True
+        self.inject(png_bytes, bounds)
         log.info("[RadarOverlay] updated with %s (grid=%d)", scan.label, self._grid_size)
 
     def clear(self):
@@ -176,7 +255,46 @@ class RadarOverlay(QObject):
           if (map.getSource("{self.SOURCE_ID}")) map.removeSource("{self.SOURCE_ID}");
         """)
         self._active = False
+        self._hidden = False
         self._current_scan = None
+
+    def hide(self):
+        """Hide the overlay without removing the MapLibre source/layer.
+
+        Much lighter than clear() — avoids the expensive removeLayer + addLayer
+        cycle that forces MapLibre to tear down and rebuild its raster rendering
+        pipeline.  The next inject() call will just use updateImage() (fast path).
+        """
+        if self._active:
+            self._map.run_js(
+                f'if(map.getLayer("{self.LAYER_ID}")) '
+                f'map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0);'
+            )
+        self._hidden = True
+        self._current_scan = None
+
+    def inject(self, png_bytes: bytes, bounds: list):
+        """Inject a pre-rendered PNG (from background thread) into the map.
+        Must be called from the main thread.
+
+        Stores the PNG in the StormSchemeHandler and passes a short URL to
+        MapLibre instead of embedding the full base64 blob in runJavaScript.
+        This keeps the IPC message tiny so Chromium's renderer JS thread stays
+        free to process mouse/keyboard events during the image fetch.
+        """
+        import time
+        scheme_handler = getattr(self._map, "scheme_handler", None)
+        if scheme_handler is not None:
+            scheme_handler.set_radar_png(png_bytes)
+            ts = int(time.monotonic() * 1000) & 0xFFFFFF  # cache-bust token
+            image_url = f"storm://app/radar/overlay.png?t={ts}"
+        else:
+            # SAFE_MAP_MODE — no scheme handler; fall back to data URL
+            image_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        restoring = self._hidden
+        self._hidden = False
+        self._inject_into_map(image_url, bounds, restore_opacity=restoring)
+        self._active = True
 
     def set_opacity(self, opacity: float):
         """set overlay opacity (0.0 – 1.0)."""
@@ -191,13 +309,12 @@ class RadarOverlay(QObject):
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _render_to_png(self, scan: RadarScan) -> tuple[str, list]:
+    def _render_to_png(self, scan: RadarScan) -> tuple[bytes, list]:
         """
-        Convert scan data to a base64-encoded PNG using proper polar→Cartesian
-        reprojection so the circular sweep looks correct on the map.
+        Convert scan data to a PNG using proper polar→Cartesian reprojection.
 
         Returns:
-            (base64_png_string, [west, south, east, north])
+            (png_bytes, [west, south, east, north])
         """
         IMG = self._grid_size   # adaptive configurable — lower = faster render
         t0 = perf_counter()
@@ -279,19 +396,19 @@ class RadarOverlay(QObject):
         # encode as PNG
         buf = io.BytesIO()
         mimg.imsave(buf, rgba, format="png")
-        png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        png_bytes = buf.getvalue()
 
         elapsed_ms = (perf_counter() - t0) * 1000.0
         self._maybe_adjust_grid(elapsed_ms)
         log.debug(
             "render complete: %.0f KB PNG in %.1f ms (grid=%d)",
-            len(png_b64) * 3 / 4 / 1024,
+            len(png_bytes) / 1024,
             elapsed_ms,
             IMG,
         )
 
         bounds = [lon_min, lat_min, lon_max, lat_max]
-        return png_b64, bounds
+        return png_bytes, bounds
 
     def _maybe_adjust_grid(self, elapsed_ms: float) -> None:
         if not self._adaptive_grid:
@@ -333,9 +450,13 @@ class RadarOverlay(QObject):
                 int(ADAPTIVE_UP_MS),
             )
 
-    def _inject_into_map(self, png_b64: str, bounds: list):
+    def _inject_into_map(self, image_url: str, bounds: list, restore_opacity: bool = False):
         """
         Add or update the radar image source and layer in MapLibre.
+
+        image_url may be a storm://app/radar/overlay.png?t=... URL (preferred —
+        small IPC message, browser fetches PNG asynchronously so the renderer's
+        JS thread stays free for input events) or a data: URL fallback.
 
         MapLibre image sources expect coordinates as:
           [[NW_lon, NW_lat], [NE_lon, NE_lat], [SE_lon, SE_lat], [SW_lon, SW_lat]]
@@ -345,13 +466,12 @@ class RadarOverlay(QObject):
         coords_js = (
             f"[[{west},{north}], [{east},{north}], [{east},{south}], [{west},{south}]]"
         )
-        data_url = f"data:image/png;base64,{png_b64}"
 
         log.debug("injecting radar image into map (bounds %s)", bounds)
 
         js = f"""
         (function() {{
-          const imageUrl = "{data_url}";
+          const imageUrl = "{image_url}";
           const coords   = {coords_js};
 
           try {{
@@ -361,6 +481,18 @@ class RadarOverlay(QObject):
                 url: imageUrl,
                 coordinates: coords
               }});
+              {"" if not restore_opacity else f'''
+              // restore opacity after hide() set it to 0 for site switch;
+              // disable fade so the new site's data appears instantly
+              if (map.getLayer("{self.LAYER_ID}")) {{
+                map.setPaintProperty("{self.LAYER_ID}", "raster-fade-duration", 0);
+                map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0.75);
+                // re-enable fade for subsequent updates (loop playback, live updates)
+                setTimeout(function() {{
+                  if (map.getLayer("{self.LAYER_ID}"))
+                    map.setPaintProperty("{self.LAYER_ID}", "raster-fade-duration", 300);
+                }}, 500);
+              }}'''}
             }} else {{
               // first time — add source and layer
               map.addSource("{self.SOURCE_ID}", {{

@@ -1453,6 +1453,10 @@ def build_map_html() -> str:
           const siteId = radarHits[0].properties && radarHits[0].properties.site_id;
           if (siteId) {{
             window.stormSetRadarStationsVisible(false);
+            // Hide radar overlay immediately in JS — avoids a Python→JS
+            // round-trip that freezes the renderer during click processing.
+            if (map.getLayer("radar-overlay"))
+              map.setPaintProperty("radar-overlay", "raster-opacity", 0);
             if (bridge) bridge.on_radar_station_click(siteId);
             return;
           }}
@@ -2524,6 +2528,8 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         QWebEngineProfile.defaultProfile().installUrlSchemeHandler(
             b"storm", self._scheme_handler
         )
+        # Public accessor so RadarOverlay can push PNG bytes for URL-based serving
+        self.scheme_handler = self._scheme_handler
 
         settings = self.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -2552,6 +2558,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.loadFinished.connect(self._on_page_loaded)
 
         QTimer.singleShot(0, self._load_map)
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        if '[TIMING]' in message:
+            print(f"JS {message}", flush=True)
 
     def _load_map(self):
         self.load(QUrl("storm://app/"))

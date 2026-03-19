@@ -15,6 +15,7 @@
 import logging
 import os
 import sqlite3
+import threading
 import zlib
 
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
@@ -51,6 +52,16 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         self._mbtiles_path = mbtiles_path
         self._static_path  = static_path
         self._html         = html.encode("utf-8")
+        # Thread-safe buffer for the latest radar overlay PNG.
+        # Written by the render thread (via set_radar_png); read by Chromium's
+        # resource-loader thread (via requestStarted → _serve_radar_png).
+        self._radar_png_lock  = threading.Lock()
+        self._radar_png_bytes = b""
+
+    def set_radar_png(self, data: bytes) -> None:
+        """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
+        with self._radar_png_lock:
+            self._radar_png_bytes = data
 
     def requestStarted(self, job: QWebEngineUrlRequestJob):
         path = job.requestUrl().path()
@@ -64,6 +75,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_file(job, "fonts/" + path[len("/fonts/"):])
         elif path.startswith("/tiles/"):
             self._serve_tile(job, path)
+        elif path.startswith("/radar/overlay.png"):
+            self._serve_radar_png(job)
         else:
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
 
@@ -134,6 +147,16 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             pass   # not gzipped — use raw
 
         self._reply(job, b"application/x-protobuf", tile_data)
+
+    # ── Radar overlay PNG ─────────────────────────────────────────────────────
+
+    def _serve_radar_png(self, job: QWebEngineUrlRequestJob):
+        with self._radar_png_lock:
+            data = self._radar_png_bytes
+        if not data:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, b"image/png", data)
 
     # ── Helper ────────────────────────────────────────────────────────────────
 
