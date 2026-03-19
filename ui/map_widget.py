@@ -18,7 +18,7 @@ SAFE_MAP_MODE = (
     and runtime_flags.FLAGS.safe_map_mode
 )
 
-from PyQt6.QtCore import QUrl, QTimer, pyqtSignal, QObject, pyqtSlot
+from PyQt6.QtCore import QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, Qt
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 if not SAFE_MAP_MODE:
@@ -69,6 +69,8 @@ def build_safe_map_html() -> str:
     window.stormAddVehicle = _noop;
     window.stormRemoveVehicle = _noop;
     window.stormFlyTo = _noop;
+    window.stormFollowMove = _noop;
+    window.stormSetFollow = _noop;
     window.stormAddAnnotation = _noop;
     window.stormRemoveAnnotation = _noop;
     window.stormAddStormCone = _noop;
@@ -383,6 +385,8 @@ def build_map_html() -> str:
     window.stormAddVehicle = _stormNoop;
     window.stormRemoveVehicle = _stormNoop;
     window.stormFlyTo = _stormNoop;
+    window.stormFollowMove = _stormNoop;
+    window.stormSetFollow = _stormNoop;
     window.stormAddAnnotation = _stormNoop;
     window.stormRemoveAnnotation = _stormNoop;
     window.stormAddStormCone = _stormNoop;
@@ -418,6 +422,7 @@ def build_map_html() -> str:
     window._radarStationsVisible = false;
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
+    window._soundingModeActive = false;
     window._stormDrawingType = '';
     window._drawingConfirmedPts = [];
     window._drawingRubberPt = null;
@@ -1407,6 +1412,11 @@ def build_map_html() -> str:
     }});
 
     map.on("click", function(e) {{
+      // In sounding mode: capture lat/lon and forward to Python — skip all other handling
+      if (window._soundingModeActive) {{
+        if (bridge) bridge.on_sounding_click(e.lngLat.lat, e.lngLat.lng);
+        return;
+      }}
       // In drawing mode: skip all hit detection, just emit map_click (point placement)
       if (window._stormDrawingActive) {{
         if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
@@ -1560,6 +1570,25 @@ def build_map_html() -> str:
         duration: 800
       }});
     }};
+
+    // ── Follow mode ────────────────────────────────────────────────────────
+    var _followActive = false;
+
+    window.stormSetFollow = function(enabled) {{
+      _followActive = !!enabled;
+    }};
+
+    window.stormFollowMove = function(lat, lon) {{
+      if (!_followActive) return;
+      map.easeTo({{ center: [lon, lat], duration: 300 }});
+    }};
+
+    map.on('dragstart', function() {{
+      if (_followActive && bridge) {{
+        _followActive = false;
+        bridge.on_user_drag();
+      }}
+    }});
 
     // ── Annotations ───────────────────────────────────────────────────────
     const _ANNO_TYPES = {{
@@ -2453,9 +2482,11 @@ class MapBridge(QObject):
     feature_clicked    = pyqtSignal(str)
     annotation_clicked = pyqtSignal(str)
     storm_cone_clicked = pyqtSignal(str)
-    map_double_clicked = pyqtSignal(float, float)
-    drawing_clicked    = pyqtSignal(str)
+    map_double_clicked    = pyqtSignal(float, float)
+    drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
+    sounding_clicked      = pyqtSignal(float, float)
+    user_dragged          = pyqtSignal()
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -2489,19 +2520,29 @@ class MapBridge(QObject):
     def on_radar_station_click(self, site_id: str):
         self.radar_station_clicked.emit(site_id)
 
+    @pyqtSlot(float, float)
+    def on_sounding_click(self, lat: float, lon: float):
+        self.sounding_clicked.emit(lat, lon)
+
+    @pyqtSlot()
+    def on_user_drag(self):
+        self.user_dragged.emit()
+
 
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
 class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
-    map_ready          = pyqtSignal()
-    map_clicked        = pyqtSignal(float, float)
-    map_moved          = pyqtSignal(float, float, float)
-    feature_clicked    = pyqtSignal(str)
-    annotation_clicked = pyqtSignal(str)
-    storm_cone_clicked = pyqtSignal(str)
-    map_double_clicked = pyqtSignal(float, float)
-    drawing_clicked    = pyqtSignal(str)
+    map_ready             = pyqtSignal()
+    map_clicked           = pyqtSignal(float, float)
+    map_moved             = pyqtSignal(float, float, float)
+    feature_clicked       = pyqtSignal(str)
+    annotation_clicked    = pyqtSignal(str)
+    storm_cone_clicked    = pyqtSignal(str)
+    map_double_clicked    = pyqtSignal(float, float)
+    drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
+    sounding_clicked      = pyqtSignal(float, float)
+    user_dragged          = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2551,6 +2592,8 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.map_double_clicked.connect(self.map_double_clicked)
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
+        self.bridge.sounding_clicked.connect(self.sounding_clicked)
+        self.bridge.user_dragged.connect(self.user_dragged)
 
         # Queue for JS calls that arrive before the page has loaded
         self._map_ready = False
@@ -2651,6 +2694,13 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
         )
 
+    def set_sounding_mode(self, active: bool):
+        """Toggle sounding-click mode: map clicks emit lat/lon instead of normal actions."""
+        flag = "true" if active else "false"
+        self.run_js(f"window._soundingModeActive = {flag};")
+        cursor = Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor
+        self.setCursor(cursor)
+
     def preview_meso_sector(self, idx: int | None):
         if idx in (1, 2):
             self.run_js(
@@ -2662,6 +2712,12 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def fly_to(self, lat: float, lon: float, zoom: float = None):
         zoom_str = str(zoom) if zoom is not None else "undefined"
         self.run_js(f"stormFlyTo({lat}, {lon}, {zoom_str});")
+
+    def set_follow(self, enabled: bool):
+        self.run_js(f"stormSetFollow({'true' if enabled else 'false'});")
+
+    def follow_move(self, lat: float, lon: float):
+        self.run_js(f"stormFollowMove({lat}, {lon});")
 
     def set_annotation_mode(self, active: bool):
         if active:

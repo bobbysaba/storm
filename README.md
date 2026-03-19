@@ -13,6 +13,7 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
+- **HRRR point soundings** — click any map location to fetch a live Skew-T log-P sounding from the HRRR model (open-meteo free API); shows parcel parameters, kinematics table, hodograph, and F0–F3 forecast hour scrubber
 
 ---
 
@@ -163,6 +164,7 @@ storm/
 │   ├── annotation.py        # Annotation dataclass + type registry
 │   ├── observation.py       # Meteorological obs record
 │   ├── radar_scan.py        # RadarScan dataclass + product metadata
+│   ├── sounding.py          # Sounding + SoundingSet dataclasses; pressure levels
 │   ├── storm_cone.py        # StormCone dataclass + GeoJSON builder
 │   └── vehicle.py           # Vehicle dataclass
 │
@@ -171,6 +173,7 @@ storm/
 │   ├── radar_decoder.py     # MetPy Level 3 decode → RadarScan
 │   ├── satellite_fetcher.py # WMS satellite imagery fetch + cache
 │   ├── hazard_fetcher.py    # SPC/NWS hazard polygons
+│   ├── sounding_fetcher.py  # On-demand HRRR point sounding via open-meteo
 │   ├── obs_file_watcher.py  # Watches FOFS instrument logger file (Track A)
 │   ├── gps_reader.py        # NMEA via pyserial — auto-detects GPS puck (Track B)
 │   └── truck_replay.py      # Offline CSV replay for testing
@@ -194,6 +197,7 @@ storm/
 │   ├── annotation_dialog.py # Place / edit annotation dialogs
 │   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
+│   ├── sounding_dialog.py   # HRRR point sounding Skew-T dialog
 │   └── theme.py             # QSS dark theme + color constants
 │
 ├── static/                  # Bundled offline assets (no CDN)

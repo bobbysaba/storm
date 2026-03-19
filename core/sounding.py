@@ -1,0 +1,88 @@
+# core/sounding.py
+# Data classes representing a vertical atmospheric sounding profile.
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import numpy as np
+
+
+# Pressure levels requested from the API (hPa), surface → tropopause.
+# Chosen to give good vertical resolution in the lower troposphere while
+# still covering the jet stream / upper-level flow important for severe wx.
+PRESSURE_LEVELS = [
+    1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 725,
+    700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100,
+]
+
+# Time slots: current run F0 (analysis) through F3.
+# (hour_offset, short_label, tab_label)
+SOUNDING_SLOTS = [
+    (0, "F0", "Analysis (F0)"),
+    (1, "F1", "F+1h"),
+    (2, "F2", "F+2h"),
+    (3, "F3", "F+3h"),
+]
+
+
+@dataclass
+class Sounding:
+    """Vertical atmospheric profile at a single location and valid time.
+
+    All arrays are ordered from highest pressure (surface) to lowest (top),
+    with any below-ground levels already removed.
+    """
+    lat:         float
+    lon:         float
+    valid_time:  datetime
+    slot_offset: int        # hour offset from analysis (−2 … +3)
+    label:       str        # human-readable tab label, e.g. "Analysis −2h"
+
+    # Vertical profile arrays — all shape (N,)
+    pressure:    np.ndarray  # hPa
+    temperature: np.ndarray  # °C
+    dewpoint:    np.ndarray  # °C
+    u_wind:      np.ndarray  # m/s  (eastward component)
+    v_wind:      np.ndarray  # m/s  (northward component)
+    height:      np.ndarray  # m    (geopotential height MSL)
+
+    @property
+    def wind_speed(self) -> np.ndarray:
+        """Wind speed in m/s derived from U/V components."""
+        return np.sqrt(self.u_wind ** 2 + self.v_wind ** 2)
+
+    @property
+    def wind_direction(self) -> np.ndarray:
+        """Meteorological wind direction in degrees (0 = from north)."""
+        direction = np.degrees(np.arctan2(-self.u_wind, -self.v_wind)) % 360
+        return direction
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.pressure) == 0
+
+
+@dataclass
+class SoundingSet:
+    """Four sounding time slots (F0–F3) for a single clicked map location.
+
+    Returned by SoundingFetcher after a successful API call.  Not all
+    slots are guaranteed to be present — HRRR may not have data for
+    every requested time step near the edges of its run window.
+    """
+    lat:       float
+    lon:       float
+    elevation: float     # m MSL (site elevation from open-meteo)
+    fetch_time: datetime
+    soundings: list      # list[Sounding], may be fewer than 6 if some slots missing
+
+    def get(self, slot_offset: int):
+        """Return the Sounding for a given hour offset, or None."""
+        for s in self.soundings:
+            if s.slot_offset == slot_offset:
+                return s
+        return None
+
+    @property
+    def available_offsets(self) -> list:
+        return [s.slot_offset for s in self.soundings]

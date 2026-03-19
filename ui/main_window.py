@@ -24,11 +24,13 @@ from ui.hazard_controls import HazardControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
+from ui.sounding_dialog import SoundingDialog
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
 from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
+from data.sounding_fetcher import SoundingFetcher
 from data.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
 from data.satellite_fetcher import SatelliteFetcher
@@ -300,6 +302,10 @@ class MainWindow(QMainWindow):
 
         # ── vehicles ──────────────────────────────────────────────────────
         self.btn_vehicles = self._toolbar_toggle("VEHICLES", "Toggle vehicle panel", tb)
+        self.btn_follow = self._toolbar_toggle("FOLLOW", "Follow vehicle on map", tb)
+        self.btn_follow.toggled.connect(self._set_follow_mode)
+        if self._monitor:
+            self.btn_follow.hide()
 
         # ── previous deployment locations ─────────────────────────────────
         self.btn_prev_locs = self._toolbar_toggle(
@@ -333,6 +339,14 @@ class MainWindow(QMainWindow):
         self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
         self.btn_satellite.toggled.connect(self._start_layout_pulse)
         self.btn_satellite.toggled.connect(self._on_satellite_toggled)
+
+        self._add_separator(tb)
+
+        # ── sounding ──────────────────────────────────────────────────────
+        self.btn_sounding = self._toolbar_toggle(
+            "SOUNDING", "Click map to fetch HRRR point sounding (F0–F3)", tb
+        )
+        self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
 
         self._add_separator(tb)
 
@@ -878,6 +892,13 @@ class MainWindow(QMainWindow):
 
         self._auto_start_radar()
 
+        # ── sounding ──────────────────────────────────────────────────────
+        self._sounding_fetcher = SoundingFetcher(self)
+        self._sounding_dialog  = SoundingDialog(self)
+        self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
+        self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+        self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
+
     def _init_hazards(self):
         self._hazard_fetcher = HazardFetcher(parent=self)
         self.hazard_controls.spc_mode_changed.connect(self._on_spc_mode_changed)
@@ -1333,6 +1354,25 @@ class MainWindow(QMainWindow):
         self._last_inject_time = 0.0
         self._deferred_inject_result = None
         self._inject_throttle_timer.stop()
+
+    def _on_sounding_mode_toggled(self, active: bool):
+        self.map_widget.set_sounding_mode(active)
+        if not active:
+            return
+        # Untoggle other exclusive map-click modes
+        if self.btn_measure.isChecked():
+            self.btn_measure.setChecked(False)
+
+    def _on_sounding_map_click(self, lat: float, lon: float):
+        self.status_msg_label.setText("Fetching HRRR sounding…")
+        self._sounding_fetcher.fetch(lat, lon)
+
+    def _on_sounding_ready(self, sset):
+        self.status_msg_label.setText("")
+        self._sounding_dialog.load(sset)
+
+    def _on_sounding_error(self, msg: str):
+        self.status_msg_label.setText(f"Sounding error: {msg}")
 
     def _toggle_radar_station_picker(self):
         self._set_radar_station_picker_visible(not self._radar_station_picker_visible)
@@ -2075,8 +2115,10 @@ class MainWindow(QMainWindow):
 
     def _init_stations(self):
         self._vehicles: dict[str, Vehicle] = {}
+        self._follow_mode = False
         self._station_layer = StationPlotLayer(self.map_widget)
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
+        self.map_widget.user_dragged.connect(self._on_user_dragged)
         # station plots on by default — delayed until map is ready
         QTimer.singleShot(1200, lambda: self._station_layer.set_visible(
             self._chk_station_plots.isChecked()
@@ -2126,6 +2168,30 @@ class MainWindow(QMainWindow):
         self._refresh_vehicle_panel()
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
         self._refresh_vehicle_detail()
+        if self._follow_mode and obs.vehicle_id == self._follow_target_id():
+            self.map_widget.follow_move(obs.lat, obs.lon)
+
+    def _follow_target_id(self) -> str | None:
+        """Return the vehicle ID to follow: local vehicle, first selected, or sole vehicle."""
+        if config.VEHICLE_ID in self._vehicles:
+            return config.VEHICLE_ID
+        if self._selected_vehicle_ids:
+            return self._selected_vehicle_ids[0]
+        if len(self._vehicles) == 1:
+            return next(iter(self._vehicles))
+        return None
+
+    def _set_follow_mode(self, enabled: bool) -> None:
+        self._follow_mode = enabled
+        self.map_widget.set_follow(enabled)
+
+    def _on_user_dragged(self) -> None:
+        """Called when JS detects a map drag — disengage follow mode."""
+        if self._follow_mode:
+            self._follow_mode = False
+            self.btn_follow.blockSignals(True)
+            self.btn_follow.setChecked(False)
+            self.btn_follow.blockSignals(False)
 
     def _maybe_seed_initial_radar_site(self, obs: Observation) -> None:
         if not self._radar_auto_site_pending or self._monitor:

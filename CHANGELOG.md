@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.7.0] - 2026-03-19
+### Added
+- HRRR point sounding dialog — click any map location to fetch a live vertical atmospheric profile from the open-meteo HRRR API (free tier, single HTTP request per click)
+- Skew-T log-P diagram with temperature, dewpoint, virtual temperature curve, wind barbs, surface-based parcel profile, and CAPE/CIN shading
+- SHARPpy-inspired features: dendritic growth zone shading (-10 to -20°C), effective inflow layer bracket on left spine, AGL height reference lines (0.5–9 km) in red
+- Hodograph inset (color-coded by height: 0–3 km red, 3–6 km gold, 6–9 km blue) with EIL segment highlight, Bunkers RM/LM dots, and storm motion dir/spd readout
+- Parcel table showing CAPE, CIN, LCL, LFC, and EL for surface-based, mixed-layer, and most-unstable parcels
+- Kinematics table showing bulk shear, SRH, and mean storm-relative wind for 0–500 m, 0–1 km, 0–3 km, and 0–6 km layers
+- Composite indices row: LR 700–500, LR 0–3 km, SFC θe, PW, Convective Temperature, STP, SCP, EHI — with threshold-based color coding
+- F0–F3 forecast hour scrubber in the dialog header (cyan accent); header displays both init time and valid time
+- Interactive pressure-level cursor readout (hover over SkewT to see T, Td, wind, height)
+
+### Changed
+- Point sounding data source: open-meteo HRRR CONUS at 3 km / hourly resolution; rate limit 10,000 calls/day on free tier
+
 ## [0.6.0] - 2026-03-13
 ### Added
 - Internet connectivity indicator in status pill (● NET OK / ● NET SLOW / ● NO INTERNET) — TCP check to 1.1.1.1:53 every 30 seconds

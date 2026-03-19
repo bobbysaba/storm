@@ -23,16 +23,17 @@
    - 6.10 [Vehicle Panel](#610-vehicle-panel)
 7. [Status Bar](#7-status-bar)
 8. [Outlook Text Panel](#8-outlook-text-panel)
-9. [Vehicle Tracking & Observations](#9-vehicle-tracking--observations)
-10. [Network & MQTT Sync](#10-network--mqtt-sync)
-11. [Data Sources & Polling Intervals](#11-data-sources--polling-intervals)
-12. [Command-Line Options](#12-command-line-options)
-13. [Configuration & Certificates](#13-configuration--certificates)
-14. [Keyboard Shortcuts](#14-keyboard-shortcuts)
-15. [Performance Tuning](#15-performance-tuning)
-16. [Diagnostics & Error Handling](#16-diagnostics--error-handling)
-17. [Known Limitations & Quirks](#17-known-limitations--quirks)
-18. [Feature Availability Matrix](#18-feature-availability-matrix)
+9. [Point Soundings](#9-point-soundings)
+10. [Vehicle Tracking & Observations](#10-vehicle-tracking--observations)
+11. [Network & MQTT Sync](#11-network--mqtt-sync)
+12. [Data Sources & Polling Intervals](#12-data-sources--polling-intervals)
+13. [Command-Line Options](#13-command-line-options)
+14. [Configuration & Certificates](#14-configuration--certificates)
+15. [Keyboard Shortcuts](#15-keyboard-shortcuts)
+16. [Performance Tuning](#16-performance-tuning)
+17. [Diagnostics & Error Handling](#17-diagnostics--error-handling)
+18. [Known Limitations & Quirks](#18-known-limitations--quirks)
+19. [Feature Availability Matrix](#19-feature-availability-matrix)
 
 ---
 
@@ -630,7 +631,123 @@ Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, t
 
 ---
 
-## 9. Vehicle Tracking & Observations
+## 9. Point Soundings
+
+Clicking any location on the map requests a live HRRR vertical atmospheric profile for that point. The data is fetched from the open-meteo API (free tier, no API key required) and displayed in a floating Skew-T log-P dialog.
+
+### Triggering a Sounding
+
+Click any point on the map that is within the HRRR CONUS domain. The dialog opens automatically when data arrives (typically 1–3 seconds). Clicking a new location updates the same dialog in place.
+
+### Dialog Layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  HRRR  Init 18Z 19 Mar 2026  ·  Valid 18Z 19 Mar 2026 (F0) │ ─── [scrubber] ─
+│  35.220°N  97.440°W  ·  308 m MSL                           │   F0  F+1  F+2  F+3
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│              Skew-T log-P (with hodograph inset)            │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│  [Parcel table: SB / ML / MU × CAPE / CIN / LCL / LFC / EL]│
+│  [Kinematics table: 0-500m / 0-1km / 0-3km / 0-6km × Shear / SRH / SRW]  │
+├─────────────────────────────────────────────────────────────┤
+│  LR 700-500  LR 0-3km  SFC θe  PW  Conv Temp  STP  SCP  EHI│
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Header & Scrubber
+
+The header shows the HRRR init time and the currently-displayed valid time. The scrubber on the right side steps through four time slots: **F0** (analysis), **F+1h**, **F+2h**, and **F+3h** from the most recent HRRR run. Drag the slider or click a tick label to switch hours. The active slot is highlighted in cyan.
+
+### Skew-T diagram
+
+| Element | Description |
+|---------|-------------|
+| Red curve | Temperature |
+| Green curve | Dewpoint |
+| Dashed warm-tint curve | Virtual temperature |
+| White dashed curve | Surface-based parcel profile |
+| Red shading | CAPE area |
+| Blue shading | CIN area |
+| Cyan circle | LCL marker |
+| Blue shading (light) | Dendritic growth zone (−10 to −20°C) |
+| Red dotted horizontal lines | AGL height reference lines (0.5, 1, 2, 3, 4, 6, 9 km) |
+| Green bracket (left spine) | Effective inflow layer (EIL) |
+| Wind barbs | Meteorological wind at each pressure level |
+
+### Hodograph Inset
+
+Located in the upper-right corner of the Skew-T. The trace is color-coded by height AGL:
+
+| Color | Layer |
+|-------|-------|
+| Red | 0–3 km |
+| Gold | 3–6 km |
+| Blue | 6–9 km |
+| Gray | Above 9 km |
+
+A wide semi-transparent green overlay highlights the EIL segment. Bunkers right-mover (RM) and left-mover (LM) storm motion points are plotted as colored dots (red and blue respectively) with direction/speed readouts in the corner of the inset.
+
+### Parcel Table
+
+| Column | Description |
+|--------|-------------|
+| CAPE | Convective available potential energy (J/kg) |
+| CIN | Convective inhibition (J/kg, negative values) |
+| LCL | Lifted condensation level height (m AGL) |
+| LFC | Level of free convection (m AGL) |
+| EL | Equilibrium level (m AGL) |
+
+Rows: **SB** (surface-based), **ML** (100 hPa mixed-layer), **MU** (most-unstable). Values are threshold-colored: yellow → orange → red as severity increases.
+
+### Kinematics Table
+
+| Row | Description |
+|-----|-------------|
+| 0–500m | Bulk shear, SRH, and mean SRW in the lowest 500 m |
+| 0–1km | Bulk shear, SRH, and mean SRW in the lowest 1 km |
+| 0–3km | Bulk shear, SRH, and mean SRW in the lowest 3 km |
+| 0–6km | Bulk shear and mean SRW (SRH not shown for this layer) |
+
+**SRW** (storm-relative wind) is the mean wind speed relative to the Bunkers right-mover in each layer. All shear values in knots, SRH in m²/s².
+
+Storm motion is displayed as `RM  dir°/spd kt` and `LM  dir°/spd kt` in the hodograph corner.
+
+### Bottom Scalar Row
+
+| Parameter | Description |
+|-----------|-------------|
+| LR 700–500 | 700–500 hPa lapse rate (°C/km) |
+| LR 0–3 km | 0–3 km AGL lapse rate (°C/km) |
+| SFC θe | Surface equivalent potential temperature (K) |
+| PW | Precipitable water (mm) |
+| Conv Temp | Convective temperature — surface temperature required for convection initiation (°C) |
+| STP | Significant Tornado Parameter |
+| SCP | Supercell Composite Parameter |
+| EHI | Energy-Helicity Index |
+
+### Cursor Readout
+
+Hovering over the Skew-T axes displays a live readout below the plot:
+`pressure (hPa)  ·  T  ·  Td  ·  Wind dir°@spd kt  ·  height m MSL`
+
+### Data Source
+
+| Item | Detail |
+|------|--------|
+| Model | NCEP HRRR CONUS (3 km, hourly updates) |
+| API | open-meteo `/v1/forecast` — no API key required |
+| Variables | Temperature, dewpoint, U/V wind components, geopotential height at 25 pressure levels (1000–100 hPa) |
+| Request cost | 1 API call per map click |
+| Rate limits (free tier) | 600/min · 10,000/day · 300,000/month |
+| Fetch time | Typically 1–3 seconds |
+| Domain | CONUS only — clicks outside HRRR coverage will return an error |
+
+---
+
+## 10. Vehicle Tracking & Observations
 
 STORM tracks vehicles through several parallel data input channels. All inputs feed into the live vehicle state used by the vehicle panel, station plots, and map markers.
 
@@ -662,7 +779,7 @@ Automatically detects and reads NMEA sentences from a connected serial GPS devic
 
 Receives observations from other vehicles via the `storm/vehicles/{id}` topic. Active whenever MQTT is connected and not disabled.
 
-## 10. Network & MQTT Sync
+## 11. Network & MQTT Sync
 
 STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, and vehicle observations across all connected vehicles in the network.
 
@@ -684,7 +801,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 
 ---
 
-## 11. Data Sources & Polling Intervals
+## 12. Data Sources & Polling Intervals
 
 | Data Source | Polling Interval | Notes |
 |-------------|-----------------|-------|
@@ -703,7 +820,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 
 ---
 
-## 12. Command-Line Options
+## 13. Command-Line Options
 
 Run `python main.py --help` for the full list. Key options:
 
@@ -758,7 +875,7 @@ Run `python main.py --help` for the full list. Key options:
 
 ---
 
-## 13. Configuration & Certificates
+## 14. Configuration & Certificates
 
 ### config.py
 
@@ -796,7 +913,7 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 
 ---
 
-## 14. Keyboard Shortcuts
+## 15. Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
@@ -807,7 +924,7 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 
 ---
 
-## 15. Performance Tuning
+## 16. Performance Tuning
 
 ### Radar Grid Size
 
@@ -843,7 +960,7 @@ Safe mode reduces grid size to 128, disables some overlays, and minimizes backgr
 
 ---
 
-## 16. Diagnostics & Error Handling
+## 17. Diagnostics & Error Handling
 
 ### Debug Mode
 
@@ -885,7 +1002,7 @@ STORM uses an internal TCP port (19876) as a process lock. If a second instance 
 
 ---
 
-## 17. Known Limitations & Quirks
+## 18. Known Limitations & Quirks
 
 **Canvas Readback**
 MapLibre GL running inside QWebEngineView cannot reliably read back canvas pixel data. Hatch patterns (CIG/SIGN significant areas) are therefore built entirely as raw `Uint8Array` pixel data and added to MapLibre via `addImage()`, rather than drawn on a canvas. This is a known architectural constraint.
@@ -910,7 +1027,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 
 ---
 
-## 18. Feature Availability Matrix
+## 19. Feature Availability Matrix
 
 | Feature | Default | Disabled By |
 |---------|---------|-------------|
