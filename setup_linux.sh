@@ -26,13 +26,13 @@ elif command -v dnf &>/dev/null; then
     sudo dnf install -y nss libXScrnSaver alsa-lib at-spi2-atk gtk3 \
         libX11 libXcomposite libXdamage libXrandr \
         libxkbcommon libxkbcommon-x11 \
-        xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
+        xcb-util xcb-util-cursor xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
         desktop-file-utils
 elif command -v yum &>/dev/null; then
     sudo yum install -y nss libXScrnSaver alsa-lib at-spi2-atk gtk3 \
         libX11 libXcomposite libXdamage libXrandr \
         libxkbcommon libxkbcommon-x11 \
-        xcb-util xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
+        xcb-util xcb-util-cursor xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm libxcb \
         desktop-file-utils
 else
     echo "WARNING: Could not detect package manager (apt/dnf/yum)."
@@ -113,6 +113,8 @@ cat > "$LAUNCHER" << EOF
 source "\$(conda info --base)/etc/profile.d/conda.sh"
 conda activate storm
 cd "$SCRIPT_DIR"
+
+
 python main.py "\$@"
 EOF
 chmod +x "$LAUNCHER"
