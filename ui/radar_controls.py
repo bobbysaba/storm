@@ -328,8 +328,6 @@ class RadarControls(QWidget):
         self.setMaximumHeight(0)
 
     def _refresh_product_availability(self, site_id: str):
-        import time as _time
-        _t0 = _time.monotonic()
         site = _normalize_site(site_id)
         if not site:
             return
@@ -341,20 +339,15 @@ class RadarControls(QWidget):
             if available:
                 optional.append((code, label))
 
-        print(f"  PRODUCT AVAIL check done in {(_time.monotonic()-_t0)*1000:.0f}ms (bg thread)", flush=True)
         # Emit signal instead of QTimer.singleShot — PyQt6 AutoConnection safely
         # queues this to the main thread even when emitted from a background thread.
         self._products_refreshed.emit(list(PRODUCTS) + optional)
 
     def _apply_product_items(self, items: list):
         """Slot — always runs on the main thread via the _products_refreshed signal."""
-        from time import perf_counter
-        _t0 = perf_counter()
         prev = self._product
         self._set_product_items(items, preserve_code=prev)
-        changed = prev != self._product
-        print(f"  APPLY PRODUCT ITEMS: prev={prev} now={self._product} changed={changed} took {(perf_counter()-_t0)*1000:.1f}ms (main thread)", flush=True)
-        if changed:
+        if prev != self._product:
             self.product_changed.emit(self._product)
             self.fetch_requested.emit()
 
