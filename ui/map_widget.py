@@ -875,7 +875,9 @@ def build_map_html() -> str:
         layout: {{'visibility': 'none'}},
         paint: {{
           'circle-radius': 6,
-          'circle-color': '#FFD166',
+          'circle-color': ['match', ['coalesce', ['get', 'rank_abi'], 0],
+            1, '#2DC653', 2, '#A8C538', 3, '#FFD166', 4, '#FF8C42', 5, '#EF233C',
+            '#888888'],
           'circle-stroke-width': 1.5,
           'circle-stroke-color': '#0A0A0F',
           'circle-opacity': 0.85
@@ -2046,6 +2048,24 @@ def build_map_html() -> str:
     window.stormSetDeployLocsVisible = function(visible) {{
       map.setLayoutProperty('deploy-locs-circles', 'visibility', visible ? 'visible' : 'none');
     }};
+    window.stormSetDeployLocsMetric = function(metric) {{
+      var expr;
+      if (metric === 'rank_abi' || metric === 'rank_aoi') {{
+        expr = ['match', ['coalesce', ['get', metric], 0],
+          1, '#2DC653', 2, '#A8C538', 3, '#FFD166', 4, '#FF8C42', 5, '#EF233C',
+          '#888888'];
+      }} else if (metric === 'rqi') {{
+        expr = ['case',
+          ['<', ['coalesce', ['get', 'rqi'], -1], 0], '#888888',
+          ['step', ['get', 'rqi'],
+            '#EF233C', 0.2, '#FF8C42', 0.4, '#FFD166', 0.6, '#A8C538', 0.8, '#2DC653'
+          ]
+        ];
+      }} else {{
+        expr = '#888888';
+      }}
+      map.setPaintProperty('deploy-locs-circles', 'circle-color', expr);
+    }};
 
     // ── SPC + NWS Hazard Layers ───────────────────────────────────────────
     window._spcCatVisible = {{MRGL:false, SLGHT:false, ENH:false, MDT:false, HIGH:false}};
@@ -2808,13 +2828,21 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         fc = {"type": "FeatureCollection", "features": [
             {"type": "Feature",
              "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]},
-             "properties": {}}
+             "properties": {
+                 "rank_abi": p.get("rank_abi"),
+                 "rank_aoi": p.get("rank_aoi"),
+                 "rqi":      p.get("rqi"),
+             }}
             for p in points
         ]}
         self.run_js(f"stormLoadDeployLocs({json.dumps(json.dumps(fc))});")
 
     def set_deploy_locs_visible(self, visible: bool) -> None:
         self.run_js(f"stormSetDeployLocsVisible({'true' if visible else 'false'});")
+
+    def set_deploy_locs_metric(self, metric: str) -> None:
+        import json
+        self.run_js(f"stormSetDeployLocsMetric({json.dumps(metric)});")
 
     def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
         import json

@@ -34,3 +34,9 @@ veh_data/
 
 # roadmap (is for local progress only)
 roadmap.txt
+
+# locs/ source data — kept locally, not needed in repo
+locs/merge_locs.py
+locs/all_rounds052615.txt
+locs/sites.info
+locs/deployment_locations.json

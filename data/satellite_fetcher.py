@@ -34,7 +34,7 @@ CONUS_BBOX   = [-126.0, 22.0, -64.0, 52.0]
 CONUS_W, CONUS_H = 1600, 800
 
 # MESO images are square (sector ≈ 1000×1000 km)
-MESO_W, MESO_H = 1024, 1024
+MESO_W, MESO_H = 2048, 2048
 
 
 @dataclass

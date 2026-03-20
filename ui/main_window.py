@@ -2,6 +2,7 @@
 # top-level application window for STORM.
 # assembles the layout: toolbar, map widget, status bar, and collapsible panels.
 
+import csv
 import json
 import logging
 import sqlite3
@@ -21,6 +22,7 @@ from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
 from ui.map_widget import MapWidget, TILES_PATH
 from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
+from ui.deploy_locs_controls import DeployLocsControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
@@ -311,6 +313,10 @@ class MainWindow(QMainWindow):
         self.btn_prev_locs = self._toolbar_toggle(
             "PREV LOCS", "Show previous truck deployment locations", tb
         )
+        self.deploy_locs_controls = DeployLocsControls(self._map_container)
+        self.deploy_locs_controls.setObjectName("floatingToolbar")
+        self.btn_prev_locs.toggled.connect(self.deploy_locs_controls.toggle_drawer)
+        self.btn_prev_locs.toggled.connect(self._start_layout_pulse)
 
         self._add_separator(tb)
 
@@ -555,6 +561,8 @@ class MainWindow(QMainWindow):
                 _stack(self.vehicle_panel)
             if hasattr(self, "vehicle_detail_panel") and self.vehicle_detail_panel.isVisible():
                 _stack(self.vehicle_detail_panel)
+            if hasattr(self, "deploy_locs_controls") and self.btn_prev_locs.isChecked():
+                _stack(self.deploy_locs_controls)
             if hasattr(self, "hazard_controls") and self.btn_hazards.isChecked():
                 _stack(self.hazard_controls)
             if hasattr(self, "satellite_controls") and self.btn_satellite.isChecked():
@@ -786,6 +794,7 @@ class MainWindow(QMainWindow):
         self.btn_vehicles.toggled.connect(self.vehicle_panel.setVisible)
         self.btn_vehicles.toggled.connect(self._start_layout_pulse)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
+        self.deploy_locs_controls.metric_changed.connect(self.map_widget.set_deploy_locs_metric)
 
         # detail pill (hidden until a vehicle is selected)
         self._selected_vehicle_ids = []
@@ -2132,8 +2141,18 @@ class MainWindow(QMainWindow):
 
     def _load_deploy_locs(self):
         try:
-            with open(config.DEPLOY_LOCS_FILE) as f:
-                points = json.load(f)
+            with open(config.DEPLOY_LOCS_FILE, newline='') as f:
+                reader = csv.DictReader(f)
+                points = [
+                    {
+                        "lat": float(r["lat"]),
+                        "lon": float(r["lon"]),
+                        "rank_abi": int(r["rank_abi"]) if r["rank_abi"] else None,
+                        "rank_aoi": int(r["rank_aoi"]) if r["rank_aoi"] else None,
+                        "rqi": float(r["rqi"]) if r["rqi"] else None,
+                    }
+                    for r in reader
+                ]
             self.map_widget.load_deploy_locs(points)
             log.info("deploy locs: loaded %d points from %s", len(points), config.DEPLOY_LOCS_FILE)
         except Exception as e:

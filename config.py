@@ -45,7 +45,7 @@ GPS_PORT = ""
 GPS_BAUD = 4800
 
 # path to previous deployment locations
-DEPLOY_LOCS_FILE = str(_PROJ / "data" / "deployment_locations.json")
+DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
 # accent color
 ACCENT_COLOR = "#00CFFF"

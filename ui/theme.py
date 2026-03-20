@@ -65,7 +65,8 @@ QMainWindow, QWidget {
 
 #floatingToolbar QWidget#radarDrawer,
 #floatingToolbar QWidget#hazardDrawer,
-#floatingToolbar QWidget#satelliteDrawer {
+#floatingToolbar QWidget#satelliteDrawer,
+#floatingToolbar QWidget#deployLocsDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -74,7 +75,8 @@ QMainWindow, QWidget {
 
 #floatingToolbar QWidget#radarDrawer > QWidget,
 #floatingToolbar QWidget#hazardDrawer > QWidget,
-#floatingToolbar QWidget#satelliteDrawer > QWidget {
+#floatingToolbar QWidget#satelliteDrawer > QWidget,
+#floatingToolbar QWidget#deployLocsDrawer > QWidget {
     background: transparent;
 }
 
@@ -186,6 +188,31 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#hazardDrawer QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #4A9EFF;
+    font-weight: 600;
+}
+
+/* ── Deploy Locs Drawer ───────────────────────────────── */
+#floatingToolbar QWidget#deployLocsDrawer QToolButton {
+    background-color: transparent;
+    border: 1px solid #2E2E4E;
+    border-radius: 6px;
+    color: #B8BFCD;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    padding: 3px 8px;
+}
+
+#floatingToolbar QWidget#deployLocsDrawer QToolButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#deployLocsDrawer QToolButton:checked {
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #4A9EFF;
@@ -525,7 +552,8 @@ QToolTip {
 
 #floatingToolbar QWidget#radarDrawer QCheckBox,
 #floatingToolbar QWidget#hazardDrawer QCheckBox,
-#floatingToolbar QWidget#satelliteDrawer QCheckBox {
+#floatingToolbar QWidget#satelliteDrawer QCheckBox,
+#floatingToolbar QWidget#deployLocsDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {
