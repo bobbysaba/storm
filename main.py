@@ -430,10 +430,7 @@ def main() -> None:
 
     # if not in monitor mode
     if not monitor:
-        # dismiss loading screen before the launch dialog appears
-        loading.close()
-
-        # show the launch dialog
+        # show the launch dialog (loading screen stays visible in background)
         dialog = LaunchDialog()
 
         # if the diaglog is not accepted
@@ -456,6 +453,8 @@ def main() -> None:
     # Deferred import — QWebEngineView (and Chromium DLLs) load here, after the
     # loading screen is already visible instead of freezing before any UI appears.
     loading.set_status("Loading map engine...")
+    loading.show()
+    app.processEvents()
     from ui.main_window import MainWindow  # noqa: PLC0415
 
     # ── File presence checks ───────────────────────────────────────────────────

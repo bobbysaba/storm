@@ -22,6 +22,7 @@ dependencies:
   # Utilities
   - pyserial             # GPS (NMEA via serial port)
   - pynmea2              # NMEA sentence parsing
+  - git                  # ensure git is on PATH for update_checker
   # Windows runtime dependencies (handled by conda-forge automatically,
   # listed here for clarity — do NOT add xorg-*, libgcc, libgfortran,
   # llvm-openmp, or other Linux/macOS-only libs)
