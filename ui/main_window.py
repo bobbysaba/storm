@@ -96,10 +96,11 @@ class MainWindow(QMainWindow):
     # gen, site, product, scan, png_b64, bounds so main thread can inject it.
     _render_ready = pyqtSignal(object)
 
-    def __init__(self, debug: bool = False, monitor: bool = False):
+    def __init__(self, debug: bool = False, monitor: bool = False, viewer: bool = False):
         super().__init__()
         self._debug = debug
         self._monitor = monitor
+        self._viewer = viewer
 
         self.setWindowTitle(f"STORM  v{config.VERSION}")
         self.setMinimumSize(1024, 680)
@@ -1632,7 +1633,7 @@ class MainWindow(QMainWindow):
         # local vehicles publish to the broker; remote vehicles subscribe back in
         self._vehicle_sync = VehicleSync(self._mqtt_client, parent=self)
         self._vehicle_sync.vehicle_received.connect(self._on_remote_vehicle_obs)
-        self._storm_cone_sync = StormConeSync(self._mqtt_client, parent=self)
+        self._storm_cone_sync = StormConeSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
         # connect after a short delay so the window is fully painted first
         if config.MQTT_HOST:
@@ -1708,7 +1709,7 @@ class MainWindow(QMainWindow):
     def _init_annotations(self):
         self._annotations: dict[str, Annotation] = {}
         self._active_annotation_type: str = ""
-        self._annotation_sync = AnnotationSync(self._mqtt_client, parent=self)
+        self._annotation_sync = AnnotationSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
         # mutual exclusion: opening one drawer closes the other
         self.btn_radar.toggled.connect(
@@ -1743,7 +1744,7 @@ class MainWindow(QMainWindow):
         self._drawings: dict[str, DrawingAnnotation] = {}
         self._active_drawing_type: str = ""
         self._drawing_points: list = []
-        self._drawing_sync = DrawingSync(self._mqtt_client, parent=self)
+        self._drawing_sync = DrawingSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
         self.map_widget.map_double_clicked.connect(self._on_map_dblclick)
         self.map_widget.drawing_clicked.connect(self._on_drawing_clicked)

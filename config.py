@@ -47,6 +47,17 @@ GPS_BAUD = 4800
 # path to previous deployment locations
 DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
+# ── Mode passphrases ──────────────────────────────────────────────────────────
+# SHA-256 hashes of the passphrases required to launch in vehicle or monitor
+# mode.  The plaintext passwords are never stored here — only hashes.
+#
+# To generate a new hash:
+#   python3 -c "import hashlib; print(hashlib.sha256(b'your_password').hexdigest())"
+#
+# Replace the placeholder values below with hashes of your actual passwords.
+VEHICLE_PASSPHRASE_HASH = "6f3924cf58c4302ac1d1743807806f5cac6af1dd163ceea88407dee66eaa046e"
+MONITOR_PASSPHRASE_HASH = "3aa29dabcf48a07aae0fd782da7c48705f82614eaa0e0fcf02bbb42cb6db13d0"
+
 # accent color
 ACCENT_COLOR = "#00CFFF"
 

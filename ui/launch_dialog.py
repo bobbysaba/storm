@@ -2,16 +2,19 @@
 # Startup dialog — shown on every launch to confirm vehicle ID and data
 # directory.  Persists settings via QSettings so they survive across sessions.
 
+import hashlib
 import os
 import sys
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
-    QTextEdit, QApplication, QMessageBox, QProgressBar, QSizePolicy,
+    QTextEdit, QApplication, QMessageBox, QProgressBar, QSizePolicy, QWidget,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize
 from PyQt6.QtGui import QPixmap, QPainter, QIcon
+
+import config as _config
 
 # SVG icon definitions for the vehicle icon picker (same shapes as the map markers).
 # Color is substituted at render time so selected/unselected states differ.
@@ -195,6 +198,36 @@ QToolButton {
     letter-spacing: 0.5px;
     padding: 5px 3px 3px 3px;
     min-width: 52px;
+}
+"""
+
+_MODE_BTN_STYLE = """
+QPushButton {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #5A5B6A;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 7px 0px;
+}
+QPushButton:hover {
+    border-color: #00CFFF;
+    color: #8E97AB;
+}
+"""
+
+_MODE_BTN_SELECTED_STYLE = """
+QPushButton {
+    background-color: #0D1A2E;
+    border: 2px solid #00CFFF;
+    border-radius: 6px;
+    color: #00CFFF;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 7px 0px;
 }
 """
 
@@ -441,10 +474,10 @@ class LaunchDialog(QDialog):
 
         s = QSettings()
         saved = {
-            "vehicle_id":   s.value("launch/vehicle_id",   "",    type=str),
-            "data_dir":     s.value("launch/data_dir",     "",    type=str),
-            "monitor_mode": s.value("launch/monitor_mode", False, type=bool),
-            "vehicle_icon": s.value("launch/vehicle_icon", "car", type=str),
+            "vehicle_id":   s.value("launch/vehicle_id",   "",         type=str),
+            "data_dir":     s.value("launch/data_dir",     "",         type=str),
+            "mode":         s.value("launch/mode",         "vehicle",  type=str),
+            "vehicle_icon": s.value("launch/vehicle_icon", "car",      type=str),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
@@ -564,15 +597,41 @@ class LaunchDialog(QDialog):
         # Single lock controls all vehicle config fields; lock when either value exists.
         self._set_fields_locked(bool(saved.get("vehicle_id") or saved.get("data_dir")))
 
-        # Monitor mode
-        self._monitor_cb = QCheckBox("Monitor mode — no local data")
-        self._monitor_cb.setChecked(bool(saved.get("monitor_mode", False)))
-        self._monitor_cb.stateChanged.connect(self._on_monitor_toggled)
-        root.addWidget(self._monitor_cb)
+        # ── Mode selector ──────────────────────────────────────────────────────
+        mode_label = QLabel("LAUNCH MODE")
+        mode_label.setObjectName("fieldLabel")
+        root.addWidget(mode_label)
+        root.addSpacing(6)
 
-        # Apply initial monitor state
-        if self._monitor_cb.isChecked():
-            self._set_fields_monitor_disabled(True)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self._mode_btns: dict[str, QPushButton] = {}
+        for key, label in (("vehicle", "VEHICLE"), ("monitor", "MONITOR"), ("viewer", "VIEWER")):
+            btn = QPushButton(label)
+            btn.setStyleSheet(_MODE_BTN_STYLE)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _checked, k=key: self._select_mode(k))
+            mode_row.addWidget(btn)
+            self._mode_btns[key] = btn
+        root.addLayout(mode_row)
+        root.addSpacing(12)
+
+        # Passphrase row (hidden in viewer mode)
+        self._passphrase_row = QWidget()
+        pw_layout = QVBoxLayout(self._passphrase_row)
+        pw_layout.setContentsMargins(0, 0, 0, 0)
+        pw_layout.setSpacing(6)
+        self._passphrase_label = QLabel("PASSPHRASE")
+        self._passphrase_label.setObjectName("fieldLabel")
+        pw_layout.addWidget(self._passphrase_label)
+        self._passphrase_input = QLineEdit()
+        self._passphrase_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._passphrase_input.setPlaceholderText("Enter passphrase")
+        pw_layout.addWidget(self._passphrase_input)
+        root.addWidget(self._passphrase_row)
+
+        # Apply saved mode
+        self._select_mode(saved.get("mode", "vehicle"))
         root.addSpacing(28)
 
         # Launch button
@@ -624,14 +683,21 @@ class LaunchDialog(QDialog):
     def _toggle_fields_lock(self):
         self._set_fields_locked(not self._vid_input.isReadOnly())
 
-    def _set_fields_monitor_disabled(self, disabled: bool):
+    def _select_mode(self, mode: str):
+        self._selected_mode = mode
+        for key, btn in self._mode_btns.items():
+            btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if key == mode else _MODE_BTN_STYLE)
+        vehicle_mode = (mode == "vehicle")
         for w in (self._vid_input, self._lock_btn, self._dir_input, self._browse_btn):
-            w.setEnabled(not disabled)
+            w.setEnabled(vehicle_mode)
         for btn in self._icon_btns.values():
-            btn.setEnabled(not disabled)
-
-    def _on_monitor_toggled(self):
-        self._set_fields_monitor_disabled(self._monitor_cb.isChecked())
+            btn.setEnabled(vehicle_mode)
+        viewer_mode = (mode == "viewer")
+        self._passphrase_row.setVisible(not viewer_mode)
+        if not viewer_mode:
+            lbl = "VEHICLE PASSPHRASE" if vehicle_mode else "MONITOR PASSPHRASE"
+            self._passphrase_label.setText(lbl)
+        self._passphrase_input.clear()
 
     def _select_icon(self, key: str):
         self._set_icon_selected(key)
@@ -705,21 +771,37 @@ class LaunchDialog(QDialog):
             self._dir_input.setText(chosen)
 
     def _on_launch(self):
-        vid = self._vid_input.text().strip()
-        # In monitor mode there's no local vehicle ID, so no conflict is possible.
-        if self._monitor_cb.isChecked():
-            self._do_accept()
-            return
+        mode = getattr(self, "_selected_mode", "vehicle")
 
-        # Vehicle ID is required when not in monitor mode.
-        if not vid:
-            QMessageBox.warning(
-                self,
-                "Vehicle ID Required",
-                "Please enter a vehicle ID before launching.",
+        # Validate passphrase for vehicle and monitor modes
+        if mode != "viewer":
+            passphrase = self._passphrase_input.text()
+            entered_hash = hashlib.sha256(passphrase.encode()).hexdigest()
+            expected_hash = (
+                _config.VEHICLE_PASSPHRASE_HASH if mode == "vehicle"
+                else _config.MONITOR_PASSPHRASE_HASH
             )
-            self._vid_input.setFocus()
-            return
+            if entered_hash != expected_hash:
+                QMessageBox.warning(
+                    self,
+                    "Incorrect Passphrase",
+                    "The passphrase you entered is incorrect.",
+                )
+                self._passphrase_input.clear()
+                self._passphrase_input.setFocus()
+                return
+
+        # Vehicle ID is required in vehicle mode
+        if mode == "vehicle":
+            vid = self._vid_input.text().strip()
+            if not vid:
+                QMessageBox.warning(
+                    self,
+                    "Vehicle ID Required",
+                    "Please enter a vehicle ID before launching.",
+                )
+                self._vid_input.setFocus()
+                return
 
         self._do_accept()
 
@@ -727,26 +809,29 @@ class LaunchDialog(QDialog):
         s = QSettings()
         s.setValue("launch/vehicle_id",   self._vid_input.text().strip())
         s.setValue("launch/data_dir",     self._dir_input.text().strip())
-        s.setValue("launch/monitor_mode", self._monitor_cb.isChecked())
+        s.setValue("launch/mode",         getattr(self, "_selected_mode", "vehicle"))
         s.setValue("launch/vehicle_icon", getattr(self, "_selected_icon", "car"))
         self.accept()
 
     # ── Accessors (read by main.py after accept) ───────────────────────────────
 
     def vehicle_id(self) -> str:
-        if self._monitor_cb.isChecked():
+        if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return ""
         return self._vid_input.text().strip()
 
     def data_dir(self) -> str:
-        if self._monitor_cb.isChecked():
+        if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return ""
         return self._dir_input.text().strip()
 
     def monitor(self) -> bool:
-        return self._monitor_cb.isChecked()
+        return getattr(self, "_selected_mode", "vehicle") == "monitor"
+
+    def viewer(self) -> bool:
+        return getattr(self, "_selected_mode", "vehicle") == "viewer"
 
     def vehicle_icon(self) -> str:
-        if self._monitor_cb.isChecked():
+        if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return "car"
         return getattr(self, "_selected_icon", "car")

@@ -23,9 +23,10 @@ class DrawingSync(QObject):
     drawing_received = pyqtSignal(object)   # DrawingAnnotation instance
     drawing_deleted  = pyqtSignal(str)       # drawing_id
 
-    def __init__(self, mqtt_client: MQTTClient, parent=None):
+    def __init__(self, mqtt_client: MQTTClient, read_only: bool = False, parent=None):
         super().__init__(parent)
         self._mqtt = mqtt_client
+        self._read_only = read_only
         self._mqtt.connected.connect(self._on_mqtt_connected)
         self._mqtt.message_received.connect(self._on_message)
 
@@ -43,6 +44,8 @@ class DrawingSync(QObject):
         self._publish(drawing_id, {"id": drawing_id, "deleted": True})
 
     def _publish(self, drawing_id: str, payload: dict):
+        if self._read_only:
+            return
         topic = f"{_TOPIC_PREFIX}/{drawing_id}"
         try:
             self._mqtt.publish(topic, json.dumps(payload))

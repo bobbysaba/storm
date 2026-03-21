@@ -93,6 +93,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="monitor mode: skip local obs inputs; MQTT sync for map edits remains enabled",
     )
 
+    # run in viewer mode (subscribe only, no publishing)
+    parser.add_argument(
+        "--viewer",
+        action="store_true",
+        help="viewer mode: subscribe-only, no publishing of annotations/drawings/cones",
+    )
+
     # determine the log level to run in 
     parser.add_argument(
         "--log-level",
@@ -425,11 +432,12 @@ def main() -> None:
         sys.exit(0)
 
 
-    # pull whether or not we're in monitor mode
+    # pull whether or not we're in monitor or viewer mode
     monitor = args.monitor
+    viewer  = args.viewer
 
-    # if not in monitor mode
-    if not monitor:
+    # if not launched via CLI mode flag, show the launch dialog
+    if not monitor and not viewer:
         # show the launch dialog (loading screen stays visible in background)
         dialog = LaunchDialog()
 
@@ -447,8 +455,9 @@ def main() -> None:
         # get the directory for real-time observation files (if any)
         config.OBS_FILE_DIR = dialog.data_dir()
 
-        # get whether or not we're in monitor mode (from the user-selected window)
+        # get mode from the dialog
         monitor = dialog.monitor()
+        viewer  = dialog.viewer()
 
     # Deferred import — QWebEngineView (and Chromium DLLs) load here, after the
     # loading screen is already visible instead of freezing before any UI appears.
@@ -463,7 +472,7 @@ def main() -> None:
     _warn_missing_files()
 
     # create the main window
-    window = MainWindow(debug = args.debug, monitor = monitor)
+    window = MainWindow(debug=args.debug, monitor=monitor, viewer=viewer)
 
     # define the JS console message handler
     js_log = logging.getLogger("storm.js")

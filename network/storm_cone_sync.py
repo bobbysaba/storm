@@ -26,9 +26,10 @@ class StormConeSync(QObject):
     # emitted when a remote delete arrives
     cone_deleted = pyqtSignal(str)        # cone_id
 
-    def __init__(self, mqtt_client: MQTTClient, parent=None):
+    def __init__(self, mqtt_client: MQTTClient, read_only: bool = False, parent=None):
         super().__init__(parent)
         self._mqtt = mqtt_client
+        self._read_only = read_only
         self._mqtt.connected.connect(self._on_mqtt_connected)
         self._mqtt.message_received.connect(self._on_message)
 
@@ -50,6 +51,8 @@ class StormConeSync(QObject):
         self._publish(cone_id, {"id": cone_id, "deleted": True})
 
     def _publish(self, cone_id: str, payload: dict):
+        if self._read_only:
+            return
         topic = f"{_TOPIC_PREFIX}/{cone_id}"
         try:
             self._mqtt.publish(topic, json.dumps(payload))

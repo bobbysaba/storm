@@ -34,9 +34,10 @@ class AnnotationSync(QObject):
     # emitted when a remote delete arrives
     annotation_deleted = pyqtSignal(str)        # annotation_id
 
-    def __init__(self, mqtt_client: MQTTClient, parent=None):
+    def __init__(self, mqtt_client: MQTTClient, read_only: bool = False, parent=None):
         super().__init__(parent)
         self._mqtt = mqtt_client
+        self._read_only = read_only
         # re-subscribe every time the broker connection (re)establishes
         self._mqtt.connected.connect(self._on_mqtt_connected)
         self._mqtt.message_received.connect(self._on_message)
@@ -59,6 +60,8 @@ class AnnotationSync(QObject):
         self._publish(annotation_id, {"id": annotation_id, "deleted": True})
 
     def _publish(self, annotation_id: str, payload: dict):
+        if self._read_only:
+            return
         topic = f"{_TOPIC_PREFIX}/{annotation_id}"
         try:
             self._mqtt.publish(topic, json.dumps(payload))
