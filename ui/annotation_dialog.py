@@ -61,7 +61,7 @@ class AnnotationPlaceDialog(QDialog):
     Shows type symbol/label, coordinates, and editable note field.
     """
 
-    def __init__(self, type_key: str, lat: float, lon: float, parent=None):
+    def __init__(self, type_key: str, lat: float, lon: float, viewer_mode: bool = False, parent=None):
         super().__init__(parent)
         self.setObjectName("annotationDialog")
         self.setWindowTitle("Place Annotation")
@@ -82,6 +82,14 @@ class AnnotationPlaceDialog(QDialog):
         layout.setSpacing(12)
 
         layout.addWidget(_header_widget(meta))
+
+        if viewer_mode:
+            notice = QLabel("Viewer mode — this annotation will only appear on your screen.")
+            notice.setWordWrap(True)
+            notice.setStyleSheet(
+                "font-size: 10px; color: #E8A020; background: transparent;"
+            )
+            layout.addWidget(notice)
 
         coord_label = QLabel(f"LAT {lat:.4f}   LON {lon:.4f}")
         coord_label.setStyleSheet(
@@ -130,7 +138,7 @@ class AnnotationEditDialog(QDialog):
     Returns action='save', 'delete', or 'cancel'.
     """
 
-    def __init__(self, annotation: Annotation, parent=None):
+    def __init__(self, annotation: Annotation, viewer_mode: bool = False, parent=None):
         super().__init__(parent)
         self.setObjectName("annotationDialog")
         self.setWindowTitle("Edit Annotation")
@@ -153,6 +161,14 @@ class AnnotationEditDialog(QDialog):
         layout.setSpacing(12)
 
         layout.addWidget(_header_widget(meta))
+
+        if viewer_mode:
+            notice = QLabel("Viewer mode — changes and deletions will only affect your screen.")
+            notice.setWordWrap(True)
+            notice.setStyleSheet(
+                "font-size: 10px; color: #E8A020; background: transparent;"
+            )
+            layout.addWidget(notice)
 
         coord_label = QLabel(f"LAT {annotation.lat:.4f}   LON {annotation.lon:.4f}")
         coord_label.setStyleSheet(

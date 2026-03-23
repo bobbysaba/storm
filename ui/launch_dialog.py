@@ -457,11 +457,17 @@ class LaunchDialog(QDialog):
         root.addWidget(div)
         root.addSpacing(24)
 
+        # ── Vehicle-only section (hidden in monitor/viewer mode) ───────────────
+        self._vehicle_section = QWidget()
+        vs = QVBoxLayout(self._vehicle_section)
+        vs.setContentsMargins(0, 0, 0, 0)
+        vs.setSpacing(0)
+
         # Vehicle ID
         vid_label = QLabel("VEHICLE ID")
         vid_label.setObjectName("fieldLabel")
-        root.addWidget(vid_label)
-        root.addSpacing(6)
+        vs.addWidget(vid_label)
+        vs.addSpacing(6)
 
         vid_row = QHBoxLayout()
         vid_row.setSpacing(6)
@@ -475,14 +481,14 @@ class LaunchDialog(QDialog):
         self._lock_btn.setToolTip("Unlock both fields")
         self._lock_btn.clicked.connect(self._toggle_fields_lock)
         vid_row.addWidget(self._lock_btn)
-        root.addLayout(vid_row)
-        root.addSpacing(20)
+        vs.addLayout(vid_row)
+        vs.addSpacing(20)
 
         # Data directory
         dir_label = QLabel("DATA DIRECTORY")
         dir_label.setObjectName("fieldLabel")
-        root.addWidget(dir_label)
-        root.addSpacing(6)
+        vs.addWidget(dir_label)
+        vs.addSpacing(6)
 
         dir_row = QHBoxLayout()
         dir_row.setSpacing(6)
@@ -496,7 +502,7 @@ class LaunchDialog(QDialog):
         self._browse_btn.clicked.connect(self._browse_dir)
         dir_row.addWidget(self._browse_btn)
 
-        root.addLayout(dir_row)
+        vs.addLayout(dir_row)
 
         hint = QLabel(
             "Leave blank if no mesonet instrument is connected — "
@@ -504,14 +510,14 @@ class LaunchDialog(QDialog):
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
-        root.addWidget(hint)
-        root.addSpacing(20)
+        vs.addWidget(hint)
+        vs.addSpacing(20)
 
         # Vehicle icon picker
         icon_label = QLabel("VEHICLE ICON")
         icon_label.setObjectName("fieldLabel")
-        root.addWidget(icon_label)
-        root.addSpacing(6)
+        vs.addWidget(icon_label)
+        vs.addSpacing(6)
 
         icon_grid = QGridLayout()
         icon_grid.setSpacing(6)
@@ -534,8 +540,10 @@ class LaunchDialog(QDialog):
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             icon_grid.addWidget(btn, i // 3, i % 3)
             self._icon_btns[key] = btn
-        root.addLayout(icon_grid)
-        root.addSpacing(20)
+        vs.addLayout(icon_grid)
+        vs.addSpacing(20)
+
+        root.addWidget(self._vehicle_section)
 
         self._set_icon_selected(saved.get("vehicle_icon", "car"))
 
@@ -633,16 +641,14 @@ class LaunchDialog(QDialog):
         for key, btn in self._mode_btns.items():
             btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if key == mode else _MODE_BTN_STYLE)
         vehicle_mode = (mode == "vehicle")
-        for w in (self._vid_input, self._lock_btn, self._dir_input, self._browse_btn):
-            w.setEnabled(vehicle_mode)
-        for btn in self._icon_btns.values():
-            btn.setEnabled(vehicle_mode)
         viewer_mode = (mode == "viewer")
+        self._vehicle_section.setVisible(vehicle_mode)
         self._passphrase_row.setVisible(not viewer_mode)
         if not viewer_mode:
             lbl = "VEHICLE PASSPHRASE" if vehicle_mode else "MONITOR PASSPHRASE"
             self._passphrase_label.setText(lbl)
         self._passphrase_input.clear()
+        self.adjustSize()
 
     def _select_icon(self, key: str):
         self._set_icon_selected(key)

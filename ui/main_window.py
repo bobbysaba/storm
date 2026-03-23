@@ -1826,7 +1826,7 @@ class MainWindow(QMainWindow):
             self._clear_placement_prompt()
             self._place_storm_cone(cone)
         elif self._active_annotation_type:
-            dlg = AnnotationPlaceDialog(self._active_annotation_type, lat, lon, parent=self)
+            dlg = AnnotationPlaceDialog(self._active_annotation_type, lat, lon, viewer_mode=self._viewer, parent=self)
             if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:
                 annotation = Annotation.new(
                     type_key=self._active_annotation_type,
@@ -1840,7 +1840,7 @@ class MainWindow(QMainWindow):
         annotation = self._annotations.get(annotation_id)
         if annotation is None:
             return
-        dlg = AnnotationEditDialog(annotation, parent=self)
+        dlg = AnnotationEditDialog(annotation, viewer_mode=self._viewer, parent=self)
         if dlg.exec() == AnnotationEditDialog.DialogCode.Accepted:
             if dlg.action() == "delete":
                 self._delete_annotation(annotation_id)
