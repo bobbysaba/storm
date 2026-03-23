@@ -9,7 +9,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
-    QTextEdit, QApplication, QMessageBox, QProgressBar, QSizePolicy, QWidget,
+    QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize
 from PyQt6.QtGui import QPixmap, QPainter, QIcon
@@ -399,61 +399,6 @@ class _LogViewerDialog(QDialog):
 
     def _copy(self):
         QApplication.clipboard().setText(self._text.toPlainText())
-
-
-class LoadingScreen(QDialog):
-    """Frameless loading screen shown while MainWindow + WebEngine initialize."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("STORM")
-        self.setFixedSize(380, 180)
-        self.setWindowFlags(
-            Qt.WindowType.Dialog
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.CustomizeWindowHint
-            | Qt.WindowType.WindowTitleHint
-        )
-        self.setStyleSheet(_DIALOG_STYLE)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 36, 32, 32)
-        layout.setSpacing(0)
-
-        title = QLabel("STORM")
-        title.setObjectName("title")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        layout.addSpacing(20)
-
-        self._status = QLabel("Initializing...")
-        self._status.setObjectName("hint")
-        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._status)
-
-        layout.addSpacing(14)
-
-        bar = QProgressBar()
-        bar.setRange(0, 0)          # indeterminate / marquee
-        bar.setFixedHeight(4)
-        bar.setTextVisible(False)
-        bar.setStyleSheet("""
-            QProgressBar {
-                background-color: #1A1A2E;
-                border: none;
-                border-radius: 2px;
-            }
-            QProgressBar::chunk {
-                background-color: #00CFFF;
-                border-radius: 2px;
-            }
-        """)
-        layout.addWidget(bar)
-
-    def set_status(self, text: str) -> None:
-        self._status.setText(text)
-        QApplication.processEvents()
 
 
 class LaunchDialog(QDialog):

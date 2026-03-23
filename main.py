@@ -13,7 +13,7 @@ import faulthandler
 import runtime_flags
 from dataclasses import replace
 from datetime import datetime, timezone
-from ui.launch_dialog import LaunchDialog, LoadingScreen
+from ui.launch_dialog import LaunchDialog
 from ui.radar_overlay import set_render_grid_size
 from data.truck_replay import load_truck_observations
 
@@ -412,17 +412,9 @@ def main() -> None:
     # set application quit behavior
     app.setQuitOnLastWindowClosed(False)
 
-    # ── Loading screen (early) ─────────────────────────────────────────────────
-    # Show immediately so there is visible feedback while the app finishes
-    # initializing — on Windows this startup period can be several seconds.
-    loading = LoadingScreen()
-    loading.show()
-    app.processEvents()
-
     # ── Single-instance guard ──────────────────────────────────────────────────
     # Must happen after QApplication exists so the warning dialog can be shown.
     if not _acquire_instance_lock():
-        loading.close()
         QMessageBox.warning(
             None,
             "STORM Already Running",
@@ -438,7 +430,6 @@ def main() -> None:
 
     # if not launched via CLI mode flag, show the launch dialog
     if not monitor and not viewer:
-        # show the launch dialog (loading screen stays visible in background)
         dialog = LaunchDialog()
 
         # if the diaglog is not accepted
@@ -459,11 +450,6 @@ def main() -> None:
         monitor = dialog.monitor()
         viewer  = dialog.viewer()
 
-    # Deferred import — QWebEngineView (and Chromium DLLs) load here, after the
-    # loading screen is already visible instead of freezing before any UI appears.
-    loading.set_status("Loading map engine...")
-    loading.show()
-    app.processEvents()
     from ui.main_window import MainWindow  # noqa: PLC0415
 
     # ── File presence checks ───────────────────────────────────────────────────
@@ -486,8 +472,6 @@ def main() -> None:
         # set the JS console message handler
         window.map_widget.page().javaScriptConsoleMessage = handle_js_message
 
-    # close loading screen and show the main window
-    loading.close()
     window.show()
 
     # if a truck replay file is specified
