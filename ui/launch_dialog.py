@@ -622,6 +622,10 @@ class LaunchDialog(QDialog):
         log_row.addStretch()
         root.addLayout(log_row)
 
+        # Defer adjustSize until the event loop starts so the full layout is
+        # computed before the dialog is measured for the first time.
+        QTimer.singleShot(0, self.adjustSize)
+
     # ── Lock helpers ───────────────────────────────────────────────────────────
 
     def _set_fields_locked(self, locked: bool):
@@ -648,7 +652,8 @@ class LaunchDialog(QDialog):
             lbl = "VEHICLE PASSPHRASE" if vehicle_mode else "MONITOR PASSPHRASE"
             self._passphrase_label.setText(lbl)
         self._passphrase_input.clear()
-        self.adjustSize()
+        if self.isVisible():
+            self.adjustSize()
 
     def _select_icon(self, key: str):
         self._set_icon_selected(key)

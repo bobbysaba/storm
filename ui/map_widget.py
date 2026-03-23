@@ -103,6 +103,10 @@ def build_safe_map_html() -> str:
     window.stormSetMesoSectors = _noop;
     window.stormSetRadarStations = _noop;
     window.stormSetRadarStationsVisible = _noop;
+    window.stormSetRoute = _noop;
+    window.stormClearRoute = _noop;
+    window.stormSetRoutePickMode = _noop;
+    window.stormSetDestinationMarker = _noop;
   </script>
 </head>
 <body>
@@ -419,6 +423,10 @@ def build_map_html() -> str:
     window.stormSetMesoSectors = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
+    window.stormSetRoute = _stormNoop;
+    window.stormClearRoute = _stormNoop;
+    window.stormSetRoutePickMode = _stormNoop;
+    window.stormSetDestinationMarker = _stormNoop;
     window._radarStationsVisible = false;
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
@@ -980,6 +988,34 @@ def build_map_html() -> str:
           'text-halo-color': '#0A0A0F',
           'text-halo-width': 1.5
         }}
+      }});
+
+      // ── Route overlay ────────────────────────────────────────────────────
+      var emptyLine = {{type:'Feature', geometry:{{type:'LineString', coordinates:[]}}}};
+      map.addSource('route', {{type:'geojson', data:emptyLine}});
+      map.addLayer({{
+        id: 'route-casing', type: 'line', source: 'route',
+        layout: {{'line-join':'round','line-cap':'round'}},
+        paint: {{'line-color':'#1A4A8A','line-width':8,'line-opacity':0.55}}
+      }});
+      map.addLayer({{
+        id: 'route-line', type: 'line', source: 'route',
+        layout: {{'line-join':'round','line-cap':'round'}},
+        paint: {{'line-color':'#4A90E2','line-width':5,'line-opacity':0.9}}
+      }});
+
+      // Click-to-pick destination mode
+      var _routePickMode = false;
+      window.stormSetRoutePickMode = function(on) {{
+        _routePickMode = !!on;
+        map.getCanvas().style.cursor = _routePickMode ? 'crosshair' : '';
+      }};
+
+      map.on('click', function(e) {{
+        if (!_routePickMode) return;
+        _routePickMode = false;
+        map.getCanvas().style.cursor = '';
+        if (bridge) bridge.on_map_pick_for_route(e.lngLat.lat, e.lngLat.lng);
       }});
 
       // ── SPC + NWS hazard overlays (all default hidden) ──────────────────
@@ -1984,6 +2020,42 @@ def build_map_html() -> str:
       if (!visible) map.getCanvas().style.cursor = '';
     }};
 
+    // ── Route Overlay ─────────────────────────────────────────────────────
+    var _destMarker = null;
+
+    window.stormSetRoute = function(geojsonStr) {{
+      var src = map.getSource('route');
+      if (!src) return;
+      src.setData(JSON.parse(geojsonStr));
+      // Fit map to route bounds
+      try {{
+        var coords = JSON.parse(geojsonStr).geometry.coordinates;
+        if (coords && coords.length > 1) {{
+          var lons = coords.map(function(c){{return c[0];}});
+          var lats = coords.map(function(c){{return c[1];}});
+          var sw = [Math.min.apply(null,lons), Math.min.apply(null,lats)];
+          var ne = [Math.max.apply(null,lons), Math.max.apply(null,lats)];
+          map.fitBounds([sw, ne], {{padding: 60, duration: 800}});
+        }}
+      }} catch(e) {{}}
+    }};
+
+    window.stormClearRoute = function() {{
+      var src = map.getSource('route');
+      if (src) src.setData({{type:'Feature',geometry:{{type:'LineString',coordinates:[]}}}});
+      if (_destMarker) {{ _destMarker.remove(); _destMarker = null; }}
+    }};
+
+    window.stormSetDestinationMarker = function(lon, lat) {{
+      if (_destMarker) {{ _destMarker.remove(); _destMarker = null; }}
+      var el = document.createElement('div');
+      el.style.cssText = 'width:18px;height:18px;border-radius:50%;'
+        + 'background:#E53935;border:2px solid #fff;box-shadow:0 0 6px rgba(0,0,0,0.6);';
+      _destMarker = new maplibregl.Marker({{element:el,anchor:'center'}})
+        .setLngLat([lon, lat])
+        .addTo(map);
+    }};
+
     // ── Measure Tool ─────────────────────────────────────────────────────
     window._measureAnchor = null;
 
@@ -2507,6 +2579,7 @@ class MapBridge(QObject):
     radar_station_clicked = pyqtSignal(str)
     sounding_clicked      = pyqtSignal(float, float)
     user_dragged          = pyqtSignal()
+    map_pick_for_route    = pyqtSignal(float, float)
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -2548,6 +2621,10 @@ class MapBridge(QObject):
     def on_user_drag(self):
         self.user_dragged.emit()
 
+    @pyqtSlot(float, float)
+    def on_map_pick_for_route(self, lat: float, lon: float):
+        self.map_pick_for_route.emit(lat, lon)
+
 
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
@@ -2563,6 +2640,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     radar_station_clicked = pyqtSignal(str)
     sounding_clicked      = pyqtSignal(float, float)
     user_dragged          = pyqtSignal()
+    map_pick_for_route    = pyqtSignal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2614,6 +2692,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
         self.bridge.sounding_clicked.connect(self.sounding_clicked)
         self.bridge.user_dragged.connect(self.user_dragged)
+        self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
 
         # Queue for JS calls that arrive before the page has loaded
         self._map_ready = False
@@ -2712,6 +2791,27 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         flag = "true" if visible else "false"
         self.run_js(
             f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
+        )
+
+    def set_route(self, geojson_str: str, dest_lon: float, dest_lat: float):
+        """Draw a route polyline on the map and place a destination marker."""
+        self.run_js(
+            f"if(window.stormSetRoute) stormSetRoute({json.dumps(geojson_str)});"
+        )
+        self.run_js(
+            f"if(window.stormSetDestinationMarker) "
+            f"stormSetDestinationMarker({dest_lon}, {dest_lat});"
+        )
+
+    def clear_route(self):
+        """Remove the route line and destination marker."""
+        self.run_js("if(window.stormClearRoute) stormClearRoute();")
+
+    def set_route_pick_mode(self, active: bool):
+        """Toggle crosshair pick mode for destination selection."""
+        flag = "true" if active else "false"
+        self.run_js(
+            f"if(window.stormSetRoutePickMode) stormSetRoutePickMode({flag});"
         )
 
     def set_sounding_mode(self, active: bool):

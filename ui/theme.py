@@ -66,7 +66,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#radarDrawer,
 #floatingToolbar QWidget#hazardDrawer,
 #floatingToolbar QWidget#satelliteDrawer,
-#floatingToolbar QWidget#deployLocsDrawer {
+#floatingToolbar QWidget#deployLocsDrawer,
+#floatingToolbar QWidget#routingDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -76,7 +77,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#radarDrawer > QWidget,
 #floatingToolbar QWidget#hazardDrawer > QWidget,
 #floatingToolbar QWidget#satelliteDrawer > QWidget,
-#floatingToolbar QWidget#deployLocsDrawer > QWidget {
+#floatingToolbar QWidget#deployLocsDrawer > QWidget,
+#floatingToolbar QWidget#routingDrawer > QWidget {
     background: transparent;
 }
 
@@ -213,6 +215,46 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#deployLocsDrawer QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #4A9EFF;
+    font-weight: 600;
+}
+
+/* ── Routing Drawer ───────────────────────────────────── */
+#floatingToolbar QWidget#routingDrawer QLineEdit {
+    background-color: rgba(26, 26, 46, 0.85);
+    border: 1px solid #2E2E4E;
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-size: 11px;
+    color: #E8EAF0;
+    min-height: 20px;
+}
+
+#floatingToolbar QWidget#routingDrawer QLineEdit:focus {
+    border-color: #4A9EFF;
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton {
+    background-color: transparent;
+    border: 1px solid #2E2E4E;
+    border-radius: 6px;
+    color: #B8BFCD;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    padding: 3px 8px;
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton:checked,
+#floatingToolbar QWidget#routingDrawer QToolButton:pressed {
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #4A9EFF;
@@ -553,7 +595,8 @@ QToolTip {
 #floatingToolbar QWidget#radarDrawer QCheckBox,
 #floatingToolbar QWidget#hazardDrawer QCheckBox,
 #floatingToolbar QWidget#satelliteDrawer QCheckBox,
-#floatingToolbar QWidget#deployLocsDrawer QCheckBox {
+#floatingToolbar QWidget#deployLocsDrawer QCheckBox,
+#floatingToolbar QWidget#routingDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

@@ -22,6 +22,7 @@ from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
 from ui.map_widget import MapWidget, TILES_PATH
 from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
+from ui.routing_controls import RoutingControls
 from ui.deploy_locs_controls import DeployLocsControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
@@ -374,6 +375,35 @@ class MainWindow(QMainWindow):
             "MEASURE", "Click two points to measure distance", tb
         )
 
+        self._add_separator(tb)
+
+        # ── route / directions ────────────────────────────────────────────
+        self.btn_route = self._toolbar_toggle(
+            "ROUTE", "Get turn-by-turn directions", tb
+        )
+        self.routing_controls = RoutingControls(self._map_container)
+        self.routing_controls.setObjectName("floatingToolbar")
+        self.btn_route.toggled.connect(self.routing_controls.toggle_drawer)
+        self.btn_route.toggled.connect(self._start_layout_pulse)
+        self.routing_controls.enter_pick_mode.connect(
+            lambda: self.map_widget.set_route_pick_mode(True)
+        )
+        self.routing_controls.route_calculated.connect(self._on_route_calculated)
+        self.routing_controls.route_cleared.connect(self._on_route_cleared)
+        self.map_widget.map_pick_for_route.connect(
+            self.routing_controls.on_destination_picked
+        )
+
+    def _on_route_calculated(self, result):
+        import json as _json
+        geojson_str = _json.dumps(result.geometry)
+        dlat, dlon  = result.dest_latlon
+        self.map_widget.set_route(geojson_str, dlon, dlat)
+
+    def _on_route_cleared(self):
+        self.map_widget.clear_route()
+        self.map_widget.set_route_pick_mode(False)
+
     def _toolbar_toggle(self, label: str, tooltip: str, layout: QHBoxLayout) -> QToolButton:
         btn = QToolButton()
         btn.setText(label)
@@ -570,6 +600,8 @@ class MainWindow(QMainWindow):
                 _stack(self.satellite_controls)
             if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
                 _stack(self.annotation_tools)
+            if hasattr(self, "routing_controls") and self.btn_route.isChecked():
+                _stack(self.routing_controls)
 
         # outlook panel — right side, below toolbar, above status pill
         if hasattr(self, "outlook_panel"):
@@ -1372,6 +1404,8 @@ class MainWindow(QMainWindow):
         # Untoggle other exclusive map-click modes
         if self.btn_measure.isChecked():
             self.btn_measure.setChecked(False)
+        if hasattr(self, "btn_annotate") and self.btn_annotate.isChecked():
+            self.btn_annotate.setChecked(False)
 
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
@@ -2078,13 +2112,19 @@ class MainWindow(QMainWindow):
         self._measure_has_anchor = False
         self._measure_complete = False
 
-        # mutual exclusion: MEASURE and ANNOTATE both consume map clicks
+        # mutual exclusion: MEASURE, ANNOTATE, and SOUNDING all consume map clicks
         # connect exclusion BEFORE _on_measure_toggled so deactivation fires first
         self.btn_measure.toggled.connect(
             lambda on: self.btn_annotate.setChecked(False) if on else None
         )
+        self.btn_measure.toggled.connect(
+            lambda on: self.btn_sounding.setChecked(False) if on else None
+        )
         self.btn_annotate.toggled.connect(
             lambda on: self.btn_measure.setChecked(False) if on else None
+        )
+        self.btn_annotate.toggled.connect(
+            lambda on: self.btn_sounding.setChecked(False) if on else None
         )
         self.btn_measure.toggled.connect(self._on_measure_toggled)
 
@@ -2181,6 +2221,8 @@ class MainWindow(QMainWindow):
         age_label = self._obs_age_label(obs)
         self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
         self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
+        if obs.vehicle_id == config.VEHICLE_ID and hasattr(self, "routing_controls"):
+            self.routing_controls.update_own_position(obs.lat, obs.lon)
         count = len(self._vehicles)
         self.update_vehicle_count(count)
         if hasattr(self, "_vehicle_placeholder"):
