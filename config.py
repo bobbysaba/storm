@@ -24,8 +24,11 @@ VEHICLE_ICON = "car"
 # define the path to the obs file (will be overwritten)
 OBS_FILE_DIR = ""
 
-# define the interval to poll the obs file
-OBS_FILE_POLL_S = 10
+# define the interval to poll the obs file (local GUI update rate)
+OBS_FILE_POLL_S = 1
+
+# how often local obs are published to MQTT for other vehicles to see
+OBS_MQTT_PUBLISH_S = 10
 
 # column header names for real-time obs file
 OBS_FILE_COL_LAT = "lat"

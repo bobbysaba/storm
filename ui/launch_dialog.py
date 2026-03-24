@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
 )
@@ -170,11 +170,12 @@ QToolButton#iconBtn {
     border: 1px solid #1E1E2E;
     border-radius: 6px;
     color: #5A5B6A;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.5px;
-    padding: 6px 4px 4px 4px;
-    min-width: 52px;
+    padding: 4px 2px 3px 2px;
+    min-width: 40px;
+    min-height: 42px;
 }
 QToolButton#iconBtn:hover {
     border-color: #4A9EFF;
@@ -193,11 +194,12 @@ QToolButton {
     border: 2px solid #00CFFF;
     border-radius: 6px;
     color: #00CFFF;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
     letter-spacing: 0.5px;
-    padding: 5px 3px 3px 3px;
-    min-width: 52px;
+    padding: 3px 1px 2px 1px;
+    min-width: 40px;
+    min-height: 42px;
 }
 """
 
@@ -419,10 +421,14 @@ class LaunchDialog(QDialog):
 
         s = QSettings()
         saved = {
-            "vehicle_id":   s.value("launch/vehicle_id",   "",         type=str),
-            "data_dir":     s.value("launch/data_dir",     "",         type=str),
-            "mode":         s.value("launch/mode",         "vehicle",  type=str),
-            "vehicle_icon": s.value("launch/vehicle_icon", "car",      type=str),
+            "vehicle_id":     s.value("launch/vehicle_id",     "",        type=str),
+            "data_dir":       s.value("launch/data_dir",       "",        type=str),
+            "mode":           s.value("launch/mode",           "vehicle", type=str),
+            "vehicle_icon":   s.value("launch/vehicle_icon",   "car",     type=str),
+            "auto_spc":       s.value("launch/auto_spc",       False,     type=bool),
+            "auto_nws":       s.value("launch/auto_nws",       False,     type=bool),
+            "auto_radar":     s.value("launch/auto_radar",     False,     type=bool),
+            "auto_satellite": s.value("launch/auto_satellite", "",        type=str),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
@@ -446,7 +452,7 @@ class LaunchDialog(QDialog):
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setWordWrap(True)
         root.addWidget(sub)
-        root.addSpacing(24)
+        root.addSpacing(16)
 
         # Divider
         div = QFrame()
@@ -455,7 +461,7 @@ class LaunchDialog(QDialog):
         div.setStyleSheet("background-color: #1E1E2E;")
         div.setFixedHeight(1)
         root.addWidget(div)
-        root.addSpacing(24)
+        root.addSpacing(16)
 
         # ── Vehicle-only section (hidden in monitor/viewer mode) ───────────────
         self._vehicle_section = QWidget()
@@ -482,7 +488,7 @@ class LaunchDialog(QDialog):
         self._lock_btn.clicked.connect(self._toggle_fields_lock)
         vid_row.addWidget(self._lock_btn)
         vs.addLayout(vid_row)
-        vs.addSpacing(20)
+        vs.addSpacing(14)
 
         # Data directory
         dir_label = QLabel("DATA DIRECTORY")
@@ -503,15 +509,7 @@ class LaunchDialog(QDialog):
         dir_row.addWidget(self._browse_btn)
 
         vs.addLayout(dir_row)
-
-        hint = QLabel(
-            "Leave blank if no mesonet instrument is connected — "
-            "a GPS puck will be used instead."
-        )
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        vs.addWidget(hint)
-        vs.addSpacing(20)
+        vs.addSpacing(14)
 
         # Vehicle icon picker
         icon_label = QLabel("VEHICLE ICON")
@@ -519,29 +517,26 @@ class LaunchDialog(QDialog):
         vs.addWidget(icon_label)
         vs.addSpacing(6)
 
-        icon_grid = QGridLayout()
-        icon_grid.setSpacing(6)
-        icon_grid.setColumnStretch(0, 1)
-        icon_grid.setColumnStretch(1, 1)
-        icon_grid.setColumnStretch(2, 1)
+        icon_row = QHBoxLayout()
+        icon_row.setSpacing(4)
         self._icon_btns: dict[str, QToolButton] = {}
         _icons = [
-            ("car", "CAR"),    ("drone", "DRONE"), ("mesonet", "MESO"),
+            ("car", "CAR"), ("drone", "DRONE"), ("mesonet", "MESO"),
             ("lidar", "LIDAR"), ("radar", "RADAR"), ("hailcam", "HAIL"),
         ]
-        for i, (key, label) in enumerate(_icons):
+        for key, label in _icons:
             btn = QToolButton()
             btn.setText(label)
             btn.setObjectName("iconBtn")
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            btn.setIconSize(QSize(28, 28))
-            btn.setIcon(QIcon(_svg_pixmap(key, "#5A5B6A")))
+            btn.setIconSize(QSize(22, 22))
+            btn.setIcon(QIcon(_svg_pixmap(key, "#5A5B6A", 22)))
             btn.clicked.connect(lambda _checked, k=key: self._select_icon(k))
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            icon_grid.addWidget(btn, i // 3, i % 3)
+            icon_row.addWidget(btn)
             self._icon_btns[key] = btn
-        vs.addLayout(icon_grid)
-        vs.addSpacing(20)
+        vs.addLayout(icon_row)
+        vs.addSpacing(12)
 
         root.addWidget(self._vehicle_section)
 
@@ -585,7 +580,57 @@ class LaunchDialog(QDialog):
 
         # Apply saved mode
         self._select_mode(saved.get("mode", "vehicle"))
-        root.addSpacing(28)
+
+        # ── Data on launch ─────────────────────────────────────────────────────
+        root.addSpacing(14)
+        div2 = QFrame()
+        div2.setObjectName("divider")
+        div2.setFrameShape(QFrame.Shape.HLine)
+        div2.setStyleSheet("background-color: #1E1E2E;")
+        div2.setFixedHeight(1)
+        root.addWidget(div2)
+        root.addSpacing(12)
+
+        data_label = QLabel("DATA ON LAUNCH")
+        data_label.setObjectName("fieldLabel")
+        root.addWidget(data_label)
+        root.addSpacing(6)
+
+        # Row 1: SPC / NWS / RADAR checkboxes
+        check_row = QHBoxLayout()
+        check_row.setSpacing(16)
+        self._chk_spc   = QCheckBox("SPC")
+        self._chk_nws   = QCheckBox("NWS")
+        self._chk_radar = QCheckBox("RADAR")
+        self._chk_spc.setChecked(saved.get("auto_spc", False))
+        self._chk_nws.setChecked(saved.get("auto_nws", False))
+        self._chk_radar.setChecked(saved.get("auto_radar", False))
+        check_row.addWidget(self._chk_spc)
+        check_row.addWidget(self._chk_nws)
+        check_row.addWidget(self._chk_radar)
+        check_row.addStretch()
+        root.addLayout(check_row)
+        root.addSpacing(6)
+
+        # Row 2: satellite selector — "SAT" label inline with mode buttons
+        sat_row = QHBoxLayout()
+        sat_row.setSpacing(6)
+        sat_lbl = QLabel("SAT")
+        sat_lbl.setObjectName("fieldLabel")
+        sat_lbl.setFixedWidth(28)
+        sat_row.addWidget(sat_lbl)
+        self._sat_btns: dict[str, QPushButton] = {}
+        for key, label in (("", "OFF"), ("conus", "CONUS"), ("auto_meso", "AUTO-MESO")):
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _checked, k=key: self._select_satellite(k))
+            sat_row.addWidget(btn)
+            self._sat_btns[key] = btn
+        root.addLayout(sat_row)
+
+        self._select_satellite(saved.get("auto_satellite", ""))
+
+        root.addSpacing(20)
 
         # Launch button
         btn_row = QHBoxLayout()
@@ -624,7 +669,17 @@ class LaunchDialog(QDialog):
 
         # Defer adjustSize until the event loop starts so the full layout is
         # computed before the dialog is measured for the first time.
-        QTimer.singleShot(0, self.adjustSize)
+        QTimer.singleShot(0, self._post_layout_adjust)
+
+    # ── Layout helpers ─────────────────────────────────────────────────────────
+
+    def _post_layout_adjust(self):
+        """Resize to content then re-center within the available screen area."""
+        self.adjustSize()
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = screen.x() + max(0, (screen.width()  - self.width())  // 2)
+        y = screen.y() + max(0, (screen.height() - self.height()) // 2)
+        self.move(x, y)
 
     # ── Lock helpers ───────────────────────────────────────────────────────────
 
@@ -653,7 +708,12 @@ class LaunchDialog(QDialog):
             self._passphrase_label.setText(lbl)
         self._passphrase_input.clear()
         if self.isVisible():
-            self.adjustSize()
+            self._post_layout_adjust()
+
+    def _select_satellite(self, key: str):
+        self._selected_satellite = key if key in self._sat_btns else ""
+        for k, btn in self._sat_btns.items():
+            btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if k == self._selected_satellite else _MODE_BTN_STYLE)
 
     def _select_icon(self, key: str):
         self._set_icon_selected(key)
@@ -663,7 +723,7 @@ class LaunchDialog(QDialog):
         for k, btn in self._icon_btns.items():
             selected = (k == self._selected_icon)
             btn.setStyleSheet(_ICON_SELECTED_STYLE if selected else "")
-            btn.setIcon(QIcon(_svg_pixmap(k, "#00CFFF" if selected else "#5A5B6A")))
+            btn.setIcon(QIcon(_svg_pixmap(k, "#00CFFF" if selected else "#5A5B6A", 22)))
 
     # ── Update check ───────────────────────────────────────────────────────────
 
@@ -763,10 +823,14 @@ class LaunchDialog(QDialog):
 
     def _do_accept(self):
         s = QSettings()
-        s.setValue("launch/vehicle_id",   self._vid_input.text().strip())
-        s.setValue("launch/data_dir",     self._dir_input.text().strip())
-        s.setValue("launch/mode",         getattr(self, "_selected_mode", "vehicle"))
-        s.setValue("launch/vehicle_icon", getattr(self, "_selected_icon", "car"))
+        s.setValue("launch/vehicle_id",     self._vid_input.text().strip())
+        s.setValue("launch/data_dir",       self._dir_input.text().strip())
+        s.setValue("launch/mode",           getattr(self, "_selected_mode", "vehicle"))
+        s.setValue("launch/vehicle_icon",   getattr(self, "_selected_icon", "car"))
+        s.setValue("launch/auto_spc",       self._chk_spc.isChecked())
+        s.setValue("launch/auto_nws",       self._chk_nws.isChecked())
+        s.setValue("launch/auto_radar",     self._chk_radar.isChecked())
+        s.setValue("launch/auto_satellite", getattr(self, "_selected_satellite", ""))
         self.accept()
 
     # ── Accessors (read by main.py after accept) ───────────────────────────────
@@ -791,3 +855,15 @@ class LaunchDialog(QDialog):
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return "car"
         return getattr(self, "_selected_icon", "car")
+
+    def auto_spc(self) -> bool:
+        return self._chk_spc.isChecked()
+
+    def auto_nws(self) -> bool:
+        return self._chk_nws.isChecked()
+
+    def auto_radar(self) -> bool:
+        return self._chk_radar.isChecked()
+
+    def auto_satellite(self) -> str:
+        return getattr(self, "_selected_satellite", "")

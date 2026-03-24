@@ -20,6 +20,7 @@ class HazardControls(QWidget):
     spc_mds_toggled      = pyqtSignal(bool)
     nws_warnings_toggled = pyqtSignal(bool)
     fetch_requested      = pyqtSignal()
+    content_resized      = pyqtSignal()      # triggers layout pulse in main_window
 
     # Colored-swatch entries per product layer.  Each entry is (hex_color, short_label).
     PRODUCT_LEGENDS: dict[str, list[tuple[str, str]]] = {
@@ -154,6 +155,8 @@ class HazardControls(QWidget):
             self.setMaximumHeight(current)
             target = 0
 
+        if self._animation:
+            self._animation.stop()
         anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(180)
         anim.setStartValue(current)
@@ -191,6 +194,8 @@ class HazardControls(QWidget):
             current = self.height()
             if target == current:
                 return
+            if self._animation:
+                self._animation.stop()
             anim = QPropertyAnimation(self, b"maximumHeight")
             anim.setDuration(120)
             anim.setStartValue(current)
@@ -199,6 +204,7 @@ class HazardControls(QWidget):
             anim.finished.connect(lambda: self.setMaximumHeight(16777215))
             anim.start()
             self._animation = anim
+            self.content_resized.emit()
 
     def deactivate_all(self):
         self._set_spc_mode("")

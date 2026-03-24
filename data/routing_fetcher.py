@@ -61,6 +61,7 @@ class RouteStep:
     instruction: str
     distance_m: float
     duration_s: float
+    location: tuple[float, float] = (0.0, 0.0)   # (lat, lon) of maneuver point
 
 
 @dataclass
@@ -159,6 +160,27 @@ def _geocode_address(address: str) -> tuple[str, float, float]:
     return hit.get("display_name", address), float(hit["lat"]), float(hit["lon"])
 
 
+def _pick_ref_badge(ref: str) -> str:
+    """Return the most significant route reference as a [badge], or ''.
+
+    OSRM often gives semicolon-separated designations, e.g. "I-44;US-270".
+    Priority: Interstate > US Highway > everything else (state/county/local).
+    """
+    if not ref:
+        return ""
+    parts = [p.strip() for p in ref.split(";") if p.strip()]
+    if not parts:
+        return ""
+    up = [p.upper() for p in parts]
+    for i, u in enumerate(up):
+        if u.startswith("I-") or u.startswith("I "):
+            return f"[{parts[i]}]"
+    for i, u in enumerate(up):
+        if u.startswith("US") or u.startswith("U.S."):
+            return f"[{parts[i]}]"
+    return f"[{parts[0]}]"
+
+
 def _fetch_route(
     olat: float, olon: float, dlat: float, dlon: float
 ) -> RouteResult:
@@ -183,18 +205,23 @@ def _fetch_route(
             m_type   = maneuver.get("type", "")
             m_mod    = maneuver.get("modifier", "")
             name     = step.get("name", "")
+            badge    = _pick_ref_badge(step.get("ref", ""))
 
             icon, verb = _MANEUVER_MAP.get(
                 (m_type, m_mod),
                 _MANEUVER_MAP.get((m_type, ""), ("↑", m_type.capitalize() or "Continue")),
             )
-            instruction = f"{verb} {name}".strip() if name else verb
+            # Combine badge + name: "[I-44] Oklahoma Turnpike", "[I-44]", or "Main St"
+            road = " ".join(filter(None, [badge, name]))
+            instruction = f"{verb} {road}".strip() if road else verb
 
+            loc = maneuver.get("location", [0.0, 0.0])  # OSRM: [lon, lat]
             steps.append(RouteStep(
                 icon        = icon,
                 instruction = instruction,
                 distance_m  = step.get("distance", 0.0),
                 duration_s  = step.get("duration", 0.0),
+                location    = (loc[1], loc[0]),           # store as (lat, lon)
             ))
 
     return RouteResult(

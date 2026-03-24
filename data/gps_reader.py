@@ -18,7 +18,7 @@ from core.observation import Observation
 
 log = logging.getLogger(__name__)
 
-GPS_EMIT_INTERVAL = 10.0   # seconds between emitted observations
+GPS_EMIT_INTERVAL = 1.0    # seconds between emitted observations
 RETRY_DELAY       = 5.0    # seconds before retrying after a serial error
 _PROBE_TIMEOUT    = 2.0    # seconds to listen when probing a candidate port
 _PROBE_LINES      = 20     # max NMEA lines to read during probe

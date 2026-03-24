@@ -40,7 +40,8 @@ class DeployLocsControls(QWidget):
     Emits metric_changed(key) whenever the active metric changes.
     """
 
-    metric_changed = pyqtSignal(str)  # "rank_abi" | "rank_aoi" | "rqi"
+    metric_changed   = pyqtSignal(str)   # "rank_abi" | "rank_aoi" | "rqi"
+    content_resized  = pyqtSignal()      # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,6 +118,8 @@ class DeployLocsControls(QWidget):
             self.setMaximumHeight(current)
             target = 0
 
+        if self._animation:
+            self._animation.stop()
         anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(180)
         anim.setStartValue(current)
@@ -176,6 +179,8 @@ class DeployLocsControls(QWidget):
             current = self.height()
             if target == current:
                 return
+            if self._animation:
+                self._animation.stop()
             anim = QPropertyAnimation(self, b"maximumHeight")
             anim.setDuration(120)
             anim.setStartValue(current)
@@ -184,3 +189,4 @@ class DeployLocsControls(QWidget):
             anim.finished.connect(lambda: self.setMaximumHeight(16777215))
             anim.start()
             self._animation = anim
+            self.content_resized.emit()

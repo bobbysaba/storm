@@ -7,12 +7,11 @@
 # Timestamp is two columns: gps_date (DDMMYY) + gps_time (HHMMSS).
 # Vehicle identity has no column in the file — always taken from config.
 #
-# Runs on a QTimer in the main thread (file I/O at 10 s intervals is
-# too brief to justify a background thread).
+# Runs on a QTimer in the main thread — at 1 s intervals the file I/O
+# (stat + seek + single-row read) is fast enough to stay off a thread.
 #
-# Note: We parse all new rows each poll, but emit only the most recent
-# observation (last row). This avoids sending a burst of 10 one-second
-# observations every 10 seconds when the logger writes at 1 Hz.
+# We parse all new rows each poll but emit only the most recent one so
+# that bursts during catch-up (e.g. after a stall) don't flood the UI.
 
 import csv
 import io

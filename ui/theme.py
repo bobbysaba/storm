@@ -261,6 +261,14 @@ QMainWindow, QWidget {
     font-weight: 600;
 }
 
+/* Small fixed-size buttons in origin / dest rows (⊕ pick, GPS reset) */
+#floatingToolbar QWidget#routingDrawer QToolButton[text="⊕"],
+#floatingToolbar QWidget#routingDrawer QToolButton[text="GPS"] {
+    padding: 1px 2px;
+    font-size: 13px;
+    border-radius: 4px;
+}
+
 /* ── Outlook Panel ────────────────────────────────────── */
 #outlookPanel {
     background-color: rgba(15, 15, 26, 0.95);
@@ -336,6 +344,41 @@ QWidget#statusOverlayLeft QLabel, QWidget#statusOverlayRight QLabel {
     letter-spacing: 0.5px;
     padding: 0;
     color: #C8D0DE;
+}
+
+/* ── Navigation Pill ──────────────────────────────────── */
+QWidget#navPill {
+    background-color: rgba(15, 15, 26, 0.93);
+    border-radius: 10px;
+    border: 1px solid rgba(74, 158, 255, 0.4);
+}
+
+QWidget#navPill QLabel#navPillStep {
+    background: transparent;
+    color: #EFF3FF;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0;
+}
+
+QWidget#navPill QLabel#navPillSummary {
+    background: transparent;
+    color: #4A9EFF;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 0;
+}
+
+QWidget#navPill QToolButton {
+    background: transparent;
+    border: none;
+    color: #9DA6B8;
+    font-size: 13px;
+    padding: 0;
+}
+
+QWidget#navPill QToolButton:hover {
+    color: #EFF3FF;
 }
 
 /* ── Side Panel ───────────────────────────────────────── */

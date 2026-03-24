@@ -7,6 +7,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import runtime_flags
 from datetime import datetime, timezone
 
@@ -23,6 +24,7 @@ from ui.map_widget import MapWidget, TILES_PATH
 from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
 from ui.routing_controls import RoutingControls
+from ui.nav_pill import NavPill
 from ui.deploy_locs_controls import DeployLocsControls
 from ui.satellite_controls import SatelliteControls
 from ui.outlook_panel import OutlookPanel
@@ -275,10 +277,68 @@ class MainWindow(QMainWindow):
         if self._post_startup_fetchers_started:
             return
         self._post_startup_fetchers_started = True
+
+        s = QSettings()
+        self._launch_auto_spc       = s.value("launch/auto_spc",       False, type=bool)
+        self._launch_auto_nws       = s.value("launch/auto_nws",       False, type=bool)
+        self._launch_auto_radar     = s.value("launch/auto_radar",     False, type=bool)
+        self._launch_auto_satellite = s.value("launch/auto_satellite", "",    type=str)
+
         if not self._disable_radar:
             self._init_radar()
         self._init_hazards()
         self._init_satellite()
+        self._apply_launch_prefs()
+
+    def _apply_launch_prefs(self):
+        """Auto-enable map layers based on launch dialog preferences."""
+        if self._launch_auto_spc:
+            self.hazard_controls._btn_outlook.setChecked(True)
+        if self._launch_auto_nws:
+            self.hazard_controls._btn_nws_warnings.setChecked(True)
+        if self._launch_auto_radar and not self._disable_radar and hasattr(self, "_radar_fetcher"):
+            self._auto_start_radar()
+            self.btn_radar.setChecked(True)
+        sat = self._launch_auto_satellite
+        if sat == "conus":
+            self.satellite_controls._btn_conus.setChecked(True)
+        elif sat == "auto_meso":
+            self._auto_meso_pending = True
+            self._satellite_fetcher.meso_sectors_updated.connect(self._on_auto_meso_caps_ready)
+
+    def _on_auto_meso_caps_ready(self, sectors: dict):
+        """One-shot: pick the closer meso sector once caps have been fetched."""
+        if not getattr(self, "_auto_meso_pending", False):
+            return
+        self._auto_meso_pending = False
+        try:
+            self._satellite_fetcher.meso_sectors_updated.disconnect(self._on_auto_meso_caps_ready)
+        except Exception:
+            pass
+
+        vehicle = self._vehicles.get(config.VEHICLE_ID)
+        lat = vehicle.lat if vehicle else config.HOME_LAT
+        lon = vehicle.lon if vehicle else config.HOME_LON
+
+        best_idx = None
+        best_dist = float("inf")
+        for idx in (1, 2):
+            bbox = sectors.get(idx)
+            if not bbox:
+                continue
+            clat = (bbox["north"] + bbox["south"]) / 2
+            clon = (bbox["east"]  + bbox["west"])  / 2
+            dist = (lat - clat) ** 2 + (lon - clon) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+        if best_idx == 1:
+            self.satellite_controls._btn_meso1.setChecked(True)
+        elif best_idx == 2:
+            self.satellite_controls._btn_meso2.setChecked(True)
+        else:
+            self.satellite_controls._btn_conus.setChecked(True)
 
     # ── Toolbar ───────────────────────────────────────────────────────────────
 
@@ -319,6 +379,7 @@ class MainWindow(QMainWindow):
         self.deploy_locs_controls.setObjectName("floatingToolbar")
         self.btn_prev_locs.toggled.connect(self.deploy_locs_controls.toggle_drawer)
         self.btn_prev_locs.toggled.connect(self._start_layout_pulse)
+        self.deploy_locs_controls.content_resized.connect(self._start_layout_pulse)
 
         self._add_separator(tb)
 
@@ -330,6 +391,7 @@ class MainWindow(QMainWindow):
         self.hazard_controls.setObjectName("floatingToolbar")
         self.btn_hazards.toggled.connect(self.hazard_controls.toggle_drawer)
         self.btn_hazards.toggled.connect(self._start_layout_pulse)
+        self.hazard_controls.content_resized.connect(self._start_layout_pulse)
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
@@ -388,11 +450,46 @@ class MainWindow(QMainWindow):
         self.routing_controls.enter_pick_mode.connect(
             lambda: self.map_widget.set_route_pick_mode(True)
         )
+        self.routing_controls.enter_pick_mode.connect(
+            lambda: self.btn_sounding.setChecked(False) if self.btn_sounding.isChecked() else None
+        )
+        self.routing_controls.cancel_pick_mode.connect(
+            lambda: self.map_widget.set_route_pick_mode(False)
+        )
         self.routing_controls.route_calculated.connect(self._on_route_calculated)
         self.routing_controls.route_cleared.connect(self._on_route_cleared)
+        self.routing_controls.content_resized.connect(self._start_layout_pulse)
         self.map_widget.map_pick_for_route.connect(
-            self.routing_controls.on_destination_picked
+            self.routing_controls.on_map_pick
         )
+        if self._viewer:
+            self.btn_route.hide()
+
+        # ── Navigation pill (upper-right, visible when route active + drawer closed)
+        self.nav_pill = NavPill(self._map_container)
+        self.routing_controls.nav_updated.connect(self._on_nav_updated)
+        self.routing_controls.route_cleared.connect(self.nav_pill.nav_clear)
+        self.routing_controls.route_cleared.connect(self._layout_overlays)
+        self.nav_pill.open_drawer_requested.connect(
+            lambda: self.btn_route.setChecked(True)
+        )
+        self.nav_pill.clear_requested.connect(self.routing_controls._on_clear)
+        self.btn_route.toggled.connect(self._on_route_drawer_toggled)
+
+    def _on_nav_updated(self, step_text: str, summary: str):
+        """Show/refresh the nav pill — but only when the drawer is collapsed."""
+        self.nav_pill.update_nav(step_text, summary)
+        if self.btn_route.isChecked():
+            self.nav_pill.hide()
+        self._layout_overlays()
+
+    def _on_route_drawer_toggled(self, checked: bool):
+        """Hide pill while drawer is open; restore it when drawer closes."""
+        if checked:
+            self.nav_pill.hide()
+        elif self.routing_controls._last_result is not None:
+            self.nav_pill.show()
+        self._layout_overlays()
 
     def _on_route_calculated(self, result):
         import json as _json
@@ -602,6 +699,15 @@ class MainWindow(QMainWindow):
                 _stack(self.annotation_tools)
             if hasattr(self, "routing_controls") and self.btn_route.isChecked():
                 _stack(self.routing_controls)
+
+        # nav pill — upper-right, below toolbar (hidden while route drawer is open)
+        if hasattr(self, "nav_pill") and self.nav_pill.isVisible():
+            self.nav_pill.adjustSize()
+            np_w = self.nav_pill.width()
+            np_h = self.nav_pill.height()
+            nav_y = MARGIN + (tb_h + 4 if hasattr(self, "_floating_toolbar") else 0)
+            self.nav_pill.setGeometry(r.width() - np_w - MARGIN, nav_y, np_w, np_h)
+            self.nav_pill.raise_()
 
         # outlook panel — right side, below toolbar, above status pill
         if hasattr(self, "outlook_panel"):
@@ -931,8 +1037,6 @@ class MainWindow(QMainWindow):
         initial_site = self.radar_controls.current_site()
         self._radar_fetcher.set_site(initial_site)
         self._radar_fetcher.set_products(["N0B", "N0U"])
-
-        self._auto_start_radar()
 
         # ── sounding ──────────────────────────────────────────────────────
         self._sounding_fetcher = SoundingFetcher(self)
@@ -1406,6 +1510,12 @@ class MainWindow(QMainWindow):
             self.btn_measure.setChecked(False)
         if hasattr(self, "btn_annotate") and self.btn_annotate.isChecked():
             self.btn_annotate.setChecked(False)
+        # Cancel active annotation sub-tool even if annotate drawer was already closed
+        if getattr(self, "_active_annotation_type", "") or getattr(self, "_active_drawing_type", ""):
+            self._on_annotation_tool_selected("")
+        # Cancel route pick mode
+        if hasattr(self, "map_widget"):
+            self.map_widget.set_route_pick_mode(False)
 
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
@@ -1685,10 +1795,15 @@ class MainWindow(QMainWindow):
     def _on_local_vehicle_obs(self, obs: Observation):
         if self._startup_local_pending and obs.vehicle_id == config.VEHICLE_ID:
             self._complete_local_startup_phase()
+        # Always update local GUI at the full poll rate (1 Hz)
         self.update_vehicle_obs(obs)
+        # Throttle MQTT publishes independently — other vehicles don't need 1 Hz
         vehicle_sync = getattr(self, "_vehicle_sync", None)
         if vehicle_sync is not None:
-            vehicle_sync.publish_obs(obs)
+            now = time.monotonic()
+            if now - self._last_mqtt_publish >= config.OBS_MQTT_PUBLISH_S:
+                vehicle_sync.publish_obs(obs)
+                self._last_mqtt_publish = now
 
     def _mqtt_connect(self):
         use_tls = config.MQTT_USE_TLS and not runtime_flags.FLAGS.mqtt_no_tls
@@ -1800,6 +1915,9 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_annotation_tool_selected(self, type_key: str):
+        # Selecting any tool deactivates sounding mode
+        if type_key and hasattr(self, "btn_sounding") and self.btn_sounding.isChecked():
+            self.btn_sounding.setChecked(False)
         # cancel any in-progress drawing when tool switches
         if getattr(self, "_active_drawing_type", ""):
             self._cancel_drawing()
@@ -2500,6 +2618,7 @@ class MainWindow(QMainWindow):
         """Start Track A (file watcher) and/or Track B (GPS) if configured."""
         self._gps_reader: GPSReader | None = None
         self._obs_watcher: ObsFileWatcher | None = None
+        self._last_mqtt_publish = 0.0   # monotonic timestamp of last MQTT vehicle publish
 
         if self._monitor:
             log.info("Monitor mode — no local data inputs started")
