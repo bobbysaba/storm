@@ -76,7 +76,15 @@ if conda env list | grep -q "^storm "; then
     echo "storm environment already exists — skipping creation."
 else
     echo "Creating storm conda environment (this may take a few minutes)..."
-    conda env create -f "$SCRIPT_DIR/envs/storm_mac.yml"
+    # Fall back to classic solver if libmamba is broken (e.g. missing libarchive)
+    SOLVER_FLAG=""
+    if conda env list --solver=libmamba &>/dev/null; then
+        :
+    else
+        echo "libmamba solver unavailable, falling back to classic solver."
+        SOLVER_FLAG="--solver=classic"
+    fi
+    conda env create $SOLVER_FLAG -f "$SCRIPT_DIR/envs/storm_mac.yml"
     echo "storm environment created."
 fi
 

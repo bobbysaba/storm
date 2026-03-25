@@ -64,17 +64,28 @@ class Sounding:
 
 @dataclass
 class SoundingSet:
-    """Four sounding time slots (F0–F3) for a single clicked map location.
+    """Sounding time slots for a single location.
 
-    Returned by SoundingFetcher after a successful API call.  Not all
-    slots are guaranteed to be present — HRRR may not have data for
-    every requested time step near the edges of its run window.
+    For HRRR model soundings: F0–F3 forecast slots from open-meteo.
+    For observed soundings: all available raob times for the station/date
+    from IEM, sorted chronologically.
+
+    Not all slots are guaranteed to be present.
     """
     lat:       float
     lon:       float
-    elevation: float     # m MSL (site elevation from open-meteo)
+    elevation: float      # m MSL
     fetch_time: datetime
-    soundings: list      # list[Sounding], may be fewer than 6 if some slots missing
+    soundings: list       # list[Sounding], chronological order
+
+    # Populated only for observed (radiosonde) soundings:
+    station_id:   str = ""   # e.g. "OUN"
+    station_name: str = ""   # e.g. "Norman, OK"
+
+    @property
+    def is_observed(self) -> bool:
+        """True when this set came from a radiosonde station (not HRRR)."""
+        return bool(self.station_id)
 
     def get(self, slot_offset: int):
         """Return the Sounding for a given hour offset, or None."""

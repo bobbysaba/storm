@@ -137,7 +137,7 @@ class RadarControls(QWidget):
 
         # checkbox sits immediately right of product selector
         self._chk_show_data = QCheckBox("show data")
-        self._chk_show_data.setChecked(True)
+        self._chk_show_data.setChecked(False)
         self._chk_show_data.setFixedHeight(22)
         self._chk_show_data.setToolTip("enable or disable radar data fetch and display")
         self._chk_show_data.toggled.connect(self._on_data_enabled_toggled)

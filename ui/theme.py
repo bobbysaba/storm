@@ -67,7 +67,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#hazardDrawer,
 #floatingToolbar QWidget#satelliteDrawer,
 #floatingToolbar QWidget#deployLocsDrawer,
-#floatingToolbar QWidget#routingDrawer {
+#floatingToolbar QWidget#routingDrawer,
+#floatingToolbar QWidget#soundingDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -78,7 +79,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#hazardDrawer > QWidget,
 #floatingToolbar QWidget#satelliteDrawer > QWidget,
 #floatingToolbar QWidget#deployLocsDrawer > QWidget,
-#floatingToolbar QWidget#routingDrawer > QWidget {
+#floatingToolbar QWidget#routingDrawer > QWidget,
+#floatingToolbar QWidget#soundingDrawer > QWidget {
     background: transparent;
 }
 
@@ -221,6 +223,43 @@ QMainWindow, QWidget {
     font-weight: 600;
 }
 
+#floatingToolbar QWidget#deployLocsFilterRow {
+    background: transparent;
+}
+
+#floatingToolbar QSlider#deployLocsSlider {
+    height: 18px;
+}
+
+#floatingToolbar QSlider#deployLocsSlider::groove:horizontal {
+    height: 4px;
+    background: #2E2E4E;
+    border-radius: 2px;
+}
+
+#floatingToolbar QSlider#deployLocsSlider::sub-page:horizontal {
+    background: #4A9EFF;
+    border-radius: 2px;
+}
+
+#floatingToolbar QSlider#deployLocsSlider::handle:horizontal {
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    background: #EFF3FF;
+    border-radius: 6px;
+}
+
+#floatingToolbar QSlider#deployLocsSlider::handle:horizontal:hover {
+    background: #4A9EFF;
+}
+
+#floatingToolbar QLabel#deployLocsSliderLabel {
+    background: transparent;
+    color: #B5BDCC;
+    font-size: 10px;
+}
+
 /* ── Routing Drawer ───────────────────────────────────── */
 #floatingToolbar QWidget#routingDrawer QLineEdit {
     background-color: rgba(26, 26, 46, 0.85);
@@ -261,12 +300,25 @@ QMainWindow, QWidget {
     font-weight: 600;
 }
 
-/* Small fixed-size buttons in origin / dest rows (⊕ pick, GPS reset) */
+/* Small fixed-size buttons in origin / dest rows (⊕ pick, nav-arrow loc) */
 #floatingToolbar QWidget#routingDrawer QToolButton[text="⊕"],
-#floatingToolbar QWidget#routingDrawer QToolButton[text="GPS"] {
+#floatingToolbar QWidget#routingDrawer QToolButton#locBtn {
     padding: 1px 2px;
     font-size: 13px;
     border-radius: 4px;
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton#locBtn:enabled {
+    border-color: rgba(74, 158, 255, 0.4);
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton#locBtn:enabled:hover {
+    background-color: rgba(74, 158, 255, 0.15);
+    border-color: #4A9EFF;
+}
+
+#floatingToolbar QWidget#routingDrawer QToolButton#locBtn:disabled {
+    border-color: #252535;
 }
 
 /* ── Outlook Panel ────────────────────────────────────── */
@@ -331,13 +383,13 @@ QWidget#outlookTabRow {
 }
 
 /* ── Status Overlays ──────────────────────────────────── */
-QWidget#statusOverlayLeft, QWidget#statusOverlayRight {
+QWidget#statusOverlayLeft {
     background-color: rgba(15, 15, 26, 0.88);
     border-radius: 8px;
     border: 1px solid rgba(84, 94, 122, 0.5);
 }
 
-QWidget#statusOverlayLeft QLabel, QWidget#statusOverlayRight QLabel {
+QWidget#statusOverlayLeft QLabel {
     background: transparent;
     font-size: 10px;
     font-weight: 500;
@@ -356,7 +408,7 @@ QWidget#navPill {
 QWidget#navPill QLabel#navPillStep {
     background: transparent;
     color: #EFF3FF;
-    font-size: 12px;
+    font-size: 15px;
     font-weight: 600;
     padding: 0;
 }
@@ -364,7 +416,7 @@ QWidget#navPill QLabel#navPillStep {
 QWidget#navPill QLabel#navPillSummary {
     background: transparent;
     color: #4A9EFF;
-    font-size: 10px;
+    font-size: 13px;
     font-weight: 500;
     padding: 0;
 }
@@ -373,7 +425,7 @@ QWidget#navPill QToolButton {
     background: transparent;
     border: none;
     color: #9DA6B8;
-    font-size: 13px;
+    font-size: 16px;
     padding: 0;
 }
 
@@ -639,7 +691,8 @@ QToolTip {
 #floatingToolbar QWidget#hazardDrawer QCheckBox,
 #floatingToolbar QWidget#satelliteDrawer QCheckBox,
 #floatingToolbar QWidget#deployLocsDrawer QCheckBox,
-#floatingToolbar QWidget#routingDrawer QCheckBox {
+#floatingToolbar QWidget#routingDrawer QCheckBox,
+#floatingToolbar QWidget#soundingDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

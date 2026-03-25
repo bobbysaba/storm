@@ -40,6 +40,10 @@ class UpdateWorker(QObject):
     # ── internals ─────────────────────────────────────────────────────────────
 
     def _do_check(self):
+        git_dir = os.path.join(self._root, ".git")
+        if not os.path.isdir(git_dir):
+            self.check_done.emit(-3)   # not a git install — zip download
+            return
         try:
             subprocess.run(
                 ["git", "fetch", "--quiet"],

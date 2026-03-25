@@ -78,6 +78,9 @@ def build_safe_map_html() -> str:
     window.stormAddStationPlot = _noop;
     window.stormRemoveStationPlot = _noop;
     window.stormSetStationPlotsVisible = _noop;
+    window.stormAddSurfaceStationPlot = _noop;
+    window.stormRemoveSurfaceStationPlot = _noop;
+    window.stormSetSurfaceStationPlotsVisible = _noop;
     window.stormLoadDeployLocs = _noop;
     window.stormSetDeployLocsVisible = _noop;
     window.stormMeasureActivate = _noop;
@@ -103,6 +106,8 @@ def build_safe_map_html() -> str:
     window.stormSetMesoSectors = _noop;
     window.stormSetRadarStations = _noop;
     window.stormSetRadarStationsVisible = _noop;
+    window.stormSetSoundingStations = _noop;
+    window.stormClearSoundingStations = _noop;
     window.stormSetRoute = _noop;
     window.stormClearRoute = _noop;
     window.stormSetRoutePickMode = _noop;
@@ -167,13 +172,14 @@ def build_map_html() -> str:
       padding: 1px 4px !important;
     }}
 
-    /* Lift bottom controls above Qt status pills and align left controls with legend. */
+    /* Scale bar: float it to the left of the legend along the same bottom baseline. */
     .maplibregl-ctrl-bottom-left {{
-      left: 10px !important;
-      bottom: 46px !important;
-      width: 172px !important;
+      left: auto !important;
+      right: 234px !important;
+      bottom: 10px !important;
+      width: auto !important;
       display: flex !important;
-      justify-content: center !important;
+      justify-content: flex-end !important;
     }}
 
     .maplibregl-ctrl-bottom-left .maplibregl-ctrl {{
@@ -182,7 +188,7 @@ def build_map_html() -> str:
 
     .maplibregl-ctrl-bottom-right {{
       right: 10px !important;
-      bottom: 62px !important;
+      bottom: 10px !important;
     }}
 
     .maplibregl-ctrl-bottom-right .maplibregl-ctrl {{
@@ -192,12 +198,12 @@ def build_map_html() -> str:
     /* ── Legend ── */
     #storm-legend {{
       position: absolute;
-      bottom: 84px;
-      left: 10px;
+      bottom: 10px;
+      right: 50px;
       width: 172px;
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: flex-end;
       z-index: 100;
       font-family: "Helvetica Neue", sans-serif;
     }}
@@ -263,6 +269,24 @@ def build_map_html() -> str:
       letter-spacing: 0.3px;
       white-space: nowrap;
       z-index: 200;
+    }}
+
+    .maplibregl-popup.storm-hover-tooltip .maplibregl-popup-content {{
+      background: rgba(15, 15, 26, 0.96);
+      color: #E8EAF0;
+      border: 1px solid #49536F;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-family: "Helvetica Neue", sans-serif;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    }}
+
+    .maplibregl-popup.storm-hover-tooltip .maplibregl-popup-tip {{
+      border-top-color: rgba(15, 15, 26, 0.96);
+      border-bottom-color: rgba(15, 15, 26, 0.96);
     }}
 
     .maplibregl-ctrl-top-right {{
@@ -398,6 +422,9 @@ def build_map_html() -> str:
     window.stormAddStationPlot = _stormNoop;
     window.stormRemoveStationPlot = _stormNoop;
     window.stormSetStationPlotsVisible = _stormNoop;
+    window.stormAddSurfaceStationPlot = _stormNoop;
+    window.stormRemoveSurfaceStationPlot = _stormNoop;
+    window.stormSetSurfaceStationPlotsVisible = _stormNoop;
     window.stormLoadDeployLocs = _stormNoop;
     window.stormSetDeployLocsVisible = _stormNoop;
     window.stormMeasureActivate = _stormNoop;
@@ -423,6 +450,8 @@ def build_map_html() -> str:
     window.stormSetMesoSectors = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
+    window.stormSetSoundingStations = _stormNoop;
+    window.stormClearSoundingStations = _stormNoop;
     window.stormSetRoute = _stormNoop;
     window.stormClearRoute = _stormNoop;
     window.stormSetRoutePickMode = _stormNoop;
@@ -431,6 +460,7 @@ def build_map_html() -> str:
     window._stormDrawings = {{}};
     window._stormDrawingActive = false;
     window._soundingModeActive = false;
+    window._soundingObsModeActive = false;
     window._stormDrawingType = '';
     window._drawingConfirmedPts = [];
     window._drawingRubberPt = null;
@@ -942,6 +972,61 @@ def build_map_html() -> str:
         window._radarStationsData = null;
       }}
       window.stormSetRadarStationsVisible(window._radarStationsVisible);
+
+      // ── Sounding Station layer ────────────────────────────────────────────
+      map.addSource('sounding-stations-src', {{type:'geojson', data:empty}});
+      map.addLayer({{
+        id: 'sounding-stations',
+        type: 'circle',
+        source: 'sounding-stations-src',
+        layout: {{'visibility': 'none'}},
+        paint: {{
+          'circle-radius': 6,
+          'circle-color': '#00E5FF',
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': '#0A0A0F',
+          'circle-opacity': 0.88
+        }}
+      }});
+      map.addLayer({{
+        id: 'sounding-stations-label',
+        type: 'symbol',
+        source: 'sounding-stations-src',
+        layout: {{
+          'visibility': 'none',
+          'text-field': ['get', 'id'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 10,
+          'text-anchor': 'top',
+          'text-offset': [0, 1.0],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        }},
+        paint: {{
+          'text-color': '#E8EDF5',
+          'text-halo-color': '#0A0A0F',
+          'text-halo-width': 2
+        }}
+      }});
+      map.on('mouseenter', 'sounding-stations', function() {{
+        if (window._soundingObsModeActive) map.getCanvas().style.cursor = 'pointer';
+      }});
+      map.on('mouseleave', 'sounding-stations', function() {{
+        if (window._soundingObsModeActive) map.getCanvas().style.cursor = '';
+      }});
+      map.on('click', 'sounding-stations', function(e) {{
+        if (!window._soundingObsModeActive) return;
+        var feat = e.features && e.features[0];
+        if (!feat) return;
+        var p = feat.properties;
+        if (bridge) bridge.on_obs_station_click(
+          p.id, p.name,
+          feat.geometry.coordinates[1],
+          feat.geometry.coordinates[0],
+          p.elevation
+        );
+        e.originalEvent.stopPropagation();
+      }});
 
       // ── GOES Satellite image overlay ─────────────────────────────────────
       // Uses a single image source (like the radar overlay) rather than tiled
@@ -1969,6 +2054,8 @@ def build_map_html() -> str:
     // ── Station Plots ─────────────────────────────────────────────────────
     window._stormStationPlots = {{}};
     window._stormStationPlotsVisible = true;
+    window._stormSurfacePlots = {{}};
+    window._stormSurfacePlotsVisible = true;
 
     window.stormAddStationPlot = function(id, lat, lon, pngB64) {{
       if (window._stormStationPlots[id]) {{
@@ -2001,6 +2088,67 @@ def build_map_html() -> str:
       }});
     }};
 
+    window.stormAddSurfaceStationPlot = function(id, lat, lon, pngB64, name) {{
+      if (window._stormSurfacePlots[id]) {{
+        window._stormSurfacePlots[id].remove();
+        delete window._stormSurfacePlots[id];
+      }}
+      const label = name || id;
+      const el = document.createElement('div');
+      el.style.cssText = 'width:135px;height:135px;pointer-events:auto;';
+      if (!window._stormSurfacePlotsVisible) el.style.display = 'none';
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,' + pngB64;
+      img.style.cssText = 'width:100%;height:100%;pointer-events:none;';
+      img.alt = label;
+      el.appendChild(img);
+      el.addEventListener('mouseenter', function(e) {{
+        var tip = document.getElementById('hazard-tooltip');
+        if (tip) {{
+          tip.textContent = label;
+          tip.style.display = 'block';
+          var mc = map.getContainer().getBoundingClientRect();
+          tip.style.left = (e.clientX - mc.left + 14) + 'px';
+          tip.style.top  = (e.clientY - mc.top - 10) + 'px';
+        }}
+      }});
+      el.addEventListener('mousemove', function(e) {{
+        var tip = document.getElementById('hazard-tooltip');
+        if (tip) {{
+          tip.textContent = label;
+          tip.style.display = 'block';
+          var mc = map.getContainer().getBoundingClientRect();
+          tip.style.left = (e.clientX - mc.left + 14) + 'px';
+          tip.style.top  = (e.clientY - mc.top - 10) + 'px';
+        }}
+      }});
+      el.addEventListener('mouseleave', function() {{
+        var tip = document.getElementById('hazard-tooltip');
+        if (tip) tip.style.display = 'none';
+      }});
+      const marker = new maplibregl.Marker({{element: el, anchor: 'center'}})
+        .setLngLat([lon, lat]).addTo(map);
+      window._stormSurfacePlots[id] = marker;
+    }};
+
+    window.stormRemoveSurfaceStationPlot = function(id) {{
+      if (window._stormSurfacePlots[id]) {{
+        window._stormSurfacePlots[id].remove();
+        delete window._stormSurfacePlots[id];
+      }}
+    }};
+
+    window.stormSetSurfaceStationPlotsVisible = function(visible) {{
+      window._stormSurfacePlotsVisible = visible;
+      Object.values(window._stormSurfacePlots).forEach(function(m) {{
+        m.getElement().style.display = visible ? '' : 'none';
+      }});
+      if (!visible) {{
+        var tip = document.getElementById('hazard-tooltip');
+        if (tip) tip.style.display = 'none';
+      }}
+    }};
+
     // ── Radar Station Picker ─────────────────────────────────────────────
     window.stormSetRadarStations = function(stationsJson) {{
       var src = map.getSource('radar-stations');
@@ -2018,6 +2166,24 @@ def build_map_html() -> str:
         map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
       }});
       if (!visible) map.getCanvas().style.cursor = '';
+    }};
+
+    // ── Sounding Station Layer ────────────────────────────────────────────
+    window.stormSetSoundingStations = function(geojsonStr) {{
+      var src = map.getSource('sounding-stations-src');
+      if (!src) return;
+      src.setData(JSON.parse(geojsonStr));
+      ['sounding-stations', 'sounding-stations-label'].forEach(function(lid) {{
+        if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', 'visible');
+      }});
+    }};
+
+    window.stormClearSoundingStations = function() {{
+      var src = map.getSource('sounding-stations-src');
+      if (src) src.setData({{type:'FeatureCollection',features:[]}});
+      ['sounding-stations', 'sounding-stations-label'].forEach(function(lid) {{
+        if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', 'none');
+      }});
     }};
 
     // ── Route Overlay ─────────────────────────────────────────────────────
@@ -2119,6 +2285,19 @@ def build_map_html() -> str:
     }};
     window.stormSetDeployLocsVisible = function(visible) {{
       map.setLayoutProperty('deploy-locs-circles', 'visibility', visible ? 'visible' : 'none');
+    }};
+    window.stormSetDeployLocsFilter = function(metric, threshold) {{
+      var filter;
+      if (metric === 'rank_abi' || metric === 'rank_aoi') {{
+        // coalesce null → 999 so N/A points are excluded (999 > any threshold)
+        filter = ['<=', ['coalesce', ['get', metric], 999], threshold];
+      }} else if (metric === 'rqi') {{
+        // coalesce null → -1 so N/A points are excluded (-1 < any threshold ≥ 0)
+        filter = ['>=', ['coalesce', ['get', 'rqi'], -1], threshold];
+      }} else {{
+        filter = null;
+      }}
+      map.setFilter('deploy-locs-circles', filter);
     }};
     window.stormSetDeployLocsMetric = function(metric) {{
       var expr;
@@ -2577,7 +2756,8 @@ class MapBridge(QObject):
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
-    sounding_clicked      = pyqtSignal(float, float)
+    sounding_clicked             = pyqtSignal(float, float)
+    obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
 
@@ -2617,6 +2797,10 @@ class MapBridge(QObject):
     def on_sounding_click(self, lat: float, lon: float):
         self.sounding_clicked.emit(lat, lon)
 
+    @pyqtSlot(str, str, float, float, float)
+    def on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
+        self.obs_sounding_station_clicked.emit(station_id, name, lat, lon, elev)
+
     @pyqtSlot()
     def on_user_drag(self):
         self.user_dragged.emit()
@@ -2638,7 +2822,8 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
-    sounding_clicked      = pyqtSignal(float, float)
+    sounding_clicked             = pyqtSignal(float, float)
+    obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
 
@@ -2691,6 +2876,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
         self.bridge.sounding_clicked.connect(self.sounding_clicked)
+        self.bridge.obs_sounding_station_clicked.connect(self.obs_sounding_station_clicked)
         self.bridge.user_dragged.connect(self.user_dragged)
         self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
 
@@ -2815,11 +3001,27 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         )
 
     def set_sounding_mode(self, active: bool):
-        """Toggle sounding-click mode: map clicks emit lat/lon instead of normal actions."""
+        """Toggle HRRR sounding-click mode: map clicks emit lat/lon instead of normal actions."""
         flag = "true" if active else "false"
         self.run_js(f"window._soundingModeActive = {flag};")
         cursor = Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor
         self.setCursor(cursor)
+
+    def set_obs_sounding_mode(self, active: bool):
+        """Toggle OBS sounding mode: station dots become clickable."""
+        flag = "true" if active else "false"
+        self.run_js(f"window._soundingObsModeActive = {flag};")
+        if not active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_sounding_stations(self, geojson_str: str):
+        """Inject sounding station GeoJSON and make the layer visible."""
+        escaped = geojson_str.replace("\\", "\\\\").replace("`", "\\`")
+        self.run_js(f"if(window.stormSetSoundingStations) stormSetSoundingStations(`{escaped}`);")
+
+    def clear_sounding_stations(self):
+        """Hide and clear the sounding station layer."""
+        self.run_js("if(window.stormClearSoundingStations) stormClearSoundingStations();")
 
     def preview_meso_sector(self, idx: int | None):
         if idx in (1, 2):
@@ -2923,6 +3125,21 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         v = "true" if visible else "false"
         self.run_js(f"stormSetStationPlotsVisible({v});")
 
+    def add_surface_station_plot(self, station_id: str, lat: float, lon: float, png_bytes: bytes, name: str = "") -> None:
+        import base64
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        import json
+        self.run_js(
+            f"stormAddSurfaceStationPlot({json.dumps(station_id)}, {lat}, {lon}, '{b64}', {json.dumps(name)});"
+        )
+
+    def remove_surface_station_plot(self, station_id: str) -> None:
+        self.run_js(f"stormRemoveSurfaceStationPlot('{station_id}');")
+
+    def set_surface_station_plots_visible(self, visible: bool) -> None:
+        v = "true" if visible else "false"
+        self.run_js(f"stormSetSurfaceStationPlotsVisible({v});")
+
     def load_deploy_locs(self, points: list) -> None:
         import json
         fc = {"type": "FeatureCollection", "features": [
@@ -2943,6 +3160,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_deploy_locs_metric(self, metric: str) -> None:
         import json
         self.run_js(f"stormSetDeployLocsMetric({json.dumps(metric)});")
+
+    def set_deploy_locs_filter(self, metric: str, threshold: float) -> None:
+        import json
+        self.run_js(f"stormSetDeployLocsFilter({json.dumps(metric)}, {threshold});")
 
     def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
         import json

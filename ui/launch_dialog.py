@@ -734,7 +734,10 @@ class LaunchDialog(QDialog):
         self._worker.start_check()
 
     def _on_check_done(self, commits_behind: int):
-        if commits_behind == -2:
+        if commits_behind == -3:
+            self._update_btn.setText("⚠   NOT A GIT INSTALL — CLONE REPO FOR IN-APP UPDATES")
+            self._update_btn.setStyleSheet(_UPD_WARNING)
+        elif commits_behind == -2:
             self._update_btn.setText("DEV BUILD")
             self._update_btn.setStyleSheet(_UPD_CURRENT)
         elif commits_behind < 0:

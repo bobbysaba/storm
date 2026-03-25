@@ -1,7 +1,9 @@
 # ui/deploy_locs_controls.py
 # Collapsible toolbar drawer for previous deployment location color-coding.
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QToolButton, QLabel
+from PyQt6.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QToolButton, QLabel, QSlider,
+)
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
 from PyQt6.QtGui import QFont
 
@@ -31,17 +33,45 @@ _LEGENDS = {
     ],
 }
 
+# (slider_min, slider_max, slider_default)
+# rank: integer 1–5; rqi: integer 0–10 representing 0.0–1.0
+_SLIDER_CFG = {
+    "rank_abi": (1, 5, 1),
+    "rank_aoi": (1, 5, 1),
+    "rqi":      (0, 10, 8),
+}
+
+
+def _slider_to_threshold(metric: str, slider_val: int) -> float:
+    """Convert raw slider integer to the threshold value used for filtering."""
+    if metric == "rqi":
+        return slider_val / 10.0
+    return float(slider_val)
+
+
+def _slider_label_text(metric: str, slider_val: int) -> str:
+    if metric in ("rank_abi", "rank_aoi"):
+        if slider_val == 1:
+            return "rank 1 only"
+        return f"rank 1 – {slider_val}"
+    else:
+        return f"RQI ≥ {slider_val / 10:.1f}"
+
 
 class DeployLocsControls(QWidget):
     """
-    Floating drawer for previous deployment location color-coding.
+    Floating drawer for previous deployment location color-coding + threshold
+    filtering.
 
-    Three mutually exclusive metrics: RANK ABI, RANK AOI, RQI.
-    Emits metric_changed(key) whenever the active metric changes.
+    Signals:
+        metric_changed(key)             — active metric switched
+        filter_changed(metric, threshold) — slider or metric changed; apply
+                                           a MapLibre filter at this threshold
     """
 
-    metric_changed   = pyqtSignal(str)   # "rank_abi" | "rank_aoi" | "rqi"
-    content_resized  = pyqtSignal()      # triggers layout pulse in main_window
+    metric_changed   = pyqtSignal(str)          # "rank_abi" | "rank_aoi" | "rqi"
+    filter_changed   = pyqtSignal(str, float)   # (metric, threshold)
+    content_resized  = pyqtSignal()             # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -91,12 +121,40 @@ class DeployLocsControls(QWidget):
         self._legend.setVisible(False)
         col.addWidget(self._legend)
 
+        # ── Threshold slider row ──────────────────────────────────────────
+        self._filter_row = QWidget()
+        self._filter_row.setObjectName("deployLocsFilterRow")
+        fr = QHBoxLayout(self._filter_row)
+        fr.setContentsMargins(4, 2, 4, 0)
+        fr.setSpacing(8)
+
+        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider.setObjectName("deployLocsSlider")
+        self._slider.setMinimumWidth(90)
+        self._slider.valueChanged.connect(self._on_slider_changed)
+
+        self._slider_label = QLabel()
+        self._slider_label.setObjectName("deployLocsSliderLabel")
+        self._slider_label.setFont(QFont("Helvetica Neue", 9))
+        self._slider_label.setStyleSheet(
+            "color: #B5BDCC; background: transparent;"
+        )
+        self._slider_label.setMinimumWidth(80)
+
+        fr.addWidget(self._slider, 1)
+        fr.addWidget(self._slider_label)
+        self._filter_row.setVisible(False)
+        col.addWidget(self._filter_row)
+
         outer.addWidget(self._drawer)
 
         # Default to rank_abi without firing the signal yet
         self._updating = True
         self._btns["rank_abi"].setChecked(True)
         self._updating = False
+
+        # Initialise slider config for the default metric (no emit)
+        self._init_slider("rank_abi")
 
     def _btn(self, label: str) -> QToolButton:
         b = QToolButton()
@@ -138,7 +196,21 @@ class DeployLocsControls(QWidget):
                 return key
         return "rank_abi"
 
+    def current_threshold(self) -> float:
+        return _slider_to_threshold(self.current_metric(), self._slider.value())
+
     # ── Internal ───────────────────────────────────────────────────────────
+
+    def _init_slider(self, metric: str):
+        """Set slider range/default for metric without emitting filter_changed."""
+        mn, mx, default = _SLIDER_CFG[metric]
+        self._slider.blockSignals(True)
+        self._slider.setMinimum(mn)
+        self._slider.setMaximum(mx)
+        self._slider.setValue(default)
+        self._slider.blockSignals(False)
+        self._slider_label.setText(_slider_label_text(metric, default))
+        self._filter_row.setVisible(True)
 
     def _on_metric_toggled(self, key: str, checked: bool):
         if self._updating:
@@ -154,6 +226,8 @@ class DeployLocsControls(QWidget):
                 self._updating = False
             self.metric_changed.emit(key)
             self._update_legend(key)
+            self._init_slider(key)
+            self.filter_changed.emit(key, _slider_to_threshold(key, _SLIDER_CFG[key][2]))
         else:
             # Prevent deselecting the last active button
             if not any(b.isChecked() for b in self._btns.values()):
@@ -162,6 +236,11 @@ class DeployLocsControls(QWidget):
                     self._btns[key].setChecked(True)
                 finally:
                     self._updating = False
+
+    def _on_slider_changed(self, value: int):
+        metric = self.current_metric()
+        self._slider_label.setText(_slider_label_text(metric, value))
+        self.filter_changed.emit(metric, _slider_to_threshold(metric, value))
 
     def _update_legend(self, metric: str):
         entries = _LEGENDS.get(metric, [])

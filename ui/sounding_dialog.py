@@ -412,24 +412,34 @@ class SoundingDialog(QDialog):
     def _update_header(self):
         if not self._sset or not self._sset.soundings:
             return
-        f0  = self._sset.get(0)
         snd = self._sset.soundings[self._cur_idx]
-        if not f0 or not snd:
+        if not snd:
             return
 
-        init_str  = f0.valid_time.strftime("%Hz %d %b %Y")
-        valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
-        f_str     = "Analysis" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
-        lat, lon  = self._sset.lat, self._sset.lon
-
-        self._header_line1.setText(
-            f"HRRR  Init {init_str}  ·  Valid {valid_str} ({f_str})"
-        )
-        self._header_line2.setText(
-            f"{abs(lat):.3f}°{'N' if lat >= 0 else 'S'}  "
-            f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}  ·  "
-            f"{self._sset.elevation:.0f} m MSL"
-        )
+        if self._sset.is_observed:
+            valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
+            self._header_line1.setText(
+                f"OBS  ·  {self._sset.station_name} ({self._sset.station_id})"
+            )
+            self._header_line2.setText(
+                f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL"
+            )
+        else:
+            f0 = self._sset.get(0)
+            if not f0:
+                return
+            init_str  = f0.valid_time.strftime("%Hz %d %b %Y")
+            valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
+            f_str     = "Analysis" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
+            lat, lon  = self._sset.lat, self._sset.lon
+            self._header_line1.setText(
+                f"HRRR  Init {init_str}  ·  Valid {valid_str} ({f_str})"
+            )
+            self._header_line2.setText(
+                f"{abs(lat):.3f}°{'N' if lat >= 0 else 'S'}  "
+                f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}  ·  "
+                f"{self._sset.elevation:.0f} m MSL"
+            )
 
         for i, lbl in enumerate(self._tick_labels):
             active = (i == self._cur_idx)

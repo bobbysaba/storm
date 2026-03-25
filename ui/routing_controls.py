@@ -1,10 +1,10 @@
 # ui/routing_controls.py
 # Collapsible toolbar drawer for turn-by-turn directions.
 #
-# Origin is always an editable QLineEdit — auto-fills with GPS when available,
-# or the user can type an address / lat,lon, or pick a point on the map.
-# Destination works the same way.  Both fields can be set without a GPS fix,
-# making the drawer fully usable in monitor mode or with GPS outages.
+# Origin and destination are both editable QLineEdit fields.  Either can be
+# set by typing an address / lat,lon, clicking the ⊕ map-pick button, or
+# clicking the ⌖ current-location button (enabled when a GPS fix is available).
+# No field is auto-populated — the user must explicitly choose an input method.
 
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QToolButton,
@@ -13,13 +13,20 @@ from PyQt6.QtWidgets import (
 )
 from math import radians, sin, cos, sqrt, atan2
 
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QTimer
+from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QTimer, QSize
+from PyQt6.QtGui import QIcon, QPixmap, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 
 from data.routing_fetcher import RoutingFetcher, RouteResult, fmt_distance, fmt_duration
 
-# Remove a completed step from the list when the vehicle is within this distance
-# of the next maneuver point.  300 m gives ~10 s of warning at highway speeds.
-_ADVANCE_M = 300.0
+# Pass-through detection thresholds
+_CLOSE_M        = 40.0    # must come within this to be "at" the maneuver
+_PASSED_M       = 20.0    # distance must grow by this after being close → passed through
+# Off-route re-routing thresholds
+_OFF_ROUTE_M    = 100.0   # metres from route geometry → considered off-route
+_OFF_ROUTE_COUNT = 3      # consecutive off-route fixes before recalculating
+# Arrival
+_ARRIVE_M       = 30.0    # metres to destination → trigger arrival
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -31,9 +38,50 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
-# Text-colour styles applied inline on the origin QLineEdit
-_STYLE_GPS    = "color: #39D98A;"   # green  — GPS-tracked position
-_STYLE_MANUAL = "color: #EFF3FF;"   # white  — manually entered / picked
+# Text-colour styles applied inline on the QLineEdit fields
+_STYLE_GPS    = "color: #39D98A;"   # green  — set via GPS loc button
+_STYLE_MANUAL = "color: #EFF3FF;"   # white  — manually entered / map-picked
+
+
+def _make_loc_icon(size: int = 15) -> QIcon:
+    """Return a QIcon with the hollow navigation-arrow cursor (maps-style).
+
+    Uses two pixmaps: Normal (blue) and Disabled (dim gray) so Qt swaps
+    automatically when the button is enabled/disabled.
+    """
+    # Feather-style hollow navigation arrow — matches the Google/Apple Maps icon
+    _SVG = (
+        '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
+        '<polygon points="3 11 22 2 13 21 11 13"'
+        ' fill="none" stroke="{color}" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '</svg>'
+    )
+
+    def _pixmap(color: str) -> QPixmap:
+        svg_bytes = _SVG.format(color=color).encode()
+        renderer = QSvgRenderer(svg_bytes)
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(px)
+        renderer.render(painter)
+        painter.end()
+        return px
+
+    icon = QIcon()
+    icon.addPixmap(_pixmap("#4A9EFF"), QIcon.Mode.Normal,   QIcon.State.Off)
+    icon.addPixmap(_pixmap("#3A3F52"), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
+
+
+_LOC_ICON = None   # built once on first use to avoid constructing before QApp
+
+
+def _loc_icon() -> QIcon:
+    global _LOC_ICON
+    if _LOC_ICON is None:
+        _LOC_ICON = _make_loc_icon()
+    return _LOC_ICON
 
 
 class RoutingControls(QWidget):
@@ -58,7 +106,7 @@ class RoutingControls(QWidget):
         self._animation         = None
         self._fetcher           = RoutingFetcher()
 
-        # Last GPS fix received (may differ from routing origin when overridden)
+        # Last GPS fix received — None until a fix arrives
         self._gps_lat: float | None = None
         self._gps_lon: float | None = None
 
@@ -68,12 +116,18 @@ class RoutingControls(QWidget):
         self._dest_lat: float | None = None
         self._dest_lon: float | None = None
 
-        self._origin_manual     = False   # True while user has overridden GPS
         self._geocoding_origin  = False
         self._geocoding_dest    = False
         self._last_result: RouteResult | None = None
         self._route_steps: list = []      # full step list with location data
         self._first_unfinished  = 0       # index of the step at top of list
+
+        # Pass-through tracking
+        self._min_maneuver_dist: float = float("inf")
+
+        # Off-route tracking
+        self._off_route_count: int = 0
+        self._rerouting: bool = False
 
         # "origin" while picking start, "dest" while picking destination, "" = idle
         self._pick_mode: str = ""
@@ -109,7 +163,6 @@ class RoutingControls(QWidget):
         ori_lbl.setStyleSheet("color: #6E7A8F; font-size: 9px; font-weight: 700; "
                               "letter-spacing: 0.8px; background: transparent;")
 
-        # Always-visible editable field — GPS auto-fills it (green), manual overrides it (white)
         self._origin_input = QLineEdit()
         self._origin_input.setPlaceholderText("Address, lat,lon, or pick on map…")
         self._origin_input.returnPressed.connect(self._on_origin_enter)
@@ -126,18 +179,20 @@ class RoutingControls(QWidget):
         self._btn_origin_pick.setFixedSize(24, 24)
         self._btn_origin_pick.toggled.connect(self._on_origin_pick_toggled)
 
-        # GPS-reset button — appears when user has overridden GPS and a fix is available
-        self._btn_origin_gps = QToolButton()
-        self._btn_origin_gps.setText("GPS")
-        self._btn_origin_gps.setToolTip("Revert to GPS position")
-        self._btn_origin_gps.setFixedSize(36, 24)
-        self._btn_origin_gps.setVisible(False)
-        self._btn_origin_gps.clicked.connect(self._reset_to_gps_origin)
+        # Current-location button for origin — enabled only when a GPS fix exists
+        self._btn_origin_loc = QToolButton()
+        self._btn_origin_loc.setIcon(_loc_icon())
+        self._btn_origin_loc.setIconSize(QSize(14, 14))
+        self._btn_origin_loc.setToolTip("Use current GPS location as start point")
+        self._btn_origin_loc.setObjectName("locBtn")
+        self._btn_origin_loc.setFixedSize(24, 24)
+        self._btn_origin_loc.setEnabled(False)
+        self._btn_origin_loc.clicked.connect(self._set_origin_to_gps)
 
         ori.addWidget(ori_lbl)
         ori.addWidget(self._origin_input)
         ori.addWidget(self._btn_origin_pick)
-        ori.addWidget(self._btn_origin_gps)
+        ori.addWidget(self._btn_origin_loc)
         col.addWidget(origin_row)
 
         # ── Destination row ───────────────────────────────────────────────────
@@ -167,9 +222,20 @@ class RoutingControls(QWidget):
         self._btn_dest_pick.setFixedSize(24, 24)
         self._btn_dest_pick.toggled.connect(self._on_dest_pick_toggled)
 
+        # Current-location button for destination — enabled only when a GPS fix exists
+        self._btn_dest_loc = QToolButton()
+        self._btn_dest_loc.setIcon(_loc_icon())
+        self._btn_dest_loc.setIconSize(QSize(14, 14))
+        self._btn_dest_loc.setToolTip("Use current GPS location as destination")
+        self._btn_dest_loc.setObjectName("locBtn")
+        self._btn_dest_loc.setFixedSize(24, 24)
+        self._btn_dest_loc.setEnabled(False)
+        self._btn_dest_loc.clicked.connect(self._set_dest_to_gps)
+
         dst.addWidget(dest_lbl)
         dst.addWidget(self._dest_input)
         dst.addWidget(self._btn_dest_pick)
+        dst.addWidget(self._btn_dest_loc)
         col.addWidget(dest_row)
 
         # ── Action row ────────────────────────────────────────────────────────
@@ -271,26 +337,21 @@ class RoutingControls(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def update_own_position(self, lat: float, lon: float):
-        """Called by MainWindow whenever the own vehicle's GPS position updates."""
+        """Called by MainWindow whenever the own vehicle's GPS position updates.
+
+        Stores the fix silently and enables the ⌖ buttons — neither field is
+        auto-populated so the user stays in full control.
+        """
         self._gps_lat = lat
         self._gps_lon = lon
-        if not self._origin_manual:
-            self._own_lat = lat
-            self._own_lon = lon
-            self._origin_input.setText(f"My Vehicle  ({lat:.4f}, {lon:.4f})")
-            self._origin_input.setStyleSheet(_STYLE_GPS)
-            self._update_go_enabled()
-        else:
-            # GPS is now available as a fallback — offer the reset button
-            self._btn_origin_gps.setVisible(True)
+        self._btn_origin_loc.setEnabled(True)
+        self._btn_dest_loc.setEnabled(True)
         self._check_step_advance(lat, lon)
 
     def on_map_pick(self, lat: float, lon: float):
-        """Called by MainWindow when the user clicks the map in pick mode.
-        Routes to origin or destination depending on which pick is active."""
+        """Called by MainWindow when the user clicks the map in pick mode."""
         if self._pick_mode == "origin":
             self._pick_mode = ""
-            self._origin_manual = True
             self._own_lat = lat
             self._own_lon = lon
             self._origin_input.setText(f"{lat:.5f}, {lon:.5f}")
@@ -298,8 +359,6 @@ class RoutingControls(QWidget):
             self._btn_origin_pick.blockSignals(True)
             self._btn_origin_pick.setChecked(False)
             self._btn_origin_pick.blockSignals(False)
-            if self._gps_lat is not None:
-                self._btn_origin_gps.setVisible(True)
             self._update_go_enabled()
             if self._have_dest():
                 self._on_get_directions()
@@ -319,12 +378,10 @@ class RoutingControls(QWidget):
     # ── Origin helpers ─────────────────────────────────────────────────────────
 
     def _on_origin_text_edited(self):
-        """User manually typed in the origin field — switch to manual mode."""
-        self._origin_manual = True
+        """User manually typed in the origin field — clear resolved coords."""
         self._own_lat = None
         self._own_lon = None
         self._origin_input.setStyleSheet(_STYLE_MANUAL)
-        self._btn_origin_gps.setVisible(self._gps_lat is not None)
         self._update_go_enabled()
 
     def _on_origin_enter(self):
@@ -355,21 +412,16 @@ class RoutingControls(QWidget):
         self._set_status("")
         self._update_go_enabled()
 
-    def _reset_to_gps_origin(self):
-        self._origin_manual = False
+    def _set_origin_to_gps(self):
+        """Fill the FROM field with the current GPS fix."""
+        if self._gps_lat is None:
+            return
         self._own_lat = self._gps_lat
         self._own_lon = self._gps_lon
-        self._btn_origin_gps.setVisible(False)
-        if self._gps_lat is not None:
-            self._origin_input.blockSignals(True)
-            self._origin_input.setText(
-                f"My Vehicle  ({self._gps_lat:.4f}, {self._gps_lon:.4f})"
-            )
-            self._origin_input.setStyleSheet(_STYLE_GPS)
-            self._origin_input.blockSignals(False)
-        else:
-            self._origin_input.clear()
-            self._origin_input.setStyleSheet(_STYLE_MANUAL)
+        self._origin_input.blockSignals(True)
+        self._origin_input.setText(f"{self._gps_lat:.5f}, {self._gps_lon:.5f}")
+        self._origin_input.setStyleSheet(_STYLE_GPS)
+        self._origin_input.blockSignals(False)
         self._update_go_enabled()
 
     # ── Destination helpers ────────────────────────────────────────────────────
@@ -386,6 +438,18 @@ class RoutingControls(QWidget):
         self._update_go_enabled()
         if self._dest_input.text().strip():
             self._on_get_directions()
+
+    def _set_dest_to_gps(self):
+        """Fill the TO field with the current GPS fix."""
+        if self._gps_lat is None:
+            return
+        self._dest_lat = self._gps_lat
+        self._dest_lon = self._gps_lon
+        self._dest_input.blockSignals(True)
+        self._dest_input.setText(f"{self._gps_lat:.5f}, {self._gps_lon:.5f}")
+        self._dest_input.setStyleSheet(_STYLE_GPS)
+        self._dest_input.blockSignals(False)
+        self._update_go_enabled()
 
     # ── Pick mode ──────────────────────────────────────────────────────────────
 
@@ -505,6 +569,7 @@ class RoutingControls(QWidget):
 
     def _on_route_ready(self, result: RouteResult):
         self._last_result = result
+        self._rerouting = False
         self._btn_go.setEnabled(True)
         self._set_status("")
         self._btn_clear.setEnabled(True)
@@ -521,12 +586,16 @@ class RoutingControls(QWidget):
         self._set_status(msg[:60])
 
     def _on_clear(self):
-        self._dest_lat         = None
-        self._dest_lon         = None
-        self._last_result      = None
-        self._route_steps      = []
-        self._first_unfinished = 0
+        self._dest_lat          = None
+        self._dest_lon          = None
+        self._last_result       = None
+        self._route_steps       = []
+        self._first_unfinished  = 0
+        self._min_maneuver_dist = float("inf")
+        self._off_route_count   = 0
+        self._rerouting         = False
         self._dest_input.clear()
+        self._dest_input.setStyleSheet(_STYLE_MANUAL)
         self._summary_label.setVisible(False)
         self._steps_list.clear()
         self._steps_list.setVisible(False)
@@ -542,10 +611,6 @@ class RoutingControls(QWidget):
         self._update_go_enabled()
         self.route_cleared.emit()
         # Only animate the height change when the drawer is fully open.
-        # If maximumHeight is mid-animation (closing), don't interfere — the
-        # close animation is already running.  If it's 0 (hidden), there's
-        # nothing to resize.  In both cases emit content_resized so the
-        # layout pulse still runs and corrects geometry via _stack.
         if self.maximumHeight() == 16777215:
             self._resize_for_content()
         else:
@@ -554,8 +619,10 @@ class RoutingControls(QWidget):
     # ── Display ────────────────────────────────────────────────────────────────
 
     def _populate_steps(self, result: RouteResult):
-        self._route_steps     = list(result.steps)
+        self._route_steps      = list(result.steps)
         self._first_unfinished = 0
+        self._min_maneuver_dist = float("inf")
+        self._off_route_count  = 0
         self._steps_list.clear()
         for step in result.steps:
             dist_str = fmt_distance(step.distance_m) if step.distance_m > 0 else ""
@@ -570,21 +637,72 @@ class RoutingControls(QWidget):
         self._summary_label.setVisible(True)
         self._steps_list.setVisible(True)
 
+    def _dist_to_route(self, lat: float, lon: float) -> float:
+        """Minimum distance in metres from (lat, lon) to any coordinate in the route geometry."""
+        if self._last_result is None:
+            return 0.0
+        coords = self._last_result.geometry.get("coordinates", [])
+        if not coords:
+            return 0.0
+        return min(_haversine_m(lat, lon, c[1], c[0]) for c in coords)
+
     def _check_step_advance(self, lat: float, lon: float):
-        """Remove completed steps as the vehicle approaches each maneuver point."""
-        # Need at least two steps — never drop the final "Arrive" step
-        if self._steps_list.count() <= 1 or not self._route_steps:
+        """Advance steps and handle off-route / arrival on every GPS fix."""
+        if not self._route_steps:
             return
 
-        # The next maneuver point is the start of step (first_unfinished + 1)
+        # ── Arrival: only the arrive step remains ─────────────────────────────
+        if self._steps_list.count() == 1:
+            arrive_loc = self._route_steps[-1].location
+            if _haversine_m(lat, lon, arrive_loc[0], arrive_loc[1]) < _ARRIVE_M:
+                self._steps_list.takeItem(0)
+                self.nav_updated.emit("You have arrived.", "")
+                self._set_status("Arrived!")
+                QTimer.singleShot(5000, self._on_clear)
+            return
+
+        # ── Distance to the upcoming maneuver point ───────────────────────────
         next_idx = self._first_unfinished + 1
         if next_idx >= len(self._route_steps):
             return
-
         next_loc = self._route_steps[next_idx].location
-        if _haversine_m(lat, lon, next_loc[0], next_loc[1]) < _ADVANCE_M:
+        dist = _haversine_m(lat, lon, next_loc[0], next_loc[1])
+
+        # Update live distance in the first list item and pill
+        step = self._route_steps[self._first_unfinished]
+        item = self._steps_list.item(0)
+        if item:
+            item.setText(f"{step.icon}  {step.instruction}  —  {fmt_distance(dist)}")
+        self._emit_nav_state()
+
+        # ── Off-route detection ───────────────────────────────────────────────
+        if not self._rerouting and self._last_result is not None:
+            if self._dist_to_route(lat, lon) > _OFF_ROUTE_M:
+                self._off_route_count += 1
+                if self._off_route_count >= _OFF_ROUTE_COUNT:
+                    self._off_route_count = 0
+                    self._rerouting = True
+                    self._own_lat = lat
+                    self._own_lon = lon
+                    self._origin_input.blockSignals(True)
+                    self._origin_input.setText(f"{lat:.5f}, {lon:.5f}")
+                    self._origin_input.setStyleSheet(_STYLE_GPS)
+                    self._origin_input.blockSignals(False)
+                    self._set_status("Off route — recalculating…")
+                    self._start_route_fetch()
+                    return
+            else:
+                self._off_route_count = 0
+
+        # ── Pass-through detection ────────────────────────────────────────────
+        if dist < self._min_maneuver_dist:
+            self._min_maneuver_dist = dist
+
+        if self._min_maneuver_dist < _CLOSE_M and dist > self._min_maneuver_dist + _PASSED_M:
             self._steps_list.takeItem(0)
             self._first_unfinished += 1
+            self._min_maneuver_dist = float("inf")
+            self._off_route_count   = 0
             self._emit_nav_state()
             self._resize_for_content()
 
@@ -629,6 +747,5 @@ class RoutingControls(QWidget):
             anim.finished.connect(lambda: self.setMaximumHeight(16777215))
             anim.start()
             self._animation = anim
-        # Always notify so _start_layout_pulse runs and _stack corrects geometry,
-        # even when no animation is needed (e.g. adjustSize already handled it).
+        # Always notify so _start_layout_pulse runs and corrects geometry.
         self.content_resized.emit()

@@ -27,18 +27,23 @@ from ui.routing_controls import RoutingControls
 from ui.nav_pill import NavPill
 from ui.deploy_locs_controls import DeployLocsControls
 from ui.satellite_controls import SatelliteControls
+from ui.surface_controls import SurfaceControls
 from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
 from ui.sounding_dialog import SoundingDialog
+from ui.sounding_controls import SoundingControls
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
 from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
 from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
 from data.sounding_fetcher import SoundingFetcher
+from data.obs_sounding_fetcher import ObsSoundingFetcher
+from data.sounding_stations import build_stations_geojson
 from data.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
 from data.satellite_fetcher import SatelliteFetcher
+from data.surface_fetcher import SurfaceFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
@@ -54,6 +59,7 @@ from network.vehicle_sync import VehicleSync
 from data.gps_reader import GPSReader
 from data.obs_file_watcher import ObsFileWatcher, FieldMap
 from ui.station_plot_layer import StationPlotLayer
+from ui.surface_plot_layer import SurfacePlotLayer
 
 log = logging.getLogger(__name__)
 
@@ -187,6 +193,14 @@ class MainWindow(QMainWindow):
         # internet connectivity indicator — checks every 30 seconds
         self._start_net_check()
 
+        # GPS fix age indicator — polls every 5 seconds (vehicle mode only)
+        self._last_local_obs_ts: float = 0.0
+        if not (self._monitor or self._viewer):
+            self._gps_indicator_timer = QTimer(self)
+            self._gps_indicator_timer.timeout.connect(self._update_gps_indicator)
+            self._gps_indicator_timer.start(5_000)
+            self._update_gps_indicator()
+
         # in-ops update checker — background, non-blocking, no dialogs
         self._start_update_check()
 
@@ -288,6 +302,7 @@ class MainWindow(QMainWindow):
             self._init_radar()
         self._init_hazards()
         self._init_satellite()
+        self._init_surface_obs()
         self._apply_launch_prefs()
 
     def _apply_launch_prefs(self):
@@ -297,6 +312,9 @@ class MainWindow(QMainWindow):
         if self._launch_auto_nws:
             self.hazard_controls._btn_nws_warnings.setChecked(True)
         if self._launch_auto_radar and not self._disable_radar and hasattr(self, "_radar_fetcher"):
+            self.radar_controls._chk_show_data.blockSignals(True)
+            self.radar_controls._chk_show_data.setChecked(True)
+            self.radar_controls._chk_show_data.blockSignals(False)
             self._auto_start_radar()
             self.btn_radar.setChecked(True)
         sat = self._launch_auto_satellite
@@ -412,10 +430,25 @@ class MainWindow(QMainWindow):
 
         self._add_separator(tb)
 
+        self.btn_surface = self._toolbar_toggle(
+            "SURFACE", "Show/hide surface observation controls", tb
+        )
+        self.surface_controls = SurfaceControls(self._map_container)
+        self.surface_controls.setObjectName("floatingToolbar")
+        self.btn_surface.toggled.connect(self.surface_controls.toggle_drawer)
+        self.btn_surface.toggled.connect(self._start_layout_pulse)
+        self.surface_controls.content_resized.connect(self._start_layout_pulse)
+
+        self._add_separator(tb)
+
         # ── sounding ──────────────────────────────────────────────────────
         self.btn_sounding = self._toolbar_toggle(
-            "SOUNDING", "Click map to fetch HRRR point sounding (F0–F3)", tb
+            "SOUNDING", "Click map for HRRR point sounding or observed radiosonde data", tb
         )
+        self.sounding_controls = SoundingControls(self._map_container)
+        self.sounding_controls.setObjectName("floatingToolbar")
+        self.btn_sounding.toggled.connect(self.sounding_controls.toggle_drawer)
+        self.btn_sounding.toggled.connect(self._start_layout_pulse)
         self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
 
         self._add_separator(tb)
@@ -467,25 +500,43 @@ class MainWindow(QMainWindow):
 
         # ── Navigation pill (upper-right, visible when route active + drawer closed)
         self.nav_pill = NavPill(self._map_container)
+        self._pill_route_expanded = False
         self.routing_controls.nav_updated.connect(self._on_nav_updated)
         self.routing_controls.route_cleared.connect(self.nav_pill.nav_clear)
         self.routing_controls.route_cleared.connect(self._layout_overlays)
-        self.nav_pill.open_drawer_requested.connect(
-            lambda: self.btn_route.setChecked(True)
-        )
+        self.routing_controls.route_cleared.connect(self._on_pill_route_cleared)
+        self.nav_pill.open_drawer_requested.connect(self._on_pill_expand_requested)
         self.nav_pill.clear_requested.connect(self.routing_controls._on_clear)
         self.btn_route.toggled.connect(self._on_route_drawer_toggled)
 
     def _on_nav_updated(self, step_text: str, summary: str):
-        """Show/refresh the nav pill — but only when the drawer is collapsed."""
+        """Show/refresh the nav pill — but only when the toolbar drawer is open."""
         self.nav_pill.update_nav(step_text, summary)
         if self.btn_route.isChecked():
             self.nav_pill.hide()
         self._layout_overlays()
 
+    def _on_pill_expand_requested(self):
+        """Toggle the floating routing panel below the nav pill."""
+        self._pill_route_expanded = not self._pill_route_expanded
+        self.nav_pill.set_expanded(self._pill_route_expanded)
+        self.routing_controls.toggle_drawer(self._pill_route_expanded)
+        self._start_layout_pulse()
+
+    def _on_pill_route_cleared(self):
+        """Collapse the pill-expanded routing panel when the route is cleared."""
+        if self._pill_route_expanded:
+            self._pill_route_expanded = False
+            self.nav_pill.set_expanded(False)
+            self.routing_controls.toggle_drawer(False)
+
     def _on_route_drawer_toggled(self, checked: bool):
-        """Hide pill while drawer is open; restore it when drawer closes."""
+        """Hide pill while toolbar drawer is open; restore it when drawer closes."""
         if checked:
+            # If pill-expand was open, close it — toolbar takes over
+            if self._pill_route_expanded:
+                self._pill_route_expanded = False
+                self.nav_pill.set_expanded(False)
             self.nav_pill.hide()
         elif self.routing_controls._last_result is not None:
             self.nav_pill.show()
@@ -519,42 +570,51 @@ class MainWindow(QMainWindow):
     # ── Status Bar ────────────────────────────────────────────────────────────
 
     def _init_statusbar(self):
-        # ── left overlay pill — coords, vehicle count, messages ───────────
+        # ── Single bottom-left overlay pill — three rows ──────────────────
+        # Row 1: mode | [update] | coords | vehicle count
+        # Row 2: [GPS] | AWS | NET | date | time
+        # Row 3: status message (always present, blank when idle — keeps height stable)
         self._status_left = QWidget(self._map_container)
         self._status_left.setObjectName("statusOverlayLeft")
-        left = QHBoxLayout(self._status_left)
-        left.setContentsMargins(8, 4, 8, 4)
-        left.setSpacing(8)
+        pill = QVBoxLayout(self._status_left)
+        pill.setContentsMargins(10, 5, 10, 5)
+        pill.setSpacing(3)
+
+        # ── Row 1: positional / operational info ──────────────────────────
+        self.status_msg_label = QLabel("")
+        self.status_msg_label.setStyleSheet(
+            "color: #9BA3B2; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
+        )
+
+        row1 = QHBoxLayout()
+        row1.setContentsMargins(0, 0, 0, 0)
+        row1.setSpacing(8)
 
         self.coord_label = QLabel("LAT: ---.---- LON: ---.----")
         coord_probe = "LAT: -180.0000  LON: -180.0000"
         self.coord_label.setMinimumWidth(self.coord_label.fontMetrics().horizontalAdvance(coord_probe) + 8)
         self.vehicle_count_label = QLabel("VEHICLES: 0")
-        self.status_msg_label = QLabel("")
 
         for lbl in [self.coord_label, self.vehicle_count_label]:
             lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;")
 
+        # Mode badge: VEHICLE / MONITOR / VIEWER — always leftmost in row 1
         if self._monitor:
-            monitor_badge = QLabel("● MONITOR")
-            monitor_badge.setStyleSheet(
+            mode_badge = QLabel("● MONITOR")
+            mode_badge.setStyleSheet(
                 "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
             )
-            left.addWidget(monitor_badge)
-            left.addWidget(self._status_divider())
-
-        left.addWidget(self.coord_label)
-        left.addWidget(self._status_divider())
-        left.addWidget(self.vehicle_count_label)
-        left.addWidget(self._status_divider())
-        left.addWidget(self.status_msg_label)
-
-        # ── right overlay pill — connection status + date + time ─────────
-        self._status_right = QWidget(self._map_container)
-        self._status_right.setObjectName("statusOverlayRight")
-        right = QVBoxLayout(self._status_right)
-        right.setContentsMargins(10, 6, 10, 6)
-        right.setSpacing(2)
+        elif self._viewer:
+            mode_badge = QLabel("● VIEWER")
+            mode_badge.setStyleSheet(
+                "color: #9B8FFF; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+            )
+        else:
+            mode_badge = QLabel("● VEHICLE")
+            mode_badge.setStyleSheet(
+                "color: #39D98A; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+            )
+        row1.addWidget(mode_badge)
 
         # in-ops update indicator — hidden until an update is detected
         self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
@@ -567,44 +627,68 @@ class MainWindow(QMainWindow):
         self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_indicator.setVisible(False)
         self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
-        right.addWidget(self.update_indicator)
+        row1.addWidget(self.update_indicator)
+
+        row1.addWidget(self._status_divider())
+        row1.addWidget(self.coord_label)
+        row1.addWidget(self._status_divider())
+        row1.addWidget(self.vehicle_count_label)
+        row1.addWidget(self._status_divider())
+        row1.addWidget(self.status_msg_label)
+        row1.addStretch()
+
+        # ── Row 2: connection indicators + clock ──────────────────────────
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(8)
+
+        # GPS fix status — vehicle mode only (hidden in monitor/viewer)
+        self.gps_indicator = QLabel("● NO GPS FIX")
+        self.gps_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
+        )
+        self.gps_indicator.setVisible(not (self._monitor or self._viewer))
+        row2.addWidget(self.gps_indicator)
+
+        if not (self._monitor or self._viewer):
+            row2.addWidget(self._status_divider())
 
         self.conn_indicator = QLabel("● AWS OFFLINE")
         self.conn_indicator.setStyleSheet(
             "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
         )
-        self.conn_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
-        right.addWidget(self.conn_indicator)
-
-        self.hazard_indicator = QLabel("● DATA OFFLINE")
-        self.hazard_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-        )
-        self.hazard_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.hazard_indicator.setVisible(False)
-        right.addWidget(self.hazard_indicator)
+        row2.addWidget(self.conn_indicator)
+        row2.addWidget(self._status_divider())
 
         self.net_indicator = QLabel("")
         self.net_indicator.setStyleSheet(
             "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #3A3B4A;"
         )
-        self.net_indicator.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.net_indicator.setVisible(False)
-        right.addWidget(self.net_indicator)
+        row2.addWidget(self.net_indicator)
+
+        row2.addStretch()
 
         self.date_label = QLabel("-- --- ----")
         self.date_label.setStyleSheet(
             "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
         )
-        self.date_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        right.addWidget(self.date_label)
+        row2.addWidget(self.date_label)
+
+        row2.addWidget(self._status_divider())
 
         self.clock_label = QLabel("--:--:-- UTC")
         self.clock_label.setStyleSheet(
             "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
         )
-        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        right.addWidget(self.clock_label)
+        row2.addWidget(self.clock_label)
+
+        # keep hazard_indicator as a hidden member so existing callers don't break
+        self.hazard_indicator = QLabel("● DATA OFFLINE")
+        self.hazard_indicator.setVisible(False)
+
+        pill.addLayout(row1)
+        pill.addLayout(row2)
 
 
     def _status_divider(self) -> QFrame:
@@ -629,6 +713,8 @@ class MainWindow(QMainWindow):
             self._hazard_fetcher.stop()
         if hasattr(self, "_satellite_fetcher"):
             self._satellite_fetcher.stop()
+        if hasattr(self, "_surface_fetcher"):
+            self._surface_fetcher.stop()
         if hasattr(self, "_gps_reader") and self._gps_reader is not None:
             self._gps_reader.stop()
         if hasattr(self, "_obs_watcher") and self._obs_watcher is not None:
@@ -695,19 +781,34 @@ class MainWindow(QMainWindow):
                 _stack(self.hazard_controls)
             if hasattr(self, "satellite_controls") and self.btn_satellite.isChecked():
                 _stack(self.satellite_controls)
+            if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
+                _stack(self.surface_controls)
+            if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
+                _stack(self.sounding_controls)
             if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
                 _stack(self.annotation_tools)
             if hasattr(self, "routing_controls") and self.btn_route.isChecked():
                 _stack(self.routing_controls)
 
-        # nav pill — upper-right, below toolbar (hidden while route drawer is open)
+        # nav pill — upper-right, below toolbar (hidden while toolbar drawer is open)
+        _np_w = min(340, r.width() - 2 * MARGIN)
+        _nav_y = MARGIN + (tb_h + 4 if hasattr(self, "_floating_toolbar") else 0)
+        _np_h = 0
         if hasattr(self, "nav_pill") and self.nav_pill.isVisible():
-            self.nav_pill.adjustSize()
-            np_w = self.nav_pill.width()
-            np_h = self.nav_pill.height()
-            nav_y = MARGIN + (tb_h + 4 if hasattr(self, "_floating_toolbar") else 0)
-            self.nav_pill.setGeometry(r.width() - np_w - MARGIN, nav_y, np_w, np_h)
+            self.nav_pill.setFixedWidth(_np_w)
+            self.nav_pill.layout().activate()
+            _np_h = self.nav_pill.sizeHint().height()
+            self.nav_pill.setGeometry(r.width() - _np_w - MARGIN, _nav_y, _np_w, _np_h)
             self.nav_pill.raise_()
+
+        # routing panel — floats below the nav pill when opened via ▾ button
+        if (hasattr(self, "routing_controls") and self._pill_route_expanded
+                and not self.btn_route.isChecked()):
+            rc = self.routing_controls
+            rc_y = _nav_y + _np_h + 4
+            rc.adjustSize()
+            rc.setGeometry(r.width() - _np_w - MARGIN, rc_y, _np_w, rc.height())
+            rc.raise_()
 
         # outlook panel — right side, below toolbar, above status pill
         if hasattr(self, "outlook_panel"):
@@ -729,15 +830,6 @@ class MainWindow(QMainWindow):
             )
             self._status_left.raise_()
 
-        # right status pill — bottom-right corner
-        if hasattr(self, "_status_right"):
-            self._status_right.adjustSize()
-            sr = self._status_right.size()
-            self._status_right.setGeometry(
-                r.width() - sr.width() - MARGIN, r.height() - sr.height() - MARGIN,
-                sr.width(), sr.height()
-            )
-            self._status_right.raise_()
 
     def _start_layout_pulse(self):
         """Re-layout at ~60 fps for 220 ms to track drawer open/close animations."""
@@ -790,6 +882,26 @@ class MainWindow(QMainWindow):
                 "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
             )
         self.net_indicator.setVisible(True)
+        self._layout_overlays()
+
+    def _update_gps_indicator(self):
+        """Refresh GPS fix status label based on age of last local vehicle observation."""
+        age = time.monotonic() - self._last_local_obs_ts
+        if self._last_local_obs_ts == 0.0 or age > 30:
+            self.gps_indicator.setText("● NO GPS FIX")
+            self.gps_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
+            )
+        elif age > 5:
+            self.gps_indicator.setText("● GPS STALE")
+            self.gps_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #FFD166;"
+            )
+        else:
+            self.gps_indicator.setText("● GPS OK")
+            self.gps_indicator.setStyleSheet(
+                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
+            )
         self._layout_overlays()
 
     # ── In-ops update check ───────────────────────────────────────────────────
@@ -933,7 +1045,9 @@ class MainWindow(QMainWindow):
         self.btn_vehicles.toggled.connect(self.vehicle_panel.setVisible)
         self.btn_vehicles.toggled.connect(self._start_layout_pulse)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
+        self.btn_prev_locs.toggled.connect(self._apply_deploy_locs_filter_on_show)
         self.deploy_locs_controls.metric_changed.connect(self.map_widget.set_deploy_locs_metric)
+        self.deploy_locs_controls.filter_changed.connect(self.map_widget.set_deploy_locs_filter)
 
         # detail pill (hidden until a vehicle is selected)
         self._selected_vehicle_ids = []
@@ -1039,11 +1153,21 @@ class MainWindow(QMainWindow):
         self._radar_fetcher.set_products(["N0B", "N0U"])
 
         # ── sounding ──────────────────────────────────────────────────────
-        self._sounding_fetcher = SoundingFetcher(self)
-        self._sounding_dialog  = SoundingDialog(self)
+        self._sounding_fetcher     = SoundingFetcher(self)
+        self._obs_sounding_fetcher = ObsSoundingFetcher(self)
+        self._sounding_dialog      = SoundingDialog(self)
+
         self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+        self._obs_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
+        self._obs_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+
         self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
+        self.map_widget.obs_sounding_station_clicked.connect(self._on_obs_station_click)
+        self.sounding_controls.mode_changed.connect(self._on_sounding_mode_changed)
+
+        # Pre-build stations GeoJSON once (static asset, ~15 KB)
+        self._sounding_stations_geojson = build_stations_geojson()
 
     def _init_hazards(self):
         self._hazard_fetcher = HazardFetcher(parent=self)
@@ -1123,14 +1247,60 @@ class MainWindow(QMainWindow):
         for btn, other in [
             (self.btn_satellite, self.btn_radar),
             (self.btn_satellite, self.btn_hazards),
+            (self.btn_satellite, self.btn_surface),
             (self.btn_satellite, self.btn_annotate),
             (self.btn_radar,     self.btn_satellite),
+            (self.btn_radar,     self.btn_surface),
             (self.btn_hazards,   self.btn_satellite),
+            (self.btn_hazards,   self.btn_surface),
+            (self.btn_surface,   self.btn_satellite),
+            (self.btn_surface,   self.btn_radar),
+            (self.btn_surface,   self.btn_hazards),
+            (self.btn_surface,   self.btn_annotate),
             (self.btn_annotate,  self.btn_satellite),
+            (self.btn_annotate,  self.btn_surface),
         ]:
             btn.toggled.connect(
                 lambda on, o=other: o.setChecked(False) if on else None
             )
+
+    def _init_surface_obs(self):
+        self._surface_fetcher = SurfaceFetcher(parent=self)
+        self._surface_layer = SurfacePlotLayer(self.map_widget)
+        self._surface_station_ids: set[str] = set()
+
+        self.surface_controls.ok_toggled.connect(self._surface_fetcher.set_ok_enabled)
+        self.surface_controls.wtm_toggled.connect(self._surface_fetcher.set_wtm_enabled)
+        self.surface_controls.metar_toggled.connect(self._surface_fetcher.set_metar_enabled)
+        self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
+
+        self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
+        self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
+        self._surface_fetcher.status_updated.connect(self.status_msg_label.setText)
+        self._surface_fetcher.error.connect(self._on_surface_error)
+
+        self._surface_fetcher.start()
+        QTimer.singleShot(1200, lambda: self._surface_layer.set_visible(
+            self.surface_controls.plots_visible()
+        ))
+
+    def _on_surface_observations_updated(self, items: list[dict]):
+        incoming: set[str] = set()
+        for item in items:
+            obs = item["obs"]
+            station_id = item["id"]
+            incoming.add(station_id)
+            self._surface_layer.update(
+                station_id, obs.lat, obs.lon, obs, name=item.get("name", station_id)
+            )
+
+        for station_id in self._surface_station_ids - incoming:
+            self._surface_layer.remove(station_id)
+        self._surface_station_ids = incoming
+
+    def _on_surface_error(self, msg: str):
+        self.status_msg_label.setText(f"Surface: {msg}")
+        self._layout_overlays()
 
     def _on_satellite_toggled(self, checked: bool):
         if not checked:
@@ -1502,9 +1672,17 @@ class MainWindow(QMainWindow):
         self._inject_throttle_timer.stop()
 
     def _on_sounding_mode_toggled(self, active: bool):
-        self.map_widget.set_sounding_mode(active)
         if not active:
+            # Deactivate both sub-modes and clear station layer
+            self.map_widget.set_sounding_mode(False)
+            self.map_widget.set_obs_sounding_mode(False)
+            self.map_widget.clear_sounding_stations()
+            if hasattr(self, "sounding_controls"):
+                self.sounding_controls.reset_to_hrrr()
             return
+        # Activate the currently selected sub-mode
+        mode = self.sounding_controls.active_mode if hasattr(self, "sounding_controls") else "hrrr"
+        self._on_sounding_mode_changed(mode)
         # Untoggle other exclusive map-click modes
         if self.btn_measure.isChecked():
             self.btn_measure.setChecked(False)
@@ -1517,9 +1695,26 @@ class MainWindow(QMainWindow):
         if hasattr(self, "map_widget"):
             self.map_widget.set_route_pick_mode(False)
 
+    def _on_sounding_mode_changed(self, mode: str):
+        """Called when the user switches between HRRR and OBS in the sub-bar."""
+        if not self.btn_sounding.isChecked():
+            return
+        if mode == "hrrr":
+            self.map_widget.set_obs_sounding_mode(False)
+            self.map_widget.clear_sounding_stations()
+            self.map_widget.set_sounding_mode(True)
+        else:  # obs
+            self.map_widget.set_sounding_mode(False)
+            self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
+            self.map_widget.set_obs_sounding_mode(True)
+
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
         self._sounding_fetcher.fetch(lat, lon)
+
+    def _on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
+        self.status_msg_label.setText(f"Fetching OBS sounding {station_id}…")
+        self._obs_sounding_fetcher.fetch(station_id, name, lat, lon, elev)
 
     def _on_sounding_ready(self, sset):
         self.status_msg_label.setText("")
@@ -1795,6 +1990,9 @@ class MainWindow(QMainWindow):
     def _on_local_vehicle_obs(self, obs: Observation):
         if self._startup_local_pending and obs.vehicle_id == config.VEHICLE_ID:
             self._complete_local_startup_phase()
+        # Track GPS fix age for the local vehicle status indicator
+        if obs.vehicle_id == config.VEHICLE_ID and obs.lat is not None:
+            self._last_local_obs_ts = time.monotonic()
         # Always update local GUI at the full poll rate (1 Hz)
         self.update_vehicle_obs(obs)
         # Throttle MQTT publishes independently — other vehicles don't need 1 Hz
@@ -2293,6 +2491,14 @@ class MainWindow(QMainWindow):
         ))
 
     # ── Deployment Locations ──────────────────────────────────────────────────
+
+    def _apply_deploy_locs_filter_on_show(self, visible: bool):
+        """Apply the current threshold filter whenever the layer is toggled on."""
+        if visible:
+            self.map_widget.set_deploy_locs_filter(
+                self.deploy_locs_controls.current_metric(),
+                self.deploy_locs_controls.current_threshold(),
+            )
 
     def _init_deploy_locs(self):
         if config.DEPLOY_LOCS_FILE:

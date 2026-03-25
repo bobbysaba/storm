@@ -31,8 +31,8 @@ class NavPill(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 7, 8, 7)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 10, 12, 10)
+        layout.setSpacing(10)
 
         # ── Text column ─────────────────────────────────────────────────────
         col = QVBoxLayout()
@@ -42,7 +42,6 @@ class NavPill(QWidget):
         self._step_label = QLabel("Navigating…")
         self._step_label.setObjectName("navPillStep")
         self._step_label.setWordWrap(True)
-        self._step_label.setMaximumWidth(260)
 
         self._summary_label = QLabel("")
         self._summary_label.setObjectName("navPillSummary")
@@ -55,7 +54,7 @@ class NavPill(QWidget):
         self._btn_expand.setText("▾")
         self._btn_expand.setObjectName("navPillExpand")
         self._btn_expand.setToolTip("Show full directions")
-        self._btn_expand.setFixedSize(26, 26)
+        self._btn_expand.setFixedSize(32, 32)
         self._btn_expand.clicked.connect(self.open_drawer_requested)
 
         # ── Clear button (✕) ─────────────────────────────────────────────────
@@ -63,7 +62,7 @@ class NavPill(QWidget):
         self._btn_clear.setText("✕")
         self._btn_clear.setObjectName("navPillClear")
         self._btn_clear.setToolTip("Clear route")
-        self._btn_clear.setFixedSize(26, 26)
+        self._btn_clear.setFixedSize(32, 32)
         self._btn_clear.clicked.connect(self.clear_requested)
 
         layout.addLayout(col, 1)
@@ -71,6 +70,10 @@ class NavPill(QWidget):
         layout.addWidget(self._btn_clear)
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    def set_expanded(self, expanded: bool):
+        """Toggle the expand button icon to reflect open/closed state."""
+        self._btn_expand.setText("▴" if expanded else "▾")
 
     def update_nav(self, step_text: str, summary: str):
         """Refresh displayed step and summary, then show the pill."""

@@ -34,6 +34,8 @@ git clone https://github.com/bobbysaba/storm.git
 cd storm
 ```
 
+> **Important:** You must clone the repo — do not download the ZIP from GitHub. STORM's in-app updater relies on `git pull` and will not work without a `.git` directory.
+
 ### 2. Run the setup script
 
 The setup script creates the `storm` conda environment and places a launch shortcut on your Desktop — all in one step. If you already have Miniforge, Miniconda, or Anaconda installed, it will be used automatically and nothing extra will be installed.
@@ -78,6 +80,8 @@ Windows: double-click `scripts\create_app_windows.bat`
 ---
 
 ## Updating
+
+> **Note:** In-app updates and `git pull` only work if you installed via `git clone`. If you downloaded a ZIP, re-install using the clone instructions above.
 
 Pull the latest code and sync your conda environment using your normal git/conda workflow for this checkout. The repository does not currently include a dedicated update script.
 
