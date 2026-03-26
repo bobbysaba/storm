@@ -71,6 +71,7 @@ class DeployLocsControls(QWidget):
 
     metric_changed   = pyqtSignal(str)          # "rank_abi" | "rank_aoi" | "rqi"
     filter_changed   = pyqtSignal(str, float)   # (metric, threshold)
+    size_changed     = pyqtSignal(int)          # circle radius in pixels
     content_resized  = pyqtSignal()             # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
@@ -146,6 +147,36 @@ class DeployLocsControls(QWidget):
         self._filter_row.setVisible(False)
         col.addWidget(self._filter_row)
 
+        # ── Size slider row ───────────────────────────────────────────────
+        self._size_row = QWidget()
+        self._size_row.setObjectName("deployLocsSizeRow")
+        sr = QHBoxLayout(self._size_row)
+        sr.setContentsMargins(4, 2, 4, 0)
+        sr.setSpacing(8)
+
+        size_lbl = QLabel("Size")
+        size_lbl.setFont(QFont("Helvetica Neue", 9))
+        size_lbl.setStyleSheet("color: #B5BDCC; background: transparent;")
+
+        self._size_slider = QSlider(Qt.Orientation.Horizontal)
+        self._size_slider.setObjectName("deployLocsSizeSlider")
+        self._size_slider.setMinimum(2)
+        self._size_slider.setMaximum(20)
+        self._size_slider.setValue(6)
+        self._size_slider.setMinimumWidth(90)
+        self._size_slider.valueChanged.connect(self._on_size_changed)
+
+        self._size_val_label = QLabel("6 px")
+        self._size_val_label.setFont(QFont("Helvetica Neue", 9))
+        self._size_val_label.setStyleSheet("color: #B5BDCC; background: transparent;")
+        self._size_val_label.setMinimumWidth(36)
+
+        sr.addWidget(size_lbl)
+        sr.addWidget(self._size_slider, 1)
+        sr.addWidget(self._size_val_label)
+        self._size_row.setVisible(False)
+        col.addWidget(self._size_row)
+
         outer.addWidget(self._drawer)
 
         # Default to rank_abi without firing the signal yet
@@ -211,6 +242,7 @@ class DeployLocsControls(QWidget):
         self._slider.blockSignals(False)
         self._slider_label.setText(_slider_label_text(metric, default))
         self._filter_row.setVisible(True)
+        self._size_row.setVisible(True)
 
     def _on_metric_toggled(self, key: str, checked: bool):
         if self._updating:
@@ -241,6 +273,10 @@ class DeployLocsControls(QWidget):
         metric = self.current_metric()
         self._slider_label.setText(_slider_label_text(metric, value))
         self.filter_changed.emit(metric, _slider_to_threshold(metric, value))
+
+    def _on_size_changed(self, value: int):
+        self._size_val_label.setText(f"{value} px")
+        self.size_changed.emit(value)
 
     def _update_legend(self, metric: str):
         entries = _LEGENDS.get(metric, [])

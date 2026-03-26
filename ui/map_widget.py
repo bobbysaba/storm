@@ -1529,7 +1529,34 @@ def build_map_html() -> str:
             _htip.style.display = 'none';
           }}
         }} else {{
-          _htip.style.display = 'none';
+          // No hazard layer hit — check for a nearby surface station.
+          var _stLabel = null;
+          if (window._stormSurfacePlotsVisible) {{
+            var _reg = window._stormSurfaceRegistry || {{}};
+            var _threshold = 15;
+            var _bestDist  = Infinity;
+            var _ids = Object.keys(_reg);
+            for (var _si = 0; _si < _ids.length; _si++) {{
+              var _st = _reg[_ids[_si]];
+              var _sp = map.project([_st.lon, _st.lat]);
+              var _dx = _sp.x - e.point.x;
+              var _dy = _sp.y - e.point.y;
+              var _d  = Math.sqrt(_dx * _dx + _dy * _dy);
+              if (_d < _threshold && _d < _bestDist) {{
+                _bestDist = _d;
+                _stLabel  = _st.label;
+              }}
+            }}
+          }}
+          if (_stLabel) {{
+            var _smc = map.getContainer().getBoundingClientRect();
+            _htip.textContent = _stLabel;
+            _htip.style.left  = (e.originalEvent.clientX - _smc.left + 14) + 'px';
+            _htip.style.top   = (e.originalEvent.clientY - _smc.top  - 10) + 'px';
+            _htip.style.display = 'block';
+          }} else {{
+            _htip.style.display = 'none';
+          }}
         }}
       }}
     }});
@@ -2056,6 +2083,7 @@ def build_map_html() -> str:
     window._stormStationPlotsVisible = true;
     window._stormSurfacePlots = {{}};
     window._stormSurfacePlotsVisible = true;
+    window._stormSurfaceRegistry = {{}};  // id → {{lon, lat, label}}
 
     window.stormAddStationPlot = function(id, lat, lon, pngB64) {{
       if (window._stormStationPlots[id]) {{
@@ -2094,38 +2122,41 @@ def build_map_html() -> str:
         delete window._stormSurfacePlots[id];
       }}
       const label = name || id;
+
+      // Outer div: pointer-events:none so the 135px image never blocks
+      // neighbouring station hit-targets underneath it.
       const el = document.createElement('div');
-      el.style.cssText = 'width:135px;height:135px;pointer-events:auto;';
+      el.style.cssText = 'width:135px;height:135px;pointer-events:none;';
       if (!window._stormSurfacePlotsVisible) el.style.display = 'none';
+
       const img = document.createElement('img');
       img.src = 'data:image/png;base64,' + pngB64;
-      img.style.cssText = 'width:100%;height:100%;pointer-events:none;';
+      // display:block removes inline baseline gap so the hit-target margin
+      // math below is exact: img occupies exactly 0..135px vertically.
+      img.style.cssText = 'display:block;width:135px;height:135px;pointer-events:none;';
       img.alt = label;
       el.appendChild(img);
-      el.addEventListener('mouseenter', function(e) {{
-        var tip = document.getElementById('hazard-tooltip');
-        if (tip) {{
-          tip.textContent = label;
-          tip.style.display = 'block';
-          var mc = map.getContainer().getBoundingClientRect();
-          tip.style.left = (e.clientX - mc.left + 14) + 'px';
-          tip.style.top  = (e.clientY - mc.top - 10) + 'px';
-        }}
-      }});
-      el.addEventListener('mousemove', function(e) {{
-        var tip = document.getElementById('hazard-tooltip');
-        if (tip) {{
-          tip.textContent = label;
-          tip.style.display = 'block';
-          var mc = map.getContainer().getBoundingClientRect();
-          tip.style.left = (e.clientX - mc.left + 14) + 'px';
-          tip.style.top  = (e.clientY - mc.top - 10) + 'px';
-        }}
-      }});
-      el.addEventListener('mouseleave', function() {{
-        var tip = document.getElementById('hazard-tooltip');
-        if (tip) tip.style.display = 'none';
-      }});
+
+      // 20px hit-target centered on the station point.  Negative margin-top
+      // pulls it back up from below the image into the center of the 135px
+      // square.  No position:relative needed on the parent, so MapLibre's
+      // transform-based marker placement is unaffected.
+      //   Natural top of hit div = 135px (after block img)
+      //   Desired top            = (135 - 20) / 2 = 57.5px
+      //   margin-top             = 57.5 - 135 = -77.5px
+      const hit = document.createElement('div');
+      hit.style.cssText = (
+        'width:20px;height:20px;' +
+        'margin-top:-77.5px;' +
+        'margin-left:57.5px;' +
+        'pointer-events:auto;cursor:pointer;'
+      );
+      el.appendChild(hit);
+
+      // Tooltip is driven by map.on('mousemove') — same as SPC layers —
+      // so no DOM mouseenter/mouseleave needed here.
+      window._stormSurfaceRegistry[id] = {{lon: lon, lat: lat, label: label}};
+
       const marker = new maplibregl.Marker({{element: el, anchor: 'center'}})
         .setLngLat([lon, lat]).addTo(map);
       window._stormSurfacePlots[id] = marker;
@@ -2136,6 +2167,7 @@ def build_map_html() -> str:
         window._stormSurfacePlots[id].remove();
         delete window._stormSurfacePlots[id];
       }}
+      delete window._stormSurfaceRegistry[id];
     }};
 
     window.stormSetSurfaceStationPlotsVisible = function(visible) {{
@@ -2298,6 +2330,9 @@ def build_map_html() -> str:
         filter = null;
       }}
       map.setFilter('deploy-locs-circles', filter);
+    }};
+    window.stormSetDeployLocsSize = function(radius) {{
+      map.setPaintProperty('deploy-locs-circles', 'circle-radius', radius);
     }};
     window.stormSetDeployLocsMetric = function(metric) {{
       var expr;
@@ -2810,6 +2845,7 @@ class MapBridge(QObject):
         self.map_pick_for_route.emit(lat, lon)
 
 
+
 # ── Map Widget ────────────────────────────────────────────────────────────────
 
 class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
@@ -3014,6 +3050,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         if not active:
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
+
     def set_sounding_stations(self, geojson_str: str):
         """Inject sounding station GeoJSON and make the layer visible."""
         escaped = geojson_str.replace("\\", "\\\\").replace("`", "\\`")
@@ -3164,6 +3201,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_deploy_locs_filter(self, metric: str, threshold: float) -> None:
         import json
         self.run_js(f"stormSetDeployLocsFilter({json.dumps(metric)}, {threshold});")
+
+    def set_deploy_locs_size(self, radius: int) -> None:
+        self.run_js(f"stormSetDeployLocsSize({radius});")
 
     def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
         import json

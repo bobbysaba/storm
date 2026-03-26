@@ -68,7 +68,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#satelliteDrawer,
 #floatingToolbar QWidget#deployLocsDrawer,
 #floatingToolbar QWidget#routingDrawer,
-#floatingToolbar QWidget#soundingDrawer {
+#floatingToolbar QWidget#soundingDrawer,
+#floatingToolbar QWidget#surfaceDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -80,7 +81,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#satelliteDrawer > QWidget,
 #floatingToolbar QWidget#deployLocsDrawer > QWidget,
 #floatingToolbar QWidget#routingDrawer > QWidget,
-#floatingToolbar QWidget#soundingDrawer > QWidget {
+#floatingToolbar QWidget#soundingDrawer > QWidget,
+#floatingToolbar QWidget#surfaceDrawer > QWidget {
     background: transparent;
 }
 
@@ -258,6 +260,37 @@ QMainWindow, QWidget {
     background: transparent;
     color: #B5BDCC;
     font-size: 10px;
+}
+
+#floatingToolbar QWidget#deployLocsSizeRow {
+    background: transparent;
+}
+
+#floatingToolbar QSlider#deployLocsSizeSlider {
+    height: 18px;
+}
+
+#floatingToolbar QSlider#deployLocsSizeSlider::groove:horizontal {
+    height: 4px;
+    background: #2E2E4E;
+    border-radius: 2px;
+}
+
+#floatingToolbar QSlider#deployLocsSizeSlider::sub-page:horizontal {
+    background: #4A9EFF;
+    border-radius: 2px;
+}
+
+#floatingToolbar QSlider#deployLocsSizeSlider::handle:horizontal {
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    background: #EFF3FF;
+    border-radius: 6px;
+}
+
+#floatingToolbar QSlider#deployLocsSizeSlider::handle:horizontal:hover {
+    background: #4A9EFF;
 }
 
 /* ── Routing Drawer ───────────────────────────────────── */
@@ -692,7 +725,8 @@ QToolTip {
 #floatingToolbar QWidget#satelliteDrawer QCheckBox,
 #floatingToolbar QWidget#deployLocsDrawer QCheckBox,
 #floatingToolbar QWidget#routingDrawer QCheckBox,
-#floatingToolbar QWidget#soundingDrawer QCheckBox {
+#floatingToolbar QWidget#soundingDrawer QCheckBox,
+#floatingToolbar QWidget#surfaceDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

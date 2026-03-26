@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QToolButton, QCheckBox, QFileDialog, QFrame,
+    QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize
@@ -147,23 +147,22 @@ QPushButton#launchBtn:hover {
 QPushButton#launchBtn:pressed {
     background-color: #009ECC;
 }
-QCheckBox {
-    color: #8E97AB;
-    font-size: 11px;
-    spacing: 8px;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: none;
-    background: transparent;
-    image: url(static/indicator_off.svg);
-}
-QCheckBox::indicator:checked {
-    image: url(static/indicator_on.svg);
-}
+
 QFrame#divider {
     color: #1E1E2E;
+}
+QPushButton#dataToggleBtn {
+    background: transparent;
+    border: none;
+    color: #8E97AB;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 0px;
+    text-align: left;
+}
+QPushButton#dataToggleBtn:hover {
+    color: #00CFFF;
 }
 QToolButton#iconBtn {
     background-color: #1A1A2E;
@@ -429,6 +428,9 @@ class LaunchDialog(QDialog):
             "auto_nws":       s.value("launch/auto_nws",       False,     type=bool),
             "auto_radar":     s.value("launch/auto_radar",     False,     type=bool),
             "auto_satellite": s.value("launch/auto_satellite", "",        type=str),
+            "auto_obs_ok":    s.value("launch/auto_obs_ok",    False,     type=bool),
+            "auto_obs_wtm":   s.value("launch/auto_obs_wtm",   False,     type=bool),
+            "auto_obs_ks":    s.value("launch/auto_obs_ks",    False,     type=bool),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
@@ -581,7 +583,7 @@ class LaunchDialog(QDialog):
         # Apply saved mode
         self._select_mode(saved.get("mode", "vehicle"))
 
-        # ── Data on launch ─────────────────────────────────────────────────────
+        # ── Data on launch (collapsible) ───────────────────────────────────────
         root.addSpacing(14)
         div2 = QFrame()
         div2.setObjectName("divider")
@@ -589,30 +591,33 @@ class LaunchDialog(QDialog):
         div2.setStyleSheet("background-color: #1E1E2E;")
         div2.setFixedHeight(1)
         root.addWidget(div2)
-        root.addSpacing(12)
+        root.addSpacing(10)
 
-        data_label = QLabel("DATA ON LAUNCH")
-        data_label.setObjectName("fieldLabel")
-        root.addWidget(data_label)
-        root.addSpacing(6)
+        self._data_toggle_btn = QPushButton("▸  DATA ON LAUNCH")
+        self._data_toggle_btn.setObjectName("dataToggleBtn")
+        self._data_toggle_btn.setFixedHeight(18)
+        self._data_toggle_btn.clicked.connect(self._toggle_data_section)
+        root.addWidget(self._data_toggle_btn)
 
-        # Row 1: SPC / NWS / RADAR checkboxes
-        check_row = QHBoxLayout()
-        check_row.setSpacing(16)
-        self._chk_spc   = QCheckBox("SPC")
-        self._chk_nws   = QCheckBox("NWS")
-        self._chk_radar = QCheckBox("RADAR")
-        self._chk_spc.setChecked(saved.get("auto_spc", False))
-        self._chk_nws.setChecked(saved.get("auto_nws", False))
-        self._chk_radar.setChecked(saved.get("auto_radar", False))
-        check_row.addWidget(self._chk_spc)
-        check_row.addWidget(self._chk_nws)
-        check_row.addWidget(self._chk_radar)
-        check_row.addStretch()
-        root.addLayout(check_row)
-        root.addSpacing(6)
+        # Collapsible container — hidden by default
+        self._data_section = QWidget()
+        ds = QVBoxLayout(self._data_section)
+        ds.setContentsMargins(0, 8, 0, 0)
+        ds.setSpacing(6)
 
-        # Row 2: satellite selector — "SAT" label inline with mode buttons
+        # Row 1: SPC / NWS / RADAR as multi-select button strip
+        self._layer_btns: dict[str, QPushButton] = {}
+        layer_row = QHBoxLayout()
+        layer_row.setSpacing(6)
+        for key, label in (("spc", "SPC"), ("nws", "NWS"), ("radar", "RADAR")):
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _checked, k=key: self._toggle_layer(k))
+            layer_row.addWidget(btn)
+            self._layer_btns[key] = btn
+        ds.addLayout(layer_row)
+
+        # Row 2: satellite selector (exclusive)
         sat_row = QHBoxLayout()
         sat_row.setSpacing(6)
         sat_lbl = QLabel("SAT")
@@ -626,9 +631,50 @@ class LaunchDialog(QDialog):
             btn.clicked.connect(lambda _checked, k=key: self._select_satellite(k))
             sat_row.addWidget(btn)
             self._sat_btns[key] = btn
-        root.addLayout(sat_row)
+        ds.addLayout(sat_row)
+
+        # Row 3: surface obs multi-select
+        obs_row = QHBoxLayout()
+        obs_row.setSpacing(6)
+        obs_lbl = QLabel("OBS")
+        obs_lbl.setObjectName("fieldLabel")
+        obs_lbl.setFixedWidth(28)
+        obs_row.addWidget(obs_lbl)
+        self._obs_btns: dict[str, QPushButton] = {}
+        for key, label in (("ok", "OK MESO"), ("wtm", "WTM"), ("ks", "KS MESO")):
+            btn = QPushButton(label)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _checked, k=key: self._toggle_obs(k))
+            obs_row.addWidget(btn)
+            self._obs_btns[key] = btn
+        ds.addLayout(obs_row)
+
+        self._data_section.setVisible(False)
+        root.addWidget(self._data_section)
+
+        # Initialise multi-select state from saved settings
+        self._selected_layers: set[str] = set()
+        for key, setting in (("spc", "auto_spc"), ("nws", "auto_nws"), ("radar", "auto_radar")):
+            if saved.get(setting, False):
+                self._selected_layers.add(key)
+        self._refresh_layer_styles()
 
         self._select_satellite(saved.get("auto_satellite", ""))
+
+        self._selected_obs: set[str] = set()
+        for key in ("ok", "wtm", "ks"):
+            if saved.get(f"auto_obs_{key}", False):
+                self._selected_obs.add(key)
+        self._refresh_obs_styles()
+
+        # Auto-expand if any data pref is set
+        any_data = (
+            bool(self._selected_layers)
+            or bool(self._selected_satellite)
+            or bool(self._selected_obs)
+        )
+        if any_data:
+            self._toggle_data_section()
 
         root.addSpacing(20)
 
@@ -710,10 +756,32 @@ class LaunchDialog(QDialog):
         if self.isVisible():
             self._post_layout_adjust()
 
+    def _toggle_data_section(self):
+        visible = not self._data_section.isVisible()
+        self._data_section.setVisible(visible)
+        self._data_toggle_btn.setText("▾  DATA ON LAUNCH" if visible else "▸  DATA ON LAUNCH")
+        QTimer.singleShot(0, self.adjustSize)
+
+    def _toggle_layer(self, key: str):
+        self._selected_layers.discard(key) if key in self._selected_layers else self._selected_layers.add(key)
+        self._refresh_layer_styles()
+
+    def _refresh_layer_styles(self):
+        for k, btn in self._layer_btns.items():
+            btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if k in self._selected_layers else _MODE_BTN_STYLE)
+
     def _select_satellite(self, key: str):
         self._selected_satellite = key if key in self._sat_btns else ""
         for k, btn in self._sat_btns.items():
             btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if k == self._selected_satellite else _MODE_BTN_STYLE)
+
+    def _toggle_obs(self, key: str):
+        self._selected_obs.discard(key) if key in self._selected_obs else self._selected_obs.add(key)
+        self._refresh_obs_styles()
+
+    def _refresh_obs_styles(self):
+        for k, btn in self._obs_btns.items():
+            btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if k in self._selected_obs else _MODE_BTN_STYLE)
 
     def _select_icon(self, key: str):
         self._set_icon_selected(key)
@@ -830,10 +898,15 @@ class LaunchDialog(QDialog):
         s.setValue("launch/data_dir",       self._dir_input.text().strip())
         s.setValue("launch/mode",           getattr(self, "_selected_mode", "vehicle"))
         s.setValue("launch/vehicle_icon",   getattr(self, "_selected_icon", "car"))
-        s.setValue("launch/auto_spc",       self._chk_spc.isChecked())
-        s.setValue("launch/auto_nws",       self._chk_nws.isChecked())
-        s.setValue("launch/auto_radar",     self._chk_radar.isChecked())
+        layers = getattr(self, "_selected_layers", set())
+        s.setValue("launch/auto_spc",   "spc"   in layers)
+        s.setValue("launch/auto_nws",   "nws"   in layers)
+        s.setValue("launch/auto_radar", "radar" in layers)
         s.setValue("launch/auto_satellite", getattr(self, "_selected_satellite", ""))
+        obs = getattr(self, "_selected_obs", set())
+        s.setValue("launch/auto_obs_ok",  "ok"  in obs)
+        s.setValue("launch/auto_obs_wtm", "wtm" in obs)
+        s.setValue("launch/auto_obs_ks",  "ks"  in obs)
         self.accept()
 
     # ── Accessors (read by main.py after accept) ───────────────────────────────
@@ -860,13 +933,22 @@ class LaunchDialog(QDialog):
         return getattr(self, "_selected_icon", "car")
 
     def auto_spc(self) -> bool:
-        return self._chk_spc.isChecked()
+        return "spc" in getattr(self, "_selected_layers", set())
 
     def auto_nws(self) -> bool:
-        return self._chk_nws.isChecked()
+        return "nws" in getattr(self, "_selected_layers", set())
 
     def auto_radar(self) -> bool:
-        return self._chk_radar.isChecked()
+        return "radar" in getattr(self, "_selected_layers", set())
 
     def auto_satellite(self) -> str:
         return getattr(self, "_selected_satellite", "")
+
+    def auto_obs_ok(self) -> bool:
+        return "ok" in getattr(self, "_selected_obs", set())
+
+    def auto_obs_wtm(self) -> bool:
+        return "wtm" in getattr(self, "_selected_obs", set())
+
+    def auto_obs_ks(self) -> bool:
+        return "ks" in getattr(self, "_selected_obs", set())

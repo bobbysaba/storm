@@ -86,9 +86,11 @@ class ObsSoundingFetcher(QObject):
 def _timestamps_to_query() -> list[str]:
     """Return list of synoptic RAOB timestamps to query.
 
-    The IEM RAOB endpoint now accepts explicit timestamps rather than a date.
-    To preserve the previous behavior, query 00Z and 12Z for the current UTC
-    date, and also the previous UTC date before 12Z.
+    Query all four standard RAOB synoptic times (00Z, 06Z, 12Z, 18Z) for the
+    current UTC date.  If we are before 12Z, also include the previous UTC date
+    so overnight continuity is preserved (e.g. 02Z on the 26th still shows the
+    25th's soundings).  The future-sounding filter in _fetch_sounding_set() will
+    discard any slot that hasn't launched yet.
     """
     now = datetime.now(timezone.utc)
     dates = [now.date()]
@@ -96,7 +98,7 @@ def _timestamps_to_query() -> list[str]:
         dates.append((now - timedelta(days=1)).date())
     timestamps: list[str] = []
     for date_obj in dates:
-        for hour in (0, 12):
+        for hour in (0, 6, 12, 18):
             ts = datetime(
                 date_obj.year, date_obj.month, date_obj.day, hour, 0, 0,
                 tzinfo=timezone.utc,

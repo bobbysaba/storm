@@ -151,6 +151,33 @@ def _lbl(text, color=_TEXT, size=10, bold=False,
     return w
 
 
+# Pressure levels used for wind barbs and hodograph thinning.
+# Denser than strict mandatory levels to give ~18-20 points per sounding —
+# enough detail without the noise of every significant level.
+_MANDATORY_PRES = np.array(
+    [1000, 975, 950, 925, 900, 875, 850, 825, 800, 750, 700,
+     650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100],
+    dtype=float
+)
+
+def _thin_to_mandatory(pres_arr: np.ndarray, tol: float = 15.0) -> np.ndarray:
+    """Return sorted indices of levels closest to each mandatory pressure level.
+
+    Skips a mandatory level if no data point falls within *tol* hPa of it.
+    Each data index is included at most once.
+    """
+    indices: list[int] = []
+    seen: set[int] = set()
+    for mp in _MANDATORY_PRES:
+        if mp > pres_arr[0] + tol or mp < pres_arr[-1] - tol:
+            continue  # outside the sounding's pressure range
+        i = int(np.argmin(np.abs(pres_arr - mp)))
+        if np.abs(pres_arr[i] - mp) <= tol and i not in seen:
+            seen.add(i)
+            indices.append(i)
+    return np.array(sorted(indices), dtype=int)
+
+
 def _p_at_t(snd: Sounding, target_c: float) -> float | None:
     """Pressure (hPa) where temperature first crosses target_c °C from surface up."""
     for i in range(len(snd.temperature) - 1):
@@ -390,11 +417,26 @@ class SoundingDialog(QDialog):
         self._scrubber.setValue(0)
         self._scrubber.blockSignals(False)
 
+        # For obs: show the day number if any two soundings share the same hour
+        # (e.g. 00Z Mar 24 and 00Z Mar 25 both appear).
+        obs_hours = (
+            [s.valid_time.strftime("%H") for s in self._sset.soundings]
+            if self._sset.is_observed else []
+        )
+        obs_needs_day = len(obs_hours) != len(set(obs_hours))
+
         self._tick_row.addStretch(1)
         for i, snd in enumerate(self._sset.soundings):
-            f_str = "F0" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
+            if self._sset.is_observed:
+                if obs_needs_day:
+                    f_str = snd.valid_time.strftime("%HZ\n%-d")  # "00Z\n24"
+                else:
+                    f_str = snd.valid_time.strftime("%HZ")       # "00Z"
+            else:
+                f_str = "F0" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
             lbl = _lbl(f_str, color=_MUTED, size=8,
                        align=Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
             lbl.setFixedWidth(36)
             self._tick_labels.append(lbl)
             self._tick_row.addWidget(lbl)
@@ -529,7 +571,10 @@ class SoundingDialog(QDialog):
         except Exception:
             pass
 
-        skewt.plot_barbs(pres, u_kt, v_kt, color=_BARB_CLR,
+        # Only plot barbs at mandatory pressure levels — significant-level data
+        # would produce 80+ overlapping barbs that are unreadable.
+        thin = _thin_to_mandatory(snd.pressure)
+        skewt.plot_barbs(pres[thin], u_kt[thin], v_kt[thin], color=_BARB_CLR,
                          linewidth=0.8, length=6)
 
         # Parcel profile + CAPE/CIN shading
@@ -615,9 +660,14 @@ class SoundingDialog(QDialog):
             ax.text(spd * 0.72, spd * 0.72, f"{spd}", fontsize=5,
                     color=_MUTED, ha="center", va="center", alpha=0.7)
 
-        u_kt       = (snd.u_wind * units("m/s")).to("knots").magnitude
-        v_kt       = (snd.v_wind * units("m/s")).to("knots").magnitude
-        hgt_agl_km = (snd.height - snd.height[0]) / 1000.0
+        # Thin to mandatory pressure levels — mirrors SPC's hodograph display and
+        # avoids a jagged trace from hundreds of significant-level wind reports.
+        thin       = _thin_to_mandatory(snd.pressure)
+        u_kt       = (snd.u_wind[thin] * units("m/s")).to("knots").magnitude
+        v_kt       = (snd.v_wind[thin] * units("m/s")).to("knots").magnitude
+        pres_thin  = snd.pressure[thin]
+        hgt_thin   = snd.height[thin]
+        hgt_agl_km = (hgt_thin - hgt_thin[0]) / 1000.0
 
         # Gapless height-colored trace via LineCollection
         if len(u_kt) >= 2:
@@ -641,8 +691,8 @@ class SoundingDialog(QDialog):
             # EIL highlight
             if self._eil_base_p is not None and self._eil_top_p is not None:
                 eil_colors = []
-                for i in range(len(snd.pressure) - 1):
-                    p_mid = (snd.pressure[i] + snd.pressure[i + 1]) / 2.0
+                for i in range(len(pres_thin) - 1):
+                    p_mid = (pres_thin[i] + pres_thin[i + 1]) / 2.0
                     in_eil = self._eil_top_p <= p_mid <= self._eil_base_p
                     eil_colors.append(_EIL_CLR if in_eil else (0, 0, 0, 0))
                 ax.add_collection(
@@ -672,9 +722,9 @@ class SoundingDialog(QDialog):
             lm_v_kt = float(lm[1].to("knots").m)
 
             rm_spd = float(np.sqrt(rm_u_kt**2 + rm_v_kt**2))
-            rm_dir = float(np.degrees(np.arctan2(-rm[0].to("m/s").m, -rm[1].to("m/s").m)) % 360)
+            rm_dir = float(np.degrees(np.arctan2(rm[0].to("m/s").m, rm[1].to("m/s").m)) % 360)
             lm_spd = float(np.sqrt(lm_u_kt**2 + lm_v_kt**2))
-            lm_dir = float(np.degrees(np.arctan2(-lm[0].to("m/s").m, -lm[1].to("m/s").m)) % 360)
+            lm_dir = float(np.degrees(np.arctan2(lm[0].to("m/s").m, lm[1].to("m/s").m)) % 360)
 
             ax.plot(rm_u_kt, rm_v_kt, "o", color=_RM_CLR, markersize=5,
                     markeredgecolor=_FIG_BG, markeredgewidth=0.8, zorder=7)
