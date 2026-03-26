@@ -78,14 +78,20 @@ class SoundingSet:
     fetch_time: datetime
     soundings: list       # list[Sounding], chronological order
 
-    # Populated only for observed (radiosonde) soundings:
-    station_id:   str = ""   # e.g. "OUN"
-    station_name: str = ""   # e.g. "Norman, OK"
+    # Populated only for observed / NSSL soundings:
+    station_id:   str = ""      # e.g. "OUN" or "CLAMPS"
+    station_name: str = ""      # e.g. "Norman, OK"
+    source:       str = "hrrr"  # "hrrr" | "obs" | "nssl"
 
     @property
     def is_observed(self) -> bool:
         """True when this set came from a radiosonde station (not HRRR)."""
-        return bool(self.station_id)
+        return self.source == "obs"
+
+    @property
+    def is_nssl(self) -> bool:
+        """True when this set came from the NSSL CLAMPS DL Truck."""
+        return self.source == "nssl"
 
     def get(self, slot_offset: int):
         """Return the Sounding for a given hour offset, or None."""

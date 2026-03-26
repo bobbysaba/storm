@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.0] - 2026-03-25
+### Added
+- Mesonet surface observation overlay — live station data fetched and displayed on the map
+- Observed sounding dialog — fetch and display real-time vertical profiles from surface obs networks
+- CLAMPS sounding support — additional sounding data source via CLAMPS fetcher
+- Routing and turn-by-turn navigation with off-route recalculation and arrival detection
+- On-launch data fetch selection — choose which data products to load at startup
+
+### Changed
+- Status pill top row reorganized: version anchor (`STORM vX.X.X`), update indicator, and status message now occupy a dedicated top row above mode/position and connectivity rows
+- Launch window and viewer mode patching
+
+---
+
 ## [0.7.0] - 2026-03-19
 ### Added
 - HRRR point sounding dialog — click any map location to fetch a live vertical atmospheric profile from the open-meteo HRRR API (free tier, single HTTP request per click)

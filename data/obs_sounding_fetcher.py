@@ -183,6 +183,7 @@ def _fetch_sounding_set(
         soundings    = soundings,
         station_id   = station_id,
         station_name = station_name,
+        source       = "obs",
     )
 
 
@@ -263,4 +264,4 @@ def _parse_profile(
 
 def _format_label(dt: datetime) -> str:
     """Return a scrubber label like '00Z Mar 25'."""
-    return dt.strftime("%-HZ %b %-d").replace("  ", " ")
+    return f"{dt.hour}Z {dt.strftime('%b')} {dt.day}"

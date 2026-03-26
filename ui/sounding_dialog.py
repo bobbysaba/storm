@@ -253,7 +253,9 @@ class SoundingDialog(QDialog):
         text_col.addWidget(self._header_line2)
         header_row.addLayout(text_col, stretch=1)
 
-        scrubber_col = QVBoxLayout()
+        self._scrubber_widget = QWidget()
+        self._scrubber_widget.setAutoFillBackground(False)
+        scrubber_col = QVBoxLayout(self._scrubber_widget)
         scrubber_col.setSpacing(1)
         scrubber_col.setContentsMargins(0, 0, 0, 0)
 
@@ -275,7 +277,7 @@ class SoundingDialog(QDialog):
         self._tick_row.setSpacing(0)
         scrubber_col.addLayout(self._tick_row)
 
-        header_row.addLayout(scrubber_col)
+        header_row.addWidget(self._scrubber_widget)
         root.addLayout(header_row)
 
         # ── Matplotlib canvas ─────────────────────────────────────────────────
@@ -412,26 +414,29 @@ class SoundingDialog(QDialog):
             return
 
         count = len(self._sset.soundings)
+        self._scrubber_widget.setVisible(count > 1)
         self._scrubber.blockSignals(True)
         self._scrubber.setMaximum(count - 1)
         self._scrubber.setValue(0)
         self._scrubber.blockSignals(False)
 
-        # For obs: show the day number if any two soundings share the same hour
-        # (e.g. 00Z Mar 24 and 00Z Mar 25 both appear).
-        obs_hours = (
-            [s.valid_time.strftime("%H") for s in self._sset.soundings]
-            if self._sset.is_observed else []
+        # For obs/nssl: show the day number if any two soundings share the same hour.
+        time_based = self._sset.is_observed or self._sset.is_nssl
+        snd_hours = (
+            [s.valid_time.strftime("%H%d") for s in self._sset.soundings]
+            if time_based else []
         )
-        obs_needs_day = len(obs_hours) != len(set(obs_hours))
+        needs_day = len(snd_hours) != len(set(
+            s.valid_time.strftime("%H") for s in self._sset.soundings
+        )) if time_based else False
 
         self._tick_row.addStretch(1)
         for i, snd in enumerate(self._sset.soundings):
-            if self._sset.is_observed:
-                if obs_needs_day:
-                    f_str = snd.valid_time.strftime("%HZ\n%-d")  # "00Z\n24"
+            if time_based:
+                if needs_day:
+                    f_str = f"{snd.valid_time.strftime('%HZ')}\n{snd.valid_time.day}"
                 else:
-                    f_str = snd.valid_time.strftime("%HZ")       # "00Z"
+                    f_str = snd.valid_time.strftime("%HZ")
             else:
                 f_str = "F0" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
             lbl = _lbl(f_str, color=_MUTED, size=8,
@@ -458,7 +463,13 @@ class SoundingDialog(QDialog):
         if not snd:
             return
 
-        if self._sset.is_observed:
+        if self._sset.is_nssl:
+            valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
+            self._header_line1.setText("NSSL CLAMPS  ·  DL Truck")
+            self._header_line2.setText(
+                f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL"
+            )
+        elif self._sset.is_observed:
             valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
             self._header_line1.setText(
                 f"OBS  ·  {self._sset.station_name} ({self._sset.station_id})"
@@ -507,8 +518,8 @@ class SoundingDialog(QDialog):
             eil_base, eil_top = mpcalc.effective_inflow_layer(pres, temp, dewp)
             self._eil_base_p = float(eil_base.to("hPa").m)
             self._eil_top_p  = float(eil_top.to("hPa").m)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("EIL calculation failed: %s", e)
 
         self._fig.clear()
         self._cursor_hline = None
@@ -539,6 +550,14 @@ class SoundingDialog(QDialog):
         u_kt = (snd.u_wind * units("m/s")).to("knots")
         v_kt = (snd.v_wind * units("m/s")).to("knots")
 
+        # Index set for plotted traces.  High-resolution soundings (>200 levels,
+        # e.g. CLAMPS lidar-sonde) are thinned to mandatory pressure levels so
+        # the rendered line density matches a standard radiosonde.  All MetPy
+        # calculations (parcel profile, CAPE/CIN shading, vtemp) continue to use
+        # the full-resolution arrays above.
+        _pt = _thin_to_mandatory(snd.pressure) if len(snd.pressure) > 200 \
+              else np.arange(len(snd.pressure))
+
         skewt.plot_dry_adiabats(
             t0=np.arange(-40, 200, 10) * units.degC,
             alpha=0.14, colors="saddlebrown", linewidths=0.7,
@@ -558,43 +577,45 @@ class SoundingDialog(QDialog):
         if p_neg10 is not None and p_neg20 is not None:
             ax.axhspan(p_neg10, p_neg20, alpha=0.07, color="#4fc3f7", zorder=1)
 
-        # Main traces
-        skewt.plot(pres, temp, color=_TEMP_CLR, linewidth=2, zorder=5)
-        skewt.plot(pres, dewp, color=_DEWP_CLR, linewidth=2, zorder=5)
+        # Main traces — thinned for high-res soundings, full-res otherwise
+        skewt.plot(pres[_pt], temp[_pt], color=_TEMP_CLR, linewidth=2, zorder=5)
+        skewt.plot(pres[_pt], dewp[_pt], color=_DEWP_CLR, linewidth=2, zorder=5)
 
         # Virtual temperature (dashed, warm tint)
+        # Mixing ratio computed on full-res; only the plotted line is thinned.
         try:
             mr    = mpcalc.mixing_ratio_from_dewpoint(pres, dewp)
             vtemp = mpcalc.virtual_temperature(temp, mr).to("degC")
-            skewt.plot(pres, vtemp, color=_VTEMP_CLR, linewidth=1.1,
+            skewt.plot(pres[_pt], vtemp[_pt], color=_VTEMP_CLR, linewidth=1.1,
                        linestyle="--", alpha=0.6, zorder=5)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("virtual temperature plot failed: %s", e)
 
-        # Only plot barbs at mandatory pressure levels — significant-level data
-        # would produce 80+ overlapping barbs that are unreadable.
+        # Wind barbs at mandatory pressure levels only
         thin = _thin_to_mandatory(snd.pressure)
         skewt.plot_barbs(pres[thin], u_kt[thin], v_kt[thin], color=_BARB_CLR,
                          linewidth=0.8, length=6)
 
-        # Parcel profile + CAPE/CIN shading
+        # Parcel profile + CAPE/CIN shading.
+        # Parcel calculation and shading use the full-resolution profile for
+        # accuracy.  Only the plotted parcel trace is thinned.
         sb_parcel = None
         try:
             sb_parcel = mpcalc.parcel_profile(pres, temp[0], dewp[0])
-            skewt.plot(pres, sb_parcel, color=_PARCEL_CLR, linewidth=1,
+            skewt.plot(pres[_pt], sb_parcel[_pt], color=_PARCEL_CLR, linewidth=1,
                        linestyle="--", alpha=0.5, zorder=5)
             skewt.shade_cape(pres, temp, sb_parcel, alpha=0.18, color=_TEMP_CLR)
             skewt.shade_cin(pres, temp, sb_parcel,  alpha=0.18, color="#4fc3f7")
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("parcel profile / CAPE-CIN shading failed: %s", e)
 
         # LCL marker
         try:
             lcl_p, lcl_t = mpcalc.lcl(pres[0], temp[0], dewp[0])
             skewt.plot(lcl_p, lcl_t, "o", color="cyan", markersize=5,
                        markerfacecolor="none", markeredgewidth=1.5, zorder=6)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("LCL marker failed: %s", e)
 
         ax.set_ylim(1050, 100)
         ax.set_xlim(-40, 50)
@@ -738,8 +759,8 @@ class SoundingDialog(QDialog):
             ax.text(0.03, 0.90, f"LM  {lm_dir:.0f}°/{lm_spd:.0f}kt",
                     transform=ax.transAxes, color=_LM_CLR,
                     fontsize=5.5, fontweight="bold", va="top", ha="left", zorder=8)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Bunkers storm motion failed: %s", e)
 
     # ── Interactive cursor ────────────────────────────────────────────────────
 
@@ -804,7 +825,8 @@ class SoundingDialog(QDialog):
             sbcape_val = float(sbcape.to("J/kg").m)
             _set("sbcape", sbcape_val)
             _set("sbcin",  float(sbcin.to("J/kg").m))
-        except Exception:
+        except Exception as e:
+            log.debug("SB CAPE/CIN failed: %s", e)
             _set("sbcape", None); _set("sbcin", None)
 
         lcl_m = None
@@ -814,7 +836,8 @@ class SoundingDialog(QDialog):
                 lcl_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
             )) - snd.height[0]
             _set("sblcl", lcl_m)
-        except Exception:
+        except Exception as e:
+            log.debug("SB LCL failed: %s", e)
             _set("sblcl", None)
 
         try:
@@ -822,7 +845,8 @@ class SoundingDialog(QDialog):
             _set("sblfc", float(np.interp(
                 lfc_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
             )) - snd.height[0])
-        except Exception:
+        except Exception as e:
+            log.debug("SB LFC failed: %s", e)
             _set("sblfc", None)
 
         try:
@@ -830,7 +854,8 @@ class SoundingDialog(QDialog):
             _set("sbel", float(np.interp(
                 el_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
             )) - snd.height[0])
-        except Exception:
+        except Exception as e:
+            log.debug("SB EL failed: %s", e)
             _set("sbel", None)
 
         # ── Mixed-layer parcel ────────────────────────────────────────────────
@@ -846,7 +871,8 @@ class SoundingDialog(QDialog):
             ml_cin_val  = float(mlcin.to("J/kg").m)
             _set("mlcape", ml_cape_val)
             _set("mlcin",  ml_cin_val)
-        except Exception:
+        except Exception as e:
+            log.debug("ML CAPE/CIN failed: %s", e)
             _set("mlcape", None); _set("mlcin", None)
 
         if ml_p is not None:
@@ -855,7 +881,8 @@ class SoundingDialog(QDialog):
                 _set("mllcl", float(np.interp(
                     mllcl_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                 )) - snd.height[0])
-            except Exception:
+            except Exception as e:
+                log.debug("ML LCL failed: %s", e)
                 _set("mllcl", None)
             if ml_parcel is not None:
                 try:
@@ -863,14 +890,16 @@ class SoundingDialog(QDialog):
                     _set("mllfc", float(np.interp(
                         mllfc_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                     )) - snd.height[0])
-                except Exception:
+                except Exception as e:
+                    log.debug("ML LFC failed: %s", e)
                     _set("mllfc", None)
                 try:
                     mlel_p, _ = mpcalc.el(pres, temp, dewp, ml_parcel)
                     _set("mlel", float(np.interp(
                         mlel_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                     )) - snd.height[0])
-                except Exception:
+                except Exception as e:
+                    log.debug("ML EL failed: %s", e)
                     _set("mlel", None)
         else:
             _set("mllcl", None); _set("mllfc", None); _set("mlel", None)
@@ -888,13 +917,15 @@ class SoundingDialog(QDialog):
             mucape_val = float(mucape.to("J/kg").m)
             _set("mucape", mucape_val)
             _set("mucin",  float(mucin.to("J/kg").m))
-        except Exception:
+        except Exception as e:
+            log.debug("MU parcel failed: %s", e)
             # Fallback for mucape only
             try:
                 mucape_fb, _ = mpcalc.most_unstable_cape_cin(pres, temp, dewp)
                 mucape_val = float(mucape_fb.to("J/kg").m)
                 _set("mucape", mucape_val)
-            except Exception:
+            except Exception as e2:
+                log.debug("MU CAPE fallback failed: %s", e2)
                 _set("mucape", None)
             _set("mucin", None)
 
@@ -904,7 +935,8 @@ class SoundingDialog(QDialog):
                 _set("mulcl", float(np.interp(
                     mulcl_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                 )) - snd.height[0])
-            except Exception:
+            except Exception as e:
+                log.debug("MU LCL failed: %s", e)
                 _set("mulcl", None)
             if mu_parcel is not None:
                 try:
@@ -912,14 +944,16 @@ class SoundingDialog(QDialog):
                     _set("mulfc", float(np.interp(
                         mulfc_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                     )) - snd.height[0])
-                except Exception:
+                except Exception as e:
+                    log.debug("MU LFC failed: %s", e)
                     _set("mulfc", None)
                 try:
                     muel_p, _ = mpcalc.el(pres, temp, dewp, mu_parcel)
                     _set("muel", float(np.interp(
                         muel_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
                     )) - snd.height[0])
-                except Exception:
+                except Exception as e:
+                    log.debug("MU EL failed: %s", e)
                     _set("muel", None)
         else:
             _set("mulcl", None); _set("mulfc", None); _set("muel", None)
@@ -930,8 +964,10 @@ class SoundingDialog(QDialog):
             t500 = float(np.interp(500, snd.pressure[::-1], snd.temperature[::-1]))
             z700 = float(np.interp(700, snd.pressure[::-1], snd.height[::-1]))
             z500 = float(np.interp(500, snd.pressure[::-1], snd.height[::-1]))
-            _set("lr75", (t700 - t500) / ((z500 - z700) / 1000.0), fmt="{:.1f}")
-        except Exception:
+            dz_km = (z500 - z700) / 1000.0
+            _set("lr75", (t700 - t500) / dz_km if dz_km != 0.0 else None, fmt="{:.1f}")
+        except Exception as e:
+            log.debug("lr75 failed: %s", e)
             _set("lr75", None)
 
         try:
@@ -939,20 +975,23 @@ class SoundingDialog(QDialog):
             t_sfc = snd.temperature[0]
             t_3km = float(np.interp(z_sfc + 3000.0, snd.height, snd.temperature))
             _set("lr03", (t_sfc - t_3km) / 3.0, fmt="{:.1f}")
-        except Exception:
+        except Exception as e:
+            log.debug("LR03 failed: %s", e)
             _set("lr03", None)
 
         # ── Surface θe ────────────────────────────────────────────────────────
         try:
             the = mpcalc.equivalent_potential_temperature(pres[0], temp[0], dewp[0])
             _set("sfc_the", float(the.to("K").m), fmt="{:.0f}")
-        except Exception:
+        except Exception as e:
+            log.debug("SFC θe failed: %s", e)
             _set("sfc_the", None)
 
         # ── Precipitable water ────────────────────────────────────────────────
         try:
             _set("pw", float(mpcalc.precipitable_water(pres, dewp).to("mm").m))
-        except Exception:
+        except Exception as e:
+            log.debug("precipitable water failed: %s", e)
             _set("pw", None)
 
         # ── Convective temperature ────────────────────────────────────────────
@@ -965,7 +1004,8 @@ class SoundingDialog(QDialog):
                 float(pres[0].to("hPa").m) / float(ccl_p.to("hPa").m)
             ) ** 0.2854
             _set("conv_t", conv_t_K - 273.15, fmt="{:.1f}")
-        except Exception:
+        except Exception as e:
+            log.debug("convective temperature failed: %s", e)
             _set("conv_t", None)
 
         # ── Storm motion + SRH ────────────────────────────────────────────────
@@ -1002,7 +1042,8 @@ class SoundingDialog(QDialog):
             _set("srh01",   srh01_val)
             _set("srh03",   float(srh03.to("m**2/s**2").m))
             _set("srh_500", float(srh_500.to("m**2/s**2").m))
-        except Exception:
+        except Exception as e:
+            log.debug("storm motion / SRH failed: %s", e)
             for k in ("srh01", "srh03", "srh_500"):
                 _set(k, None)
 
@@ -1022,7 +1063,8 @@ class SoundingDialog(QDialog):
                 _set(key, val)
                 if key == "shear06":
                     shear06_kt = val
-            except Exception:
+            except Exception as e:
+                log.debug("bulk shear %s failed: %s", key, e)
                 _set(key, None)
 
         # ── Storm-relative wind (mean per layer, RM-relative) ─────────────────
@@ -1042,7 +1084,8 @@ class SoundingDialog(QDialog):
                         _set(key, float(np.mean(np.sqrt(rel_u**2 + rel_v**2))) * 1.944)
                     else:
                         _set(key, None)
-                except Exception:
+                except Exception as e:
+                    log.debug("SRW %s failed: %s", key, e)
                     _set(key, None)
         else:
             for k in ("srw_500", "srw01", "srw03", "srw06"):
@@ -1060,7 +1103,8 @@ class SoundingDialog(QDialog):
                 _set("stp", max(0.0, stp), fmt="{:.2f}")
             else:
                 _set("stp", None)
-        except Exception:
+        except Exception as e:
+            log.debug("STP failed: %s", e)
             _set("stp", None)
 
         try:
@@ -1070,7 +1114,8 @@ class SoundingDialog(QDialog):
                 _set("scp", max(0.0, scp), fmt="{:.2f}")
             else:
                 _set("scp", None)
-        except Exception:
+        except Exception as e:
+            log.debug("SCP failed: %s", e)
             _set("scp", None)
 
         try:
@@ -1078,5 +1123,6 @@ class SoundingDialog(QDialog):
                 _set("ehi", (sbcape_val * srh01_val) / 160000.0, fmt="{:.2f}")
             else:
                 _set("ehi", None)
-        except Exception:
+        except Exception as e:
+            log.debug("EHI failed: %s", e)
             _set("ehi", None)

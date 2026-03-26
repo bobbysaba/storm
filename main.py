@@ -33,6 +33,8 @@ except ModuleNotFoundError as exc:
 
 # reference kept alive so the OS doesn't release the bound port
 _instance_lock_file = None
+# kept alive so the OS doesn't GC the handle before a fault occurs
+_fault_log_file = None
 
 
 def _acquire_instance_lock() -> bool:
@@ -336,13 +338,14 @@ def _warn_missing_files() -> None:
 
 # main function
 def main() -> None:
+    global _fault_log_file
     # try to configure fault handler
     try:
-        # open the log file
-        _fh = open("storm_fault.log", "a", buffering=1, encoding="utf-8")
+        # open the log file and keep it alive at module level so GC doesn't close it
+        _fault_log_file = open("storm_fault.log", "a", buffering=1, encoding="utf-8")
 
         # enable the fault handler
-        faulthandler.enable(file=_fh, all_threads=True)
+        faulthandler.enable(file=_fault_log_file, all_threads=True)
     # if that fails
     except Exception:
         # do nothing

@@ -16,14 +16,14 @@ from PyQt6.QtWidgets import (
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox, QSizePolicy, QPushButton, QGridLayout
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
 from ui.map_widget import MapWidget, TILES_PATH
 from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
-from ui.routing_controls import RoutingControls
+from ui.routing_controls import RoutingControls, _make_loc_icon
 from ui.nav_pill import NavPill
 from ui.deploy_locs_controls import DeployLocsControls
 from ui.satellite_controls import SatelliteControls
@@ -39,6 +39,7 @@ from ui.storm_cone_dialog import StormConeInputDialog
 from data.radar_fetcher import RadarFetcher
 from data.sounding_fetcher import SoundingFetcher
 from data.obs_sounding_fetcher import ObsSoundingFetcher
+from data.clamps_sounding_fetcher import ClampsSoundingFetcher
 from data.sounding_stations import build_stations_geojson
 from data.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
@@ -393,10 +394,6 @@ class MainWindow(QMainWindow):
 
         # ── vehicles ──────────────────────────────────────────────────────
         self.btn_vehicles = self._toolbar_toggle("VEHICLES", "Toggle vehicle panel", tb)
-        self.btn_follow = self._toolbar_toggle("FOLLOW", "Follow vehicle on map", tb)
-        self.btn_follow.toggled.connect(self._set_follow_mode)
-        if self._monitor:
-            self.btn_follow.hide()
 
         # ── previous deployment locations ─────────────────────────────────
         self.btn_prev_locs = self._toolbar_toggle(
@@ -580,21 +577,47 @@ class MainWindow(QMainWindow):
 
     def _init_statusbar(self):
         # ── Single bottom-left overlay pill — three rows ──────────────────
-        # Row 1: mode | [update] | coords | vehicle count
+        # Row 0: version anchor | [update indicator] | status message
+        # Row 1: mode | coords | vehicle count
         # Row 2: [GPS] | AWS | NET | date | time
-        # Row 3: status message (always present, blank when idle — keeps height stable)
         self._status_left = QWidget(self._map_container)
         self._status_left.setObjectName("statusOverlayLeft")
         pill = QVBoxLayout(self._status_left)
         pill.setContentsMargins(10, 5, 10, 5)
         pill.setSpacing(3)
 
-        # ── Row 1: positional / operational info ──────────────────────────
+        # ── Row 0: notifications / status message (always has content) ────
+        row0 = QHBoxLayout()
+        row0.setContentsMargins(0, 0, 0, 0)
+        row0.setSpacing(8)
+
+        version_label = QLabel(f"STORM v{config.VERSION}")
+        version_label.setStyleSheet(
+            "color: #4A5268; font-size: 10px; font-weight: 600; letter-spacing: 0.8px;"
+        )
+        row0.addWidget(version_label)
+
+        # in-ops update indicator — hidden until an update is detected
+        self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
+        self.update_indicator.setFlat(True)
+        self.update_indicator.setStyleSheet(
+            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+            "color: #00CFFF; background: transparent; border: none; padding: 0;"
+        )
+        self.update_indicator.setToolTip("Click to apply update and restart STORM")
+        self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_indicator.setVisible(False)
+        self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
+        row0.addWidget(self.update_indicator)
+
         self.status_msg_label = QLabel("")
         self.status_msg_label.setStyleSheet(
             "color: #9BA3B2; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
         )
+        row0.addWidget(self.status_msg_label)
+        row0.addStretch()
 
+        # ── Row 1: positional / operational info ──────────────────────────
         row1 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(8)
@@ -625,25 +648,10 @@ class MainWindow(QMainWindow):
             )
         row1.addWidget(mode_badge)
 
-        # in-ops update indicator — hidden until an update is detected
-        self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
-        self.update_indicator.setFlat(True)
-        self.update_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-            "color: #00CFFF; background: transparent; border: none; padding: 0;"
-        )
-        self.update_indicator.setToolTip("Click to apply update and restart STORM")
-        self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_indicator.setVisible(False)
-        self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
-        row1.addWidget(self.update_indicator)
-
         row1.addWidget(self._status_divider())
         row1.addWidget(self.coord_label)
         row1.addWidget(self._status_divider())
         row1.addWidget(self.vehicle_count_label)
-        row1.addWidget(self._status_divider())
-        row1.addWidget(self.status_msg_label)
         row1.addStretch()
 
         # ── Row 2: connection indicators + clock ──────────────────────────
@@ -696,6 +704,7 @@ class MainWindow(QMainWindow):
         self.hazard_indicator = QLabel("● DATA OFFLINE")
         self.hazard_indicator.setVisible(False)
 
+        pill.addLayout(row0)
         pill.addLayout(row1)
         pill.addLayout(row2)
 
@@ -838,6 +847,18 @@ class MainWindow(QMainWindow):
                 sl.width(), sl.height()
             )
             self._status_left.raise_()
+
+        # re-center button — bottom-right, above MapLibre zoom controls (~70px tall)
+        if hasattr(self, "btn_recenter"):
+            _ZOOM_CTRL_H = 70   # approximate height of MapLibre NavigationControl
+            _GAP = 6
+            btn_w = self.btn_recenter.width()
+            btn_h = self.btn_recenter.height()
+            self.btn_recenter.move(
+                r.width() - btn_w - MARGIN,
+                r.height() - _ZOOM_CTRL_H - _GAP - btn_h,
+            )
+            self.btn_recenter.raise_()
 
 
     def _start_layout_pulse(self):
@@ -1163,14 +1184,17 @@ class MainWindow(QMainWindow):
         self._radar_fetcher.set_products(["N0B", "N0U"])
 
         # ── sounding ──────────────────────────────────────────────────────
-        self._sounding_fetcher     = SoundingFetcher(self)
-        self._obs_sounding_fetcher = ObsSoundingFetcher(self)
-        self._sounding_dialog      = SoundingDialog(self)
+        self._sounding_fetcher      = SoundingFetcher(self)
+        self._obs_sounding_fetcher  = ObsSoundingFetcher(self)
+        self._clamps_sounding_fetcher = ClampsSoundingFetcher(self)
+        self._sounding_dialog       = SoundingDialog(self)
 
         self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
         self._obs_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._obs_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+        self._clamps_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
+        self._clamps_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
 
         self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
         self.map_widget.obs_sounding_station_clicked.connect(self._on_obs_station_click)
@@ -1706,17 +1730,23 @@ class MainWindow(QMainWindow):
             self.map_widget.set_route_pick_mode(False)
 
     def _on_sounding_mode_changed(self, mode: str):
-        """Called when the user switches between HRRR and OBS in the sub-bar."""
+        """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
         if not self.btn_sounding.isChecked():
             return
         if mode == "hrrr":
             self.map_widget.set_obs_sounding_mode(False)
             self.map_widget.clear_sounding_stations()
             self.map_widget.set_sounding_mode(True)
-        else:  # obs
+        elif mode == "obs":
             self.map_widget.set_sounding_mode(False)
             self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
             self.map_widget.set_obs_sounding_mode(True)
+        else:  # nssl
+            self.map_widget.set_sounding_mode(False)
+            self.map_widget.set_obs_sounding_mode(False)
+            self.map_widget.clear_sounding_stations()
+            self.status_msg_label.setText("Fetching NSSL CLAMPS soundings…")
+            self._clamps_sounding_fetcher.fetch()
 
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
@@ -2500,6 +2530,29 @@ class MainWindow(QMainWindow):
             self._chk_station_plots.isChecked()
         ))
 
+        # ── Re-center button (floating, above MapLibre zoom controls) ─────────
+        self.btn_recenter = QToolButton(self._map_container)
+        self.btn_recenter.setIcon(_make_loc_icon(18))
+        self.btn_recenter.setIconSize(QSize(18, 18))
+        self.btn_recenter.setToolTip("Re-center on vehicle")
+        self.btn_recenter.setFixedSize(32, 32)
+        self.btn_recenter.setStyleSheet("""
+            QToolButton {
+                background: #1E2433;
+                border: 1px solid #2A3045;
+                border-radius: 4px;
+            }
+            QToolButton:hover {
+                background: #252D42;
+                border-color: #4A9EFF;
+            }
+            QToolButton:pressed {
+                background: #1A1F30;
+            }
+        """)
+        self.btn_recenter.clicked.connect(self._on_recenter_clicked)
+        self.btn_recenter.hide()
+
     # ── Deployment Locations ──────────────────────────────────────────────────
 
     def _apply_deploy_locs_filter_on_show(self, visible: bool):
@@ -2564,6 +2617,7 @@ class MainWindow(QMainWindow):
         self._refresh_vehicle_panel()
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
         self._refresh_vehicle_detail()
+        self._update_recenter_btn_visibility()
         if self._follow_mode and obs.vehicle_id == self._follow_target_id():
             self.map_widget.follow_move(obs.lat, obs.lon)
 
@@ -2580,14 +2634,28 @@ class MainWindow(QMainWindow):
     def _set_follow_mode(self, enabled: bool) -> None:
         self._follow_mode = enabled
         self.map_widget.set_follow(enabled)
+        self._update_recenter_btn_visibility()
+
+    def _on_recenter_clicked(self) -> None:
+        """Re-engage follow mode from the floating re-center button."""
+        self._set_follow_mode(True)
+        if self._follow_target_id():
+            target = self._vehicles.get(self._follow_target_id())
+            if target:
+                self.map_widget.follow_move(target.lat, target.lon)
+
+    def _update_recenter_btn_visibility(self) -> None:
+        if not hasattr(self, "btn_recenter"):
+            return
+        visible = not self._follow_mode and self._follow_target_id() is not None
+        self.btn_recenter.setVisible(visible)
 
     def _on_user_dragged(self) -> None:
         """Called when JS detects a map drag — disengage follow mode."""
         if self._follow_mode:
             self._follow_mode = False
-            self.btn_follow.blockSignals(True)
-            self.btn_follow.setChecked(False)
-            self.btn_follow.blockSignals(False)
+            self.map_widget.set_follow(False)
+            self._update_recenter_btn_visibility()
 
     def _maybe_seed_initial_radar_site(self, obs: Observation) -> None:
         if not self._radar_auto_site_pending or self._monitor:
@@ -2618,6 +2686,7 @@ class MainWindow(QMainWindow):
         self._refresh_vehicle_panel()
         self._refresh_vehicle_detail()
         self._sync_vehicle_detail_visibility()
+        self._update_recenter_btn_visibility()
 
     def _obs_age_minutes(self, obs: Observation) -> float:
         age = datetime.now(timezone.utc) - obs.timestamp

@@ -13,7 +13,7 @@ class SoundingControls(QWidget):
         [OBS]   — radiosonde station dots appear; click one to fetch observed data
     """
 
-    mode_changed   = pyqtSignal(str)   # "hrrr" or "obs"
+    mode_changed   = pyqtSignal(str)   # "hrrr", "obs", or "nssl"
     content_resized = pyqtSignal()     # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
@@ -45,15 +45,19 @@ class SoundingControls(QWidget):
 
         self._btn_hrrr = self._btn("HRRR")
         self._btn_obs  = self._btn("OBS")
+        self._btn_nssl = self._btn("NSSL")
 
         self._btn_hrrr.setChecked(True)   # default source
 
         self._btn_hrrr.toggled.connect(lambda on: self._on_mode_toggled("hrrr", on))
         self._btn_obs.toggled.connect( lambda on: self._on_mode_toggled("obs",  on))
+        self._btn_nssl.toggled.connect(lambda on: self._on_mode_toggled("nssl", on))
 
         row.addWidget(self._btn_hrrr)
         row.addWidget(self._vdiv())
         row.addWidget(self._btn_obs)
+        row.addWidget(self._vdiv())
+        row.addWidget(self._btn_nssl)
         row.addStretch(1)
 
         col.addWidget(btn_row)
@@ -79,7 +83,7 @@ class SoundingControls(QWidget):
             # Prevent both buttons from being unchecked simultaneously
             if self._active_mode == mode:
                 # Re-check the button that was just unchecked
-                btn = self._btn_hrrr if mode == "hrrr" else self._btn_obs
+                btn = {"hrrr": self._btn_hrrr, "obs": self._btn_obs, "nssl": self._btn_nssl}[mode]
                 btn.blockSignals(True)
                 btn.setChecked(True)
                 btn.blockSignals(False)
@@ -88,10 +92,15 @@ class SoundingControls(QWidget):
         self._active_mode = mode
 
         # Enforce mutual exclusivity
-        other_btn = self._btn_obs if mode == "hrrr" else self._btn_hrrr
-        other_btn.blockSignals(True)
-        other_btn.setChecked(False)
-        other_btn.blockSignals(False)
+        for btn, btn_mode in (
+            (self._btn_hrrr, "hrrr"),
+            (self._btn_obs,  "obs"),
+            (self._btn_nssl, "nssl"),
+        ):
+            if btn_mode != mode:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
 
         self.mode_changed.emit(mode)
 
@@ -125,12 +134,13 @@ class SoundingControls(QWidget):
     def reset_to_hrrr(self):
         """Silently reset to HRRR mode (called when SOUNDING button is deactivated)."""
         self._active_mode = "hrrr"
-        self._btn_hrrr.blockSignals(True)
-        self._btn_obs.blockSignals(True)
+        for btn in (self._btn_hrrr, self._btn_obs, self._btn_nssl):
+            btn.blockSignals(True)
         self._btn_hrrr.setChecked(True)
         self._btn_obs.setChecked(False)
-        self._btn_hrrr.blockSignals(False)
-        self._btn_obs.blockSignals(False)
+        self._btn_nssl.setChecked(False)
+        for btn in (self._btn_hrrr, self._btn_obs, self._btn_nssl):
+            btn.blockSignals(False)
 
     @property
     def active_mode(self) -> str:

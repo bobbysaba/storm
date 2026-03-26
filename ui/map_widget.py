@@ -2227,7 +2227,7 @@ def build_map_html() -> str:
       src.setData(JSON.parse(geojsonStr));
       // Fit map to route bounds
       try {{
-        var coords = JSON.parse(geojsonStr).geometry.coordinates;
+        var coords = JSON.parse(geojsonStr).coordinates;
         if (coords && coords.length > 1) {{
           var lons = coords.map(function(c){{return c[0];}});
           var lats = coords.map(function(c){{return c[1];}});

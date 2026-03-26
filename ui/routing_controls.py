@@ -129,6 +129,9 @@ class RoutingControls(QWidget):
         self._off_route_count: int = 0
         self._rerouting: bool = False
 
+        # Route fetch in-flight guard (prevents duplicate concurrent requests)
+        self._fetching_route: bool = False
+
         # "origin" while picking start, "dest" while picking destination, "" = idle
         self._pick_mode: str = ""
 
@@ -368,6 +371,7 @@ class RoutingControls(QWidget):
             self._dest_lat = lat
             self._dest_lon = lon
             self._dest_input.setText(f"{lat:.5f}, {lon:.5f}")
+            self._dest_input.setStyleSheet(_STYLE_MANUAL)
             self._btn_dest_pick.blockSignals(True)
             self._btn_dest_pick.setChecked(False)
             self._btn_dest_pick.blockSignals(False)
@@ -536,6 +540,9 @@ class RoutingControls(QWidget):
             self._fetcher.geocode(address, is_origin=False)
 
     def _start_route_fetch(self):
+        if self._fetching_route:
+            return
+        self._fetching_route = True
         self._set_status("Fetching route…")
         self._btn_go.setEnabled(False)
         self._fetcher.fetch_route(
@@ -570,6 +577,7 @@ class RoutingControls(QWidget):
     def _on_route_ready(self, result: RouteResult):
         self._last_result = result
         self._rerouting = False
+        self._fetching_route = False
         self._btn_go.setEnabled(True)
         self._set_status("")
         self._btn_clear.setEnabled(True)
@@ -582,6 +590,8 @@ class RoutingControls(QWidget):
     def _on_fetch_error(self, msg: str):
         self._geocoding_origin = False
         self._geocoding_dest   = False
+        self._fetching_route   = False
+        self._rerouting        = False
         self._update_go_enabled()
         self._set_status(msg[:60])
 
@@ -594,6 +604,9 @@ class RoutingControls(QWidget):
         self._min_maneuver_dist = float("inf")
         self._off_route_count   = 0
         self._rerouting         = False
+        self._geocoding_origin  = False
+        self._geocoding_dest    = False
+        self._fetching_route    = False
         self._dest_input.clear()
         self._dest_input.setStyleSheet(_STYLE_MANUAL)
         self._summary_label.setVisible(False)
@@ -654,7 +667,13 @@ class RoutingControls(QWidget):
         # ── Arrival: only the arrive step remains ─────────────────────────────
         if self._steps_list.count() == 1:
             arrive_loc = self._route_steps[-1].location
-            if _haversine_m(lat, lon, arrive_loc[0], arrive_loc[1]) < _ARRIVE_M:
+            dist_to_dest = _haversine_m(lat, lon, arrive_loc[0], arrive_loc[1])
+            step = self._route_steps[self._first_unfinished]
+            item = self._steps_list.item(0)
+            if item:
+                item.setText(f"{step.icon}  {step.instruction}  —  {fmt_distance(dist_to_dest)}")
+            self._emit_nav_state()
+            if dist_to_dest < _ARRIVE_M:
                 self._steps_list.takeItem(0)
                 self.nav_updated.emit("You have arrived.", "")
                 self._set_status("Arrived!")
