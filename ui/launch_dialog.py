@@ -6,12 +6,14 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
+    QDateTimeEdit,
 )
-from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize
+from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize, QDateTime
 from PyQt6.QtGui import QPixmap, QPainter, QIcon
 
 import config as _config
@@ -556,7 +558,7 @@ class LaunchDialog(QDialog):
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
         self._mode_btns: dict[str, QPushButton] = {}
-        for key, label in (("vehicle", "VEHICLE"), ("monitor", "MONITOR"), ("viewer", "VIEWER")):
+        for key, label in (("vehicle", "VEHICLE"), ("monitor", "MONITOR"), ("viewer", "VIEWER"), ("archive", "ARCHIVE")):
             btn = QPushButton(label)
             btn.setStyleSheet(_MODE_BTN_STYLE)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -566,7 +568,7 @@ class LaunchDialog(QDialog):
         root.addLayout(mode_row)
         root.addSpacing(12)
 
-        # Passphrase row (hidden in viewer mode)
+        # Passphrase row (hidden in viewer mode; shown for archive mode)
         self._passphrase_row = QWidget()
         pw_layout = QVBoxLayout(self._passphrase_row)
         pw_layout.setContentsMargins(0, 0, 0, 0)
@@ -579,6 +581,38 @@ class LaunchDialog(QDialog):
         self._passphrase_input.setPlaceholderText("Enter passphrase")
         pw_layout.addWidget(self._passphrase_input)
         root.addWidget(self._passphrase_row)
+
+        # ── Archive date/time picker (shown only in archive mode) ──────────────
+        self._archive_section = QWidget()
+        av_layout = QVBoxLayout(self._archive_section)
+        av_layout.setContentsMargins(0, 0, 0, 0)
+        av_layout.setSpacing(6)
+
+        arc_lbl = QLabel("ARCHIVE START TIME (UTC)")
+        arc_lbl.setObjectName("fieldLabel")
+        av_layout.addWidget(arc_lbl)
+
+        self._archive_dt_edit = QDateTimeEdit()
+        self._archive_dt_edit.setDisplayFormat("yyyy-MM-dd  HH:mm:ss")
+        self._archive_dt_edit.setCalendarPopup(True)
+        # Default to yesterday at 20:00 UTC as a sensible starting point.
+        now_utc = datetime.now(timezone.utc)
+        yesterday = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
+        self._archive_dt_edit.setDateTime(
+            QDateTime(
+                yesterday.year, yesterday.month, yesterday.day,
+                yesterday.hour, yesterday.minute, yesterday.second,
+            )
+        )
+        av_layout.addWidget(self._archive_dt_edit)
+
+        arc_hint = QLabel("All data products will replay from this UTC time.")
+        arc_hint.setObjectName("hint")
+        arc_hint.setWordWrap(True)
+        av_layout.addWidget(arc_hint)
+
+        self._archive_section.setVisible(False)
+        root.addWidget(self._archive_section)
 
         # Apply saved mode
         self._select_mode(saved.get("mode", "vehicle"))
@@ -746,11 +780,27 @@ class LaunchDialog(QDialog):
         for key, btn in self._mode_btns.items():
             btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if key == mode else _MODE_BTN_STYLE)
         vehicle_mode = (mode == "vehicle")
-        viewer_mode = (mode == "viewer")
+        viewer_mode  = (mode == "viewer")
+        archive_mode = (mode == "archive")
+
         self._vehicle_section.setVisible(vehicle_mode)
+        # Archive: show passphrase (for server auth) but hide vehicle fields
         self._passphrase_row.setVisible(not viewer_mode)
+        # Archive-specific date/time picker; data-on-launch hidden in archive mode
+        self._archive_section.setVisible(archive_mode)
+        if hasattr(self, "_data_section"):
+            self._data_toggle_btn.setVisible(not archive_mode)
+            if archive_mode and self._data_section.isVisible():
+                self._data_section.setVisible(False)
+                self._data_toggle_btn.setText("▸  DATA ON LAUNCH")
+
         if not viewer_mode:
-            lbl = "VEHICLE PASSPHRASE" if vehicle_mode else "MONITOR PASSPHRASE"
+            if archive_mode:
+                lbl = "ARCHIVE PASSPHRASE"
+            elif vehicle_mode:
+                lbl = "VEHICLE PASSPHRASE"
+            else:
+                lbl = "MONITOR PASSPHRASE"
             self._passphrase_label.setText(lbl)
         self._passphrase_input.clear()
         if self.isVisible():
@@ -860,14 +910,16 @@ class LaunchDialog(QDialog):
     def _on_launch(self):
         mode = getattr(self, "_selected_mode", "vehicle")
 
-        # Validate passphrase for vehicle and monitor modes
-        if mode != "viewer":
+        # Validate passphrase for vehicle, monitor, and archive modes
+        if mode not in ("viewer",):
             passphrase = self._passphrase_input.text()
             entered_hash = hashlib.sha256(passphrase.encode()).hexdigest()
-            expected_hash = (
-                _config.VEHICLE_PASSPHRASE_HASH if mode == "vehicle"
-                else _config.MONITOR_PASSPHRASE_HASH
-            )
+            if mode == "vehicle":
+                expected_hash = _config.VEHICLE_PASSPHRASE_HASH
+            elif mode == "archive":
+                expected_hash = _config.MONITOR_PASSPHRASE_HASH  # reuse monitor hash
+            else:
+                expected_hash = _config.MONITOR_PASSPHRASE_HASH
             if entered_hash != expected_hash:
                 QMessageBox.warning(
                     self,
@@ -896,7 +948,9 @@ class LaunchDialog(QDialog):
         s = QSettings()
         s.setValue("launch/vehicle_id",     self._vid_input.text().strip())
         s.setValue("launch/data_dir",       self._dir_input.text().strip())
-        s.setValue("launch/mode",           getattr(self, "_selected_mode", "vehicle"))
+        mode = getattr(self, "_selected_mode", "vehicle")
+        # Don't persist archive mode as the default (it needs explicit selection).
+        s.setValue("launch/mode", mode if mode != "archive" else "viewer")
         s.setValue("launch/vehicle_icon",   getattr(self, "_selected_icon", "car"))
         layers = getattr(self, "_selected_layers", set())
         s.setValue("launch/auto_spc",   "spc"   in layers)
@@ -927,28 +981,25 @@ class LaunchDialog(QDialog):
     def viewer(self) -> bool:
         return getattr(self, "_selected_mode", "vehicle") == "viewer"
 
+    def archive(self) -> bool:
+        return getattr(self, "_selected_mode", "vehicle") == "archive"
+
+    def archive_start_time(self) -> "datetime | None":
+        """UTC start time chosen in the archive date/time picker, or None."""
+        if not self.archive():
+            return None
+        qt_dt = self._archive_dt_edit.dateTime()
+        return datetime(
+            qt_dt.date().year(),
+            qt_dt.date().month(),
+            qt_dt.date().day(),
+            qt_dt.time().hour(),
+            qt_dt.time().minute(),
+            qt_dt.time().second(),
+            tzinfo=timezone.utc,
+        )
+
     def vehicle_icon(self) -> str:
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return "car"
         return getattr(self, "_selected_icon", "car")
-
-    def auto_spc(self) -> bool:
-        return "spc" in getattr(self, "_selected_layers", set())
-
-    def auto_nws(self) -> bool:
-        return "nws" in getattr(self, "_selected_layers", set())
-
-    def auto_radar(self) -> bool:
-        return "radar" in getattr(self, "_selected_layers", set())
-
-    def auto_satellite(self) -> str:
-        return getattr(self, "_selected_satellite", "")
-
-    def auto_obs_ok(self) -> bool:
-        return "ok" in getattr(self, "_selected_obs", set())
-
-    def auto_obs_wtm(self) -> bool:
-        return "wtm" in getattr(self, "_selected_obs", set())
-
-    def auto_obs_ks(self) -> bool:
-        return "ks" in getattr(self, "_selected_obs", set())

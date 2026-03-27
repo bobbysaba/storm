@@ -64,6 +64,12 @@ MONITOR_PASSPHRASE_HASH = "3aa29dabcf48a07aae0fd782da7c48705f82614eaa0e0fcf02bbb
 # accent color
 ACCENT_COLOR = "#00CFFF"
 
+# ── Archive mode ───────────────────────────────────────────────────────────────
+# Base URL for the server hosting MQTT archive JSONL files.
+# Files are expected at: {ARCHIVE_MQTT_BASE_URL}/{YYYY-MM-DD}/{topic}.jsonl
+# Leave blank to disable MQTT replay in archive mode.
+ARCHIVE_MQTT_BASE_URL = ""
+
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 

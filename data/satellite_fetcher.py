@@ -1,9 +1,15 @@
 # data/satellite_fetcher.py
-# Polls IEM GOES-East WMS for sector metadata and downloads satellite imagery
-# frames as single GetMap PNG images, caching up to MAX_FRAMES per mode.
-# IEM's goes_east.cgi dynamically serves the current operational GOES-East
-# satellite (GOES-19 as of 2025), so no satellite-specific URL changes are needed.
-# Mirrors the radar caching model so the UI can offer identical playback controls.
+# Polls satellite WMS services for imagery metadata and MESO sector bboxes.
+#
+# CONUS mode — nowCOAST WMS (nowcoast.noaa.gov):
+#   Serves GOES-19 East + GOES-18 West composite via a standard WMS tile
+#   source with a full TIME dimension (~90 frames, 5-min cadence).  Frames are
+#   represented as time-only SatFrame objects (b64=''); the map renders them
+#   via a MapLibre raster tile source instead of injecting a pre-fetched PNG.
+#
+# MESO modes — IEM WMS (mesonet.agron.iastate.edu):
+#   IEM exposes per-sector bboxes in its GetCapabilities but has no TIME
+#   dimension, so MESO frames are still fetched as full PNGs and cached.
 
 import base64
 import logging
@@ -18,20 +24,20 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-IEM_WMS  = "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes_east.cgi"
-CAPS_URL = IEM_WMS + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities"
+IEM_WMS       = "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes_east.cgi"
+IEM_CAPS_URL  = IEM_WMS + "?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities"
 
-CAPS_POLL_MS  = 5 * 60 * 1000   # 5 min — matches CONUS scan cadence
-CONUS_POLL_MS = 5 * 60 * 1000
-MESO_POLL_MS  =      60 * 1000  # 1 min — matches MESO scan cadence
+NOWCOAST_WMS      = "https://nowcoast.noaa.gov/geoserver/satellite/wms"
+NOWCOAST_CAPS_URL = NOWCOAST_WMS + "?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities"
+
+CAPS_POLL_MS = 5 * 60 * 1000   # 5 min — matches CONUS scan cadence
+MESO_POLL_MS =      60 * 1000  # 1 min — matches MESO scan cadence
 
 MAX_FRAMES      = 10
 REQUEST_TIMEOUT = 20
 
-# Fixed CONUS image extent (west, south, east, north) and pixel size.
-# Covers the GOES-East CONUS domain at a 2:1 aspect ratio.
-CONUS_BBOX   = [-126.0, 22.0, -64.0, 52.0]
-CONUS_W, CONUS_H = 1600, 800
+# Fixed CONUS image extent — used as nominal bbox for time-only SatFrames.
+CONUS_BBOX = [-126.0, 22.0, -64.0, 52.0]
 
 # MESO images are square (sector ≈ 1000×1000 km)
 MESO_W, MESO_H = 2048, 2048
@@ -40,82 +46,91 @@ MESO_W, MESO_H = 2048, 2048
 @dataclass
 class SatFrame:
     timestamp: datetime
-    b64:       str
-    bbox:      list   # [west, south, east, north]
+    b64:       str          # empty string for CONUS (tile-based); PNG for MESO
+    bbox:      list         # [west, south, east, north]
 
     @property
     def time_str(self) -> str:
         return self.timestamp.strftime("%H:%MZ")
 
+    @property
+    def time_iso(self) -> str:
+        """ISO 8601 UTC string for WMS TIME parameter."""
+        return self.timestamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
 
 class SatelliteFetcher(QObject):
     """
-    Background poller for GOES-East visible satellite imagery.
+    Background poller for satellite imagery.
 
     Signals:
         meso_sectors_updated(object)  — {1: bbox_or_None, 2: bbox_or_None}
-        frames_updated(str, object)   — (mode, list[SatFrame]) when a new frame
-                                        is added to the cache for that mode.
+        frames_updated(str, object)   — (mode, list[SatFrame]) when the cache
+                                        changes for that mode.
             mode is one of "conus", "meso1", "meso2".
+
+    CONUS frames have b64='' — the map uses a MapLibre raster tile source
+    pointed at nowCOAST WMS with the frame's TIME value.
+    MESO frames have b64 set to the PNG data.
     """
 
     meso_sectors_updated = pyqtSignal(object)        # dict
     frames_updated       = pyqtSignal(str, object)   # mode, list[SatFrame]
+    fetch_error          = pyqtSignal(str)           # error message
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._meso_bboxes: dict[int, dict | None] = {1: None, 2: None}
         self._frames:      dict[str, list]         = {"conus": [], "meso1": [], "meso2": []}
-        self._layer_times: dict[str, list[str]]    = {}
         self._lock = threading.Lock()
 
         # per-key inflight guard so parallel polls don't stack up
         self._inflight: dict[str, bool] = {
-            "caps": False, "conus": False, "meso1": False, "meso2": False,
-            "conus_hist": False, "meso1_hist": False, "meso2_hist": False
+            "caps": False, "meso1": False, "meso2": False,
+            "meso1_hist": False, "meso2_hist": False,
         }
 
-        self._caps_timer  = QTimer(self)
-        self._conus_timer = QTimer(self)
-        self._meso_timer  = QTimer(self)
+        self._caps_timer = QTimer(self)
+        self._meso_timer = QTimer(self)
 
         self._caps_timer.timeout.connect(self._poll_caps)
-        self._conus_timer.timeout.connect(self._poll_conus)
         self._meso_timer.timeout.connect(self._poll_meso)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start(self):
         self._caps_timer.start(CAPS_POLL_MS)
-        self._conus_timer.start(CONUS_POLL_MS)
         self._meso_timer.start(MESO_POLL_MS)
 
         # stagger initial fetches to avoid simultaneous TLS handshakes
         QTimer.singleShot(2_000, self._poll_caps)
-        QTimer.singleShot(4_000, self._poll_conus)
         log.info("SatelliteFetcher: started")
 
     def stop(self):
-        for t in (self._caps_timer, self._conus_timer, self._meso_timer):
+        for t in (self._caps_timer, self._meso_timer):
             t.stop()
 
     def fetch_now(self, mode: str = ""):
         """Trigger an immediate fetch — pass mode="conus"/"meso1"/"meso2" or
         empty string to refresh everything."""
-        targets = [mode] if mode else ["caps", "conus", "meso"]
+        targets = [mode] if mode else ["caps", "meso"]
         for m in targets:
-            if m == "caps":
+            if m in ("caps", "conus"):
                 QTimer.singleShot(0, self._poll_caps)
-            elif m == "conus":
-                QTimer.singleShot(0, self._poll_conus)
             elif m in ("meso", "meso1", "meso2"):
                 QTimer.singleShot(0, self._poll_meso)
 
     def fetch_history(self, mode: str, count: int = MAX_FRAMES):
-        """Backfill recent frames for a mode using WMS time positions."""
+        """Backfill recent frames for a mode.
+        CONUS: triggers a caps refresh (nowCOAST TIME list is the history).
+        MESO:  fetches recent frames from IEM."""
         mode = (mode or "").strip().lower()
         if mode not in ("conus", "meso1", "meso2"):
+            return
+        if mode == "conus":
+            # CONUS history comes from nowCOAST caps TIME dimension
+            self._spawn("caps", self._worker_caps)
             return
         count = max(1, min(int(count), MAX_FRAMES))
         key = f"{mode}_hist"
@@ -130,9 +145,6 @@ class SatelliteFetcher(QObject):
 
     def _poll_caps(self):
         self._spawn("caps", self._worker_caps)
-
-    def _poll_conus(self):
-        self._spawn("conus", self._worker_conus)
 
     def _poll_meso(self):
         self._spawn("meso1", lambda: self._worker_meso(1))
@@ -151,6 +163,7 @@ class SatelliteFetcher(QObject):
                 fn()
             except Exception as exc:
                 log.warning("SatelliteFetcher[%s]: %s", key, exc)
+                self.fetch_error.emit(str(exc))
             finally:
                 with self._lock:
                     self._inflight[key] = False
@@ -159,30 +172,39 @@ class SatelliteFetcher(QObject):
     # ── Workers ───────────────────────────────────────────────────────────────
 
     def _worker_caps(self):
-        with urlopen(CAPS_URL, timeout=REQUEST_TIMEOUT) as resp:
-            xml_bytes = resp.read()
-        root        = ET.fromstring(xml_bytes.decode("utf-8", errors="replace"))
-        sectors     = _parse_meso_bboxes(root)
-        layer_times = _parse_layer_times(root)
+        # ── IEM caps: MESO sector bboxes ──────────────────────────────────────
+        with urlopen(IEM_CAPS_URL, timeout=REQUEST_TIMEOUT) as resp:
+            iem_xml = resp.read()
+        iem_root = ET.fromstring(iem_xml.decode("utf-8", errors="replace"))
+        sectors  = _parse_meso_bboxes(iem_root)
         with self._lock:
             self._meso_bboxes = sectors
-            self._layer_times = layer_times
         self.meso_sectors_updated.emit(sectors)
         log.debug(
-            "SatelliteFetcher: caps MESO-1=%s  MESO-2=%s",
+            "SatelliteFetcher: IEM caps MESO-1=%s  MESO-2=%s",
             sectors.get(1), sectors.get(2),
         )
 
-    def _worker_conus(self):
-        w, s, e, n = CONUS_BBOX
-        url = _wms_url("conus_ch02", w, s, e, n, CONUS_W, CONUS_H)
-        b64 = self._fetch_image(url)
-        if b64:
-            self._push_frame("conus", SatFrame(
-                timestamp=datetime.now(timezone.utc),
-                b64=b64,
-                bbox=list(CONUS_BBOX),
-            ))
+        # ── nowCOAST caps: CONUS time list ────────────────────────────────────
+        try:
+            with urlopen(NOWCOAST_CAPS_URL, timeout=REQUEST_TIMEOUT) as resp:
+                nc_xml = resp.read()
+            nc_root = ET.fromstring(nc_xml.decode("utf-8", errors="replace"))
+            times   = _parse_nowcoast_times(nc_root)
+            if times:
+                frames = [
+                    SatFrame(timestamp=_parse_time(t), b64="", bbox=list(CONUS_BBOX))
+                    for t in times[-MAX_FRAMES:]
+                ]
+                with self._lock:
+                    self._frames["conus"] = frames
+                self.frames_updated.emit("conus", list(frames))
+                log.debug(
+                    "SatelliteFetcher: nowCOAST CONUS times=%d (latest: %s)",
+                    len(times), times[-1],
+                )
+        except Exception as exc:
+            log.warning("SatelliteFetcher: nowCOAST caps error: %s", exc)
 
     def _worker_meso(self, idx: int):
         with self._lock:
@@ -191,7 +213,7 @@ class SatelliteFetcher(QObject):
             return
         w = bbox["west"]; s = bbox["south"]; e = bbox["east"]; n = bbox["north"]
         layer = f"mesoscale-{idx}_ch02"
-        url = _wms_url(layer, w, s, e, n, MESO_W, MESO_H)
+        url = _iem_wms_url(layer, w, s, e, n, MESO_W, MESO_H)
         b64 = self._fetch_image(url)
         if b64:
             self._push_frame(f"meso{idx}", SatFrame(
@@ -201,48 +223,26 @@ class SatelliteFetcher(QObject):
             ))
 
     def _worker_history(self, mode: str, count: int):
-        layer = "conus_ch02" if mode == "conus" else f"mesoscale-{1 if mode == 'meso1' else 2}_ch02"
+        """Backfill MESO frames (CONUS history is handled via _worker_caps)."""
+        idx   = 1 if mode == "meso1" else 2
         with self._lock:
-            times = list(self._layer_times.get(layer, []))
-            bbox  = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+            bbox = self._meso_bboxes.get(idx)
 
-        # Caps may not have arrived yet — fetch them now so we have time positions.
-        if not times:
+        if not bbox:
+            # Caps may not have arrived yet — fetch them first.
             try:
                 self._worker_caps()
             except Exception as exc:
                 log.warning("SatelliteFetcher: caps fetch in history worker failed: %s", exc)
             with self._lock:
-                times = list(self._layer_times.get(layer, []))
-                bbox  = CONUS_BBOX if mode == "conus" else self._meso_bboxes.get(1 if mode == "meso1" else 2)
+                bbox = self._meso_bboxes.get(idx)
 
-        if not times or not bbox:
-            # fall back to a single fetch if we still don't have time positions
-            if mode == "conus":
-                self._worker_conus()
-            else:
-                self._worker_meso(1 if mode == "meso1" else 2)
+        if not bbox:
+            self._worker_meso(idx)
             return
 
-        times = times[-count:]
-        w = bbox[0] if mode == "conus" else bbox["west"]
-        s = bbox[1] if mode == "conus" else bbox["south"]
-        e = bbox[2] if mode == "conus" else bbox["east"]
-        n = bbox[3] if mode == "conus" else bbox["north"]
-        width, height = (CONUS_W, CONUS_H) if mode == "conus" else (MESO_W, MESO_H)
-
-        # Fetch oldest→newest so the cache builds in chronological order.
-        for tstr in times:
-            url = _wms_url(layer, w, s, e, n, width, height, time_str=tstr)
-            b64 = self._fetch_image(url)
-            if not b64:
-                continue
-            ts = _parse_time(tstr)
-            self._push_frame(mode, SatFrame(
-                timestamp=ts,
-                b64=b64,
-                bbox=[w, s, e, n],
-            ))
+        # IEM has no TIME dimension, so just fetch the latest frame as a fallback.
+        self._worker_meso(idx)
 
     def _fetch_image(self, url: str) -> str:
         """Download a WMS GetMap PNG and return it base64-encoded, or "" on error."""
@@ -255,7 +255,7 @@ class SatelliteFetcher(QObject):
                     return ""
                 data = resp.read()
             return base64.b64encode(data).decode("ascii")
-        except (HTTPError, URLError, Exception) as exc:
+        except Exception as exc:
             log.warning("SatelliteFetcher: image fetch error: %s", exc)
             return ""
 
@@ -302,35 +302,35 @@ def _parse_meso_bboxes(root: ET.Element) -> dict:
     return sectors
 
 
-def _parse_layer_times(root: ET.Element) -> dict[str, list[str]]:
-    """Extract WMS time positions per layer name, respecting inherited Dimensions."""
+def _parse_nowcoast_times(root: ET.Element) -> list[str]:
+    """Return ISO time strings for goes_visible_imagery from nowCOAST WMS 1.3.0 caps."""
     _strip_ns(root)
-    out: dict[str, list[str]] = {}
 
     def _direct_time(layer_el: ET.Element) -> str:
         for dim in layer_el.findall("Dimension"):
             if (dim.attrib.get("name") or "").lower() == "time":
                 return (dim.text or "").strip()
-        for ext in layer_el.findall("Extent"):
-            if (ext.attrib.get("name") or "").lower() == "time":
-                return (ext.text or "").strip()
         return ""
 
-    def _walk(layer_el: ET.Element, inherited: str):
+    def _walk(layer_el: ET.Element, inherited: str) -> list[str]:
         time_text = _direct_time(layer_el) or inherited
-        name_el = layer_el.find("Name")
-        if name_el is not None and (name_el.text or "").strip() and time_text:
-            times = [t.strip() for t in time_text.split(",") if t.strip()]
-            if times:
-                out[name_el.text.strip()] = times
+        name_el   = layer_el.find("Name")
+        if name_el is not None and (name_el.text or "").strip() == "goes_visible_imagery":
+            if time_text:
+                return [t.strip() for t in time_text.split(",") if t.strip()]
         for child in layer_el.findall("Layer"):
-            _walk(child, time_text)
+            result = _walk(child, time_text)
+            if result:
+                return result
+        return []
 
     cap = root.find("Capability")
     top = cap if cap is not None else root
     for layer in top.findall("Layer"):
-        _walk(layer, "")
-    return out
+        result = _walk(layer, "")
+        if result:
+            return result
+    return []
 
 
 def _parse_time(tstr: str) -> datetime:
@@ -343,8 +343,8 @@ def _parse_time(tstr: str) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _wms_url(layer: str, west: float, south: float, east: float, north: float,
-             width: int, height: int, time_str: str | None = None) -> str:
+def _iem_wms_url(layer: str, west: float, south: float, east: float, north: float,
+                 width: int, height: int, time_str: str | None = None) -> str:
     base = (
         f"{IEM_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
         f"&LAYERS={layer}&SRS=EPSG:4326"

@@ -113,14 +113,56 @@ def _make_nws_cc_cmap():
     return cmap
 
 
+def _make_nws_zdr_cmap():
+    """NWS-style differential reflectivity colormap (-4 to +8 dB)."""
+    colors = [
+        (0.00, (0.20, 0.20, 0.80, 1.00)),   # blue (negative ZDR)
+        (0.25, (0.40, 0.70, 1.00, 1.00)),   # light blue
+        (0.33, (0.90, 0.90, 0.90, 0.50)),   # gray (near 0)
+        (0.45, (0.20, 0.80, 0.20, 1.00)),   # green
+        (0.60, (1.00, 1.00, 0.00, 1.00)),   # yellow
+        (0.75, (1.00, 0.50, 0.00, 1.00)),   # orange
+        (1.00, (1.00, 0.00, 0.00, 1.00)),   # red (high positive ZDR)
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_zdr",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
+def _make_nws_sw_cmap():
+    """Spectrum width colormap (0–30 kt)."""
+    colors = [
+        (0.00, (0.00, 0.00, 0.00, 0.00)),   # transparent / 0
+        (0.10, (0.20, 0.20, 0.60, 0.70)),   # dark blue
+        (0.30, (0.20, 0.60, 1.00, 1.00)),   # blue
+        (0.50, (0.00, 0.90, 0.90, 1.00)),   # cyan
+        (0.70, (0.00, 0.80, 0.00, 1.00)),   # green
+        (0.85, (1.00, 1.00, 0.00, 1.00)),   # yellow
+        (1.00, (1.00, 0.00, 0.00, 1.00)),   # red
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_sw",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
 NWS_REF_CMAP = _make_nws_ref_cmap()
 NWS_VEL_CMAP = _make_nws_vel_cmap()
 NWS_CC_CMAP  = _make_nws_cc_cmap()
+NWS_ZDR_CMAP = _make_nws_zdr_cmap()
+NWS_SW_CMAP  = _make_nws_sw_cmap()
 
 COLORMAPS = {
     "nws_ref": NWS_REF_CMAP,
     "nws_vel": NWS_VEL_CMAP,
     "nws_cc":  NWS_CC_CMAP,
+    "nws_zdr": NWS_ZDR_CMAP,
+    "nws_sw":  NWS_SW_CMAP,
 }
 
 
@@ -295,17 +337,6 @@ class RadarOverlay(QObject):
         self._hidden = False
         self._inject_into_map(image_url, bounds, restore_opacity=restoring)
         self._active = True
-
-    def set_opacity(self, opacity: float):
-        """set overlay opacity (0.0 – 1.0)."""
-        if self._active:
-            self._map.run_js(
-                f'map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", {opacity:.2f});'
-            )
-
-    @property
-    def is_active(self) -> bool:
-        return self._active
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

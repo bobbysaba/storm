@@ -766,6 +766,73 @@ QDialog#annotationDialog QLineEdit {
 QDialog#annotationDialog QLineEdit:focus {
     border-color: #FF6B35;
 }
+
+/* ── Archive Controls Bar ─────────────────────────────── */
+#archiveControls {
+    background-color: rgba(10, 10, 20, 0.96);
+    border-top: 1px solid rgba(74, 83, 108, 0.50);
+}
+
+#archiveControls QToolButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #C8D0DE;
+    font-size: 11px;
+}
+
+#archiveControls QToolButton:hover {
+    background-color: #20253A;
+    border-color: #3C4664;
+    color: #EFF3FF;
+}
+
+#archiveControls QToolButton:checked {
+    background-color: #FF9F1C;
+    border-color: #FF9F1C;
+    color: #0A0A0F;
+}
+
+#archiveControls QSlider::groove:horizontal {
+    height: 4px;
+    background: #1E1E2E;
+    border-radius: 2px;
+}
+
+#archiveControls QSlider::handle:horizontal {
+    background: #00CFFF;
+    border: none;
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}
+
+#archiveControls QSlider::sub-page:horizontal {
+    background: #00CFFF;
+    border-radius: 2px;
+}
+
+#archiveControls QComboBox {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 4px;
+    color: #C8D0DE;
+    font-size: 11px;
+    padding: 2px 6px;
+}
+
+#archiveControls QComboBox:hover {
+    border-color: #3C4664;
+}
+
+#archiveControls QComboBox QAbstractItemView {
+    background-color: #1A1A2E;
+    border: 1px solid #3C4664;
+    color: #E8EAF0;
+    selection-background-color: #FF9F1C;
+    selection-color: #0A0A0F;
+}
 """.replace("#FF6B35", ACCENT_COLOR)
 
 # Accent color for use in Python code — reads from config.toml [ui] accent_color

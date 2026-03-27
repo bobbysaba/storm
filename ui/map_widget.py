@@ -5,8 +5,6 @@
 
 import json
 import os
-import sqlite3
-import zlib
 import sys
 import runtime_flags
 
@@ -42,89 +40,6 @@ TILES_PATH = os.path.abspath(
 STATIC_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "static")
 )
-
-
-def build_safe_map_html() -> str:
-    return """<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>STORM (Safe Map Mode)</title>
-  <style>
-    html, body { margin: 0; width: 100%; height: 100%; background: #0A0A0F; color: #C1C9D8; }
-    .wrap {
-      width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
-      font-family: "Segoe UI", sans-serif; text-align: center; padding: 24px; box-sizing: border-box;
-    }}
-    .card {
-      max-width: 720px; border: 1px solid #1E1E2E; border-radius: 10px;
-      background: rgba(15, 15, 26, 0.92); padding: 22px 24px;
-    }}
-    h2 { margin: 0 0 10px; color: #00CFFF; font-size: 20px; letter-spacing: 0.6px; }
-    p { margin: 0; color: #B5BDCC; font-size: 13px; line-height: 1.45; }
-  </style>
-  <script>
-    // No-op API stubs so Python runJavaScript calls remain safe.
-    function _noop() {}
-    window.stormAddVehicle = _noop;
-    window.stormRemoveVehicle = _noop;
-    window.stormFlyTo = _noop;
-    window.stormFollowMove = _noop;
-    window.stormSetFollow = _noop;
-    window.stormAddAnnotation = _noop;
-    window.stormRemoveAnnotation = _noop;
-    window.stormAddStormCone = _noop;
-    window.stormRemoveStormCone = _noop;
-    window.stormAddStationPlot = _noop;
-    window.stormRemoveStationPlot = _noop;
-    window.stormSetStationPlotsVisible = _noop;
-    window.stormAddSurfaceStationPlot = _noop;
-    window.stormRemoveSurfaceStationPlot = _noop;
-    window.stormSetSurfaceStationPlotsVisible = _noop;
-    window.stormLoadDeployLocs = _noop;
-    window.stormSetDeployLocsVisible = _noop;
-    window.stormMeasureActivate = _noop;
-    window.stormMeasureClick = _noop;
-    window.stormMeasureClear = _noop;
-    window.stormAddDrawing = _noop;
-    window.stormRemoveDrawing = _noop;
-    window.stormDrawingModeSet = _noop;
-    window.stormDrawingUpdatePreview = _noop;
-    window.stormSetSpcGeoJSON = _noop;
-    window.stormSetSpcCategoryVisible = _noop;
-    window.stormSetSpcProductVisible = _noop;
-    window.stormSetNwsWarningsGeoJSON = _noop;
-    window.stormSetNwsWarningsVisible = _noop;
-    window.stormSetSpcWatchesGeoJSON = _noop;
-    window.stormSetSpcWatchesVisible = _noop;
-    window.stormSetSpcMdsGeoJSON = _noop;
-    window.stormSetSpcMdsVisible = _noop;
-    window.stormSetSatelliteFrame = _noop;
-    window.stormSetSatelliteVisible = _noop;
-    window.stormSetSatelliteMode = _noop;
-    window.stormSetSatelliteOpacity = _noop;
-    window.stormSetMesoSectors = _noop;
-    window.stormSetRadarStations = _noop;
-    window.stormSetRadarStationsVisible = _noop;
-    window.stormSetSoundingStations = _noop;
-    window.stormClearSoundingStations = _noop;
-    window.stormSetRoute = _noop;
-    window.stormClearRoute = _noop;
-    window.stormSetRoutePickMode = _noop;
-    window.stormSetDestinationMarker = _noop;
-  </script>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h2>Safe Map Mode Enabled</h2>
-      <p>Map rendering is running in safe mode for this session.
-      Relaunch without <code>--safe-map-mode</code> to restore normal map rendering.</p>
-    </div>
-  </div>
-</body>
-</html>"""
-
 
 # ── Map HTML ──────────────────────────────────────────────────────────────────
 
@@ -444,6 +359,7 @@ def build_map_html() -> str:
     window.stormSetSpcMdsGeoJSON = _stormNoop;
     window.stormSetSpcMdsVisible = _stormNoop;
     window.stormSetSatelliteFrame = _stormNoop;
+    window.stormSetSatelliteTime = _stormNoop;
     window.stormSetSatelliteVisible = _stormNoop;
     window.stormSetSatelliteMode = _stormNoop;
     window.stormSetSatelliteOpacity = _stormNoop;
@@ -2377,16 +2293,33 @@ def build_map_html() -> str:
     }}
 
     // ── Satellite overlay API ─────────────────────────────────────────────
-    // Uses an image source (like radar) — Python pre-fetches frames and calls
-    // stormSetSatelliteFrame() to inject them.  This avoids white WMS tiles
-    // outside coverage areas and enables frame-by-frame playback.
+    // Two rendering paths depending on mode:
+    //   CONUS  — nowCOAST WMS raster tile source (SAT_WMS_SRC/SAT_WMS_LYR).
+    //            Python provides a TIME string; MapLibre fetches tiles for the
+    //            current viewport automatically.  stormSetSatelliteTime() creates
+    //            or updates the source via setTiles().
+    //   MESO   — IEM pre-fetched PNG injected as an image source (SAT_SRC/SAT_LYR).
+    //            stormSetSatelliteFrame() handles this path unchanged.
     var _satVisible = false;
     var _satMode    = '';
     var _satOpacity = 0.7;
     var _mesoPreviewLabel = '';
-    var SAT_SRC = 'sat-image';
-    var SAT_LYR = 'sat-layer';
+    var SAT_SRC     = 'sat-image';
+    var SAT_LYR     = 'sat-layer';
+    var SAT_WMS_SRC = 'sat-wms';
+    var SAT_WMS_LYR = 'sat-wms-layer';
     var _satLastUrl = '';
+    var _NOWCOAST_WMS = 'https://nowcoast.noaa.gov/geoserver/satellite/wms';
+
+    function _conusTileUrl(timeStr) {{
+      return _NOWCOAST_WMS +
+        '?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap' +
+        '&LAYERS=goes_visible_imagery' +
+        '&CRS=EPSG:3857&BBOX={{bbox-epsg-3857}}' +
+        '&WIDTH=256&HEIGHT=256' +
+        '&FORMAT=image/png&TRANSPARENT=TRUE&STYLES=' +
+        '&TIME=' + timeStr;
+    }}
 
     function _updateSatSource(dataUrl, coords) {{
       if (map.getSource(SAT_SRC)) {{
@@ -2449,6 +2382,29 @@ def build_map_html() -> str:
       _applySatMesoBoxes();
     }};
 
+    window.stormSetSatelliteTime = function(timeStr) {{
+      var tileUrl = _conusTileUrl(timeStr);
+      if (map.getSource(SAT_WMS_SRC)) {{
+        map.getSource(SAT_WMS_SRC).setTiles([tileUrl]);
+      }} else {{
+        map.addSource(SAT_WMS_SRC, {{ type: 'raster', tiles: [tileUrl], tileSize: 256, bounds: [-116, 28, -82, 49] }});
+        try {{
+          map.addLayer({{
+            id: SAT_WMS_LYR, type: 'raster', source: SAT_WMS_SRC,
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+          }}, 'road-unpaved');
+        }} catch(_) {{
+          map.addLayer({{
+            id: SAT_WMS_LYR, type: 'raster', source: SAT_WMS_SRC,
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+          }});
+        }}
+      }}
+      if (map.getLayer(SAT_WMS_LYR)) {{
+        map.setLayoutProperty(SAT_WMS_LYR, 'visibility', _satVisible ? 'visible' : 'none');
+      }}
+    }};
+
     window.stormSetSatelliteFrame = function(b64, west, south, east, north) {{
       // MapLibre image source coordinates: NW, NE, SE, SW corners
       var coords = [[west, north], [east, north], [east, south], [west, south]];
@@ -2471,28 +2427,43 @@ def build_map_html() -> str:
 
     window.stormSetSatelliteVisible = function(visible) {{
       _satVisible = !!visible;
-      if (map.getLayer(SAT_LYR)) {{
-        map.setLayoutProperty(SAT_LYR, 'visibility', _satVisible ? 'visible' : 'none');
-      }}
+      if (map.getLayer(SAT_LYR))     map.setLayoutProperty(SAT_LYR,     'visibility', _satVisible ? 'visible' : 'none');
+      if (map.getLayer(SAT_WMS_LYR)) map.setLayoutProperty(SAT_WMS_LYR, 'visibility', _satVisible ? 'visible' : 'none');
       _applySatMesoBoxes();
     }};
 
     window.stormClearSatelliteFrame = function() {{
       try {{
-        if (map.getLayer(SAT_LYR)) map.removeLayer(SAT_LYR);
-        if (map.getSource(SAT_SRC)) map.removeSource(SAT_SRC);
+        if (map.getLayer(SAT_LYR))     map.removeLayer(SAT_LYR);
+        if (map.getSource(SAT_SRC))    map.removeSource(SAT_SRC);
+        if (map.getLayer(SAT_WMS_LYR)) map.removeLayer(SAT_WMS_LYR);
+        if (map.getSource(SAT_WMS_SRC)) map.removeSource(SAT_WMS_SRC);
       }} catch(_) {{}}
       _satLastUrl = '';
     }};
 
     window.stormSetSatelliteMode = function(mode) {{
       _satMode = mode || '';
+      // Remove the source type that is no longer active to avoid stale overlays.
+      if (mode === 'conus') {{
+        try {{
+          if (map.getLayer(SAT_LYR))  map.removeLayer(SAT_LYR);
+          if (map.getSource(SAT_SRC)) map.removeSource(SAT_SRC);
+        }} catch(_) {{}}
+        _satLastUrl = '';
+      }} else if (mode === 'meso1' || mode === 'meso2') {{
+        try {{
+          if (map.getLayer(SAT_WMS_LYR))  map.removeLayer(SAT_WMS_LYR);
+          if (map.getSource(SAT_WMS_SRC)) map.removeSource(SAT_WMS_SRC);
+        }} catch(_) {{}}
+      }}
       _applySatMesoBoxes();
     }};
 
     window.stormSetSatelliteOpacity = function(opacity) {{
       _satOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
-      if (map.getLayer(SAT_LYR)) map.setPaintProperty(SAT_LYR, 'raster-opacity', _satOpacity);
+      if (map.getLayer(SAT_LYR))     map.setPaintProperty(SAT_LYR,     'raster-opacity', _satOpacity);
+      if (map.getLayer(SAT_WMS_LYR)) map.setPaintProperty(SAT_WMS_LYR, 'raster-opacity', _satOpacity);
     }};
 
     window.stormSetMesoSectors = function(sectorsJson) {{
@@ -2961,6 +2932,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetSatelliteFrame) "
             f"stormSetSatelliteFrame({repr(b64)},{west},{south},{east},{north});"
         )
+
+    def set_satellite_time(self, time_iso: str):
+        self.run_js(f"if(window.stormSetSatelliteTime) stormSetSatelliteTime('{time_iso}');")
 
     def set_satellite_visible(self, visible: bool):
         flag = "true" if visible else "false"

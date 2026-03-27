@@ -213,9 +213,6 @@ class SatelliteControls(QWidget):
             return "meso2"
         return ""
 
-    def current_opacity(self) -> float:
-        return self._opacity_slider.value() / 100.0
-
     def is_at_latest_frame(self) -> bool:
         return self._frame_slider.value() >= self._frame_slider.maximum()
 

@@ -259,4 +259,4 @@ def _parse_skewt(text: str, file_time: datetime, idx: int) -> "Sounding | None":
 
 
 def _format_label(dt: datetime) -> str:
-    return f"{dt.hour}Z {dt.strftime('%b')} {dt.day}"
+    return f"{dt.hour:02d}Z {dt.strftime('%b')} {dt.day}"

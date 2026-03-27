@@ -18,6 +18,12 @@ METRICS = [
     ("rqi",      "RQI"),
 ]
 
+_METRIC_TOOLTIPS = {
+    "rank_abi": "Annular Blockage Index — ranks deployment quality based on radar beam blockage",
+    "rank_aoi": "Areal Occultation Index — ranks deployment quality based on occultation by terrain",
+    "rqi":      "Road Quality Index — continuous road surface quality score (0–1)",
+}
+
 _LEGENDS = {
     "rank_abi": [
         ("#2DC653", "1"), ("#A8C538", "2"), ("#FFD166", "3"),
@@ -105,6 +111,7 @@ class DeployLocsControls(QWidget):
         self._btns: dict[str, QToolButton] = {}
         for key, label in METRICS:
             b = self._btn(label)
+            b.setToolTip(_METRIC_TOOLTIPS.get(key, ""))
             b.toggled.connect(lambda on, k=key: self._on_metric_toggled(k, on))
             row.addWidget(b)
             self._btns[key] = b

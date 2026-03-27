@@ -120,9 +120,6 @@ class OutlookPanel(QWidget):
     def close_panel(self):
         self._close_animated()
 
-    def is_open(self) -> bool:
-        return self.maximumWidth() != 0
-
     # ── Tab helpers ───────────────────────────────────────────────────────────
 
     def _short_title(self, title: str) -> str:

@@ -206,12 +206,6 @@ class HazardControls(QWidget):
             self._animation = anim
             self.content_resized.emit()
 
-    def deactivate_all(self):
-        self._set_spc_mode("")
-        self.spc_mode_changed.emit("")
-        for btn in (self._btn_watches, self._btn_mds, self._btn_nws_warnings):
-            btn.setChecked(False)
-
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _set_spc_mode(self, mode: str):

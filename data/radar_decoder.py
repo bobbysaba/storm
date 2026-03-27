@@ -10,8 +10,6 @@ from typing import Optional
 import numpy as np
 
 from metpy.io import Level3File
-from metpy.plots.ctables import registry as ctable_registry
-
 from core.radar_scan import RadarScan, PRODUCT_META
 
 log = logging.getLogger(__name__)

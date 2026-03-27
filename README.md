@@ -7,13 +7,16 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 
 ## Current Features
 
-- **Offline vector map** — OpenStreetMap tiles served locally from MBTiles via a bundled Flask server; no internet required for the base map
+- **Offline vector map** — OpenStreetMap tiles served entirely in-process via a custom `storm://` URL scheme; no internet required for the base map
 - **NEXRAD radar overlay** — fetches Level 3 super‑res reflectivity (N0B fallback to N0Q/N0R) and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map
 - **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection)
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
-- **HRRR point soundings** — click any map location to fetch a live Skew-T log-P sounding from the HRRR model (open-meteo free API); shows parcel parameters, kinematics table, hodograph, and F0–F3 forecast hour scrubber
+- **Surface obs (mesonet)** — live surface observation station models from OK Mesonet, KS Mesonet, and West Texas Mesonet; toggled independently per network; polled every 5 minutes
+- **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters, kinematics table, and hodograph
+- **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
+- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), or VIEWER (no MQTT, no obs) — selected at the launch dialog with passphrase authentication
 
 ---
 
@@ -166,6 +169,7 @@ storm/
 │
 ├── core/                    # Pure data types (no Qt, no I/O)
 │   ├── annotation.py        # Annotation dataclass + type registry
+│   ├── drawing.py           # Drawing (front/polyline/polygon) dataclass
 │   ├── observation.py       # Meteorological obs record
 │   ├── radar_scan.py        # RadarScan dataclass + product metadata
 │   ├── sounding.py          # Sounding + SoundingSet dataclasses; pressure levels
@@ -178,6 +182,12 @@ storm/
 │   ├── satellite_fetcher.py # WMS satellite imagery fetch + cache
 │   ├── hazard_fetcher.py    # SPC/NWS hazard polygons
 │   ├── sounding_fetcher.py  # On-demand HRRR point sounding via open-meteo
+│   ├── obs_sounding_fetcher.py  # Observed radiosonde soundings via IEM RAOB
+│   ├── clamps_sounding_fetcher.py  # NSSL CLAMPS DL truck soundings via THREDDS
+│   ├── sounding_stations.py # Radiosonde station metadata (lat/lon lookup)
+│   ├── surface_fetcher.py   # OK Mesonet / KS Mesonet / WTM surface obs (5 min poll)
+│   ├── routing_fetcher.py   # OSRM turn-by-turn routing + Nominatim geocoding
+│   ├── update_checker.py    # Git-based update check at launch
 │   ├── obs_file_watcher.py  # Watches FOFS instrument logger file (Track A)
 │   ├── gps_reader.py        # NMEA via pyserial — auto-detects GPS puck (Track B)
 │   └── truck_replay.py      # Offline CSV replay for testing
@@ -189,19 +199,27 @@ storm/
 │   └── storm_cone_sync.py   # Bidirectional storm cone MQTT sync
 │
 ├── ui/                      # Qt widgets
-│   ├── launch_dialog.py     # Pre-launch config dialog
+│   ├── launch_dialog.py     # Pre-launch config dialog (VEHICLE / MONITOR / VIEWER modes)
 │   ├── main_window.py       # Top-level QMainWindow
 │   ├── map_widget.py        # MapLibre GL map + custom storm:// asset/tile scheme
+│   ├── tile_scheme_handler.py  # QWebEngineUrlSchemeHandler for storm:// (tiles + assets)
 │   ├── radar_controls.py    # Radar site/product/playback drawer
 │   ├── radar_overlay.py     # RadarScan → PNG → MapLibre raster layer
 │   ├── satellite_controls.py # Satellite mode/playback drawer
 │   ├── hazard_controls.py   # SPC/NWS hazard toggle drawer
-│   ├── station_plot_layer.py # MetPy station plot PNG markers
+│   ├── sounding_controls.py # Sounding source selector (HRRR / OBS / NSSL) drawer
+│   ├── surface_controls.py  # Mesonet surface obs toggle drawer (OK / WTM / KS)
+│   ├── surface_plot_layer.py # MetPy station model circles for surface obs
+│   ├── routing_controls.py  # Turn-by-turn routing input / directions drawer
+│   ├── deploy_locs_controls.py # Deployment location filter drawer (RANK/RQI slider)
+│   ├── outlook_panel.py     # Right-side sliding panel for SPC/NWS discussion text
+│   ├── station_plot_layer.py # MetPy station plot PNG markers at vehicle positions
 │   ├── annotation_tools.py  # Annotation type selector drawer
 │   ├── annotation_dialog.py # Place / edit annotation dialogs
 │   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
-│   ├── sounding_dialog.py   # HRRR point sounding Skew-T dialog
+│   ├── sounding_dialog.py   # Skew-T log-P dialog (HRRR / OBS / NSSL sources)
+│   ├── nav_pill.py          # Compact navigation summary pill widget
 │   └── theme.py             # QSS dark theme + color constants
 │
 ├── static/                  # Bundled offline assets (no CDN)
@@ -224,13 +242,16 @@ storm/
 
 ## Architecture Notes
 
-- **Tile/asset serving** — A custom `storm://` URL scheme serves the map HTML, MapLibre assets, fonts, and MBTiles vector tiles entirely in-process. MapLibre GL JS is bundled locally — no internet required.
+- **Tile/asset serving** — `StormSchemeHandler` (`ui/tile_scheme_handler.py`) registers a custom `storm://` URL scheme that serves the map HTML, MapLibre assets, fonts, and MBTiles vector tiles entirely in-process — no Flask server, no TCP port required.
 - **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context. Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
 - **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both update the live vehicle state and publish via `VehicleSync`.
-- **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`.
+- **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`, `storm/drawings/{id}`.
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
-- **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0Q (super-res reflectivity) with N0B fallback; N0U (velocity) with N0S fallback.
+- **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback.
+- **Surface obs** — `SurfaceFetcher` polls OK Mesonet, KS Mesonet, and West Texas Mesonet (WTM) every 5 minutes. Station model PNGs are rendered via MetPy/matplotlib and displayed as map markers.
+- **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via NSSL THREDDS (`ClampsSoundingFetcher`).
+- **Routing** — `RoutingFetcher` geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.
 
 ---
 

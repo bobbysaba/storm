@@ -310,9 +310,6 @@ class AnnotationTools(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def active_type(self) -> str:
-        return self._active_type
-
     def deactivate_tool(self):
         """Clear the active tool without emitting tool_selected."""
         self._active_type = ""

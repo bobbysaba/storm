@@ -14,12 +14,12 @@ from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
-    QToolButton, QFrame, QCheckBox, QSizePolicy, QPushButton, QGridLayout
+    QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
-from ui.theme import DARK_THEME, ACCENT, TEXT_MUTED, BG_PANEL
+from ui.theme import DARK_THEME, ACCENT
 from ui.map_widget import MapWidget, TILES_PATH
 from ui.radar_controls import RadarControls, NEXRAD_SITES
 from ui.hazard_controls import HazardControls
@@ -106,13 +106,25 @@ class MainWindow(QMainWindow):
     # gen, site, product, scan, png_b64, bounds so main thread can inject it.
     _render_ready = pyqtSignal(object)
 
-    def __init__(self, debug: bool = False, monitor: bool = False, viewer: bool = False):
+    def __init__(
+        self,
+        debug: bool = False,
+        monitor: bool = False,
+        viewer: bool = False,
+        archive_time=None,    # datetime | None
+    ):
         super().__init__()
         self._debug = debug
         self._monitor = monitor
         self._viewer = viewer
+        self._archive_time = archive_time    # None = live mode
+        self._archive = archive_time is not None
 
-        self.setWindowTitle(f"STORM  v{config.VERSION}")
+        self.setWindowTitle(
+            f"STORM  v{config.VERSION}"
+            + (f"  [ARCHIVE {archive_time.strftime('%Y-%m-%d %H:%MZ')}]"
+               if self._archive else "")
+        )
         self.setMinimumSize(1024, 680)
         self.resize(1280, 800)
 
@@ -127,7 +139,7 @@ class MainWindow(QMainWindow):
         self._init_vehicle_panel()
         self._radar_station_sites = self._load_radar_station_sites()
         self._radar_station_picker_visible = False
-        self._radar_auto_site_pending = not monitor
+        self._radar_auto_site_pending = not monitor and not self._archive
         self._startup_sequence_started = False
         self._startup_local_pending = False
         self._startup_mqtt_pending = False
@@ -138,7 +150,11 @@ class MainWindow(QMainWindow):
         self._mqtt_startup_timer = QTimer(self)
         self._mqtt_startup_timer.setSingleShot(True)
         self._mqtt_startup_timer.timeout.connect(self._complete_mqtt_startup_phase)
-        self.map_widget.map_ready.connect(self._begin_startup_sequence)
+
+        if self._archive:
+            self.map_widget.map_ready.connect(self._begin_archive_startup)
+        else:
+            self.map_widget.map_ready.connect(self._begin_startup_sequence)
 
         # Fine-grained startup toggles are for crash-isolation only.
         # Keep them opt-in so normal runs always start full functionality.
@@ -246,6 +262,261 @@ class MainWindow(QMainWindow):
 
         # defer initial geometry until after all overlay widgets exist
         QTimer.singleShot(0, self._layout_overlays)
+
+    # ── Archive startup ───────────────────────────────────────────────────────
+
+    def _begin_archive_startup(self):
+        """Called once the map is ready in archive mode."""
+        from archive.session import ArchiveSession
+        from archive.time_controller import TimeController
+        from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
+        from archive.fetchers.satellite_archive_fetcher import ArchiveSatelliteFetcher
+        from archive.fetchers.hazard_archive_fetcher import ArchiveHazardFetcher
+        from archive.fetchers.sounding_archive_fetcher import ArchiveSoundingFetcher
+        from archive.fetchers.mqtt_reader import ArchiveMQTTReader
+        from ui.archive_controls import ArchiveControls
+        from ui.archive_loading_dialog import ArchiveLoadingDialog
+
+        self._archive_session = ArchiveSession(start_time=self._archive_time)
+
+        # Time controller — central archive clock.
+        self._time_ctrl = TimeController(start_time=self._archive_time, parent=self)
+
+        # Archive controls bar at bottom of screen.
+        self._archive_controls = ArchiveControls(self._time_ctrl, self._map_container)
+        self._archive_controls.setObjectName("archiveControls")
+        self._archive_controls.tilt_changed.connect(self._on_archive_tilt_changed)
+        self._archive_controls.product_changed.connect(self._on_archive_product_changed)
+
+        # MQTT reader — vehicle positions.
+        mqtt_base = getattr(config, "ARCHIVE_MQTT_BASE_URL", "")
+        self._archive_mqtt = ArchiveMQTTReader(
+            base_url=mqtt_base,
+            session_date=self._archive_time,
+            parent=self,
+        )
+        self._archive_mqtt.vehicle_position.connect(self._on_archive_vehicle_position)
+        self._archive_mqtt.vehicles_cleared.connect(self._on_archive_vehicles_cleared)
+
+        # Hazard fetcher.
+        self._archive_hazard = ArchiveHazardFetcher(
+            session_date=self._archive_time, parent=self
+        )
+        self._archive_hazard.spc_received.connect(self._on_spc_received)
+        self._archive_hazard.nws_received.connect(self._on_nws_received)
+        self._archive_hazard.watches_received.connect(self._on_spc_watches_received)
+
+        # Satellite fetcher.
+        self._archive_satellite = ArchiveSatelliteFetcher(
+            session_date=self._archive_time, parent=self
+        )
+        self._archive_satellite.frame_ready.connect(self._on_archive_satellite_frame)
+
+        # Sounding dialog and archive fetcher (on-demand).
+        self._sounding_dialog = SoundingDialog(self)
+        self._archive_sounding = ArchiveSoundingFetcher(parent=self)
+        self._archive_sounding.sounding_ready.connect(self._on_sounding_ready)
+        self._archive_sounding.fetch_error.connect(
+            lambda msg: self.status_msg_label.setText(f"Sounding: {msg}")
+        )
+        # Also initialise the sounding-station layer so the map shows clickable sites.
+        self._sounding_stations_geojson = build_stations_geojson()
+
+        # Radar overlay (reuses existing renderer).
+        self._radar_overlay = RadarOverlay(self.map_widget)
+
+        # Radar fetcher — created once the station is known.
+        self._archive_radar: "ArchiveRadarFetcher | None" = None
+
+        # Wire time controller to archive fetchers.
+        self._time_ctrl.time_changed.connect(self._archive_mqtt.on_time_changed)
+        self._time_ctrl.time_changed.connect(self._archive_hazard.on_time_changed)
+        self._time_ctrl.time_changed.connect(self._archive_satellite.on_time_changed)
+        self._time_ctrl.time_changed.connect(self._archive_sounding.on_time_changed)
+
+        # Show loading dialog while initial data fetches run.
+        loading_tasks = ["Vehicle tracks", "Hazard data", "Satellite index"]
+        self._archive_loading = ArchiveLoadingDialog(
+            session_label=self._archive_time.strftime("%Y-%m-%d  %H:%M UTC"),
+            tasks=loading_tasks,
+            parent=self,
+        )
+
+        # Start background fetches; mark tasks done via callbacks.
+        self._archive_mqtt.load()
+        self._archive_hazard.load_day_data()
+        self._archive_satellite.load_capabilities()
+
+        # Track completion of loading tasks.
+        def _check_mqtt_loaded():
+            if self._archive_mqtt._loaded:
+                self._archive_loading.set_task_done("Vehicle tracks")
+                self._try_auto_select_radar_station()
+            else:
+                QTimer.singleShot(500, _check_mqtt_loaded)
+
+        def _check_hazard_loaded():
+            if self._archive_hazard._watches_loaded:
+                self._archive_loading.set_task_done("Hazard data")
+            else:
+                QTimer.singleShot(500, _check_hazard_loaded)
+
+        self._archive_satellite.capabilities_loaded.connect(
+            lambda _: self._archive_loading.set_task_done("Satellite index")
+        )
+        self._archive_satellite.error.connect(
+            lambda _: self._archive_loading.set_task_error("Satellite index")
+        )
+
+        QTimer.singleShot(400, _check_mqtt_loaded)
+        QTimer.singleShot(400, _check_hazard_loaded)
+
+        self._archive_loading.show()
+
+        # Set initial time on the time controller (emits time_changed).
+        QTimer.singleShot(200, lambda: self._time_ctrl.set_time(self._archive_time))
+
+        # Lay out the archive controls bar at the bottom of the screen.
+        QTimer.singleShot(0, self._layout_overlays)
+
+    def _try_auto_select_radar_station(self) -> None:
+        """Pick the nearest NEXRAD station from the first vehicle position."""
+        if not hasattr(self, "_archive_mqtt"):
+            return
+        positions = self._archive_mqtt.first_vehicle_positions()
+        if positions:
+            _, lat, lon = positions[0]
+            site = self._nearest_nexrad(lat, lon)
+        else:
+            site = None
+
+        if not site:
+            # Fall back: pick a default or let the user choose later.
+            log.info("Archive: no vehicle positions — radar station not auto-selected")
+            return
+
+        self._archive_session.radar_station = site
+        self._start_archive_radar(site)
+
+    def _nearest_nexrad(self, lat: float, lon: float) -> "str | None":
+        """Return the 4-letter NEXRAD ID closest to lat/lon."""
+        best_site = None
+        best_dist = float("inf")
+        for site_id, info in (self._radar_station_sites or {}).items():
+            slat = info.get("lat", 0)
+            slon = info.get("lon", 0)
+            d = (lat - slat) ** 2 + (lon - slon) ** 2
+            if d < best_dist:
+                best_dist = d
+                best_site = site_id
+        return best_site
+
+    def _start_archive_radar(self, station: str) -> None:
+        """Instantiate and wire an ArchiveRadarFetcher for the given station."""
+        from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
+
+        if self._archive_radar is not None:
+            # Disconnect old fetcher signals.
+            try:
+                self._archive_radar.scan_ready.disconnect()
+            except Exception:
+                pass
+
+        self._archive_radar = ArchiveRadarFetcher(
+            station=station,
+            session_date=self._archive_time,
+            parent=self,
+        )
+        self._archive_radar.scan_ready.connect(self._on_archive_radar_scan)
+        self._archive_radar.loading_changed.connect(
+            lambda loading: self.status_msg_label.setText(
+                f"Radar: loading {station}…" if loading else ""
+            )
+        )
+        self._archive_radar.error.connect(
+            lambda msg: self.status_msg_label.setText(msg)
+        )
+        self._time_ctrl.time_changed.connect(self._archive_radar.on_time_changed)
+
+        # Update radar controls to reflect the new station.
+        if hasattr(self, "radar_controls"):
+            for i in range(self.radar_controls._site_combo.count()):
+                if self.radar_controls._site_combo.itemText(i).startswith(station):
+                    self.radar_controls._site_combo.setCurrentIndex(i)
+                    break
+
+        self._archive_radar.load_index()
+        # Trigger first scan fetch at current archive time.
+        self._archive_radar.on_time_changed(self._time_ctrl.current_time)
+
+    # ── Archive signal handlers ───────────────────────────────────────────────
+
+    def _on_archive_radar_scan(self, scan) -> None:
+        """Render a Level-2 scan from the archive fetcher."""
+        import threading
+        from ui.radar_overlay import render_scan_to_png, RENDER_GRID_SIZE
+
+        # Add tilt/product selectors to archive controls the first time.
+        if hasattr(self, "_archive_controls") and hasattr(scan, "available_products"):
+            from core.level2_radar_scan import L2_PRODUCTS
+            products = [
+                (f, L2_PRODUCTS[f]["label"]) for f in scan.available_products
+                if f in L2_PRODUCTS
+            ]
+            self._archive_controls.add_radar_selectors(products, scan.available_tilts)
+
+        def _render():
+            try:
+                png, bounds, _ = render_scan_to_png(scan, RENDER_GRID_SIZE)
+                import base64
+                b64 = base64.b64encode(png).decode()
+                self.map_widget.set_radar_image(b64, bounds)
+                if hasattr(self, "radar_controls"):
+                    self.radar_controls.set_scan_time(
+                        scan.scan_time.strftime("%H:%MZ")
+                    )
+            except Exception as exc:
+                log.error("Archive radar render failed: %s", exc)
+
+        threading.Thread(target=_render, daemon=True).start()
+
+    def _on_archive_satellite_frame(self, frame) -> None:
+        """Display an archive satellite frame on the map."""
+        self.map_widget.set_satellite_image(frame.b64, frame.bbox)
+
+    def _on_archive_vehicle_position(
+        self, vid: str, lat: float, lon: float, speed: float, heading: float
+    ) -> None:
+        """Update a vehicle marker from the MQTT archive."""
+        from core.vehicle import Vehicle
+        v = self._vehicles.get(vid)
+        if v is None:
+            v = Vehicle(vehicle_id=vid, lat=lat, lon=lon)
+            self._vehicles[vid] = v
+        v.lat = lat
+        v.lon = lon
+        self.map_widget.update_vehicle(
+            vid, lat, lon, speed, heading,
+            getattr(v, "icon", "car"),
+        )
+        self.update_vehicle_count(len(self._vehicles))
+
+    def _on_archive_vehicles_cleared(self) -> None:
+        """Remove all vehicle markers when time jumps backward."""
+        for vid in list(self._vehicles.keys()):
+            self.map_widget.remove_vehicle(vid)
+        self._vehicles.clear()
+        self.update_vehicle_count(0)
+
+    def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
+        if self._archive_radar:
+            self._archive_radar.set_tilt_index(tilt_idx)
+
+    def _on_archive_product_changed(self, pyart_field: str) -> None:
+        if self._archive_radar:
+            self._archive_radar.set_product(pyart_field)
+
+    # ── Live startup sequence (unchanged) ────────────────────────────────────
 
     def _begin_startup_sequence(self):
         if self._runtime_safe or self._startup_sequence_started:
@@ -501,8 +772,10 @@ class MainWindow(QMainWindow):
         self.map_widget.map_pick_for_route.connect(
             self.routing_controls.on_map_pick
         )
-        if self._viewer:
+        if self._viewer or self._archive:
             self.btn_route.hide()
+        if self._archive:
+            self.btn_prev_locs.hide()
 
         # ── Navigation pill (upper-right, visible when route active + drawer closed)
         self.nav_pill = NavPill(self._map_container)
@@ -630,8 +903,13 @@ class MainWindow(QMainWindow):
         for lbl in [self.coord_label, self.vehicle_count_label]:
             lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;")
 
-        # Mode badge: VEHICLE / MONITOR / VIEWER — always leftmost in row 1
-        if self._monitor:
+        # Mode badge: VEHICLE / MONITOR / VIEWER / ARCHIVE — always leftmost in row 1
+        if self._archive:
+            mode_badge = QLabel("● ARCHIVE")
+            mode_badge.setStyleSheet(
+                "color: #FF9F1C; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+            )
+        elif self._monitor:
             mode_badge = QLabel("● MONITOR")
             mode_badge.setStyleSheet(
                 "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
@@ -838,12 +1116,21 @@ class MainWindow(QMainWindow):
                            OutlookPanel.PANEL_WIDTH, panel_h)
             op.raise_()
 
-        # left status pill — bottom-left corner
+        # archive controls bar — full-width, pinned to bottom
+        arc_bar_h = 0
+        if hasattr(self, "_archive_controls"):
+            ac = self._archive_controls
+            ac.adjustSize()
+            arc_bar_h = ac.sizeHint().height() + 6
+            ac.setGeometry(0, r.height() - arc_bar_h, r.width(), arc_bar_h)
+            ac.raise_()
+
+        # left status pill — bottom-left corner (above archive bar if present)
         if hasattr(self, "_status_left"):
             self._status_left.adjustSize()
             sl = self._status_left.size()
             self._status_left.setGeometry(
-                MARGIN, r.height() - sl.height() - MARGIN,
+                MARGIN, r.height() - sl.height() - MARGIN - arc_bar_h,
                 sl.width(), sl.height()
             )
             self._status_left.raise_()
@@ -873,10 +1160,6 @@ class MainWindow(QMainWindow):
 
     def update_coordinates(self, lat: float, lon: float):
         self.coord_label.setText(f"LAT: {lat:>9.4f}  LON: {lon:>10.4f}")
-
-    def update_zoom(self, zoom: float):
-        # Zoom readout intentionally removed from the field status pill.
-        pass
 
     def update_vehicle_count(self, count: int):
         self.vehicle_count_label.setText(f"VEHICLES: {count}")
@@ -1209,7 +1492,7 @@ class MainWindow(QMainWindow):
         self.hazard_controls.spc_watches_toggled.connect(self._on_spc_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_nws_warnings_toggled)
-        self.hazard_controls.fetch_requested.connect(self._hazard_fetcher.fetch_now)
+        self.hazard_controls.fetch_requested.connect(self._on_hazard_fetch_requested)
 
         self._hazard_fetcher.spc_received.connect(self._on_spc_received)
         self._hazard_fetcher.nws_received.connect(self._on_nws_received)
@@ -1274,6 +1557,11 @@ class MainWindow(QMainWindow):
         # fetcher signals → handlers
         self._satellite_fetcher.meso_sectors_updated.connect(self._on_meso_sectors_updated)
         self._satellite_fetcher.frames_updated.connect(self._on_satellite_frames_updated)
+        self._satellite_fetcher.fetch_error.connect(self._on_satellite_error)
+
+        self._satellite_error_clear_timer = QTimer(self)
+        self._satellite_error_clear_timer.setSingleShot(True)
+        self._satellite_error_clear_timer.timeout.connect(self._clear_satellite_error)
 
         self._satellite_fetcher.start()
 
@@ -1367,6 +1655,8 @@ class MainWindow(QMainWindow):
             self._render_satellite_frame(frames[-1])
             self.satellite_controls.set_scan_time(frames[-1].time_str)
             self.map_widget.set_satellite_visible(True)
+            self.status_msg_label.setText(f"GOES {mode.upper()} {frames[-1].time_str}")
+            self._layout_overlays()
         else:
             # Clear the previous mode's frame so CONUS doesn't linger
             # while waiting on the first MESO frame.
@@ -1374,6 +1664,8 @@ class MainWindow(QMainWindow):
             self.map_widget.set_satellite_visible(False)
             # Backfill recent frames on first select so loop playback works immediately.
             self._satellite_fetcher.fetch_history(mode, 10)
+            self.status_msg_label.setText(f"Fetching GOES {mode.upper()}…")
+            self._layout_overlays()
 
     def _on_satellite_frames_updated(self, mode: str, frames: list):
         self._satellite_cache[mode] = frames
@@ -1385,6 +1677,8 @@ class MainWindow(QMainWindow):
         if was_live:
             self._render_satellite_frame(frames[-1])
             self.satellite_controls.set_scan_time(frames[-1].time_str)
+            self.status_msg_label.setText(f"GOES {mode.upper()} {frames[-1].time_str}")
+            self._layout_overlays()
             if not self.satellite_controls.is_looping():
                 self.map_widget.set_satellite_visible(True)
 
@@ -1415,8 +1709,11 @@ class MainWindow(QMainWindow):
         self.satellite_controls.set_scan_time(frames[nxt].time_str)
 
     def _render_satellite_frame(self, frame):
-        w, s, e, n = frame.bbox
-        self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+        if frame.b64:
+            w, s, e, n = frame.bbox
+            self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+        else:
+            self.map_widget.set_satellite_time(frame.time_iso)
 
     def _on_meso_sectors_updated(self, sectors: dict):
         for idx in (1, 2):
@@ -1443,6 +1740,16 @@ class MainWindow(QMainWindow):
 
     def _clear_hazard_error(self):
         if self.status_msg_label.text().startswith("Hazards:"):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+
+    def _on_satellite_error(self, msg: str):
+        self.status_msg_label.setText(f"Satellite: {msg}")
+        self._layout_overlays()
+        self._satellite_error_clear_timer.start(10_000)
+
+    def _clear_satellite_error(self):
+        if self.status_msg_label.text().startswith("Satellite:"):
             self.status_msg_label.setText("")
             self._layout_overlays()
 
@@ -1473,16 +1780,31 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_spc_received(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str):
+        self._clear_hazard_fetch_msg()
         self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str)
 
     def _on_nws_received(self, warnings_str: str):
+        self._clear_hazard_fetch_msg()
         self.map_widget.set_nws_warnings_geojson(warnings_str)
 
     def _on_spc_watches_received(self, watches_str: str):
+        self._clear_hazard_fetch_msg()
         self.map_widget.set_spc_watches_geojson(watches_str)
 
     def _on_spc_mds_received(self, mds_str: str):
+        self._clear_hazard_fetch_msg()
         self.map_widget.set_spc_mds_geojson(mds_str)
+
+    def _clear_hazard_fetch_msg(self):
+        txt = self.status_msg_label.text()
+        if txt.startswith("Fetching ") or txt.startswith("Refreshing "):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+
+    def _on_hazard_fetch_requested(self):
+        self.status_msg_label.setText("Refreshing hazards…")
+        self._layout_overlays()
+        self._hazard_fetcher.fetch_now()
 
     def _on_spc_mds_toggled(self, enabled: bool):
         self._hazard_fetcher.set_spc_mds_enabled(enabled)
@@ -1491,6 +1813,8 @@ class MainWindow(QMainWindow):
             if self._hazard_fetcher.is_mds_fresh():
                 self._hazard_fetcher.emit_cached_mds()
             else:
+                self.status_msg_label.setText("Fetching SPC MDs…")
+                self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
@@ -1647,6 +1971,11 @@ class MainWindow(QMainWindow):
             self.map_widget.set_spc_product_visible(key, on)
 
         if mode:
+            _spc_labels = {
+                "outlook": "SPC outlook", "tor": "SPC tornado",
+                "wind": "SPC wind", "hail": "SPC hail",
+            }
+            _fetch_label = f"Fetching {_spc_labels.get(mode, 'SPC')}…"
             needs_refresh = False
             if mode == "outlook":
                 needs_refresh = not self._hazard_fetcher.spc_category_cached()
@@ -1654,10 +1983,14 @@ class MainWindow(QMainWindow):
                 needs_refresh = not self._hazard_fetcher.spc_product_cached(mode)
             if needs_refresh:
                 self._hazard_fetcher.force_spc_refresh()
+                self.status_msg_label.setText(_fetch_label)
+                self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
             elif self._hazard_fetcher.is_spc_fresh():
                 self._hazard_fetcher.emit_cached_spc()
             else:
+                self.status_msg_label.setText(_fetch_label)
+                self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
@@ -1668,6 +2001,8 @@ class MainWindow(QMainWindow):
             if self._hazard_fetcher.is_watches_fresh():
                 self._hazard_fetcher.emit_cached_watches()
             else:
+                self.status_msg_label.setText("Fetching SPC watches…")
+                self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
@@ -1678,6 +2013,8 @@ class MainWindow(QMainWindow):
             if self._hazard_fetcher.is_nws_fresh():
                 self._hazard_fetcher.emit_cached_nws()
             else:
+                self.status_msg_label.setText("Fetching NWS warnings…")
+                self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
 
@@ -1732,6 +2069,8 @@ class MainWindow(QMainWindow):
     def _on_sounding_mode_changed(self, mode: str):
         """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
         if not self.btn_sounding.isChecked():
+            return
+        if not hasattr(self, "_sounding_fetcher"):
             return
         if mode == "hrrr":
             self.map_widget.set_obs_sounding_mode(False)

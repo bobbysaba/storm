@@ -246,18 +246,6 @@ class RadarControls(QWidget):
         # update the time label next to the slider
         self._frame_time_label.setText(time_str)
 
-    def set_radar_active(self, active: bool):
-        """programmatically open/close the radar drawer (visual only)."""
-        if active != self._radar_on:
-            self.toggle_drawer(active)
-
-    def nearest_site_for_location(self, lat: float, lon: float) -> str:
-        ranked = sorted(
-            self._all_sites,
-            key=lambda site: _haversine_km(lat, lon, site[2], site[3])
-        )
-        return ranked[0][0] if ranked else "KTLX"
-
     def _set_product_items(self, items: list[tuple[str, str]], preserve_code: str | None = None):
         self._product_combo.blockSignals(True)
         self._product_combo.clear()

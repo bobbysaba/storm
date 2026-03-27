@@ -124,41 +124,6 @@ def _fc_has_features(fc_str: str) -> bool:
     return bool(fc_str and fc_str != _EMPTY_FC_STR)
 
 
-def _feature_bbox(geom: dict[str, Any]) -> tuple[float, float, float, float] | None:
-    gtype = geom.get("type")
-    coords = geom.get("coordinates")
-    pts: list[tuple[float, float]] = []
-    if not coords:
-        return None
-
-    if gtype == "Point":
-        pts = [(coords[0], coords[1])]
-    elif gtype == "LineString":
-        pts = [(c[0], c[1]) for c in coords]
-    elif gtype == "Polygon":
-        for ring in coords:
-            pts.extend((c[0], c[1]) for c in ring)
-    elif gtype == "MultiPolygon":
-        for poly in coords:
-            for ring in poly:
-                pts.extend((c[0], c[1]) for c in ring)
-    else:
-        return None
-
-    if not pts:
-        return None
-    lons = [p[0] for p in pts]
-    lats = [p[1] for p in pts]
-    return min(lons), min(lats), max(lons), max(lats)
-
-
-def _bbox_intersects(a: tuple[float, float, float, float],
-                     b: tuple[float, float, float, float]) -> bool:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    return not (ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1)
-
-
 class HazardFetcher(QObject):
     """
     Polls SPC + NWS hazard feeds in the background.

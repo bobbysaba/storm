@@ -3,7 +3,6 @@
 
 # import required packages
 from datetime import datetime
-import numpy as np
 
 
 # radar scan record
@@ -53,12 +52,6 @@ class RadarScan:
         from datetime import timezone
         # compute age
         return (datetime.now(timezone.utc) - self.scan_time).total_seconds()
-
-    # whether the scan is older than 10 minutes
-    @property
-    def is_stale(self):
-        # compare age against 10 minutes
-        return self.age_seconds > 600
 
     # human-readable label for ui display
     @property

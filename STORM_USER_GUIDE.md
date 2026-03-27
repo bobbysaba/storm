@@ -14,13 +14,16 @@
    - 6.1 [Radar](#61-radar)
    - 6.2 [Hazards](#62-hazards)
    - 6.3 [Satellite](#63-satellite)
-   - 6.4 [Annotations](#64-annotations)
-   - 6.5 [Drawings](#65-drawings)
-   - 6.6 [Storm Motion Cone](#66-storm-motion-cone)
-   - 6.7 [Measurement Tool](#67-measurement-tool)
-   - 6.8 [Station Plots](#68-station-plots)
-   - 6.9 [Deployment Locations](#69-deployment-locations)
-   - 6.10 [Vehicle Panel](#610-vehicle-panel)
+   - 6.4 [Soundings](#64-soundings)
+   - 6.5 [Surface Obs](#65-surface-obs)
+   - 6.6 [Routing](#66-routing)
+   - 6.7 [Annotations](#67-annotations)
+   - 6.8 [Drawings](#68-drawings)
+   - 6.9 [Storm Motion Cone](#69-storm-motion-cone)
+   - 6.10 [Measurement Tool](#610-measurement-tool)
+   - 6.11 [Station Plots](#611-station-plots)
+   - 6.12 [Deployment Locations](#612-deployment-locations)
+   - 6.13 [Vehicle Panel](#613-vehicle-panel)
 7. [Status Bar](#7-status-bar)
 8. [Outlook Text Panel](#8-outlook-text-panel)
 9. [Point Soundings](#9-point-soundings)
@@ -87,25 +90,46 @@ Only one instance of STORM can run per machine (an internal port is used as a lo
 
 ### Launch Dialog
 
-Every time STORM starts (unless `--monitor` mode is passed), a configuration dialog appears before the main window opens.
+Every time STORM starts (unless `--monitor` mode is passed on the command line), a configuration dialog appears before the main window opens.
+
+#### Launch Mode
+
+Choose one of three mutually exclusive roles for this session:
+
+| Mode | Description |
+|------|-------------|
+| **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires a vehicle passphrase. |
+| **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires a monitor passphrase. |
+| **VIEWER** | Fully offline / no-network mode — no MQTT, no obs publishing. Map, radar, satellite, and SPC/NWS hazards still function. |
+
+#### Vehicle Config (VEHICLE mode only)
 
 **Vehicle ID**
-Your vehicle's identifier on the network (e.g., "Chase1", "Mesonet-TX"). It is pre-filled from the previous session. You can edit it freely. The ID is published with every observation, annotation, and drawing you send to other vehicles.
+Your vehicle's identifier on the network (e.g., "Chase1", "Mesonet-TX"). Pre-filled from the previous session; edit freely. The ID is published with every observation, annotation, and drawing you send to other vehicles.
+
+**Vehicle Icon**
+Choose the icon that represents your vehicle on the map. Options: car, drone, mesonet, lidar, radar, hailcam.
 
 **Data Directory (Track A)**
-An optional folder path for real-time observation files from a local data logger (FOFS truck logger format). If left blank, Track A file input is disabled for the session. Use the "Browse" button to pick a folder. The app will scan for a file matching `YYYYMMDD.txt` for the current date and poll it every 10 seconds.
+Optional folder path for a local FOFS instrument logger. If left blank, file-watcher input is disabled for the session. Use **Browse** to pick a folder. The app scans for `YYYYMMDD.txt` and polls it every 10 seconds.
 
-**Monitor Mode**
-When checked, local observation inputs (file watcher, GPS) are suppressed. Your vehicle publishes no observations, but you can still view other vehicles' data and control all map overlays. Useful for command post / situational-awareness-only roles.
+#### Data on Launch (collapsible)
 
-**Update Status**
-During startup, STORM checks for available updates. The dialog will show:
+A collapsible section lets you pre-select which data layers to enable automatically on startup:
+
+- **SPC / NWS / RADAR** — multi-select toggle buttons to auto-enable those overlays
+- **Satellite** — exclusive selector: OFF | CONUS | AUTO-MESO
+- **Surface obs** — multi-select: OK MESONET | WTM | KS MESONET
+
+#### Update Status
+
+During startup STORM checks for available updates. The dialog shows:
 - "Checking for updates…" while polling
-- The current and latest version numbers if an update is available
+- Current and latest version numbers if an update is available
 - An "Update Available" button (STORM never auto-updates)
 
 **Launch**
-Click Launch to proceed. Your vehicle ID and data directory are saved to persistent settings and pre-filled next time.
+Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are saved to persistent settings and pre-filled next time.
 
 ---
 
@@ -161,13 +185,15 @@ Click Launch to proceed. Your vehicle ID and data directory are saved to persist
 6. NWS warnings (storm-polygon fills, phenom-specific colors)
 7. GOES satellite imagery (optional, opacity-controlled)
 8. NEXRAD radar overlay (semi-transparent PNG raster)
-9. Station plot icons (MetPy-style, at vehicle positions)
-10. Vehicle markers (colored dots + info popups)
-11. Annotations (road closure / construction / flooding / downed-lines / debris markers)
-12. Drawings (fronts, polylines, polygons)
-13. Storm motion cones
-14. Measurement tool geometry
-15. Deployment location markers
+9. Surface obs station model circles (mesonet obs)
+10. Station plot icons (MetPy-style, at vehicle positions)
+11. Vehicle markers (colored dots + info popups)
+12. Annotations (road closure / construction / flooding / downed-lines / debris markers)
+13. Drawings (fronts, polylines, polygons)
+14. Storm motion cones
+15. Routing line (active route geometry)
+16. Measurement tool geometry
+17. Deployment location markers
 
 ---
 
@@ -375,7 +401,86 @@ Identical layout to the radar playback row:
 
 ---
 
-### 6.4 Annotations
+### 6.4 Soundings
+
+**Button:** `SOUNDINGS` (checkable toggle, expands drawer)
+
+Select which data source to use for Skew-T log-P soundings. Only one source is active at a time. Deactivating the button resets to HRRR mode.
+
+| Button | Source | How to Trigger |
+|--------|--------|----------------|
+| **HRRR** | NCEP HRRR model via open-meteo (no API key) | Click anywhere on the map |
+| **OBS** | Observed radiosondes via IEM RAOB API | Radiosonde station markers appear; click one |
+| **NSSL** | NSSL CLAMPS DL truck soundings via THREDDS | CLAMPS markers appear when data is available; click one |
+
+In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
+
+See [Section 9](#9-point-soundings) for full dialog documentation.
+
+---
+
+### 6.5 Surface Obs
+
+**Button:** `SURFACE` (checkable toggle, expands drawer)
+
+Displays live surface observation station models from up to three mesonet networks simultaneously.
+
+#### Network Toggles (multi-select)
+
+| Button | Network | Coverage |
+|--------|---------|----------|
+| **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
+| **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
+| **KS MESONET** | Kansas Mesonet (K-State) | ~50 stations across Kansas |
+
+Any combination can be active at once. Each network polls independently every 5 minutes.
+
+#### Station Model Display
+
+Each station renders a compact model circle on the map showing:
+
+| Position | Data |
+|----------|------|
+| Upper-left | Temperature (°F) |
+| Lower-left | Dewpoint (°F) |
+| Center | Wind barb |
+| Right | Wind speed / direction |
+
+Toggle station models on or off with the **Show plots** checkbox.
+
+---
+
+### 6.6 Routing
+
+**Button:** `ROUTING` (checkable toggle, expands drawer)
+
+Provides turn-by-turn driving directions rendered on the map.
+
+#### Setting Origin and Destination
+
+- **Origin:** Type an address, lat/lon pair, or click **Use My Location** to use the current GPS position.
+- **Destination:** Type an address or lat/lon pair, or click a point on the map while the destination field is focused.
+
+Click **Get Directions** to fetch the route. The route geometry is drawn on the map as a colored line, and the directions list appears below with each maneuver's distance and turn arrow (↑, ←, →, ↖, ↗, ↩, etc.).
+
+#### Auto-Re-Routing
+
+If the vehicle drifts more than 100 m off the calculated route for 3 or more consecutive GPS fixes, STORM automatically re-fetches directions from the current position.
+
+#### Arrival
+
+When the vehicle is within 30 m of the destination, STORM shows an arrival notification and clears the route from the map.
+
+#### Data Sources
+
+| Function | Service |
+|----------|---------|
+| Turn-by-turn routing | OSRM public demo server (`router.project-osrm.org`) |
+| Address geocoding | Nominatim (`nominatim.openstreetmap.org`) |
+
+---
+
+### 6.7 Annotations
 
 **Button:** `ANNOTATIONS` (checkable toggle, expands drawer)
 
@@ -411,7 +516,7 @@ Changes and deletions are published to all connected vehicles.
 
 ---
 
-### 6.5 Drawings
+### 6.8 Drawings
 
 **Button:** `DRAWINGS` (collapsible drawer)
 
@@ -458,7 +563,7 @@ All changes are synced via MQTT.
 
 ---
 
-### 6.6 Storm Motion Cone
+### 6.9 Storm Motion Cone
 
 **Button:** `CONE`
 
@@ -496,7 +601,7 @@ Cones are synced via MQTT (`storm/cones/{id}` topic).
 
 ---
 
-### 6.7 Measurement Tool
+### 6.10 Measurement Tool
 
 **Button:** `MEASURE` (checkable toggle)
 
@@ -518,7 +623,7 @@ Measures great-circle distances on the map.
 
 ---
 
-### 6.8 Station Plots
+### 6.11 Station Plots
 
 **Button:** `STATION PLOTS` (checkable toggle)
 
@@ -552,16 +657,32 @@ Station plots are generated as PNG images (135×135 px, transparent background) 
 
 ---
 
-### 6.9 Deployment Locations
+### 6.12 Deployment Locations
 
-**Button:** `DEPLOY LOCS` (checkable toggle)
+**Button:** `DEPLOY LOCS` (checkable toggle, expands drawer)
 
-Displays historical deployment locations from a static JSON file as markers on the map.
+Displays historical deployment locations as markers on the map, filtered by research quality metrics.
 
-- **Data source:** `data/deployment_locations.json`
-- **Format:** JSON array of `{lat, lon, label, date}` objects
-- **Display:** Small dot/icon markers; hover to see label and date in a tooltip
-- Toggle visibility without reloading — markers are pre-loaded at startup
+#### Quality Metric Selector
+
+| Button | Metric | Description |
+|--------|--------|-------------|
+| **RANK_ABI** | ABI Rank | Rank by ABI-derived quality index |
+| **RANK_AOI** | AOI Rank | Rank by area-of-interest quality |
+| **RQI** | Road Quality Index | Continuous road surface quality score (0–1) |
+
+#### Threshold Slider
+
+A slider controls the minimum quality threshold. Only locations meeting or exceeding the threshold are shown. The legend below the slider shows a green → red color ramp corresponding to the quality range, updated live as you drag.
+
+#### Marker Radius
+
+An additional slider controls the displayed circle radius for each location marker.
+
+#### Data Source
+
+- **File:** `data/deployment_locations.json`
+- Markers are pre-loaded at startup; toggling visibility or threshold is instant.
 
 #### Disabled If
 
@@ -569,7 +690,7 @@ Displays historical deployment locations from a static JSON file as markers on t
 
 ---
 
-### 6.10 Vehicle Panel
+### 6.13 Vehicle Panel
 
 **Button:** `VEHICLES` (toggles the right-side dock panel)
 
@@ -607,14 +728,14 @@ The status bar runs along the bottom of the main window.
 
 ## 8. Outlook Text Panel
 
-The Outlook Panel is a left-side slide-in drawer that displays the full text of SPC and NWS products.
+The Outlook Panel is a right-side panel that expands horizontally to display the full text of SPC and NWS products.
 
 **Opening the Panel:**
 Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, then click "Read" or "Read Discussion" in the popup.
 
 **What Appears:**
 - **Title bar:** Product name (e.g., "DAY 1 CONVECTIVE OUTLOOK", "MD 0179", "TORNADO WATCH 0029")
-- **Close button (×):** Slides the panel back out
+- **Close button (×):** Collapses the panel
 - **Text area:** Full monospaced text of the product (read-only, scrollable)
 
 **Text Sources:**
@@ -627,17 +748,27 @@ Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, t
 | SVR Tstm Watches | IEM AFOS (same PIL logic as tornado) |
 | NWS Warnings | NWS API JSON (`headline` + `description` + `instruction` fields) |
 
-**Animation:** Slides in from the left (200 ms), slides out on close (200 ms). Panel is 340 px wide.
+**Animation:** Expands in from the right edge (200 ms), collapses on close (200 ms). Panel is 340 px wide.
 
 ---
 
 ## 9. Point Soundings
 
-Clicking any location on the map requests a live HRRR vertical atmospheric profile for that point. The data is fetched from the open-meteo API (free tier, no API key required) and displayed in a floating Skew-T log-P dialog.
+STORM supports three independent sounding sources, selected via the **SOUNDINGS** drawer (see [Section 6.4](#64-soundings)). All three sources display in the same Skew-T log-P dialog.
+
+### HRRR Model Soundings
+
+Click any map location within the HRRR CONUS domain. Data fetched from open-meteo (free tier, no API key required). The dialog opens automatically when data arrives (typically 1–3 seconds). Clicking a new location updates the same dialog in place.
+
+### Observed Radiosonde Soundings
+
+Switch to OBS mode in the SOUNDINGS drawer. Radiosonde station markers appear on the map at active upper-air sites. Click a marker to fetch the most recent balloon launch profile from IEM RAOB. STORM automatically selects the 00Z or 12Z launch closest to the current UTC time.
+
+### NSSL CLAMPS DL Truck Soundings
+
+Switch to NSSL mode in the SOUNDINGS drawer. CLAMPS truck markers appear when data is available from the NSSL THREDDS fileserver. Click a marker to fetch and display the most recent truck sounding. Up to 12 hours of soundings per truck are available.
 
 ### Triggering a Sounding
-
-Click any point on the map that is within the HRRR CONUS domain. The dialog opens automatically when data arrives (typically 1–3 seconds). Clicking a new location updates the same dialog in place.
 
 ### Dialog Layout
 
@@ -733,7 +864,9 @@ Storm motion is displayed as `RM  dir°/spd kt` and `LM  dir°/spd kt` in the ho
 Hovering over the Skew-T axes displays a live readout below the plot:
 `pressure (hPa)  ·  T  ·  Td  ·  Wind dir°@spd kt  ·  height m MSL`
 
-### Data Source
+### Data Sources
+
+**HRRR mode:**
 
 | Item | Detail |
 |------|--------|
@@ -744,6 +877,24 @@ Hovering over the Skew-T axes displays a live readout below the plot:
 | Rate limits (free tier) | 600/min · 10,000/day · 300,000/month |
 | Fetch time | Typically 1–3 seconds |
 | Domain | CONUS only — clicks outside HRRR coverage will return an error |
+
+**OBS mode:**
+
+| Item | Detail |
+|------|--------|
+| Source | IEM RAOB radiosonde archive |
+| API | `mesonet.agron.iastate.edu/json/raob.py` |
+| Launch times | 00Z and 12Z; STORM selects the most recent launch |
+| Fetch time | Typically 2–5 seconds |
+
+**NSSL mode:**
+
+| Item | Detail |
+|------|--------|
+| Source | NSSL CLAMPS DL truck soundings via THREDDS fileServer |
+| Catalog | `data.nssl.noaa.gov/thredds/catalog/FRDD/CLAMPS/dltruck/` |
+| Availability | Only when NSSL DL truck is actively collecting data |
+| History | Up to 12 hours of soundings per truck available |
 
 ---
 
@@ -813,6 +964,11 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | NWS Warnings | Every 2 minutes | All active VTEC phenomenons |
 | GOES Satellite (CONUS) | Every 5 minutes | Full CONUS, up to 10 frames |
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
+| HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
+| Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
+| NSSL CLAMPS DL Truck | On demand | Fetched from NSSL THREDDS on click |
+| OK / KS / WTM Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
 | GPS (Track B) | Real-time / continuous | NMEA sentences |
 | MQTT Inbound | Real-time | Vehicle obs, annotations, drawings, cones |
@@ -1039,10 +1195,15 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | SPC Mesoscale Discussions | ✅ Enabled | n/a |
 | NWS Warnings | ✅ Enabled | n/a |
 | Outlook Text Panel | ✅ Enabled | n/a |
+| HRRR Point Soundings | ✅ Enabled | n/a |
+| Observed Radiosonde Soundings | ✅ Enabled | n/a |
+| NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
+| Surface Obs (OK / KS / WTM Mesonet) | ✅ Enabled (when toggled on) | n/a |
+| Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |
 | Drawings (fronts, polylines, polygons) | ✅ Enabled | `--disable-annotations` |
 | Storm Motion Cone | ✅ Enabled | `--disable-annotations` |
-| Station Plots | ✅ Enabled | `--disable-annotations` |
+| Station Plots (vehicle obs) | ✅ Enabled | `--disable-annotations` |
 | Measurement Tool | ✅ Enabled | n/a |
 | Deployment Locations | ✅ Enabled | `--disable-deploy-locs` or missing data file |
 | Vehicle Panel | ✅ Enabled | n/a |

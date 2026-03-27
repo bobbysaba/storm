@@ -8,8 +8,8 @@
 import json
 import logging
 import threading
-from dataclasses import dataclass, field
-from urllib.parse import urlencode, quote
+from dataclasses import dataclass
+from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 

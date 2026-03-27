@@ -57,11 +57,6 @@ class Sounding:
         direction = np.degrees(np.arctan2(-self.u_wind, -self.v_wind)) % 360
         return direction
 
-    @property
-    def is_empty(self) -> bool:
-        return len(self.pressure) == 0
-
-
 @dataclass
 class SoundingSet:
     """Sounding time slots for a single location.
@@ -99,7 +94,3 @@ class SoundingSet:
             if s.slot_offset == slot_offset:
                 return s
         return None
-
-    @property
-    def available_offsets(self) -> list:
-        return [s.slot_offset for s in self.soundings]

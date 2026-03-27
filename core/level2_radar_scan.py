@@ -1,0 +1,114 @@
+# core/level2_radar_scan.py
+# Level2RadarScan — extends RadarScan with NEXRAD Level-2 specific metadata.
+#
+# Level-2 files contain multiple elevation tilts and more dual-pol products
+# than Level-3.  This class carries the extra fields needed to drive the
+# tilt/product selectors in archive mode; the base RadarScan fields
+# (data, lats, lons, vmin, vmax, colormap) are fully compatible with the
+# existing RadarOverlay renderer.
+
+from core.radar_scan import RadarScan
+
+
+# ── Level-2 product catalogue ─────────────────────────────────────────────────
+# Maps pyart field names to display metadata.
+
+L2_PRODUCTS: dict[str, dict] = {
+    "reflectivity": {
+        "label":    "Reflectivity (REF)",
+        "units":    "dBZ",
+        "vmin":     -32.0,
+        "vmax":      90.0,
+        "colormap": "nws_ref",
+    },
+    "velocity": {
+        "label":    "Velocity (VEL)",
+        "units":    "kt",
+        "vmin":     -100.0,
+        "vmax":      100.0,
+        "colormap": "nws_vel",
+    },
+    "cross_correlation_ratio": {
+        "label":    "Corr. Coefficient (CC)",
+        "units":    "",
+        "vmin":      0.0,
+        "vmax":      1.0,
+        "colormap": "nws_cc",
+    },
+    "differential_reflectivity": {
+        "label":    "Diff. Reflectivity (ZDR)",
+        "units":    "dB",
+        "vmin":     -4.0,
+        "vmax":      8.0,
+        "colormap": "nws_zdr",
+    },
+    "spectrum_width": {
+        "label":    "Spectrum Width (SW)",
+        "units":    "kt",
+        "vmin":      0.0,
+        "vmax":     30.0,
+        "colormap": "nws_sw",
+    },
+}
+
+# Default product shown when the archive session opens.
+DEFAULT_L2_PRODUCT = "reflectivity"
+
+
+class Level2RadarScan(RadarScan):
+    """
+    A RadarScan produced from a NEXRAD Level-2 archive file.
+
+    Extra attributes
+    ----------------
+    tilt_deg : float
+        Elevation angle of this sweep in degrees.
+    available_tilts : list[float]
+        All elevation angles present in the parent Level-2 file (sorted).
+    available_products : list[str]
+        pyart field names present in the sweep (subset of L2_PRODUCTS keys).
+    pyart_field : str
+        The pyart field name that was rendered (e.g. "reflectivity").
+    """
+
+    def __init__(
+        self,
+        site,
+        product,       # human-readable label, e.g. "REF"
+        scan_time,
+        data,
+        lats,
+        lons,
+        vmin,
+        vmax,
+        units,
+        colormap,
+        tilt_deg: float,
+        available_tilts: list,
+        available_products: list,
+        pyart_field: str,
+        az_offset: float = 0.0,
+    ):
+        super().__init__(
+            site=site,
+            product=product,
+            scan_time=scan_time,
+            data=data,
+            lats=lats,
+            lons=lons,
+            vmin=vmin,
+            vmax=vmax,
+            units=units,
+            colormap=colormap,
+            az_offset=az_offset,
+        )
+        self.tilt_deg = tilt_deg
+        self.available_tilts = sorted(available_tilts)
+        self.available_products = available_products
+        self.pyart_field = pyart_field
+
+    @property
+    def label(self) -> str:
+        meta = L2_PRODUCTS.get(self.pyart_field, {})
+        name = meta.get("label", self.pyart_field)
+        return f"{self.site} {name} {self.tilt_deg:.1f}° {self.scan_time.strftime('%H:%M')}Z"

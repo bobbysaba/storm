@@ -428,8 +428,9 @@ def main() -> None:
 
 
     # pull whether or not we're in monitor or viewer mode
-    monitor = args.monitor
-    viewer  = args.viewer
+    monitor      = args.monitor
+    viewer       = args.viewer
+    archive_time = None   # datetime | None
 
     # if not launched via CLI mode flag, show the launch dialog
     if not monitor and not viewer:
@@ -450,8 +451,9 @@ def main() -> None:
         config.OBS_FILE_DIR = dialog.data_dir()
 
         # get mode from the dialog
-        monitor = dialog.monitor()
-        viewer  = dialog.viewer()
+        monitor      = dialog.monitor()
+        viewer       = dialog.viewer()
+        archive_time = dialog.archive_start_time()   # None unless archive mode
 
     from ui.main_window import MainWindow  # noqa: PLC0415
 
@@ -461,7 +463,12 @@ def main() -> None:
     _warn_missing_files()
 
     # create the main window
-    window = MainWindow(debug=args.debug, monitor=monitor, viewer=viewer)
+    window = MainWindow(
+        debug=args.debug,
+        monitor=monitor,
+        viewer=viewer,
+        archive_time=archive_time,
+    )
 
     # define the JS console message handler
     js_log = logging.getLogger("storm.js")

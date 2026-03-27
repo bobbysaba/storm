@@ -4,7 +4,6 @@
 import logging
 import re
 import threading
-import time
 import xml.etree.ElementTree as ET
 from typing import Optional
 from urllib.parse import urljoin

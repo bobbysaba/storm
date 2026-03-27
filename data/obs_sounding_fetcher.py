@@ -264,4 +264,4 @@ def _parse_profile(
 
 def _format_label(dt: datetime) -> str:
     """Return a scrubber label like '00Z Mar 25'."""
-    return f"{dt.hour}Z {dt.strftime('%b')} {dt.day}"
+    return f"{dt.hour:02d}Z {dt.strftime('%b')} {dt.day}"
