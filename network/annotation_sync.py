@@ -51,21 +51,29 @@ class AnnotationSync(QObject):
     # ── Publish (local → broker) ───────────────────────────────────────────────
 
     def publish_create(self, annotation: Annotation):
-        self._publish(annotation.id, annotation.to_dict())
+        self._publish(annotation.id, annotation.to_dict(), retain=True)
 
     def publish_update(self, annotation: Annotation):
-        self._publish(annotation.id, annotation.to_dict())
+        self._publish(annotation.id, annotation.to_dict(), retain=True)
 
     def publish_delete(self, annotation_id: str):
-        self._publish(annotation_id, {"id": annotation_id, "deleted": True})
+        # Clear the retained message on the broker so late joiners don't see it.
+        topic = f"{_TOPIC_PREFIX}/{annotation_id}"
+        if not self._read_only:
+            try:
+                self._mqtt.publish(topic, "", retain=True)
+            except Exception as e:
+                log.warning("AnnotationSync: retained clear failed: %s", e)
+        # Notify live clients of the delete.
+        self._publish(annotation_id, {"id": annotation_id, "deleted": True}, retain=False)
 
-    def _publish(self, annotation_id: str, payload: dict):
+    def _publish(self, annotation_id: str, payload: dict, retain: bool = False):
         if self._read_only:
             return
         topic = f"{_TOPIC_PREFIX}/{annotation_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload))
-            log.debug("AnnotationSync: published %s", topic)
+            self._mqtt.publish(topic, json.dumps(payload), retain=retain)
+            log.debug("AnnotationSync: published %s (retain=%s)", topic, retain)
         except Exception as e:
             log.warning("AnnotationSync: publish failed: %s", e)
 

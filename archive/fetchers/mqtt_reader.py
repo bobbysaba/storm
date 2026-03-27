@@ -15,8 +15,10 @@
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -138,16 +140,14 @@ class ArchiveMQTTReader(QObject):
     # ── File loading ──────────────────────────────────────────────────────────
 
     def _fetch_files(self) -> None:
-        """Download vehicle position JSONL file for the session date."""
-        url = f"{self._base_url}/{self._date_str}/{TOPIC_VEHICLES}.jsonl"
+        """Read vehicle position JSONL file for the session date (local or HTTP)."""
+        rel_path = f"{self._date_str}/{TOPIC_VEHICLES}.jsonl"
         try:
-            resp = requests.get(url, timeout=30)
-            if resp.status_code == 404:
-                log.info("ArchiveMQTTReader: no vehicle file at %s", url)
-                self._loaded = True
+            text = _read_file_snapshot(self._base_url, rel_path)
+            if text is None:
+                log.info("ArchiveMQTTReader: no vehicle file for %s", self._date_str)
                 return
-            resp.raise_for_status()
-            msgs = _parse_jsonl(resp.text)
+            msgs = _parse_jsonl(text)
             self._vehicle_msgs = sorted(msgs, key=lambda x: x[0])
             log.info(
                 "ArchiveMQTTReader: loaded %d vehicle messages for %s",
@@ -184,6 +184,46 @@ class ArchiveMQTTReader(QObject):
             hdg  = float(payload.get(FIELD_HEADING, 0) or 0)
             if lat is not None and lon is not None:
                 self.vehicle_position.emit(vid, float(lat), float(lon), spd, hdg)
+
+
+# ── File reader ───────────────────────────────────────────────────────────────
+
+def _read_file_snapshot(base: str, rel_path: str) -> Optional[str]:
+    """
+    Return the full text content of a JSONL file as a single string snapshot,
+    then close it immediately — so concurrent appends by an MQTT logger never
+    cause a conflict or partial-read issue.
+
+    Supports:
+      - Local directory paths  e.g. "/data/mqtt"
+      - file:// URLs           e.g. "file:///data/mqtt"
+      - HTTP/HTTPS URLs        e.g. "http://localhost:9000"
+
+    Returns None when the file does not exist (404 or missing path).
+    Raises on unexpected errors so the caller can log them.
+    """
+    if base.startswith("file://"):
+        local_dir = base[len("file://"):]
+        path = Path(local_dir) / rel_path
+        if not path.exists():
+            return None
+        # Read entire file at once, then release the handle immediately.
+        return path.read_text(encoding="utf-8")
+
+    if not base.startswith("http://") and not base.startswith("https://"):
+        # Treat as a plain local directory path.
+        path = Path(base) / rel_path
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    # HTTP/HTTPS — requests buffers the full response body before returning.
+    url = f"{base}/{rel_path}"
+    resp = requests.get(url, timeout=30, stream=False)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.text
 
 
 # ── JSONL parser ──────────────────────────────────────────────────────────────
