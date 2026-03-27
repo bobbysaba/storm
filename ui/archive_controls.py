@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QDialog, QPushButton, QDateTimeEdit,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 try:
     from zoneinfo import ZoneInfo
@@ -206,6 +206,26 @@ class ArchiveControls(QWidget):
         self._btn_play.clicked.connect(self._tc.toggle_play)
         self._btn_fwd.clicked.connect(self._tc.step_forward)
         self._btn_end.clicked.connect(self._on_skip_end)
+
+        # Keyboard shortcuts — these require a parent window to be set.
+        # We install them lazily once we have a top-level window.
+        self._shortcuts_installed = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._shortcuts_installed:
+            self._install_shortcuts()
+
+    def _install_shortcuts(self):
+        win = self.window()
+        if win is None:
+            return
+        self._shortcuts_installed = True
+        QShortcut(QKeySequence(Qt.Key.Key_Space),  win).activated.connect(self._tc.toggle_play)
+        QShortcut(QKeySequence(Qt.Key.Key_Left),   win).activated.connect(self._tc.step_backward)
+        QShortcut(QKeySequence(Qt.Key.Key_Right),  win).activated.connect(self._tc.step_forward)
+        QShortcut(QKeySequence(Qt.Key.Key_Home),   win).activated.connect(self._on_skip_start)
+        QShortcut(QKeySequence(Qt.Key.Key_End),    win).activated.connect(self._on_skip_end)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

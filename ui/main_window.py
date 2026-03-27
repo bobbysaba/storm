@@ -373,7 +373,33 @@ class MainWindow(QMainWindow):
 
         self._archive_loading.show()
 
-        # Set initial time on the time controller (emits time_changed).
+        # ── Archive hazard controls wiring ────────────────────────────────────
+        # The archive hazard fetcher pushes data on every time tick; the
+        # controls just toggle map-layer visibility and update the legend.
+        self.hazard_controls.spc_mode_changed.connect(self._on_archive_spc_mode_changed)
+        self.hazard_controls.spc_watches_toggled.connect(self._on_archive_watches_toggled)
+        self.hazard_controls.nws_warnings_toggled.connect(self._on_archive_nws_toggled)
+        # MDs are not available in archive — silently ignore.
+        self.hazard_controls.fetch_requested.connect(
+            lambda: self.status_msg_label.setText("Hazard refresh not available in archive mode")
+        )
+        self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
+
+        # ── Satellite opacity slider works in archive mode ────────────────────
+        self.satellite_controls.opacity_changed.connect(self.map_widget.set_satellite_opacity)
+
+        # ── Archive sounding wiring ───────────────────────────────────────────
+        self.map_widget.sounding_clicked.connect(self._on_archive_sounding_map_click)
+        self.map_widget.obs_sounding_station_clicked.connect(self._on_archive_obs_station_click)
+        # mode_changed is normally connected in _init_soundings (not called in archive).
+        self.sounding_controls.mode_changed.connect(self._on_sounding_mode_changed)
+
+        # ── Radar station picker → archive fetcher ───────────────────────────
+        # Connect the station picker so the user can select a radar site.
+        self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
+        self.radar_controls.stations_requested.connect(self._toggle_radar_station_picker)
+
+        # ── Set initial time on the time controller (emits time_changed). ─────
         QTimer.singleShot(200, lambda: self._time_ctrl.set_time(self._archive_time))
 
         # Lay out the archive controls bar at the bottom of the screen.
@@ -481,8 +507,12 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_render, daemon=True).start()
 
     def _on_archive_satellite_frame(self, frame) -> None:
-        """Display an archive satellite frame on the map."""
-        self.map_widget.set_satellite_image(frame.b64, frame.bbox)
+        """Update the archive satellite frame; only show if the user has toggled it on."""
+        w, s, e, n = frame.bbox
+        self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+        self._archive_sat_has_data = True
+        if self.btn_satellite.isChecked():
+            self.map_widget.set_satellite_visible(True)
 
     def _on_archive_vehicle_position(
         self, vid: str, lat: float, lon: float, speed: float, heading: float
@@ -515,6 +545,38 @@ class MainWindow(QMainWindow):
     def _on_archive_product_changed(self, pyart_field: str) -> None:
         if self._archive_radar:
             self._archive_radar.set_product(pyart_field)
+
+    # ── Archive hazard handlers ───────────────────────────────────────────────
+
+    def _on_archive_spc_mode_changed(self, mode: str) -> None:
+        """Toggle SPC outlook/product layers in archive mode (no live fetcher)."""
+        outlook_on = mode == "outlook"
+        for key in ("MRGL", "SLGHT", "ENH", "MDT", "HIGH"):
+            self.map_widget.set_spc_category_visible(key, outlook_on)
+        for key in ("tor", "wind", "hail"):
+            on = mode == key
+            self.map_widget.set_spc_product_visible(key, on)
+        self._update_hazard_legend()
+
+    def _on_archive_watches_toggled(self, enabled: bool) -> None:
+        self.map_widget.set_spc_watches_visible(enabled)
+        self._update_hazard_legend()
+
+    def _on_archive_nws_toggled(self, enabled: bool) -> None:
+        self.map_widget.set_nws_warnings_visible(enabled)
+        self._update_hazard_legend()
+
+    # ── Archive sounding handlers ─────────────────────────────────────────────
+
+    def _on_archive_sounding_map_click(self, lat: float, lon: float) -> None:
+        self.status_msg_label.setText("Fetching archive sounding…")
+        self._archive_sounding.fetch_model_sounding(lat, lon)
+
+    def _on_archive_obs_station_click(
+        self, station_id: str, name: str, lat: float, lon: float, elev: float
+    ) -> None:
+        self.status_msg_label.setText(f"Fetching OBS sounding {station_id}…")
+        self._archive_sounding.fetch_obs_sounding(station_id, lat, lon, elev)
 
     # ── Live startup sequence (unchanged) ────────────────────────────────────
 
@@ -776,6 +838,9 @@ class MainWindow(QMainWindow):
             self.btn_route.hide()
         if self._archive:
             self.btn_prev_locs.hide()
+            # No archive data sources for these — hide to prevent crashes.
+            self.btn_surface.hide()     # _surface_fetcher / _surface_layer absent
+            self.btn_annotate.hide()    # _mqtt_client / _annotation_sync / _drawing_sync absent
 
         # ── Navigation pill (upper-right, visible when route active + drawer closed)
         self.nav_pill = NavPill(self._map_container)
@@ -1003,6 +1068,8 @@ class MainWindow(QMainWindow):
         self._clock_timer.stop()
         if hasattr(self, "_update_check_timer"):
             self._update_check_timer.stop()
+        if hasattr(self, "_time_ctrl"):
+            self._time_ctrl.pause()
         if hasattr(self, "_radar_fetcher"):
             self._radar_fetcher.stop()
         if hasattr(self, "_hazard_fetcher"):
@@ -1625,6 +1692,11 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_satellite_toggled(self, checked: bool):
+        if self._archive:
+            # Archive mode: simply show/hide the overlay the archive fetcher is updating.
+            has_data = getattr(self, "_archive_sat_has_data", False)
+            self.map_widget.set_satellite_visible(checked and has_data)
+            return
         if not checked:
             # Closing the drawer stops playback but leaves the overlay visible.
             self._satellite_loop_timer.stop()
@@ -1820,6 +1892,23 @@ class MainWindow(QMainWindow):
 
     def _update_hazard_legend(self):
         """Recompute which hazard layers are active and update the pill legend."""
+        if not hasattr(self, "_hazard_fetcher"):
+            # Archive mode: derive active layers from hazard_controls button states.
+            hc = self.hazard_controls
+            active = []
+            if hc._btn_outlook.isChecked():
+                active.append("spc-cat")
+            for k in ("tor", "wind", "hail"):
+                btn = getattr(hc, f"_btn_{k}")
+                if btn.isChecked():
+                    active.append(f"spc-{k}")
+            if hc._btn_watches.isChecked():
+                active.append("spc-watches")
+            if hc._btn_nws_warnings.isChecked():
+                active.append("nws-warnings")
+            hc.update_legend(active)
+            self._start_layout_pulse()
+            return
         fc = self._hazard_fetcher
         active = []
         if any(fc._spc_categories.values()):
@@ -2070,6 +2159,22 @@ class MainWindow(QMainWindow):
         """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
         if not self.btn_sounding.isChecked():
             return
+        if self._archive:
+            # Archive mode: HRRR → model sounding, OBS → radiosonde, NSSL not supported.
+            if mode == "hrrr":
+                self.map_widget.set_obs_sounding_mode(False)
+                self.map_widget.clear_sounding_stations()
+                self.map_widget.set_sounding_mode(True)
+            elif mode == "obs":
+                self.map_widget.set_sounding_mode(False)
+                self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
+                self.map_widget.set_obs_sounding_mode(True)
+            else:  # nssl — not supported in archive
+                self.map_widget.set_sounding_mode(False)
+                self.map_widget.set_obs_sounding_mode(False)
+                self.map_widget.clear_sounding_stations()
+                self.status_msg_label.setText("NSSL soundings not available in archive mode")
+            return
         if not hasattr(self, "_sounding_fetcher"):
             return
         if mode == "hrrr":
@@ -2114,6 +2219,11 @@ class MainWindow(QMainWindow):
         # radar-overlay opacity to 0 before the bridge call — just update
         # Python-side flags without any redundant runJavaScript calls.
         self._radar_station_picker_visible = False
+        if self._archive:
+            # In archive mode, start fetching from the selected station.
+            self._archive_session.radar_station = site
+            self._start_archive_radar(site)
+            return
         self._site_change_from_map_click = True
         self._select_radar_site(site, user_selected=True)
         self._site_change_from_map_click = False
