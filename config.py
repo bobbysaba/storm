@@ -60,6 +60,7 @@ DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 # Replace the placeholder values below with hashes of your actual passwords.
 VEHICLE_PASSPHRASE_HASH = "6f3924cf58c4302ac1d1743807806f5cac6af1dd163ceea88407dee66eaa046e"
 MONITOR_PASSPHRASE_HASH = "3aa29dabcf48a07aae0fd782da7c48705f82614eaa0e0fcf02bbb42cb6db13d0"
+ARCHIVE_PASSPHRASE_HASH = "ce8c1196ed2eeceb1d6ed967566c95be2e418b306e96f13ac3a791c4987f5e3b"
 
 # accent color
 ACCENT_COLOR = "#00CFFF"

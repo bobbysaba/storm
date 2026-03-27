@@ -11,10 +11,10 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
-    QDateTimeEdit,
+    QDateTimeEdit, QAbstractButton, QSpinBox,
 )
-from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize, QDateTime
-from PyQt6.QtGui import QPixmap, QPainter, QIcon
+from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize, QDateTime, QPointF
+from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF
 
 import config as _config
 
@@ -148,6 +148,114 @@ QPushButton#launchBtn:hover {
 }
 QPushButton#launchBtn:pressed {
     background-color: #009ECC;
+}
+
+QDateTimeEdit {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #E8EAF0;
+    font-size: 13px;
+    padding: 6px 10px;
+    selection-background-color: #00CFFF;
+}
+QDateTimeEdit:focus {
+    border: 1px solid #00CFFF;
+}
+QDateTimeEdit::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: 1px solid #1E1E2E;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background-color: #1A1A2E;
+}
+QDateTimeEdit::drop-down:hover {
+    background-color: #0D1A2E;
+    border-left-color: #00CFFF;
+}
+QDateTimeEdit::down-arrow {
+    width: 8px;
+    height: 5px;
+}
+QCalendarWidget {
+    background-color: #0A0A0F;
+    color: #E8EAF0;
+    border: 1px solid #2A2A3E;
+    border-radius: 10px;
+}
+QCalendarWidget QToolButton {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 4px;
+    color: #E8EAF0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 6px;
+}
+QCalendarWidget QToolButton:hover {
+    border-color: #00CFFF;
+    color: #00CFFF;
+}
+QCalendarWidget QToolButton#qt_calendar_prevmonth,
+QCalendarWidget QToolButton#qt_calendar_nextmonth {
+    min-width: 26px;
+    padding: 3px 4px;
+}
+QCalendarWidget QMenu {
+    background-color: #0A0A0F;
+    border: 1px solid #1E1E2E;
+    color: #E8EAF0;
+}
+QCalendarWidget QSpinBox {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 4px;
+    color: #E8EAF0;
+    font-size: 11px;
+    padding: 2px 4px;
+}
+QCalendarWidget QSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 16px;
+    border-left: 1px solid #1E1E2E;
+    border-bottom: 1px solid #1E1E2E;
+    border-top-right-radius: 4px;
+    background-color: #1A1A2E;
+}
+QCalendarWidget QSpinBox::up-button:hover {
+    background-color: #0D1A2E;
+}
+QCalendarWidget QSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 16px;
+    border-left: 1px solid #1E1E2E;
+    border-top: 1px solid #1E1E2E;
+    border-bottom-right-radius: 4px;
+    background-color: #1A1A2E;
+}
+QCalendarWidget QSpinBox::down-button:hover {
+    background-color: #0D1A2E;
+}
+QCalendarWidget QAbstractItemView {
+    background-color: #0D0D1A;
+    alternate-background-color: #0A0A0F;
+    color: #E8EAF0;
+    selection-background-color: #00CFFF;
+    selection-color: #0A0A0F;
+    gridline-color: #1E1E2E;
+    border: none;
+}
+QCalendarWidget QAbstractItemView:disabled {
+    color: #2A2A3E;
+}
+QCalendarWidget #qt_calendar_navigationbar {
+    background-color: #12121E;
+    border-radius: 9px 9px 0px 0px;
+    padding: 2px;
 }
 
 QFrame#divider {
@@ -605,6 +713,7 @@ class LaunchDialog(QDialog):
             )
         )
         av_layout.addWidget(self._archive_dt_edit)
+        self._init_calendar_icons()
 
         arc_hint = QLabel("All data products will replay from this UTC time.")
         arc_hint.setObjectName("hint")
@@ -760,6 +869,49 @@ class LaunchDialog(QDialog):
         x = screen.x() + max(0, (screen.width()  - self.width())  // 2)
         y = screen.y() + max(0, (screen.height() - self.height()) // 2)
         self.move(x, y)
+
+    # ── Calendar icon setup ────────────────────────────────────────────────────
+
+    def _init_calendar_icons(self):
+        """Inject custom white triangle icons into the calendar popup widgets."""
+
+        def _tri_icon(pts, color, w=10, h=10):
+            px = QPixmap(w, h)
+            px.fill(Qt.GlobalColor.transparent)
+            p = QPainter(px)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor(color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPolygon(QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
+            p.end()
+            return QIcon(px)
+
+        # Dropdown arrow on the QDateTimeEdit itself
+        _drop = self._archive_dt_edit.findChild(QToolButton)
+        if _drop:
+            _drop.setIcon(_tri_icon([(0.1, 0.2), (0.9, 0.2), (0.5, 0.85)], "#8E97AB", 10, 8))
+            _drop.setIconSize(QSize(10, 8))
+
+        # Calendar prev/next month nav arrows
+        cal = self._archive_dt_edit.calendarWidget()
+        _prev = cal.findChild(QToolButton, "qt_calendar_prevmonth")
+        _next = cal.findChild(QToolButton, "qt_calendar_nextmonth")
+        if _prev:
+            _prev.setIcon(_tri_icon([(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)], "#FFFFFF"))
+            _prev.setIconSize(QSize(10, 10))
+        if _next:
+            _next.setIcon(_tri_icon([(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)], "#FFFFFF"))
+            _next.setIconSize(QSize(10, 10))
+
+        # Year spinbox up/down arrows
+        _spin = cal.findChild(QSpinBox, "qt_calendar_yearedit")
+        if _spin:
+            _btns = _spin.findChildren(QAbstractButton)
+            if len(_btns) >= 2:
+                _btns[0].setIcon(_tri_icon([(0.1, 0.85), (0.9, 0.85), (0.5, 0.15)], "#8E97AB", 10, 8))
+                _btns[0].setIconSize(QSize(10, 8))
+                _btns[1].setIcon(_tri_icon([(0.1, 0.15), (0.9, 0.15), (0.5, 0.85)], "#8E97AB", 10, 8))
+                _btns[1].setIconSize(QSize(10, 8))
 
     # ── Lock helpers ───────────────────────────────────────────────────────────
 
@@ -917,7 +1069,7 @@ class LaunchDialog(QDialog):
             if mode == "vehicle":
                 expected_hash = _config.VEHICLE_PASSPHRASE_HASH
             elif mode == "archive":
-                expected_hash = _config.MONITOR_PASSPHRASE_HASH  # reuse monitor hash
+                expected_hash = _config.ARCHIVE_PASSPHRASE_HASH
             else:
                 expected_hash = _config.MONITOR_PASSPHRASE_HASH
             if entered_hash != expected_hash:
