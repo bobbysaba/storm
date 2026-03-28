@@ -285,8 +285,8 @@ class MainWindow(QMainWindow):
         # Archive controls bar at bottom of screen.
         self._archive_controls = ArchiveControls(self._time_ctrl, self._map_container)
         self._archive_controls.setObjectName("archiveControls")
-        self._archive_controls.tilt_changed.connect(self._on_archive_tilt_changed)
-        self._archive_controls.product_changed.connect(self._on_archive_product_changed)
+        self._archive_controls.set_radar_status("Radar: waiting")
+        self._archive_controls.set_satellite_status("Sat: waiting")
 
         # MQTT reader — vehicle positions.
         mqtt_base = getattr(config, "ARCHIVE_MQTT_BASE_URL", "")
@@ -311,6 +311,7 @@ class MainWindow(QMainWindow):
             session_date=self._archive_time, parent=self
         )
         self._archive_satellite.frame_ready.connect(self._on_archive_satellite_frame)
+        self._archive_satellite.meso_sectors_updated.connect(self._on_meso_sectors_updated)
 
         # Sounding dialog and archive fetcher (on-demand).
         self._sounding_dialog = SoundingDialog(self)
@@ -335,7 +336,10 @@ class MainWindow(QMainWindow):
         self._time_ctrl.time_changed.connect(self._archive_sounding.on_time_changed)
 
         # Show loading dialog while initial data fetches run.
-        loading_tasks = ["Vehicle tracks", "Hazard data", "Satellite index"]
+        # "Radar index" is included — the S3 scan listing must complete before
+        # playback is useful.  The actual first-scan download happens after the
+        # dialog closes (status bar shows progress).
+        loading_tasks = ["Vehicle tracks", "Radar index", "Hazard data", "Satellite index"]
         self._archive_loading = ArchiveLoadingDialog(
             session_label=self._archive_time.strftime("%Y-%m-%d  %H:%M UTC"),
             tasks=loading_tasks,
@@ -367,6 +371,7 @@ class MainWindow(QMainWindow):
         self._archive_satellite.error.connect(
             lambda _: self._archive_loading.set_task_error("Satellite index")
         )
+        self._archive_satellite.error.connect(self._on_archive_satellite_error)
 
         QTimer.singleShot(400, _check_mqtt_loaded)
         QTimer.singleShot(400, _check_hazard_loaded)
@@ -379,14 +384,14 @@ class MainWindow(QMainWindow):
         self.hazard_controls.spc_mode_changed.connect(self._on_archive_spc_mode_changed)
         self.hazard_controls.spc_watches_toggled.connect(self._on_archive_watches_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_archive_nws_toggled)
-        # MDs are not available in archive — silently ignore.
-        self.hazard_controls.fetch_requested.connect(
-            lambda: self.status_msg_label.setText("Hazard refresh not available in archive mode")
-        )
+        self.hazard_controls.fetch_requested.connect(self._archive_hazard.refresh_now)
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
 
         # ── Satellite opacity slider works in archive mode ────────────────────
+        self.satellite_controls.configure_for_archive(True)
+        self.satellite_controls.mode_changed.connect(self._on_satellite_mode_changed)
         self.satellite_controls.opacity_changed.connect(self.map_widget.set_satellite_opacity)
+        self.satellite_controls.meso_preview.connect(self._on_meso_preview)
 
         # ── Archive sounding wiring ───────────────────────────────────────────
         self.map_widget.sounding_clicked.connect(self._on_archive_sounding_map_click)
@@ -394,41 +399,66 @@ class MainWindow(QMainWindow):
         # mode_changed is normally connected in _init_soundings (not called in archive).
         self.sounding_controls.mode_changed.connect(self._on_sounding_mode_changed)
 
+        # ── Radar controls — archive mode keeps station / product / tilt here ───
+        self.radar_controls.configure_for_archive(True)
+        self.radar_controls.product_changed.connect(self._on_archive_product_changed)
+        self.radar_controls.tilt_changed.connect(self._on_archive_tilt_changed)
+
         # ── Radar station picker → archive fetcher ───────────────────────────
-        # Connect the station picker so the user can select a radar site.
+        # Populate the map overlay with station markers (normally done in
+        # _init_radar for live mode, but that path is skipped in archive).
+        self.map_widget.set_radar_stations(self._radar_station_sites)
         self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
         self.radar_controls.stations_requested.connect(self._toggle_radar_station_picker)
 
         # ── Set initial time on the time controller (emits time_changed). ─────
         QTimer.singleShot(200, lambda: self._time_ctrl.set_time(self._archive_time))
+        QTimer.singleShot(0, lambda: self.satellite_controls._btn_conus.setChecked(True))
 
         # Lay out the archive controls bar at the bottom of the screen.
         QTimer.singleShot(0, self._layout_overlays)
 
     def _try_auto_select_radar_station(self) -> None:
-        """Pick the nearest NEXRAD station from the first vehicle position."""
+        """Pick the nearest NEXRAD station from vehicle positions, or fall back
+        to the home location when no MQTT data is available."""
         if not hasattr(self, "_archive_mqtt"):
             return
         positions = self._archive_mqtt.first_vehicle_positions()
         if positions:
             _, lat, lon = positions[0]
-            site = self._nearest_nexrad(lat, lon)
+            site = self._nearest_nexrad(lat, lon, archive=True)
         else:
-            site = None
+            # No vehicle data — fall back to the configured home location so
+            # radar still starts without requiring a manual station pick.
+            log.info(
+                "Archive: no vehicle positions — falling back to home location "
+                "(%.3f, %.3f) for radar station selection",
+                config.HOME_LAT, config.HOME_LON,
+            )
+            site = self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True)
 
         if not site:
-            # Fall back: pick a default or let the user choose later.
-            log.info("Archive: no vehicle positions — radar station not auto-selected")
+            self.status_msg_label.setText(
+                "Could not determine radar station — select one on the map"
+            )
             return
 
         self._archive_session.radar_station = site
         self._start_archive_radar(site)
 
-    def _nearest_nexrad(self, lat: float, lon: float) -> "str | None":
-        """Return the 4-letter NEXRAD ID closest to lat/lon."""
+    def _nearest_nexrad(self, lat: float, lon: float, archive: bool = False) -> "str | None":
+        """Return the 4-letter NEXRAD ID closest to lat/lon.
+
+        When archive=True, stations known to be absent from the public Level-2
+        archive are excluded from consideration.
+        """
+        from archive.fetchers.radar_archive_fetcher import ARCHIVE_UNAVAILABLE_STATIONS
         best_site = None
         best_dist = float("inf")
-        for site_id, info in (self._radar_station_sites or {}).items():
+        for info in (self._radar_station_sites or []):
+            site_id = info.get("site_id", "")
+            if archive and site_id in ARCHIVE_UNAVAILABLE_STATIONS:
+                continue
             slat = info.get("lat", 0)
             slon = info.get("lon", 0)
             d = (lat - slat) ** 2 + (lon - slon) ** 2
@@ -442,9 +472,19 @@ class MainWindow(QMainWindow):
         from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
 
         if self._archive_radar is not None:
-            # Disconnect old fetcher signals.
+            # Disconnect all signals from the old fetcher so it stops affecting
+            # the UI and doesn't receive further time ticks.
+            for sig in (
+                self._archive_radar.scan_ready,
+                self._archive_radar.loading_changed,
+                self._archive_radar.error,
+            ):
+                try:
+                    sig.disconnect()
+                except Exception:
+                    pass
             try:
-                self._archive_radar.scan_ready.disconnect()
+                self._time_ctrl.time_changed.disconnect(self._archive_radar.on_time_changed)
             except Exception:
                 pass
 
@@ -455,21 +495,45 @@ class MainWindow(QMainWindow):
         )
         self._archive_radar.scan_ready.connect(self._on_archive_radar_scan)
         self._archive_radar.loading_changed.connect(
-            lambda loading: self.status_msg_label.setText(
-                f"Radar: loading {station}…" if loading else ""
+            lambda loading: (
+                self.status_msg_label.setText(f"Radar: loading {station}…" if loading else ""),
+                self._archive_controls.set_radar_status(f"Radar: loading {station}…")
+                if loading and hasattr(self, "_archive_controls") else None
             )
         )
-        self._archive_radar.error.connect(
-            lambda msg: self.status_msg_label.setText(msg)
-        )
+        self._archive_radar.error.connect(self._on_archive_radar_error)
         self._time_ctrl.time_changed.connect(self._archive_radar.on_time_changed)
 
-        # Update radar controls to reflect the new station.
+        # Hook into the loading dialog if it is still open.
+        # We wait for the first actual scan (scan_ready), not just the index,
+        # so the user enters the UI knowing data is already on screen.
+        # index_loaded just updates the status text to show progress.
+        # A 45-second fallback timer marks the task done if scan_ready never
+        # fires (e.g. no scan exists before the chosen archive start time).
+        loading = getattr(self, "_archive_loading", None)
+        if loading is not None and loading.isVisible():
+            self._archive_radar.index_loaded.connect(
+                lambda _: loading.set_status("Fetching first radar scan…")
+            )
+            self._archive_radar.scan_ready.connect(
+                lambda _: loading.set_task_done("Radar index")
+            )
+            self._archive_radar.error.connect(
+                lambda _: loading.set_task_error("Radar index")
+            )
+            # Fallback: if the first scan hasn't arrived in 45 s, unblock anyway.
+            _radar_timeout = QTimer(self)
+            _radar_timeout.setSingleShot(True)
+            _radar_timeout.setInterval(45_000)
+            _radar_timeout.timeout.connect(
+                lambda: loading.set_task_done("Radar index")
+                if loading.isVisible() else None
+            )
+            _radar_timeout.start()
+
+        # Update the station button label in the radar controls.
         if hasattr(self, "radar_controls"):
-            for i in range(self.radar_controls._site_combo.count()):
-                if self.radar_controls._site_combo.itemText(i).startswith(station):
-                    self.radar_controls._site_combo.setCurrentIndex(i)
-                    break
+            self.radar_controls.set_selected_site(station, emit=False)
 
         self._archive_radar.load_index()
         # Trigger first scan fetch at current archive time.
@@ -479,38 +543,49 @@ class MainWindow(QMainWindow):
 
     def _on_archive_radar_scan(self, scan) -> None:
         """Render a Level-2 scan from the archive fetcher."""
-        import threading
         from ui.radar_overlay import render_scan_to_png, RENDER_GRID_SIZE
 
-        # Add tilt/product selectors to archive controls the first time.
-        if hasattr(self, "_archive_controls") and hasattr(scan, "available_products"):
+        # Add tilt/product selectors to archive controls the first time;
+        # refresh the tilt list on every subsequent scan (VCP can change).
+        if hasattr(scan, "available_products"):
             from core.level2_radar_scan import L2_PRODUCTS
             products = [
                 (f, L2_PRODUCTS[f]["label"]) for f in scan.available_products
                 if f in L2_PRODUCTS
             ]
-            self._archive_controls.add_radar_selectors(products, scan.available_tilts)
+            self.radar_controls.set_archive_products(products)
+            current_tilt_idx = getattr(self._archive_radar, "_tilt_idx", 0)
+            self.radar_controls.set_archive_tilts(scan.available_tilts, current_tilt_idx)
 
-        def _render():
-            try:
-                png, bounds, _ = render_scan_to_png(scan, RENDER_GRID_SIZE)
-                import base64
-                b64 = base64.b64encode(png).decode()
-                self.map_widget.set_radar_image(b64, bounds)
-                if hasattr(self, "radar_controls"):
-                    self.radar_controls.set_scan_time(
-                        scan.scan_time.strftime("%H:%MZ")
-                    )
-            except Exception as exc:
-                log.error("Archive radar render failed: %s", exc)
-
-        threading.Thread(target=_render, daemon=True).start()
+        try:
+            archive_grid = max(RENDER_GRID_SIZE, 768)
+            png, bounds, _ = render_scan_to_png(scan, archive_grid)
+            self._radar_overlay.inject(png, bounds)
+            if hasattr(self, "radar_controls"):
+                self.radar_controls.set_scan_time(
+                    scan.scan_time.strftime("%H:%MZ")
+                )
+            if hasattr(self, "_archive_controls"):
+                self._archive_controls.set_radar_status(
+                    f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg {scan.scan_time.strftime('%H:%MZ')}"
+                )
+        except Exception as exc:
+            log.error("Archive radar render failed: %s", exc)
+            if hasattr(self, "_archive_controls"):
+                self._archive_controls.set_radar_status("Radar: render error", error=True)
 
     def _on_archive_satellite_frame(self, frame) -> None:
         """Update the archive satellite frame; only show if the user has toggled it on."""
         w, s, e, n = frame.bbox
         self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
         self._archive_sat_has_data = True
+        self.satellite_controls.set_scan_time(frame.time_str)
+        self.status_msg_label.setText(f"GOES {frame.mode.upper()} {frame.time_str}")
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_satellite_status(
+                f"Sat: AWS {frame.mode.upper()} {frame.time_str}"
+            )
+        self._layout_overlays()
         if self.btn_satellite.isChecked():
             self.map_widget.set_satellite_visible(True)
 
@@ -541,10 +616,26 @@ class MainWindow(QMainWindow):
     def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
         if self._archive_radar:
             self._archive_radar.set_tilt_index(tilt_idx)
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_radar_status(f"Radar: loading tilt {tilt_idx}")
 
     def _on_archive_product_changed(self, pyart_field: str) -> None:
         if self._archive_radar:
             self._archive_radar.set_product(pyart_field)
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_radar_status(f"Radar: loading {pyart_field}")
+
+    def _on_archive_radar_error(self, msg: str) -> None:
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_radar_status("Radar: error", error=True)
+        self.status_msg_label.setText(msg)
+        self._layout_overlays()
+
+    def _on_archive_satellite_error(self, msg: str) -> None:
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_satellite_status("Sat: error", error=True)
+        self.status_msg_label.setText(f"Satellite: {msg}")
+        self._layout_overlays()
 
     # ── Archive hazard handlers ───────────────────────────────────────────────
 
@@ -1712,6 +1803,24 @@ class MainWindow(QMainWindow):
                 self.map_widget.set_satellite_visible(True)
 
     def _on_satellite_mode_changed(self, mode: str):
+        if self._archive:
+            self.satellite_controls.stop_loop()
+            self.satellite_controls.reset_cache_ui()
+            self._archive_sat_has_data = False
+
+            if not mode:
+                self.map_widget.clear_satellite_frame()
+                self.map_widget.set_satellite_visible(False)
+                return
+
+            self.map_widget.set_satellite_mode(mode)
+            self.map_widget.clear_satellite_frame()
+            self.map_widget.set_satellite_visible(False)
+            self._archive_satellite.set_mode(mode)
+            self.status_msg_label.setText(f"Fetching GOES {mode.upper()}…")
+            self._layout_overlays()
+            return
+
         self._satellite_loop_timer.stop()
         self.satellite_controls.stop_loop()
         self.satellite_controls.reset_cache_ui()

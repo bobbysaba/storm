@@ -118,6 +118,20 @@ class ArchiveControls(QWidget):
 
         row1.addStretch()
 
+        self._radar_status = QLabel("Radar: --")
+        self._radar_status.setStyleSheet(
+            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
+        row1.addWidget(self._radar_status)
+
+        row1.addWidget(self._vdiv())
+
+        self._sat_status = QLabel("Sat: --")
+        self._sat_status.setStyleSheet(
+            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
+        row1.addWidget(self._sat_status)
+
         root.addLayout(row1)
 
         # ── Row 2: playback controls + scrubber ───────────────────────────────
@@ -126,10 +140,10 @@ class ArchiveControls(QWidget):
         row2.setContentsMargins(0, 0, 0, 0)
 
         self._btn_start = self._ctrl_btn("⏮", "Skip to start of day")
-        self._btn_back  = self._ctrl_btn("◀",  f"Step back {STEP_SECONDS//60} min")
-        self._btn_play  = self._ctrl_btn("▶",  "Play / pause")
+        self._btn_back  = self._ctrl_btn("◀",  f"Step back {STEP_SECONDS//60} min (Left or A)")
+        self._btn_play  = self._ctrl_btn("▶",  "Play / pause (Space)")
         self._btn_play.setCheckable(True)
-        self._btn_fwd   = self._ctrl_btn("▶",  f"Step forward {STEP_SECONDS//60} min")
+        self._btn_fwd   = self._ctrl_btn("▶",  f"Step forward {STEP_SECONDS//60} min (Right or D)")
         self._btn_fwd.setText("▶")
         self._btn_end   = self._ctrl_btn("⏭", "Skip to end of day")
 
@@ -174,6 +188,14 @@ class ArchiveControls(QWidget):
 
         row2.addWidget(self._vdiv())
 
+        self._shortcut_hint = QLabel("A/D STEP")
+        self._shortcut_hint.setStyleSheet(
+            "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
+        )
+        row2.addWidget(self._shortcut_hint)
+
+        row2.addWidget(self._vdiv())
+
         jump_btn = self._ctrl_btn("JUMP", "Jump to a specific time")
         jump_btn.setFixedWidth(46)
         jump_btn.setStyleSheet(jump_btn.styleSheet() or "")
@@ -194,6 +216,20 @@ class ArchiveControls(QWidget):
         d.setFrameShape(QFrame.Shape.VLine)
         d.setStyleSheet("color: #394056; margin: 4px 4px;")
         return d
+
+    def set_radar_status(self, text: str, error: bool = False) -> None:
+        self._radar_status.setText(text)
+        color = "#FF8F8F" if error else "#8E97AB"
+        self._radar_status.setStyleSheet(
+            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
+
+    def set_satellite_status(self, text: str, error: bool = False) -> None:
+        self._sat_status.setText(text)
+        color = "#FF8F8F" if error else "#8E97AB"
+        self._sat_status.setStyleSheet(
+            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -224,6 +260,8 @@ class ArchiveControls(QWidget):
         QShortcut(QKeySequence(Qt.Key.Key_Space),  win).activated.connect(self._tc.toggle_play)
         QShortcut(QKeySequence(Qt.Key.Key_Left),   win).activated.connect(self._tc.step_backward)
         QShortcut(QKeySequence(Qt.Key.Key_Right),  win).activated.connect(self._tc.step_forward)
+        QShortcut(QKeySequence(Qt.Key.Key_A),      win).activated.connect(self._tc.step_backward)
+        QShortcut(QKeySequence(Qt.Key.Key_D),      win).activated.connect(self._tc.step_forward)
         QShortcut(QKeySequence(Qt.Key.Key_Home),   win).activated.connect(self._on_skip_start)
         QShortcut(QKeySequence(Qt.Key.Key_End),    win).activated.connect(self._on_skip_end)
 

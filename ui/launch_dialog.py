@@ -693,7 +693,7 @@ class LaunchDialog(QDialog):
         # ── Archive date/time picker (shown only in archive mode) ──────────────
         self._archive_section = QWidget()
         av_layout = QVBoxLayout(self._archive_section)
-        av_layout.setContentsMargins(0, 0, 0, 0)
+        av_layout.setContentsMargins(0, 10, 0, 0)
         av_layout.setSpacing(6)
 
         arc_lbl = QLabel("ARCHIVE START TIME (UTC)")

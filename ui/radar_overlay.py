@@ -151,11 +151,66 @@ def _make_nws_sw_cmap():
     return cmap
 
 
+def _make_nws_phi_cmap():
+    colors = [
+        (0.00, (0.00, 0.00, 0.00, 0.00)),
+        (0.15, (0.10, 0.20, 0.70, 0.90)),
+        (0.35, (0.20, 0.70, 1.00, 1.00)),
+        (0.55, (0.00, 0.85, 0.40, 1.00)),
+        (0.75, (1.00, 0.90, 0.00, 1.00)),
+        (1.00, (1.00, 0.20, 0.00, 1.00)),
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_phi",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
+def _make_nws_kdp_cmap():
+    colors = [
+        (0.00, (0.15, 0.20, 0.70, 0.95)),
+        (0.20, (0.25, 0.55, 1.00, 1.00)),
+        (0.40, (0.80, 0.90, 1.00, 0.85)),
+        (0.55, (0.85, 0.85, 0.85, 0.50)),
+        (0.70, (1.00, 0.85, 0.00, 1.00)),
+        (0.85, (1.00, 0.45, 0.00, 1.00)),
+        (1.00, (0.85, 0.00, 0.00, 1.00)),
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_kdp",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
+def _make_nws_cfp_cmap():
+    colors = [
+        (0.00, (0.00, 0.00, 0.00, 0.00)),
+        (0.15, (0.15, 0.15, 0.18, 0.35)),
+        (0.35, (0.28, 0.28, 0.34, 0.60)),
+        (0.55, (0.55, 0.55, 0.62, 0.80)),
+        (0.75, (0.82, 0.82, 0.86, 0.95)),
+        (1.00, (1.00, 1.00, 1.00, 1.00)),
+    ]
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "nws_cfp",
+        [(pos, rgba) for pos, rgba in colors]
+    )
+    cmap.set_under(alpha=0)
+    return cmap
+
+
 NWS_REF_CMAP = _make_nws_ref_cmap()
 NWS_VEL_CMAP = _make_nws_vel_cmap()
 NWS_CC_CMAP  = _make_nws_cc_cmap()
 NWS_ZDR_CMAP = _make_nws_zdr_cmap()
 NWS_SW_CMAP  = _make_nws_sw_cmap()
+NWS_PHI_CMAP = _make_nws_phi_cmap()
+NWS_KDP_CMAP = _make_nws_kdp_cmap()
+NWS_CFP_CMAP = _make_nws_cfp_cmap()
 
 COLORMAPS = {
     "nws_ref": NWS_REF_CMAP,
@@ -163,6 +218,9 @@ COLORMAPS = {
     "nws_cc":  NWS_CC_CMAP,
     "nws_zdr": NWS_ZDR_CMAP,
     "nws_sw":  NWS_SW_CMAP,
+    "nws_phi": NWS_PHI_CMAP,
+    "nws_kdp": NWS_KDP_CMAP,
+    "nws_cfp": NWS_CFP_CMAP,
 }
 
 
@@ -219,7 +277,7 @@ def render_scan_to_png(scan: RadarScan, grid_size: int) -> tuple[bytes, list, fl
     ).reshape(IMG, IMG)
 
     data_out[outside | (data_out <= sentinel + 1.0)] = np.nan
-    if scan.colormap != "nws_vel":
+    if scan.colormap == "nws_ref":
         data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
 
     cmap   = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
@@ -409,7 +467,7 @@ class RadarOverlay(QObject):
         data_out[outside | (data_out <= sentinel + 1.0)] = np.nan
         # for reflectivity only: mask sub-threshold pixels (~8 dBZ matches RadarScope)
         # do NOT apply to velocity — velocity values include negatives (-100 to +100 kt)
-        if scan.colormap != "nws_vel":
+        if scan.colormap == "nws_ref":
             data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
 
         # reuse cached ScalarMappable — recreating norm+cmap every frame is wasteful

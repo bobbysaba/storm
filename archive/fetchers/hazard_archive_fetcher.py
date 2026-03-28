@@ -31,13 +31,17 @@ from typing import Optional
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
+from data.hazard_fetcher import _spc_cat_key, _spc_prob_label
 
 log = logging.getLogger(__name__)
 
 _IEM_SBW_URL      = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson"
 _IEM_WATCHES_URL  = "https://mesonet.agron.iastate.edu/json/watches.json"
-_IEM_OUTLOOK_URL  = "https://mesonet.agron.iastate.edu/api/1/spc/outlook.geojson"
-_SPC_OUTLOOK_CAT  = "https://www.spc.noaa.gov/services/getpackage.php"
+
+# SPC direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
+# URL: .../archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{product}.lyr.geojson
+# Products: cat, torn, wind, hail.  Available from ~2019-10-17 onward.
+_SPC_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/outlook/archive"
 
 # Cache resolution for SBW fetches: only re-fetch if the archive time has
 # moved by at least this many minutes.
@@ -95,6 +99,7 @@ class ArchiveHazardFetcher(QObject):
         self._outlook_cache: dict[datetime, tuple] = {}
         self._current_cycle: Optional[datetime] = None
         self._outlook_pending: set[datetime] = set()
+        self._current_archive_time: Optional[datetime] = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -104,9 +109,16 @@ class ArchiveHazardFetcher(QObject):
 
     def on_time_changed(self, archive_time: datetime) -> None:
         """Called by TimeController on every tick."""
+        self._current_archive_time = archive_time
         self._update_warnings(archive_time)
         self._update_watches(archive_time)
         self._update_outlook(archive_time)
+
+    def refresh_now(self) -> None:
+        """Re-emit or fetch hazard data for the current archive time."""
+        if self._current_archive_time is None:
+            return
+        self.on_time_changed(self._current_archive_time)
 
     # ── NWS Warnings (SBW) ───────────────────────────────────────────────────
 
@@ -127,10 +139,10 @@ class ArchiveHazardFetcher(QObject):
 
     def _fetch_sbw(self, rounded_time: datetime) -> None:
         try:
-            ts = rounded_time.strftime("%Y-%m-%dT%H:%M:%S")
+            ts = rounded_time.strftime("%Y-%m-%dT%H:%M:%SZ")
             resp = requests.get(
                 _IEM_SBW_URL,
-                params={"ts": ts, "wfo": "all"},
+                params={"ts": ts},
                 timeout=20,
             )
             resp.raise_for_status()
@@ -208,29 +220,38 @@ class ArchiveHazardFetcher(QObject):
 
     def _fetch_outlook(self, cycle: datetime) -> None:
         try:
-            valid_str = cycle.strftime("%Y%m%dT%H%M")
-            # Fetch all four outlook products: categorical, wind, hail, tornado.
+            # SPC archive URL: .../archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{prod}.lyr.geojson
+            date_str = cycle.strftime("%Y%m%d")
+            time_str = cycle.strftime("%H%M")
+            year     = cycle.strftime("%Y")
+            base     = f"{_SPC_OUTLOOK_ARCHIVE}/{year}/day1otlk_{date_str}_{time_str}"
+
+            empty = '{"type":"FeatureCollection","features":[]}'
+            # SPC product suffixes: cat, wind, hail, torn
+            product_map = {
+                "categorical": "cat",
+                "wind":        "wind",
+                "hail":        "hail",
+                "tornado":     "torn",
+            }
             results = {}
-            for product in ("categorical", "wind", "hail", "tornado"):
+            for key, suffix in product_map.items():
+                url = f"{base}_{suffix}.lyr.geojson"
                 try:
-                    resp = requests.get(
-                        _IEM_OUTLOOK_URL,
-                        params={"day": 1, "valid": valid_str, "product": product},
-                        timeout=20,
-                    )
+                    resp = requests.get(url, timeout=20)
                     resp.raise_for_status()
-                    results[product] = resp.text
+                    results[key] = _normalize_archive_spc_geojson(key, resp.text)
                 except Exception as exc:
                     log.warning(
-                        "ArchiveHazardFetcher: outlook %s fetch failed: %s", product, exc
+                        "ArchiveHazardFetcher: outlook %s fetch failed: %s", key, exc
                     )
-                    results[product] = '{"type":"FeatureCollection","features":[]}'
+                    results[key] = empty
 
             payload = (
-                results.get("categorical", '{"type":"FeatureCollection","features":[]}'),
-                results.get("wind",        '{"type":"FeatureCollection","features":[]}'),
-                results.get("hail",        '{"type":"FeatureCollection","features":[]}'),
-                results.get("tornado",     '{"type":"FeatureCollection","features":[]}'),
+                results.get("categorical", empty),
+                results.get("wind",        empty),
+                results.get("hail",        empty),
+                results.get("tornado",     empty),
             )
             self._outlook_cache[cycle] = payload
             self.spc_received.emit(*payload)
@@ -259,6 +280,37 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
         ).astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
+    """Normalize archive SPC GeoJSON to the same property schema live mode uses."""
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text
+
+    features = []
+    for feature in payload.get("features", []):
+        props = dict(feature.get("properties") or {})
+        geom = feature.get("geometry")
+        if not geom:
+            continue
+        if kind == "categorical":
+            cat = _spc_cat_key(props)
+            if not cat:
+                continue
+            props["cat"] = cat
+        else:
+            label = _spc_prob_label(props)
+            if label is not None:
+                props["LABEL"] = label
+        features.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": props,
+        })
+
+    return json.dumps({"type": "FeatureCollection", "features": features})
 
 
 def _current_outlook_cycle(t: datetime) -> datetime:

@@ -234,6 +234,11 @@ class SatelliteControls(QWidget):
                   self._btn_play, self._btn_jump_start, self._btn_jump_end):
             w.setEnabled(False)
 
+    def configure_for_archive(self, enabled: bool):
+        row2 = self._drawer.layout().itemAt(1).widget()
+        if row2 is not None:
+            row2.setVisible(not enabled)
+
     def toggle_drawer(self, checked: bool):
         if checked:
             self.setMaximumHeight(16777215)

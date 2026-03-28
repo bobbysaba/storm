@@ -76,6 +76,7 @@ class RadarControls(QWidget):
     site_changed    = pyqtSignal(str)
     stations_requested = pyqtSignal()
     product_changed = pyqtSignal(str)
+    tilt_changed    = pyqtSignal(int)
     fetch_requested = pyqtSignal()
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
@@ -89,6 +90,7 @@ class RadarControls(QWidget):
         super().__init__(parent)
         self._radar_on           = False
         self._product            = "N0B"
+        self._archive_mode       = False
         self._product_availability: dict[tuple[str, str], bool] = {}
         self._site               = "KTLX"
         self._all_sites          = list(NEXRAD_SITES)
@@ -134,6 +136,15 @@ class RadarControls(QWidget):
         self._set_product_items(PRODUCTS, preserve_code=self._product)
         self._product_combo.currentIndexChanged.connect(self._on_product_changed)
         r1.addWidget(self._product_combo)
+
+        self._tilt_combo = QComboBox()
+        self._tilt_combo.setFixedHeight(22)
+        self._tilt_combo.setFixedWidth(74)
+        self._tilt_combo.setObjectName("radarTiltCombo")
+        self._tilt_combo.setToolTip("Radar tilt angle")
+        self._tilt_combo.currentIndexChanged.connect(self._on_tilt_changed)
+        self._tilt_combo.setVisible(False)
+        r1.addWidget(self._tilt_combo)
 
         # checkbox sits immediately right of product selector
         self._chk_show_data = QCheckBox("show data")
@@ -307,6 +318,32 @@ class RadarControls(QWidget):
                   self._btn_play, self._btn_jump_start, self._btn_jump_end):
             w.setEnabled(False)
 
+    def configure_for_archive(self, enabled: bool) -> None:
+        self._archive_mode = enabled
+        self._chk_show_data.setVisible(not enabled)
+        playback_row = self._drawer.layout().itemAt(1).widget()
+        if playback_row is not None:
+            playback_row.setVisible(not enabled)
+        self._tilt_combo.setVisible(enabled and self._tilt_combo.count() > 0)
+
+    def set_archive_products(self, products: list[tuple[str, str]]) -> None:
+        if not products:
+            return
+        current = self._product if self._archive_mode else None
+        self._set_product_items(products, preserve_code=current or products[0][0])
+
+    def set_archive_tilts(self, tilts: list[float], current_index: int | None = None) -> None:
+        self._tilt_combo.blockSignals(True)
+        self._tilt_combo.clear()
+        for deg in tilts:
+            self._tilt_combo.addItem(f"{deg:.1f}°")
+        if self._tilt_combo.count():
+            idx = current_index if current_index is not None else 0
+            idx = max(0, min(idx, self._tilt_combo.count() - 1))
+            self._tilt_combo.setCurrentIndex(idx)
+        self._tilt_combo.blockSignals(False)
+        self._tilt_combo.setVisible(self._archive_mode and self._tilt_combo.count() > 0)
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _measure_expanded_height(self):
@@ -405,6 +442,10 @@ class RadarControls(QWidget):
             return
         self._product = product
         self.product_changed.emit(product)
+
+    def _on_tilt_changed(self, index: int):
+        if index >= 0:
+            self.tilt_changed.emit(index)
 
     def _on_slider_released(self):
         # emit frame_requested only when user releases the slider handle

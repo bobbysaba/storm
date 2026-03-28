@@ -1,259 +1,433 @@
 # archive/fetchers/satellite_archive_fetcher.py
-# ArchiveSatelliteFetcher — retrieves historical GOES-16 CONUS imagery from
-# the IEM WMS service with TIME dimension support.
-#
-# IEM serves archived GOES-16 data through a WMS endpoint.  We first fetch
-# GetCapabilities to discover available time steps for the session date, then
-# fetch individual frames on demand as the archive time advances.
-#
-# WMS base:  https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ch02.cgi
-# Band options: ch02 (visible), ch13 (IR clean window)
+# ArchiveSatelliteFetcher — retrieves historical GOES-East visible imagery from
+# NOAA's public AWS archive for CONUS and mesoscale sectors.
 
 import base64
+import io
 import logging
+import os
+import re
+import tempfile
 import threading
-from datetime import datetime, timezone, timedelta
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-# IEM GOES WMS endpoints keyed by band label.
-_WMS_ENDPOINTS = {
-    "Visible (Ch 02)": "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ch02.cgi",
-    "IR (Ch 13)":      "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes/conus_ch13.cgi",
+_S3_URL_TEMPLATE = "https://{bucket}.s3.amazonaws.com"
+_GOES19_EAST_START = datetime(2025, 4, 4, 15, 0, tzinfo=timezone.utc)
+_TIME_RE = re.compile(r"_s(?P<year>\d{4})(?P<jday>\d{3})(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})")
+
+_MODE_CONFIG = {
+    "conus": {
+        "product": "ABI-L2-CMIPC",
+        "label": "CONUS",
+        "fixed_bbox": [-125.0, 22.0, -66.0, 51.0],
+    },
+    "meso1": {
+        "product": "ABI-L2-CMIPM",
+        "label": "MESO-1",
+        "sector_token": "M1C02",
+    },
+    "meso2": {
+        "product": "ABI-L2-CMIPM",
+        "label": "MESO-2",
+        "sector_token": "M2C02",
+    },
 }
-DEFAULT_BAND = "Visible (Ch 02)"
+_MAX_CACHE = 24
+_REQUEST_TIMEOUT = 30
 
-# WMS request parameters for a 1024×512 CONUS PNG.
-_WMS_PARAMS = {
-    "SERVICE":     "WMS",
-    "VERSION":     "1.3.0",
-    "REQUEST":     "GetMap",
-    "LAYERS":      "",     # filled per endpoint
-    "STYLES":      "",
-    "CRS":         "EPSG:4326",
-    "BBOX":        "24,-126,50,-66",  # south,west,north,east for 1.3.0
-    "WIDTH":       "1024",
-    "HEIGHT":      "512",
-    "FORMAT":      "image/png",
-    "TRANSPARENT": "TRUE",
-}
 
-# CONUS bounding box [west, south, east, north].
-CONUS_BBOX = [-126.0, 24.0, -66.0, 50.0]
-
-# How many frames to keep in the decoded cache.
-_MAX_CACHE = 20
+@dataclass(frozen=True)
+class _FrameRef:
+    timestamp: datetime
+    key: str
 
 
 class SatFrame:
-    """A single satellite frame (base64-encoded PNG + valid time + bbox)."""
-    __slots__ = ("timestamp", "b64", "bbox")
+    __slots__ = ("mode", "timestamp", "b64", "bbox")
 
-    def __init__(self, timestamp: datetime, b64: str, bbox: list):
+    def __init__(self, mode: str, timestamp: datetime, b64: str, bbox: list[float]):
+        self.mode = mode
         self.timestamp = timestamp
         self.b64 = b64
-        self.bbox = bbox   # [west, south, east, north]
+        self.bbox = bbox
+
+    @property
+    def time_str(self) -> str:
+        return self.timestamp.strftime("%H:%MZ")
+
+    @property
+    def time_iso(self) -> str:
+        return self.timestamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 class ArchiveSatelliteFetcher(QObject):
     """
-    Provides historical GOES-16 CONUS imagery for archive playback.
+    Historical GOES-East visible imagery backed by NOAA's public AWS archive.
 
-    Workflow
-    --------
-    1. Call ``load_capabilities()`` once at session start to fetch the list of
-       available times from IEM WMS GetCapabilities.
-    2. Connect ``on_time_changed`` to the TimeController ``time_changed`` signal.
-    3. The fetcher emits ``frame_ready(SatFrame)`` whenever a frame is available
-       for the current archive time.
-
-    Signals
-    -------
-    frame_ready(SatFrame)
-        Emitted when the frame for the current archive time has been fetched.
-    capabilities_loaded(list[str])
-        List of available ISO-format time strings for the session date.
-    loading_changed(bool)
-    error(str)
+    Supported modes:
+      - conus  -> ABI-L2-CMIPC channel 02
+      - meso1  -> ABI-L2-CMIPM sector M1 channel 02
+      - meso2  -> ABI-L2-CMIPM sector M2 channel 02
     """
 
-    frame_ready          = pyqtSignal(object)   # SatFrame
-    capabilities_loaded  = pyqtSignal(list)     # list[str] ISO times
-    loading_changed      = pyqtSignal(bool)
-    error                = pyqtSignal(str)
+    frame_ready = pyqtSignal(object)          # SatFrame
+    capabilities_loaded = pyqtSignal(list)    # list[str] for current mode
+    loading_changed = pyqtSignal(bool)
+    error = pyqtSignal(str)
+    meso_sectors_updated = pyqtSignal(object)  # {1: bbox|None, 2: bbox|None}
 
     def __init__(self, session_date: datetime, parent=None):
         super().__init__(parent)
-        self._date   = session_date
-        self._band   = DEFAULT_BAND
-        self._times: list[datetime] = []      # available times from caps
-        self._cache: dict[datetime, Optional[SatFrame]] = {}
-        self._pending: set[datetime] = set()
+        self._date = _ensure_utc(session_date)
+        self._bucket = _bucket_for_date(self._date)
+        self._mode = "conus"
+        self._indexes: dict[str, list[_FrameRef]] = {mode: [] for mode in _MODE_CONFIG}
+        self._indexes_ready = False
+        self._indexed_modes: set[str] = set()
+        self._indexing_modes: set[str] = set()
+        self._cache: dict[tuple[str, datetime], Optional[SatFrame]] = {}
+        self._pending: set[tuple[str, datetime]] = set()
         self._fetch_lock = threading.Lock()
         self._current_archive_time: Optional[datetime] = None
+        self._meso_bboxes: dict[int, Optional[dict]] = {1: None, 2: None}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def set_band(self, band_label: str) -> None:
-        """Switch the satellite band (clears cache)."""
-        if band_label not in _WMS_ENDPOINTS:
+    def load_capabilities(self) -> None:
+        self._ensure_mode_index("conus")
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in _MODE_CONFIG:
             return
-        self._band = band_label
-        self._cache.clear()
-        self._pending.clear()
-        if self._current_archive_time:
+        self._mode = mode
+        self._ensure_mode_index(mode)
+        if mode in self._indexed_modes:
+            self.capabilities_loaded.emit(self._mode_times_iso())
+        if self._current_archive_time is not None:
             self.on_time_changed(self._current_archive_time)
 
-    @staticmethod
-    def band_options() -> list:
-        return list(_WMS_ENDPOINTS.keys())
-
-    def load_capabilities(self) -> None:
-        """Fetch available times from WMS GetCapabilities (background)."""
-        t = threading.Thread(target=self._fetch_capabilities, daemon=True)
-        t.start()
-
     def on_time_changed(self, archive_time: datetime) -> None:
-        """Called by TimeController on every tick."""
-        self._current_archive_time = archive_time
-        nearest = self._nearest_time(archive_time)
-        if nearest is None:
+        self._current_archive_time = _ensure_utc(archive_time)
+        ref = self._nearest_ref(self._mode, self._current_archive_time)
+        if ref is None:
             return
-        frame = self._cache.get(nearest)
+        cache_key = (self._mode, ref.timestamp)
+        frame = self._cache.get(cache_key)
         if frame is not None:
             self.frame_ready.emit(frame)
-        else:
-            self._ensure_fetched(nearest)
+            return
+        self._ensure_fetched(ref)
 
-    # ── Capabilities ──────────────────────────────────────────────────────────
+    # ── Indexing ──────────────────────────────────────────────────────────────
 
-    def _fetch_capabilities(self) -> None:
-        endpoint = _WMS_ENDPOINTS[self._band]
-        url = f"{endpoint}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities"
+    def _ensure_mode_index(self, mode: str) -> None:
+        if mode in self._indexed_modes or mode in self._indexing_modes:
+            return
+        self._indexing_modes.add(mode)
+        threading.Thread(target=self._build_mode_index, args=(mode,), daemon=True).start()
+
+    def _build_mode_index(self, mode: str) -> None:
         try:
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
-            times = _parse_wms_times(resp.text, self._date)
-            self._times = sorted(times)
-            log.info(
-                "ArchiveSatelliteFetcher: %d frames available on %s",
-                len(self._times), self._date.strftime("%Y-%m-%d"),
-            )
-            self.capabilities_loaded.emit(
-                [t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in self._times]
-            )
-            if self._current_archive_time and self._times:
+            cfg = _MODE_CONFIG[mode]
+            refs = self._list_day_refs(mode, cfg["product"])
+            self._indexes[mode] = refs
+            self._indexed_modes.add(mode)
+            self._indexes_ready = bool(self._indexed_modes)
+
+            if refs and mode in ("meso1", "meso2"):
+                idx = 1 if mode == "meso1" else 2
+                self._meso_bboxes[idx] = self._read_bbox_for_key(mode, refs[-1].key)
+                self.meso_sectors_updated.emit(dict(self._meso_bboxes))
+
+            if not refs and mode == "conus":
+                self.error.emit(
+                    f"No GOES-East archive imagery available for {self._date.strftime('%Y-%m-%d')}"
+                )
+                self.capabilities_loaded.emit([])
+                return
+
+            if mode == self._mode:
+                self.capabilities_loaded.emit(self._mode_times_iso())
+            if self._current_archive_time is not None and mode == self._mode:
                 self.on_time_changed(self._current_archive_time)
         except Exception as exc:
-            log.error("ArchiveSatelliteFetcher: caps fetch failed: %s", exc)
-            self.error.emit(f"Satellite caps failed: {exc}")
+            log.error("ArchiveSatelliteFetcher: index build failed: %s", exc)
+            self.error.emit(f"Satellite index failed: {exc}")
+        finally:
+            self._indexing_modes.discard(mode)
 
-    # ── Frame fetching ────────────────────────────────────────────────────────
+    def _list_day_refs(self, mode: str, product: str) -> list[_FrameRef]:
+        refs: list[_FrameRef] = []
+        base_url = _S3_URL_TEMPLATE.format(bucket=self._bucket)
+        year = self._date.strftime("%Y")
+        jday = self._date.strftime("%j")
+        sector_token = _MODE_CONFIG[mode].get("sector_token")
 
-    def _nearest_time(self, t: datetime) -> Optional[datetime]:
-        if not self._times:
+        for hour in range(24):
+            prefix = f"{product}/{year}/{jday}/{hour:02d}/"
+            params = f"?list-type=2&prefix={quote(prefix)}"
+            resp = requests.get(f"{base_url}/{params}", timeout=_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            for key_el in root.findall(".//{*}Contents/{*}Key"):
+                key = (key_el.text or "").strip()
+                if not key.endswith(".nc"):
+                    continue
+                if mode == "conus" and "_C02_" not in key:
+                    continue
+                if sector_token and sector_token not in key:
+                    continue
+                ts = _timestamp_from_key(key)
+                if ts is None:
+                    continue
+                refs.append(_FrameRef(timestamp=ts, key=key))
+
+        refs.sort(key=lambda item: item.timestamp)
+        log.info("ArchiveSatelliteFetcher: indexed %s %d frames", product, len(refs))
+        return refs
+
+    def _mode_times_iso(self) -> list[str]:
+        return [
+            ref.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+            for ref in self._indexes.get(self._mode, [])
+        ]
+
+    def _nearest_ref(self, mode: str, when: datetime) -> Optional[_FrameRef]:
+        refs = self._indexes.get(mode, [])
+        if not refs:
             return None
-        lo, hi = 0, len(self._times) - 1
+        lo, hi = 0, len(refs) - 1
         result = None
         while lo <= hi:
             mid = (lo + hi) // 2
-            if self._times[mid] <= t:
-                result = self._times[mid]
+            if refs[mid].timestamp <= when:
+                result = refs[mid]
                 lo = mid + 1
             else:
                 hi = mid - 1
-        return result
+        return result or refs[0]
 
-    def _ensure_fetched(self, frame_time: datetime) -> None:
+    # ── Fetching ──────────────────────────────────────────────────────────────
+
+    def _ensure_fetched(self, ref: _FrameRef) -> None:
+        cache_key = (self._mode, ref.timestamp)
         with self._fetch_lock:
-            if frame_time in self._pending or self._cache.get(frame_time) is not None:
+            if cache_key in self._pending or self._cache.get(cache_key) is not None:
                 return
-            self._pending.add(frame_time)
+            self._pending.add(cache_key)
         self.loading_changed.emit(True)
-        threading.Thread(
-            target=self._fetch_frame, args=(frame_time,), daemon=True
-        ).start()
+        threading.Thread(target=self._fetch_frame, args=(self._mode, ref), daemon=True).start()
 
-    def _fetch_frame(self, frame_time: datetime) -> None:
+    def _fetch_frame(self, mode: str, ref: _FrameRef) -> None:
+        cache_key = (mode, ref.timestamp)
         try:
-            endpoint = _WMS_ENDPOINTS[self._band]
-            layer = _layer_name(endpoint)
-            params = dict(_WMS_PARAMS)
-            params["LAYERS"] = layer
-            params["TIME"] = frame_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            resp = requests.get(endpoint, params=params, timeout=30)
+            url = f"{_S3_URL_TEMPLATE.format(bucket=self._bucket)}/{ref.key}"
+            resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
             resp.raise_for_status()
-            if "image" not in resp.headers.get("Content-Type", ""):
-                raise ValueError("WMS returned non-image response")
-
-            b64 = base64.b64encode(resp.content).decode()
+            png_bytes, bbox = _render_goes_png(resp.content, mode, _MODE_CONFIG[mode].get("fixed_bbox"))
             frame = SatFrame(
-                timestamp=frame_time,
-                b64=b64,
-                bbox=CONUS_BBOX,
+                mode=mode,
+                timestamp=ref.timestamp,
+                b64=base64.b64encode(png_bytes).decode("ascii"),
+                bbox=bbox,
             )
-            self._cache[frame_time] = frame
-
-            # Evict oldest entries to cap memory usage.
+            self._cache[cache_key] = frame
             while len(self._cache) > _MAX_CACHE:
-                oldest = min(self._cache.keys())
-                del self._cache[oldest]
+                oldest_key = min(self._cache.keys(), key=lambda item: item[1])
+                del self._cache[oldest_key]
 
-            if (
-                self._current_archive_time is not None
-                and self._nearest_time(self._current_archive_time) == frame_time
-            ):
-                self.frame_ready.emit(frame)
+            if mode in ("meso1", "meso2"):
+                idx = 1 if mode == "meso1" else 2
+                bbox_dict = _bbox_to_dict(bbox)
+                if self._meso_bboxes.get(idx) != bbox_dict:
+                    self._meso_bboxes[idx] = bbox_dict
+                    self.meso_sectors_updated.emit(dict(self._meso_bboxes))
+
+            if mode == self._mode and self._current_archive_time is not None:
+                nearest = self._nearest_ref(mode, self._current_archive_time)
+                if nearest is not None and nearest.timestamp == ref.timestamp:
+                    self.frame_ready.emit(frame)
         except Exception as exc:
-            log.error("ArchiveSatelliteFetcher: frame fetch failed %s: %s", frame_time, exc)
+            log.error("ArchiveSatelliteFetcher: frame fetch failed %s %s: %s", mode, ref.timestamp, exc)
             self.error.emit(f"Satellite frame failed: {exc}")
         finally:
             with self._fetch_lock:
-                self._pending.discard(frame_time)
-            with self._fetch_lock:
+                self._pending.discard(cache_key)
                 if not self._pending:
                     self.loading_changed.emit(False)
 
+    def _read_bbox_for_key(self, mode: str, key: str) -> Optional[dict]:
+        try:
+            url = f"{_S3_URL_TEMPLATE.format(bucket=self._bucket)}/{key}"
+            resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            _, bbox = _render_goes_png(resp.content, mode, _MODE_CONFIG[mode].get("fixed_bbox"), image_only=False)
+            return _bbox_to_dict(bbox)
+        except Exception as exc:
+            log.warning("ArchiveSatelliteFetcher: could not read bbox for %s: %s", mode, exc)
+            return None
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _layer_name(endpoint: str) -> str:
-    """Derive the WMS layer name from the endpoint URL."""
-    # e.g. .../conus_ch02.cgi → "conus_ch02"
-    fname = endpoint.rsplit("/", 1)[-1]
-    return fname.replace(".cgi", "")
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
-def _parse_wms_times(xml_text: str, target_date: datetime) -> list:
-    """Extract TIME dimension values from WMS GetCapabilities XML."""
-    import xml.etree.ElementTree as ET
-    times = []
+def _bucket_for_date(dt: datetime) -> str:
+    return "noaa-goes19" if dt >= _GOES19_EAST_START else "noaa-goes16"
+
+
+def _timestamp_from_key(key: str) -> Optional[datetime]:
+    match = _TIME_RE.search(key)
+    if not match:
+        return None
+    year = int(match.group("year"))
+    jday = int(match.group("jday"))
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    second = int(match.group("second"))
+    base = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=jday - 1)
+    return base.replace(hour=hour, minute=minute, second=second, microsecond=0)
+
+
+def _bbox_to_dict(bbox: list[float]) -> dict:
+    west, south, east, north = bbox
+    return {
+        "west": west,
+        "south": south,
+        "east": east,
+        "north": north,
+    }
+
+
+def _render_goes_png(
+    nc_bytes: bytes,
+    mode: str,
+    fallback_bbox: Optional[list[float]] = None,
+    image_only: bool = True,
+) -> tuple[bytes, list[float]] | tuple[None, list[float]]:
     try:
-        root = ET.fromstring(xml_text)
-        # Look for <Extent name="time"> or <Dimension name="time">
-        for tag in ("Extent", "Dimension"):
-            for elem in root.iter(tag):
-                if elem.get("name", "").lower() == "time":
-                    content = (elem.text or "").strip()
-                    # Comma-separated list of ISO timestamps.
-                    for ts in content.split(","):
-                        ts = ts.strip()
-                        if not ts:
-                            continue
-                        try:
-                            dt = datetime.fromisoformat(
-                                ts.replace("Z", "+00:00")
-                            ).astimezone(timezone.utc)
-                            # Filter to the target date only.
-                            if dt.date() == target_date.date():
-                                times.append(dt)
-                        except Exception:
-                            continue
-    except Exception as exc:
-        log.warning("_parse_wms_times: %s", exc)
-    return times
+        import cartopy.crs as ccrs
+        import matplotlib
+        matplotlib.use("Agg")
+        import numpy as np
+        import xarray as xr
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib import colormaps
+    except ImportError as exc:
+        raise RuntimeError(
+            "Archive GOES rendering requires xarray, matplotlib, and cartopy in the STORM environment"
+        ) from exc
+
+    tmp_path = None
+    ds = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+            tmp.write(nc_bytes)
+            tmp_path = tmp.name
+
+        try:
+            ds = xr.open_dataset(tmp_path, engine="h5netcdf", mask_and_scale=True)
+        except Exception:
+            ds = xr.open_dataset(tmp_path, mask_and_scale=True)
+
+        data = np.asarray(ds["CMI"]).astype("float32")
+        fill = ds["CMI"].attrs.get("_FillValue")
+        if fill is not None:
+            data[data == fill] = np.nan
+        data[~np.isfinite(data)] = np.nan
+        data = np.clip(data, 0.0, 1.0)
+
+        proj_var = ds["goes_imager_projection"]
+        sat_height = float(proj_var.attrs["perspective_point_height"])
+        lon0 = float(proj_var.attrs["longitude_of_projection_origin"])
+        sweep = str(proj_var.attrs.get("sweep_angle_axis", "x"))
+        semi_major = float(proj_var.attrs["semi_major_axis"])
+        semi_minor = float(proj_var.attrs["semi_minor_axis"])
+        x = np.asarray(ds["x"], dtype="float64") * sat_height
+        y = np.asarray(ds["y"], dtype="float64") * sat_height
+
+        bbox = _dataset_bbox(ds, fallback_bbox)
+        if not image_only:
+            return None, bbox
+
+        west, south, east, north = bbox
+        lon_span = max(1.0, east - west)
+        lat_span = max(1.0, north - south)
+        width_px = 1500 if mode == "conus" else 1100
+        height_px = max(700, int(width_px * (lat_span / lon_span)))
+        dpi = 100
+
+        fig = Figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+        fig.patch.set_alpha(0.0)
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.PlateCarree())
+        ax.set_extent([west, east, south, north], crs=ccrs.PlateCarree())
+        ax.set_axis_off()
+
+        cmap = colormaps["gray"].copy()
+        cmap.set_bad((0, 0, 0, 0))
+        globe = ccrs.Globe(
+            semimajor_axis=semi_major,
+            semiminor_axis=semi_minor,
+            ellipse=None,
+        )
+        geos = ccrs.Geostationary(
+            central_longitude=lon0,
+            satellite_height=sat_height,
+            sweep_axis=sweep,
+            globe=globe,
+        )
+        ax.imshow(
+            data,
+            origin="upper",
+            extent=[x.min(), x.max(), y.min(), y.max()],
+            transform=geos,
+            cmap=cmap,
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+
+        buf = io.BytesIO()
+        canvas.print_png(buf)
+        return buf.getvalue(), bbox
+    finally:
+        if ds is not None:
+            ds.close()
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _dataset_bbox(ds, fallback_bbox: Optional[list[float]]) -> list[float]:
+    attrs = ds.attrs
+    keys = (
+        "geospatial_westbound_longitude",
+        "geospatial_southbound_latitude",
+        "geospatial_eastbound_longitude",
+        "geospatial_northbound_latitude",
+    )
+    if all(key in attrs for key in keys):
+        return [
+            float(attrs["geospatial_westbound_longitude"]),
+            float(attrs["geospatial_southbound_latitude"]),
+            float(attrs["geospatial_eastbound_longitude"]),
+            float(attrs["geospatial_northbound_latitude"]),
+        ]
+    if fallback_bbox:
+        return list(fallback_bbox)
+    raise RuntimeError("GOES file is missing geospatial bounds")

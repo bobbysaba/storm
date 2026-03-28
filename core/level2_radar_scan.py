@@ -49,6 +49,27 @@ L2_PRODUCTS: dict[str, dict] = {
         "vmax":     30.0,
         "colormap": "nws_sw",
     },
+    "differential_phase": {
+        "label":    "Differential Phase (PHI)",
+        "units":    "deg",
+        "vmin":      0.0,
+        "vmax":    360.0,
+        "colormap": "nws_phi",
+    },
+    "specific_differential_phase": {
+        "label":    "Specific Diff. Phase (KDP)",
+        "units":    "deg/km",
+        "vmin":     -2.0,
+        "vmax":     10.0,
+        "colormap": "nws_kdp",
+    },
+    "clutter_filter_power_removed": {
+        "label":    "Clutter Filter Power Removed (CFP)",
+        "units":    "dB",
+        "vmin":      0.0,
+        "vmax":     70.0,
+        "colormap": "nws_cfp",
+    },
 }
 
 # Default product shown when the archive session opens.
