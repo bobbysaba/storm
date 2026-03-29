@@ -2914,6 +2914,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def javaScriptConsoleMessage(self, level, message, line, source):
         if '[TIMING]' in message:
             print(f"JS {message}", flush=True)
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        if level in (QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel,
+                     QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel):
+            log.warning("JS %s [%s:%s]: %s", level.name, source, line, message)
 
     def _load_map(self):
         self.load(QUrl("storm://app/"))

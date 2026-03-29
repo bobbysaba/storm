@@ -62,7 +62,7 @@ class MQTTClient(QObject):
             c = mqtt.Client(
                 callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
                 client_id=self._client_id,
-                clean_session=True,
+                protocol=mqtt.MQTTv5,
             )
             c.on_connect    = self._on_connect
             c.on_disconnect = self._on_disconnect
