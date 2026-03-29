@@ -105,6 +105,8 @@ class MainWindow(QMainWindow):
     # Emitted from the render thread when a PNG is ready — carries a dict with
     # gen, site, product, scan, png_b64, bounds so main thread can inject it.
     _render_ready = pyqtSignal(object)
+    # Emitted when the user aborts an archive loading session.
+    session_aborted = pyqtSignal()
 
     def __init__(
         self,
@@ -119,6 +121,7 @@ class MainWindow(QMainWindow):
         self._viewer = viewer
         self._archive_time = archive_time    # None = live mode
         self._archive = archive_time is not None
+        self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
 
         self.setWindowTitle(
             f"STORM  v{config.VERSION}"
@@ -287,6 +290,7 @@ class MainWindow(QMainWindow):
         self._archive_controls.setObjectName("archiveControls")
         self._archive_controls.set_radar_status("Radar: waiting")
         self._archive_controls.set_satellite_status("Sat: waiting")
+        self._archive_controls.show()
 
         # MQTT reader — vehicle positions.
         mqtt_base = getattr(config, "ARCHIVE_MQTT_BASE_URL", "")
@@ -305,6 +309,7 @@ class MainWindow(QMainWindow):
         self._archive_hazard.spc_received.connect(self._on_spc_received)
         self._archive_hazard.nws_received.connect(self._on_nws_received)
         self._archive_hazard.watches_received.connect(self._on_spc_watches_received)
+        self._archive_hazard.spc_mds_received.connect(self._on_spc_mds_received)
 
         # Satellite fetcher.
         self._archive_satellite = ArchiveSatelliteFetcher(
@@ -365,24 +370,38 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(500, _check_hazard_loaded)
 
-        self._archive_satellite.capabilities_loaded.connect(
-            lambda _: self._archive_loading.set_task_done("Satellite index")
-        )
         self._archive_satellite.error.connect(
             lambda _: self._archive_loading.set_task_error("Satellite index")
+            if self._archive_loading.isVisible() else None
         )
         self._archive_satellite.error.connect(self._on_archive_satellite_error)
+
+        def _check_satellite_indexed():
+            if not self._archive_loading.isVisible():
+                return
+            if "conus" in self._archive_satellite._indexed_modes:
+                self._archive_loading.set_task_done("Satellite index")
+            else:
+                QTimer.singleShot(1000, _check_satellite_indexed)
+
+        QTimer.singleShot(500, _check_satellite_indexed)
 
         QTimer.singleShot(400, _check_mqtt_loaded)
         QTimer.singleShot(400, _check_hazard_loaded)
 
         self._archive_loading.show()
+        # Trigger an initial data load for all fetchers once loading completes.
+        self._archive_loading.accepted.connect(
+            lambda: self._time_ctrl.set_time(self._time_ctrl.current_time)
+        )
+        self._archive_loading.rejected.connect(self._on_archive_loading_aborted)
 
         # ── Archive hazard controls wiring ────────────────────────────────────
         # The archive hazard fetcher pushes data on every time tick; the
         # controls just toggle map-layer visibility and update the legend.
         self.hazard_controls.spc_mode_changed.connect(self._on_archive_spc_mode_changed)
         self.hazard_controls.spc_watches_toggled.connect(self._on_archive_watches_toggled)
+        self.hazard_controls.spc_mds_toggled.connect(self._on_archive_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_archive_nws_toggled)
         self.hazard_controls.fetch_requested.connect(self._archive_hazard.refresh_now)
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
@@ -413,7 +432,6 @@ class MainWindow(QMainWindow):
 
         # ── Set initial time on the time controller (emits time_changed). ─────
         QTimer.singleShot(200, lambda: self._time_ctrl.set_time(self._archive_time))
-        QTimer.singleShot(0, lambda: self.satellite_controls._btn_conus.setChecked(True))
 
         # Lay out the archive controls bar at the bottom of the screen.
         QTimer.singleShot(0, self._layout_overlays)
@@ -580,7 +598,6 @@ class MainWindow(QMainWindow):
         self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
         self._archive_sat_has_data = True
         self.satellite_controls.set_scan_time(frame.time_str)
-        self.status_msg_label.setText(f"GOES {frame.mode.upper()} {frame.time_str}")
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_satellite_status(
                 f"Sat: AWS {frame.mode.upper()} {frame.time_str}"
@@ -631,6 +648,11 @@ class MainWindow(QMainWindow):
         self.status_msg_label.setText(msg)
         self._layout_overlays()
 
+    def _on_archive_loading_aborted(self) -> None:
+        """User clicked Abort on the loading dialog — quit the application."""
+        self.session_aborted.emit()
+        QApplication.quit()
+
     def _on_archive_satellite_error(self, msg: str) -> None:
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_satellite_status("Sat: error", error=True)
@@ -655,6 +677,10 @@ class MainWindow(QMainWindow):
 
     def _on_archive_nws_toggled(self, enabled: bool) -> None:
         self.map_widget.set_nws_warnings_visible(enabled)
+        self._update_hazard_legend()
+
+    def _on_archive_mds_toggled(self, enabled: bool) -> None:
+        self.map_widget.set_spc_mds_visible(enabled)
         self._update_hazard_legend()
 
     # ── Archive sounding handlers ─────────────────────────────────────────────
@@ -1274,21 +1300,24 @@ class MainWindow(QMainWindow):
                            OutlookPanel.PANEL_WIDTH, panel_h)
             op.raise_()
 
-        # archive controls bar — full-width, pinned to bottom
+        # archive controls bar — centered, pinned to bottom
         arc_bar_h = 0
         if hasattr(self, "_archive_controls"):
             ac = self._archive_controls
+            ac_w = min(r.width() - 2 * MARGIN, 820)
+            ac.setFixedWidth(ac_w)
             ac.adjustSize()
             arc_bar_h = ac.sizeHint().height() + 6
-            ac.setGeometry(0, r.height() - arc_bar_h, r.width(), arc_bar_h)
+            ac_x = max(MARGIN, (r.width() - ac_w) // 2)
+            ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, arc_bar_h)
             ac.raise_()
 
-        # left status pill — bottom-left corner (above archive bar if present)
+        # left status pill — bottom-left corner (never offset by centered archive bar)
         if hasattr(self, "_status_left"):
             self._status_left.adjustSize()
             sl = self._status_left.size()
             self._status_left.setGeometry(
-                MARGIN, r.height() - sl.height() - MARGIN - arc_bar_h,
+                MARGIN, r.height() - sl.height() - MARGIN,
                 sl.width(), sl.height()
             )
             self._status_left.raise_()
@@ -1899,7 +1928,10 @@ class MainWindow(QMainWindow):
     def _on_meso_sectors_updated(self, sectors: dict):
         for idx in (1, 2):
             bbox = sectors.get(idx)
-            self.satellite_controls.set_meso_available(idx, bbox is not None, bbox)
+            # In archive mode buttons stay enabled even before bbox is known;
+            # the bbox is populated lazily on first frame fetch.
+            available = bbox is not None or self._archive
+            self.satellite_controls.set_meso_available(idx, available, bbox)
         self.map_widget.set_meso_sectors(sectors)
 
     def _on_meso_preview(self, idx: int, active: bool):
@@ -1967,6 +1999,16 @@ class MainWindow(QMainWindow):
     def _on_nws_received(self, warnings_str: str):
         self._clear_hazard_fetch_msg()
         self.map_widget.set_nws_warnings_geojson(warnings_str)
+        try:
+            fc = json.loads(warnings_str)
+            self._nws_active_phenoms = {
+                str(f.get("properties", {}).get("phenom", "")).upper()
+                for f in fc.get("features", [])
+                if f.get("properties", {}).get("phenom")
+            }
+        except (json.JSONDecodeError, AttributeError):
+            self._nws_active_phenoms = set()
+        self._update_hazard_legend()
 
     def _on_spc_watches_received(self, watches_str: str):
         self._clear_hazard_fetch_msg()
@@ -2015,7 +2057,7 @@ class MainWindow(QMainWindow):
                 active.append("spc-watches")
             if hc._btn_nws_warnings.isChecked():
                 active.append("nws-warnings")
-            hc.update_legend(active)
+            hc.update_legend(active, nws_phenoms=self._nws_active_phenoms)
             self._start_layout_pulse()
             return
         fc = self._hazard_fetcher
@@ -2031,7 +2073,7 @@ class MainWindow(QMainWindow):
             active.append("spc-mds")
         if fc._nws_enabled:
             active.append("nws-warnings")
-        self.hazard_controls.update_legend(active)
+        self.hazard_controls.update_legend(active, nws_phenoms=self._nws_active_phenoms)
         # Drive _layout_overlays during the legend resize animation so the
         # floating overlay geometry tracks the new sizeHint().
         self._start_layout_pulse()
@@ -2052,8 +2094,15 @@ class MainWindow(QMainWindow):
             source = data.get("source", "")
             props = data.get("properties", {})
 
+            # For archive mode, encode the current archive time into identifiers
+            # that use time-windowed IEM text fetches (swo, watch).
+            _archive_ts = (
+                self._time_ctrl.current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if self._archive and hasattr(self, "_time_ctrl") else None
+            )
+
             if source == "spc-cat":
-                fetch_targets.append(("DAY 1 CONVECTIVE OUTLOOK", "swo", None))
+                fetch_targets.append(("DAY 1 CONVECTIVE OUTLOOK", "swo", _archive_ts))
             elif source == "spc-mds":
                 name = str(props.get("name", "")).strip()
                 _m = _re.search(r'\d+', name)
@@ -2064,7 +2113,9 @@ class MainWindow(QMainWindow):
                 if not watch_num:
                     continue
                 event_label = str(props.get("event", "Watch")).upper()
-                fetch_targets.append((f"{event_label} {watch_num}", "watch", watch_num))
+                # Append archive timestamp so text fetch targets the correct date.
+                ident = f"{watch_num}|{_archive_ts}" if _archive_ts else watch_num
+                fetch_targets.append((f"{event_label} {watch_num}", "watch", ident))
             elif source == "nws-warnings":
                 warning_url = str(props.get("warning_url", "")).strip()
                 if not warning_url:
@@ -2122,28 +2173,85 @@ class MainWindow(QMainWindow):
 
         try:
             if kind == "swo":
-                url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SWODY1&limit=1&fmt=text"
+                # identifier is an ISO archive timestamp in archive mode, None in live mode.
+                if identifier:
+                    from datetime import datetime as _dt2, timedelta as _td2
+                    ts = _dt2.strptime(identifier, "%Y-%m-%dT%H:%M:%SZ")
+                    # IEM AFOS ignores after/before in ISO format; sdate/edate (date-only)
+                    # correctly filter to the session's UTC date.
+                    sdate = ts.strftime("%Y-%m-%d")
+                    edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
+                    url = (
+                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+                        f"?pil=SWODY1&limit=1&fmt=text&sdate={sdate}&edate={edate}"
+                    )
+                else:
+                    url = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SWODY1&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "mcd":
                 url = f"https://www.spc.noaa.gov/products/md/md{identifier}.txt"
                 text = _fetch(url)
             elif kind == "watch":
-                # SEL PIL cycles on the last digit of the watch number.
-                # e.g. watch 0029 → SEL9, watch 0028 → SEL8.
-                sel_digit = str(int(identifier) % 10)
-                url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SEL{sel_digit}&limit=1&fmt=text"
+                # identifier is "NNNN" in live mode or "NNNN|ISO_TS" in archive mode.
+                watch_num = identifier
+                archive_ts = None
+                if identifier and "|" in identifier:
+                    watch_num, archive_ts = identifier.split("|", 1)
+                sel_digit = str(int(watch_num) % 10)
+                if archive_ts:
+                    from datetime import datetime as _dt2, timedelta as _td2
+                    ts = _dt2.strptime(archive_ts, "%Y-%m-%dT%H:%M:%SZ")
+                    sdate = (ts - _td2(days=1)).strftime("%Y-%m-%d")
+                    edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
+                    url = (
+                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+                        f"?pil=SEL{sel_digit}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
+                    )
+                else:
+                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SEL{sel_digit}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "warning":
                 if not identifier:
                     text = "(No warning URL available)"
+                elif self._archive:
+                    # Archive mode: identifier is the IEM VTEC viewer URL with query params:
+                    # ?year=YYYY&wfo=KWFO&phenomena=SV&significance=W&eventid=0003
+                    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+                    import json as _json
+                    _p = _urlparse(identifier)
+                    _q = _parse_qs(_p.query)
+                    year     = (_q.get("year",         [None])[0])
+                    wfo      = (_q.get("wfo",           [None])[0])
+                    phenom   = (_q.get("phenomena",     [None])[0])
+                    sig      = (_q.get("significance",  [None])[0])
+                    etn_raw  = (_q.get("eventid",       [None])[0])
+                    if year and wfo and phenom and sig and etn_raw:
+                        etn_int = int(etn_raw.lstrip("0") or "0")
+                        api_url = (
+                            "https://mesonet.agron.iastate.edu/json/vtec_event.py"
+                            f"?wfo={wfo}&year={year}&phenomena={phenom}"
+                            f"&significance={sig}&etn={etn_int}"
+                        )
+                        raw = _fetch(api_url)
+                        data = _json.loads(raw)
+                        if data.get("event_exists"):
+                            text = (data.get("report") or {}).get("text", "") or "(No text in archive)"
+                        else:
+                            text = "(Warning event not found in IEM archive)"
+                    else:
+                        text = "(Could not parse VTEC parameters from warning URL)"
                 else:
                     import json as _json
-                    raw_json = _json.loads(_fetch(identifier))
-                    wp = raw_json.get("properties", {})
-                    headline = wp.get("headline", "")
-                    description = wp.get("description", "")
-                    instruction = wp.get("instruction", "")
-                    text = "\n\n".join(x for x in [headline, description, instruction] if x)
+                    raw = _fetch(identifier)
+                    try:
+                        raw_json = _json.loads(raw)
+                        wp = raw_json.get("properties", {})
+                        headline = wp.get("headline", "")
+                        description = wp.get("description", "")
+                        instruction = wp.get("instruction", "")
+                        text = "\n\n".join(x for x in [headline, description, instruction] if x)
+                    except _json.JSONDecodeError:
+                        text = "(Warning text unavailable)"
             else:
                 text = ""
             if not text:

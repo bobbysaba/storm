@@ -21,7 +21,7 @@ _TICK_MS = 500
 SPEED_OPTIONS = [1, 5, 10, 30, 60, 120, 300]
 
 # Step size used by the ← / → buttons (seconds of archive time).
-STEP_SECONDS = 120   # ≈ one radar scan interval
+STEP_SECONDS = 30    # match vehicle position update interval
 
 
 class TimeController(QObject):

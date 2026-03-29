@@ -6,6 +6,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -15,6 +16,13 @@ from network.mqtt_client import MQTTClient
 log = logging.getLogger(__name__)
 
 _TOPIC_PREFIX = "storm/drawings"
+
+
+def _next_8am_utc_seconds() -> int:
+    """Seconds until 08:00 UTC the following calendar day."""
+    now = datetime.now(timezone.utc)
+    target = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
 
 
 class DrawingSync(QObject):
@@ -48,7 +56,8 @@ class DrawingSync(QObject):
             return
         topic = f"{_TOPIC_PREFIX}/{drawing_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload))
+            self._mqtt.publish(topic, json.dumps(payload), retain=True,
+                               expiry=_next_8am_utc_seconds())
             log.debug("DrawingSync: published %s", topic)
         except Exception as e:
             log.warning("DrawingSync: publish failed: %s", e)

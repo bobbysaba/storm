@@ -49,10 +49,38 @@ NEXRAD_SITES = [
     ("KFSD", "Sioux Falls, SD", 43.588, -96.728),
     ("KDVN", "Davenport, IA", 41.611, -90.581),
     ("KDMX", "Des Moines, IA", 41.731, -93.723),
+    # Illinois
+    ("KILX", "Lincoln/Central IL", 40.150, -89.336),
+    ("KLOT", "Chicago/NE IL", 41.604, -88.085),
+    # Indiana
+    ("KIND", "Indianapolis, IN", 39.707, -86.280),
+    ("KIWX", "Northern Indiana", 41.359, -85.700),
+    # Tennessee
+    ("KOHX", "Nashville, TN", 36.247, -86.563),
+    ("KNQA", "Memphis, TN", 35.345, -89.874),
+    ("KMRX", "Knoxville/E TN", 36.168, -83.402),
+    # Alabama
+    ("KBMX", "Birmingham, AL", 33.172, -86.770),
+    ("KHTX", "Huntsville/N AL", 34.930, -86.083),
+    ("KMOB", "Mobile, AL", 30.679, -88.240),
+    # Mississippi
+    ("KDGX", "Jackson/Central MS", 32.280, -89.984),
+    ("KGWX", "Columbus/NE MS", 33.897, -88.329),
+    # New Mexico
+    ("KABX", "Albuquerque, NM", 35.150, -106.823),
+    ("KFDX", "Clovis/E NM", 34.634, -103.629),
+    ("KHDX", "Holloman AFB, NM", 33.076, -106.122),
+    # Minnesota
+    ("KMPX", "Minneapolis-St. Paul, MN", 44.849, -93.565),
+    ("KDLH", "Duluth, MN", 46.837, -92.210),
+    # Montana
+    ("KBLX", "Billings, MT", 45.854, -108.607),
+    ("KTFX", "Great Falls, MT", 47.460, -111.385),
+    ("KMSX", "Missoula, MT", 47.041, -113.986),
 ]
 
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
-OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF")]
+OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0X", "DIFF REFL"), ("N0K", "SPEC DIFF PHASE")]
 THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
 class RadarControls(QWidget):
     """

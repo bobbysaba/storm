@@ -93,4 +93,18 @@ PRODUCT_META = {
         "vmax":     1.0,
         "colormap": "nws_cc",
     },
+    "N0X": {
+        "name":     "Diff. Reflectivity",
+        "units":    "dB",
+        "vmin":     -4.0,
+        "vmax":      8.0,
+        "colormap": "nws_zdr",
+    },
+    "N0K": {
+        "name":     "Specific Diff. Phase",
+        "units":    "deg/km",
+        "vmin":     -2.0,
+        "vmax":     10.0,
+        "colormap": "nws_kdp",
+    },
 }

@@ -58,6 +58,23 @@ class HazardControls(QWidget):
         "spc-mds":     [("#FF66CC", "MDs")],
     }
 
+    # Per-phenom color + short label for NWS warnings legend.
+    # Priority order determines display order when multiple types are active.
+    NWS_PHENOM_LEGEND: list[tuple[str, str, str]] = [
+        # (phenom_code, hex_color, short_label)
+        ("TO", "#FF0000",  "TOR Warn"),
+        ("SV", "#FFD700",  "SVR Warn"),
+        ("FF", "#00FF00",  "FFD Warn"),
+        ("FL", "#00FF7F",  "FL Warn"),
+        ("MA", "#87CEEB",  "Marine Warn"),
+        ("WS", "#FF69B4",  "Win Storm"),
+        ("BZ", "#FF4500",  "Blizzard"),
+        ("WW", "#FF69B4",  "Win Wx"),
+        ("HU", "#DA70D6",  "Hurricane"),
+        ("TS", "#DA70D6",  "Trop Storm"),
+        ("HF", "#DA70D6",  "HF Wind"),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._animation = None
@@ -169,11 +186,23 @@ class HazardControls(QWidget):
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def update_legend(self, active_products: list[str]):
-        """Show a compact color-swatch legend for the active hazard products."""
+    def update_legend(self, active_products: list[str], nws_phenoms: set[str] | None = None):
+        """Show a compact color-swatch legend for the active hazard products.
+
+        nws_phenoms: set of VTEC phenom codes (e.g. {'TO', 'SV', 'FL'}) actually
+        present in the current NWS warnings data.  When provided, only those types
+        appear in the legend rather than a static catch-all entry.
+        """
         entries: list[tuple[str, str]] = []
         for product in active_products:
-            entries.extend(self.PRODUCT_LEGENDS.get(product, []))
+            if product == "nws-warnings":
+                # Dynamic: show only the phenom types actually on the map.
+                phenom_set = nws_phenoms or set()
+                for code, color, label in self.NWS_PHENOM_LEGEND:
+                    if code in phenom_set:
+                        entries.append((color, label))
+            else:
+                entries.extend(self.PRODUCT_LEGENDS.get(product, []))
 
         if entries:
             parts = [

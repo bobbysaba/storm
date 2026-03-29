@@ -769,8 +769,9 @@ QDialog#annotationDialog QLineEdit:focus {
 
 /* ── Archive Controls Bar ─────────────────────────────── */
 #archiveControls {
-    background-color: rgba(10, 10, 20, 0.96);
-    border-top: 1px solid rgba(74, 83, 108, 0.50);
+    background-color: rgba(15, 15, 26, 0.88);
+    border: 1px solid rgba(84, 94, 122, 0.5);
+    border-radius: 8px;
 }
 
 #archiveControls QToolButton {

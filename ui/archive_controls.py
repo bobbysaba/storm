@@ -4,22 +4,22 @@
 # Layout
 # ------
 #   [ARCHIVE]  [2023-05-15]  [20:35:47 UTC  /  15:35 CDT  /  14:35 MDT]
-#   [⏮] [◀]  [▶ / ⏸]  [▶]  [⏭]   Speed [60x ▾]   [━━━━●━━━━━━━━━━━]  [JUMP]
+#   [⏮] [‹◀]  [▶ / ⏸]  [▶›]  [⏭]   Speed [60x ▾]   [JUMP]
 #
 # The widget is positioned at the bottom of the map container by
 # MainWindow._layout_overlays(), matching the style of the floating toolbar.
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QSlider,
-    QToolButton, QComboBox, QFrame, QSizePolicy,
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel,
+    QToolButton, QComboBox, QFrame,
     QDialog, QPushButton, QDateTimeEdit,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 
 try:
     from zoneinfo import ZoneInfo
@@ -60,7 +60,6 @@ class ArchiveControls(QWidget):
         super().__init__(parent)
         self._tc = time_controller
         self._session_date: Optional[datetime] = None
-        self._scrubbing = False    # True while the user is dragging the slider
 
         self.setObjectName("archiveControls")
         self._build_ui()
@@ -70,8 +69,8 @@ class ArchiveControls(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 6, 12, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(10, 5, 10, 5)
+        root.setSpacing(3)
 
         # ── Row 1: time display ───────────────────────────────────────────────
         row1 = QHBoxLayout()
@@ -134,16 +133,16 @@ class ArchiveControls(QWidget):
 
         root.addLayout(row1)
 
-        # ── Row 2: playback controls + scrubber ───────────────────────────────
+        # ── Row 2: playback controls ─────────────────────────────────────────
         row2 = QHBoxLayout()
         row2.setSpacing(4)
         row2.setContentsMargins(0, 0, 0, 0)
 
         self._btn_start = self._ctrl_btn("⏮", "Skip to start of day")
-        self._btn_back  = self._ctrl_btn("◀",  f"Step back {STEP_SECONDS//60} min (Left or A)")
+        self._btn_back  = self._ctrl_btn("◀",  f"Step back {STEP_SECONDS}s (Left or A)")
         self._btn_play  = self._ctrl_btn("▶",  "Play / pause (Space)")
         self._btn_play.setCheckable(True)
-        self._btn_fwd   = self._ctrl_btn("▶",  f"Step forward {STEP_SECONDS//60} min (Right or D)")
+        self._btn_fwd   = self._ctrl_btn("▶",  f"Step forward {STEP_SECONDS}s (Right or D)")
         self._btn_fwd.setText("▶")
         self._btn_end   = self._ctrl_btn("⏭", "Skip to end of day")
 
@@ -174,28 +173,6 @@ class ArchiveControls(QWidget):
 
         row2.addWidget(self._vdiv())
 
-        # Scrubber: range 0–86399 (seconds since midnight UTC).
-        self._scrubber = QSlider(Qt.Orientation.Horizontal)
-        self._scrubber.setRange(0, 86399)
-        self._scrubber.setValue(0)
-        self._scrubber.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self._scrubber.sliderPressed.connect(self._on_scrub_pressed)
-        self._scrubber.sliderReleased.connect(self._on_scrub_released)
-        self._scrubber.sliderMoved.connect(self._on_scrub_moved)
-        row2.addWidget(self._scrubber)
-
-        row2.addWidget(self._vdiv())
-
-        self._shortcut_hint = QLabel("A/D STEP")
-        self._shortcut_hint.setStyleSheet(
-            "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
-        )
-        row2.addWidget(self._shortcut_hint)
-
-        row2.addWidget(self._vdiv())
-
         jump_btn = self._ctrl_btn("JUMP", "Jump to a specific time")
         jump_btn.setFixedWidth(46)
         jump_btn.setStyleSheet(jump_btn.styleSheet() or "")
@@ -214,7 +191,7 @@ class ArchiveControls(QWidget):
     def _vdiv(self) -> QFrame:
         d = QFrame()
         d.setFrameShape(QFrame.Shape.VLine)
-        d.setStyleSheet("color: #394056; margin: 4px 4px;")
+        d.setStyleSheet("color: #394056; margin: 2px 3px;")
         return d
 
     def set_radar_status(self, text: str, error: bool = False) -> None:
@@ -269,10 +246,6 @@ class ArchiveControls(QWidget):
 
     def _on_time_changed(self, t: datetime) -> None:
         self._update_time_display(t)
-        if not self._scrubbing:
-            self._scrubber.blockSignals(True)
-            self._scrubber.setValue(self._tc.seconds_since_midnight())
-            self._scrubber.blockSignals(False)
 
     def _on_playing_changed(self, playing: bool) -> None:
         self._btn_play.blockSignals(True)
@@ -282,25 +255,6 @@ class ArchiveControls(QWidget):
 
     def _on_speed_changed(self, idx: int) -> None:
         self._tc.set_speed_by_index(idx)
-
-    def _on_scrub_pressed(self) -> None:
-        self._scrubbing = True
-        self._tc.pause()
-
-    def _on_scrub_released(self) -> None:
-        secs = self._scrubber.value()
-        self._tc.set_seconds_since_midnight(secs)
-        self._scrubbing = False
-
-    def _on_scrub_moved(self, secs: int) -> None:
-        # Update the time display while dragging without emitting time_changed.
-        if self._tc.current_time is None:
-            return
-        midnight = self._tc.current_time.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        preview = midnight + timedelta(seconds=secs)
-        self._update_time_display(preview)
 
     def _on_skip_start(self) -> None:
         t = self._tc.current_time

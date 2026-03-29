@@ -14,8 +14,12 @@
 # scans after the current archive time.  Pre-fetches missing slots in a
 # background thread so the UI stays responsive during playback.
 
+import atexit
 import io
 import logging
+import os
+import shutil
+import tempfile
 import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -95,15 +99,21 @@ class ArchiveRadarFetcher(QObject):
         self._product     = DEFAULT_L2_PRODUCT
         self._tilt_idx    = 0          # index into available tilts list
 
-        # Raw file bytes and decoded scans are cached separately so product/tilt
-        # switches don't need to re-download the same Level-2 volume.
-        self._raw_cache: dict[datetime, Optional[bytes]] = {}
+        # Raw Level-2 files are written to a per-session tmp directory (~30 MB
+        # each) so they don't bloat process memory across a long session.  The
+        # directory is deleted automatically on process exit.
+        self._tmpdir = tempfile.mkdtemp(prefix="storm_radar_")
+        atexit.register(shutil.rmtree, self._tmpdir, True)
+
+        # Maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
+        self._raw_cache: dict[datetime, Optional[str]] = {}
         self._decoded_cache: dict[tuple[datetime, str, int], Level2RadarScan] = {}
         # Sorted list of all known scan times for the date.
         self._index: list[datetime] = []
         self._index_lock = threading.Lock()
 
         self._current_archive_time: Optional[datetime] = None
+        self._last_emitted_key: Optional[tuple] = None  # suppress re-render of same scan
         self._fetch_lock = threading.Lock()
         self._pending_fetches: set[datetime] = set()
         self._pending_decodes: set[tuple[datetime, str, int]] = set()
@@ -116,6 +126,12 @@ class ArchiveRadarFetcher(QObject):
 
     def set_station(self, station: str) -> None:
         self._station = station.upper()
+        for path in self._raw_cache.values():
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         self._raw_cache.clear()
         self._decoded_cache.clear()
         self._index = []
@@ -128,12 +144,14 @@ class ArchiveRadarFetcher(QObject):
         if pyart_field == self._product:
             return
         self._product = pyart_field
+        self._last_emitted_key = None
         if self._current_archive_time is not None:
             self.on_time_changed(self._current_archive_time)
 
     def set_tilt_index(self, idx: int) -> None:
         """Switch the elevation tilt and reuse cached raw/decoded volumes."""
         self._tilt_idx = idx
+        self._last_emitted_key = None
         if self._current_archive_time is not None:
             self.on_time_changed(self._current_archive_time)
 
@@ -155,7 +173,9 @@ class ArchiveRadarFetcher(QObject):
         cache_key = self._decode_key(scan_time)
         scan = self._decoded_cache.get(cache_key)
         if scan is not None:
-            self.scan_ready.emit(scan)
+            if cache_key != self._last_emitted_key:
+                self._last_emitted_key = cache_key
+                self.scan_ready.emit(scan)
         elif self._raw_cache.get(scan_time) is not None:
             self._ensure_decoded(scan_time)
         else:
@@ -270,7 +290,14 @@ class ArchiveRadarFetcher(QObject):
             file_bytes = self._download_scan(scan_time)
             if file_bytes is None:
                 return
-            self._raw_cache[scan_time] = file_bytes
+            # Write raw bytes to tmp file to keep memory footprint low.
+            path = os.path.join(
+                self._tmpdir,
+                f"{self._station}_{scan_time.strftime('%Y%m%d_%H%M%S')}.dat",
+            )
+            with open(path, "wb") as fh:
+                fh.write(file_bytes)
+            self._raw_cache[scan_time] = path
             self._ensure_decoded(scan_time)
         except Exception as exc:
             log.error("ArchiveRadarFetcher: fetch failed for %s: %s", scan_time, exc)
@@ -283,9 +310,11 @@ class ArchiveRadarFetcher(QObject):
     def _decode_cached_scan(self, scan_time: datetime) -> None:
         cache_key = self._decode_key(scan_time)
         try:
-            file_bytes = self._raw_cache.get(scan_time)
-            if file_bytes is None:
+            path = self._raw_cache.get(scan_time)
+            if not path or not os.path.exists(path):
                 return
+            with open(path, "rb") as fh:
+                file_bytes = fh.read()
             scan = self._decode(scan_time, file_bytes)
             self._decoded_cache[cache_key] = scan
             if (
@@ -495,7 +524,12 @@ class ArchiveRadarFetcher(QObject):
         for t in list(self._raw_cache.keys()):
             i = idx.index(t) if t in idx else -1
             if i == -1 or i < evict_lo or i > evict_hi:
-                self._raw_cache.pop(t, None)
+                path = self._raw_cache.pop(t, None)
+                if path and os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
                 for key in [k for k in self._decoded_cache if k[0] == t]:
                     del self._decoded_cache[key]
 

@@ -2,7 +2,7 @@
 # Modal progress dialog shown while archive session data is being pre-fetched.
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QWidget,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QWidget, QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer
 
@@ -47,6 +47,17 @@ QProgressBar {
 QProgressBar::chunk {
     background-color: #00CFFF;
     border-radius: 3px;
+}
+QPushButton#abort {
+    background-color: transparent;
+    color: #F87171;
+    border: 1px solid rgba(248, 113, 113, 0.4);
+    border-radius: 6px;
+    font-size: 11px;
+    padding: 5px 16px;
+}
+QPushButton#abort:hover {
+    background-color: rgba(248, 113, 113, 0.12);
 }
 """
 
@@ -140,6 +151,17 @@ class ArchiveLoadingDialog(QDialog):
         self._status_label.setObjectName("status")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._status_label)
+
+        root.addSpacing(16)
+
+        abort_btn = QPushButton("Abort")
+        abort_btn.setObjectName("abort")
+        abort_btn.clicked.connect(self.reject)
+        abort_row = QHBoxLayout()
+        abort_row.addStretch()
+        abort_row.addWidget(abort_btn)
+        abort_row.addStretch()
+        root.addLayout(abort_row)
 
     # ── Public API ────────────────────────────────────────────────────────────
 

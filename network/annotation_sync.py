@@ -14,6 +14,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -23,6 +24,13 @@ from network.mqtt_client import MQTTClient
 log = logging.getLogger(__name__)
 
 _TOPIC_PREFIX = "storm/annotations"
+
+
+def _next_8am_utc_seconds() -> int:
+    """Seconds until 08:00 UTC the following calendar day."""
+    now = datetime.now(timezone.utc)
+    target = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
 
 
 class AnnotationSync(QObject):
@@ -72,7 +80,8 @@ class AnnotationSync(QObject):
             return
         topic = f"{_TOPIC_PREFIX}/{annotation_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload), retain=retain)
+            self._mqtt.publish(topic, json.dumps(payload), retain=retain,
+                               expiry=_next_8am_utc_seconds())
             log.debug("AnnotationSync: published %s (retain=%s)", topic, retain)
         except Exception as e:
             log.warning("AnnotationSync: publish failed: %s", e)

@@ -238,6 +238,13 @@ class SatelliteControls(QWidget):
         row2 = self._drawer.layout().itemAt(1).widget()
         if row2 is not None:
             row2.setVisible(not enabled)
+        if enabled:
+            # Meso buttons are disabled until live sectors are found; in archive
+            # mode enable them upfront — indexing happens lazily on first click.
+            self._btn_meso1.setEnabled(True)
+            self._btn_meso1.setToolTip("Mesoscale sector 1")
+            self._btn_meso2.setEnabled(True)
+            self._btn_meso2.setToolTip("Mesoscale sector 2")
 
     def toggle_drawer(self, checked: bool):
         if checked:

@@ -28,17 +28,17 @@ _MODE_CONFIG = {
     "conus": {
         "product": "ABI-L2-CMIPC",
         "label": "CONUS",
-        "fixed_bbox": [-125.0, 22.0, -66.0, 51.0],
+        "fixed_bbox": [-116.0, 28.0, -82.0, 49.0],
     },
     "meso1": {
         "product": "ABI-L2-CMIPM",
         "label": "MESO-1",
-        "sector_token": "M1C02",
+        "sector_token": "CMIPM1",
     },
     "meso2": {
         "product": "ABI-L2-CMIPM",
         "label": "MESO-2",
-        "sector_token": "M2C02",
+        "sector_token": "CMIPM2",
     },
 }
 _MAX_CACHE = 24
@@ -89,7 +89,7 @@ class ArchiveSatelliteFetcher(QObject):
         super().__init__(parent)
         self._date = _ensure_utc(session_date)
         self._bucket = _bucket_for_date(self._date)
-        self._mode = "conus"
+        self._mode = ""   # no mode until user explicitly selects one
         self._indexes: dict[str, list[_FrameRef]] = {mode: [] for mode in _MODE_CONFIG}
         self._indexes_ready = False
         self._indexed_modes: set[str] = set()
@@ -103,7 +103,9 @@ class ArchiveSatelliteFetcher(QObject):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_capabilities(self) -> None:
-        self._ensure_mode_index("conus")
+        # Index all modes at startup so meso buttons are responsive immediately.
+        for mode in _MODE_CONFIG:
+            self._ensure_mode_index(mode)
 
     def set_mode(self, mode: str) -> None:
         if mode not in _MODE_CONFIG:
@@ -144,9 +146,15 @@ class ArchiveSatelliteFetcher(QObject):
             self._indexes_ready = bool(self._indexed_modes)
 
             if refs and mode in ("meso1", "meso2"):
-                idx = 1 if mode == "meso1" else 2
-                self._meso_bboxes[idx] = self._read_bbox_for_key(mode, refs[-1].key)
+                # Emit now (bbox still None) so the UI immediately enables the buttons.
+                # Then fetch the bbox in a separate background thread so the map hover
+                # preview becomes available once the lightweight metadata download finishes.
                 self.meso_sectors_updated.emit(dict(self._meso_bboxes))
+                threading.Thread(
+                    target=self._fetch_mode_bbox,
+                    args=(mode, refs[-1].key),
+                    daemon=True,
+                ).start()
 
             if not refs and mode == "conus":
                 self.error.emit(
@@ -165,6 +173,14 @@ class ArchiveSatelliteFetcher(QObject):
         finally:
             self._indexing_modes.discard(mode)
 
+    def _fetch_mode_bbox(self, mode: str, key: str) -> None:
+        """Background: download one file's bbox so the map hover preview works."""
+        idx = 1 if mode == "meso1" else 2
+        bbox = self._read_bbox_for_key(mode, key)
+        if bbox is not None:
+            self._meso_bboxes[idx] = bbox
+            self.meso_sectors_updated.emit(dict(self._meso_bboxes))
+
     def _list_day_refs(self, mode: str, product: str) -> list[_FrameRef]:
         refs: list[_FrameRef] = []
         base_url = _S3_URL_TEMPLATE.format(bucket=self._bucket)
@@ -174,22 +190,30 @@ class ArchiveSatelliteFetcher(QObject):
 
         for hour in range(24):
             prefix = f"{product}/{year}/{jday}/{hour:02d}/"
-            params = f"?list-type=2&prefix={quote(prefix)}"
-            resp = requests.get(f"{base_url}/{params}", timeout=_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            root = ET.fromstring(resp.content)
-            for key_el in root.findall(".//{*}Contents/{*}Key"):
-                key = (key_el.text or "").strip()
-                if not key.endswith(".nc"):
-                    continue
-                if mode == "conus" and "_C02_" not in key:
-                    continue
-                if sector_token and sector_token not in key:
-                    continue
-                ts = _timestamp_from_key(key)
-                if ts is None:
-                    continue
-                refs.append(_FrameRef(timestamp=ts, key=key))
+            continuation = None
+            while True:
+                params = f"?list-type=2&prefix={quote(prefix)}"
+                if continuation:
+                    params += f"&continuation-token={quote(continuation)}"
+                resp = requests.get(f"{base_url}/{params}", timeout=_REQUEST_TIMEOUT)
+                resp.raise_for_status()
+                root = ET.fromstring(resp.content)
+                for key_el in root.findall(".//{*}Contents/{*}Key"):
+                    key = (key_el.text or "").strip()
+                    if not key.endswith(".nc"):
+                        continue
+                    if "C02" not in key:
+                        continue
+                    if sector_token and sector_token not in key:
+                        continue
+                    ts = _timestamp_from_key(key)
+                    if ts is None:
+                        continue
+                    refs.append(_FrameRef(timestamp=ts, key=key))
+                token_el = root.find("{*}NextContinuationToken")
+                if token_el is None:
+                    break
+                continuation = token_el.text
 
         refs.sort(key=lambda item: item.timestamp)
         log.info("ArchiveSatelliteFetcher: indexed %s %d frames", product, len(refs))
@@ -348,6 +372,10 @@ def _render_goes_png(
             data[data == fill] = np.nan
         data[~np.isfinite(data)] = np.nan
         data = np.clip(data, 0.0, 1.0)
+        # Apply gamma correction to match the visual brightness of live WMS tiles.
+        # nowCOAST applies a sqrt-like stretch; replicating it here keeps archive
+        # imagery consistent with live display.
+        data = np.where(np.isfinite(data), np.power(data, 0.5), np.nan)
 
         proj_var = ds["goes_imager_projection"]
         sat_height = float(proj_var.attrs["perspective_point_height"])
@@ -397,7 +425,7 @@ def _render_goes_png(
             cmap=cmap,
             vmin=0.0,
             vmax=1.0,
-            interpolation="nearest",
+            interpolation="bilinear",
         )
 
         buf = io.BytesIO()
@@ -430,4 +458,42 @@ def _dataset_bbox(ds, fallback_bbox: Optional[list[float]]) -> list[float]:
         ]
     if fallback_bbox:
         return list(fallback_bbox)
+
+    # Meso sector files don't carry geospatial_* attributes — derive the bbox
+    # by projecting the x/y coordinate array corners through the geostationary CRS.
+    try:
+        import cartopy.crs as ccrs
+        import numpy as np
+        proj_var   = ds["goes_imager_projection"]
+        sat_height = float(proj_var.attrs["perspective_point_height"])
+        lon0       = float(proj_var.attrs["longitude_of_projection_origin"])
+        sweep      = str(proj_var.attrs.get("sweep_angle_axis", "x"))
+        semi_major = float(proj_var.attrs["semi_major_axis"])
+        semi_minor = float(proj_var.attrs["semi_minor_axis"])
+        x = np.asarray(ds["x"], dtype="float64") * sat_height
+        y = np.asarray(ds["y"], dtype="float64") * sat_height
+
+        globe = ccrs.Globe(semimajor_axis=semi_major, semiminor_axis=semi_minor, ellipse=None)
+        geos  = ccrs.Geostationary(
+            central_longitude=lon0,
+            satellite_height=sat_height,
+            sweep_axis=sweep,
+            globe=globe,
+        )
+        pc = ccrs.PlateCarree()
+        lons, lats = [], []
+        for xi in (x.min(), x.max()):
+            for yi in (y.min(), y.max()):
+                try:
+                    pt = pc.transform_point(xi, yi, geos)
+                    if np.isfinite(pt[0]) and np.isfinite(pt[1]):
+                        lons.append(pt[0])
+                        lats.append(pt[1])
+                except Exception:
+                    pass
+        if lons and lats:
+            return [min(lons), min(lats), max(lons), max(lats)]
+    except Exception as exc:
+        log.warning("_dataset_bbox: projection fallback failed: %s", exc)
+
     raise RuntimeError("GOES file is missing geospatial bounds")

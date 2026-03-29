@@ -396,6 +396,8 @@ def build_map_html() -> str:
     if (typeof QWebChannel !== "undefined") {{
       new QWebChannel(qt.webChannelTransport, function(channel) {{
         bridge = channel.objects.bridge;
+        // If map.on("load") already fired before bridge was ready, notify now.
+        if (window._stormMapLoaded) bridge.on_map_loaded();
       }});
     }}
 
@@ -2549,6 +2551,12 @@ def build_map_html() -> str:
     }};
 
 
+    // Notify Python that MapLibre is fully loaded and all storm* functions
+    // are defined. If bridge isn't ready yet the QWebChannel init callback
+    // above will call on_map_loaded() once it sees _stormMapLoaded = true.
+    window._stormMapLoaded = true;
+    if (bridge) bridge.on_map_loaded();
+
     // ── Front Canvas Rendering ────────────────────────────────────────────
     (function() {{
       var frontCanvas = document.getElementById('front-canvas');
@@ -2811,6 +2819,12 @@ class MapBridge(QObject):
     def on_user_drag(self):
         self.user_dragged.emit()
 
+    map_loaded = pyqtSignal()
+
+    @pyqtSlot()
+    def on_map_loaded(self):
+        self.map_loaded.emit()
+
     @pyqtSlot(float, float)
     def on_map_pick_for_route(self, lat: float, lon: float):
         self.map_pick_for_route.emit(lat, lon)
@@ -2887,10 +2901,13 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.user_dragged.connect(self.user_dragged)
         self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
 
-        # Queue for JS calls that arrive before the page has loaded
+        # Queue for JS calls that arrive before MapLibre has fully loaded.
+        # _map_ready is set by the bridge.on_map_loaded() signal fired from
+        # inside map.on("load", ...) — NOT from loadFinished — so that
+        # stormAddAnnotation etc. are guaranteed to be the real functions.
         self._map_ready = False
         self._js_queue: list[str] = []
-        self.loadFinished.connect(self._on_page_loaded)
+        self.bridge.map_loaded.connect(self._on_map_loaded_from_js)
 
         QTimer.singleShot(0, self._load_map)
 
@@ -2901,13 +2918,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def _load_map(self):
         self.load(QUrl("storm://app/"))
 
-    def _on_page_loaded(self, ok: bool):
-        if ok:
-            self._map_ready = True
-            for script in self._js_queue:
-                self.page().runJavaScript(script)
-            self._js_queue.clear()
-            self.map_ready.emit()
+    def _on_map_loaded_from_js(self):
+        if self._map_ready:
+            return
+        self._map_ready = True
+        for script in self._js_queue:
+            self.page().runJavaScript(script)
+        self._js_queue.clear()
+        self.map_ready.emit()
 
     def run_js(self, script: str):
         if SAFE_MAP_MODE:

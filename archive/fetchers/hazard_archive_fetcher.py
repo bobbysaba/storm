@@ -1,51 +1,59 @@
 # archive/fetchers/hazard_archive_fetcher.py
-# ArchiveHazardFetcher — retrieves historical NWS warnings, SPC watches, and
-# SPC outlooks from IEM's archive APIs.
+# ArchiveHazardFetcher — retrieves historical NWS warnings, SPC watches, SPC MDs,
+# and SPC outlooks from IEM's archive APIs and SPC's direct archive.
 #
 # Data sources
 # ------------
-# NWS Storm-Based Warnings (SBW):
-#   https://mesonet.agron.iastate.edu/geojson/sbw.geojson?ts=YYYY-MM-DDTHH:MM:SS
-#   Returns all warnings valid at the given timestamp.
+# NWS Storm-Based Warnings:
+#   https://mesonet.agron.iastate.edu/geojson/sbw.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
+#   Returns all warnings valid at the given timestamp (with polygon geometry).
 #
 # SPC Mesoscale Watches:
-#   https://mesonet.agron.iastate.edu/json/watches.json?date=YYYY-MM-DD
-#   Returns all watches issued on that UTC date.
+#   https://mesonet.agron.iastate.edu/geojson/spc_watch.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
+#   Returns watch box polygons valid at the given timestamp.
+#
+# SPC Mesoscale Discussions:
+#   https://mesonet.agron.iastate.edu/geojson/spc_mcd.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
+#   Returns MD polygons valid at the given timestamp.
 #
 # SPC Day-1 Outlook:
-#   https://mesonet.agron.iastate.edu/api/1/spc/outlook.geojson?day=1&valid={YYYYMMDDTHHMM}
-#   Returns the outlook valid at the given UTC time.
+#   https://www.spc.noaa.gov/products/outlook/archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{product}.lyr.geojson
+#   Files exist only at actual SPC issuance times; cycle is snapped via _OUTLOOK_CYCLES.
 #
 # Strategy
 # --------
-# • Warnings: fetched for the current timestamp from IEM with a 5-minute
-#   resolution cache (avoid hitting IEM on every 10-second tick).
-# • Watches: entire day fetched once; client-side filtered by issue/expire time.
-# • Outlooks: fetched when the cycle changes (SPC issues ~4 outlooks per day).
+# All IEM endpoints are queried on each time tick with a 5-minute resolution cache
+# (avoid redundant fetches within the same cache window).  Outlook is fetched once
+# per cycle change (SPC issues ~4-6 outlooks per day).
 
+import io
 import json
 import logging
+import struct
 import threading
+import zipfile
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
-from data.hazard_fetcher import _spc_cat_key, _spc_prob_label
+from data.hazard_fetcher import _spc_cat_key, _spc_prob_label, _nws_color_for_phenom
 
 log = logging.getLogger(__name__)
 
-_IEM_SBW_URL      = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson"
-_IEM_WATCHES_URL  = "https://mesonet.agron.iastate.edu/json/watches.json"
+_IEM_SBW_URL   = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson"
+# These endpoints require a 12-digit YYYYMMDDHHmm timestamp via ?ts=
+_IEM_WATCH_URL = "https://mesonet.agron.iastate.edu/json/spcwatch.py"
+# IEM GIS shapefile endpoint for MCDs — returns a zip with .shp/.dbf/.prj
+_IEM_MCD_GIS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/spc_mcd.py"
 
 # SPC direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
 # URL: .../archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{product}.lyr.geojson
-# Products: cat, torn, wind, hail.  Available from ~2019-10-17 onward.
+# Products: cat, wind, hail, torn.  Available from ~2019-10-17 onward.
 _SPC_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/outlook/archive"
 
-# Cache resolution for SBW fetches: only re-fetch if the archive time has
-# moved by at least this many minutes.
-_SBW_CACHE_MINUTES = 5
+# Cache resolution for time-varying fetches.
+_CACHE_MINUTES = 5
 
 # SPC Day-1 outlook issuance times (UTC).  A new cycle is triggered when the
 # archive time crosses one of these thresholds.
@@ -61,8 +69,8 @@ _OUTLOOK_CYCLES = [
 
 class ArchiveHazardFetcher(QObject):
     """
-    Replays historical hazard data (warnings, watches, outlooks) in sync with
-    the archive time controller.
+    Replays historical hazard data (warnings, watches, MDs, outlooks) in sync
+    with the archive time controller.
 
     Signals
     -------
@@ -71,7 +79,9 @@ class ArchiveHazardFetcher(QObject):
     nws_received(str)
         NWS warnings GeoJSON string.
     watches_received(str)
-        SPC watches GeoJSON string (filtered to currently-active watches).
+        SPC watches GeoJSON string.
+    spc_mds_received(str)
+        SPC mesoscale discussions GeoJSON string.
     loading_changed(bool)
     error(str)
     """
@@ -79,6 +89,7 @@ class ArchiveHazardFetcher(QObject):
     spc_received     = pyqtSignal(str, str, str, str)
     nws_received     = pyqtSignal(str)
     watches_received = pyqtSignal(str)
+    spc_mds_received = pyqtSignal(str)
     loading_changed  = pyqtSignal(bool)
     error            = pyqtSignal(str)
 
@@ -86,14 +97,18 @@ class ArchiveHazardFetcher(QObject):
         super().__init__(parent)
         self._date = session_date
 
-        # SBW cache: {rounded_time → geojson_str}
-        self._sbw_cache: dict[datetime, str] = {}
-        self._sbw_pending: set[datetime] = set()
-        self._sbw_lock = threading.Lock()
+        # Per-type caches: {rounded_time → geojson_str}
+        self._sbw_cache:   dict[datetime, str] = {}
+        self._watch_cache: dict[datetime, str] = {}
+        self._mcd_cache:   dict[datetime, str] = {}
 
-        # Watches: fetched once for the day, stored as list of dicts.
-        self._watches_raw: Optional[list] = None
-        self._watches_loaded = False
+        # Per-type in-flight sets + locks
+        self._sbw_pending:   set[datetime] = set()
+        self._watch_pending: set[datetime] = set()
+        self._mcd_pending:   set[datetime] = set()
+        self._sbw_lock   = threading.Lock()
+        self._watch_lock = threading.Lock()
+        self._mcd_lock   = threading.Lock()
 
         # Outlook cache: {cycle_time → (cat, wind, hail, tor)}
         self._outlook_cache: dict[datetime, tuple] = {}
@@ -101,17 +116,21 @@ class ArchiveHazardFetcher(QObject):
         self._outlook_pending: set[datetime] = set()
         self._current_archive_time: Optional[datetime] = None
 
+        # Immediately ready — no pre-fetch step required.
+        self._watches_loaded = True
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_day_data(self) -> None:
-        """Pre-fetch watches for the session date (call once at startup)."""
-        threading.Thread(target=self._fetch_watches_for_day, daemon=True).start()
+        """No-op: all data is now fetched on demand. _watches_loaded stays True."""
+        pass
 
     def on_time_changed(self, archive_time: datetime) -> None:
         """Called by TimeController on every tick."""
         self._current_archive_time = archive_time
         self._update_warnings(archive_time)
         self._update_watches(archive_time)
+        self._update_mds(archive_time)
         self._update_outlook(archive_time)
 
     def refresh_now(self) -> None:
@@ -123,8 +142,7 @@ class ArchiveHazardFetcher(QObject):
     # ── NWS Warnings (SBW) ───────────────────────────────────────────────────
 
     def _update_warnings(self, t: datetime) -> None:
-        """Emit warnings valid at the archive time; cache at 5-min resolution."""
-        rounded = _round_to_minutes(t, _SBW_CACHE_MINUTES)
+        rounded = _round_to_minutes(t, _CACHE_MINUTES)
         cached = self._sbw_cache.get(rounded)
         if cached is not None:
             self.nws_received.emit(cached)
@@ -133,22 +151,15 @@ class ArchiveHazardFetcher(QObject):
             if rounded in self._sbw_pending:
                 return
             self._sbw_pending.add(rounded)
-        threading.Thread(
-            target=self._fetch_sbw, args=(rounded,), daemon=True
-        ).start()
+        threading.Thread(target=self._fetch_sbw, args=(rounded,), daemon=True).start()
 
     def _fetch_sbw(self, rounded_time: datetime) -> None:
         try:
             ts = rounded_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-            resp = requests.get(
-                _IEM_SBW_URL,
-                params={"ts": ts},
-                timeout=20,
-            )
+            resp = requests.get(_IEM_SBW_URL, params={"ts": ts}, timeout=20)
             resp.raise_for_status()
-            geojson_str = resp.text
+            geojson_str = _normalize_sbw_geojson(resp.text)
             self._sbw_cache[rounded_time] = geojson_str
-            # Only emit if this is still the relevant time.
             self.nws_received.emit(geojson_str)
         except Exception as exc:
             log.warning("ArchiveHazardFetcher: SBW fetch failed for %s: %s", rounded_time, exc)
@@ -158,43 +169,78 @@ class ArchiveHazardFetcher(QObject):
 
     # ── SPC Watches ───────────────────────────────────────────────────────────
 
-    def _fetch_watches_for_day(self) -> None:
-        try:
-            date_str = self._date.strftime("%Y-%m-%d")
-            resp = requests.get(
-                _IEM_WATCHES_URL,
-                params={"date": date_str},
-                timeout=20,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._watches_raw = data.get("features", data.get("watches", []))
-            self._watches_loaded = True
-            log.info(
-                "ArchiveHazardFetcher: loaded %d watches for %s",
-                len(self._watches_raw), date_str,
-            )
-        except Exception as exc:
-            log.warning("ArchiveHazardFetcher: watches fetch failed: %s", exc)
-            self._watches_raw = []
-            self._watches_loaded = True
-
     def _update_watches(self, t: datetime) -> None:
-        if not self._watches_loaded or self._watches_raw is None:
+        rounded = _round_to_minutes(t, _CACHE_MINUTES)
+        cached = self._watch_cache.get(rounded)
+        if cached is not None:
+            self.watches_received.emit(cached)
             return
-        # Filter to watches that were active at time t.
-        active = []
-        for w in self._watches_raw:
-            props = w.get("properties", w) if isinstance(w, dict) else {}
-            issued  = _parse_iso(props.get("issued")  or props.get("issue_time"))
-            expired = _parse_iso(props.get("expired") or props.get("expire_time"))
-            if issued and expired and issued <= t < expired:
-                active.append(w)
-        if not active:
-            self.watches_received.emit('{"type":"FeatureCollection","features":[]}')
+        with self._watch_lock:
+            if rounded in self._watch_pending:
+                return
+            self._watch_pending.add(rounded)
+        threading.Thread(target=self._fetch_watches, args=(rounded,), daemon=True).start()
+
+    def _fetch_watches(self, rounded_time: datetime) -> None:
+        try:
+            ts = rounded_time.strftime("%Y%m%d%H%M")   # spcwatch.py requires YYYYMMDDHHmm
+            resp = requests.get(_IEM_WATCH_URL, params={"ts": ts}, timeout=20)
+            resp.raise_for_status()
+            geojson_str = _normalize_watch_geojson(resp.text)
+            self._watch_cache[rounded_time] = geojson_str
+            self.watches_received.emit(geojson_str)
+        except Exception as exc:
+            log.warning("ArchiveHazardFetcher: Watch fetch failed for %s: %s", rounded_time, exc)
+        finally:
+            with self._watch_lock:
+                self._watch_pending.discard(rounded_time)
+
+    # ── SPC Mesoscale Discussions ─────────────────────────────────────────────
+
+    def _update_mds(self, t: datetime) -> None:
+        rounded = _round_to_minutes(t, _CACHE_MINUTES)
+        cached = self._mcd_cache.get(rounded)
+        if cached is not None:
+            self.spc_mds_received.emit(cached)
             return
-        geojson = {"type": "FeatureCollection", "features": active}
-        self.watches_received.emit(json.dumps(geojson))
+        with self._mcd_lock:
+            if rounded in self._mcd_pending:
+                return
+            self._mcd_pending.add(rounded)
+        threading.Thread(target=self._fetch_mds, args=(rounded,), daemon=True).start()
+
+    def _fetch_mds(self, rounded_time: datetime) -> None:
+        try:
+            # Use a ±2-hour window to catch MCDs that started before rounded_time
+            # but are still valid, or expire shortly after.
+            t_start = rounded_time - timedelta(hours=2)
+            t_end   = rounded_time + timedelta(hours=2)
+            params = {
+                "year1":   t_start.year,
+                "month1":  t_start.month,
+                "day1":    t_start.day,
+                "hour1":   t_start.hour,
+                "minute1": t_start.minute,
+                "year2":   t_end.year,
+                "month2":  t_end.month,
+                "day2":    t_end.day,
+                "hour2":   t_end.hour,
+                "minute2": t_end.minute,
+            }
+            resp = requests.get(_IEM_MCD_GIS_URL, params=params, timeout=30)
+            resp.raise_for_status()
+
+            features = _parse_mcd_shapefile_zip(resp.content, rounded_time)
+            geojson_str = _normalize_mcd_geojson(
+                json.dumps({"type": "FeatureCollection", "features": features})
+            )
+            self._mcd_cache[rounded_time] = geojson_str
+            self.spc_mds_received.emit(geojson_str)
+        except Exception as exc:
+            log.warning("ArchiveHazardFetcher: MCD fetch failed for %s: %s", rounded_time, exc)
+        finally:
+            with self._mcd_lock:
+                self._mcd_pending.discard(rounded_time)
 
     # ── SPC Outlooks ──────────────────────────────────────────────────────────
 
@@ -214,37 +260,48 @@ class ArchiveHazardFetcher(QObject):
         if cycle in self._outlook_pending:
             return
         self._outlook_pending.add(cycle)
-        threading.Thread(
-            target=self._fetch_outlook, args=(cycle,), daemon=True
-        ).start()
+        threading.Thread(target=self._fetch_outlook, args=(cycle,), daemon=True).start()
 
     def _fetch_outlook(self, cycle: datetime) -> None:
         try:
-            # SPC archive URL: .../archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{prod}.lyr.geojson
-            date_str = cycle.strftime("%Y%m%d")
-            time_str = cycle.strftime("%H%M")
-            year     = cycle.strftime("%Y")
-            base     = f"{_SPC_OUTLOOK_ARCHIVE}/{year}/day1otlk_{date_str}_{time_str}"
-
             empty = '{"type":"FeatureCollection","features":[]}'
-            # SPC product suffixes: cat, wind, hail, torn
             product_map = {
                 "categorical": "cat",
                 "wind":        "wind",
                 "hail":        "hail",
                 "tornado":     "torn",
             }
+
+            # SPC doesn't issue every cycle every day.  Build a fallback list of
+            # cycle times to try in reverse order (most-recent first) for the
+            # same UTC day as the requested cycle.
+            midnight = cycle.replace(hour=0, minute=0, second=0, microsecond=0)
+            candidates = [cycle] + sorted(
+                (midnight.replace(hour=h, minute=m) for h, m in _OUTLOOK_CYCLES
+                 if midnight.replace(hour=h, minute=m) < cycle),
+                reverse=True,
+            )
+
             results = {}
             for key, suffix in product_map.items():
-                url = f"{base}_{suffix}.lyr.geojson"
-                try:
-                    resp = requests.get(url, timeout=20)
-                    resp.raise_for_status()
-                    results[key] = _normalize_archive_spc_geojson(key, resp.text)
-                except Exception as exc:
-                    log.warning(
-                        "ArchiveHazardFetcher: outlook %s fetch failed: %s", key, exc
+                found = False
+                for ct in candidates:
+                    url = (
+                        f"{_SPC_OUTLOOK_ARCHIVE}/{ct.strftime('%Y')}/"
+                        f"day1otlk_{ct.strftime('%Y%m%d')}_{ct.strftime('%H%M')}_{suffix}.lyr.geojson"
                     )
+                    try:
+                        resp = requests.get(url, timeout=20)
+                        if resp.status_code == 404:
+                            continue
+                        resp.raise_for_status()
+                        results[key] = _normalize_archive_spc_geojson(key, resp.text)
+                        found = True
+                        log.debug("ArchiveHazardFetcher: outlook %s found at %sZ", key, ct.strftime("%H%M"))
+                        break
+                    except Exception as exc:
+                        log.warning("ArchiveHazardFetcher: outlook %s @ %sZ failed: %s", key, ct.strftime("%H%M"), exc)
+                if not found:
                     results[key] = empty
 
             payload = (
@@ -262,24 +319,286 @@ class ArchiveHazardFetcher(QObject):
             self._outlook_pending.discard(cycle)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Shapefile parser (no GIS libs required) ───────────────────────────────────
 
-def _round_to_minutes(dt: datetime, minutes: int) -> datetime:
-    """Round dt down to the nearest N-minute boundary."""
-    total_secs = int(dt.timestamp())
-    step = minutes * 60
-    return datetime.fromtimestamp(total_secs - (total_secs % step), tz=timezone.utc)
+def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
+    """
+    Parse the IEM GIS shapefile zip for MCDs.
+    Returns a list of GeoJSON Feature dicts filtered to those valid at filter_time.
+
+    The zip contains: .shp (Polygon type 5), .dbf (with ISSUE/EXPIRE/NUM fields).
+    DBF field ISSUE and EXPIRE are 12-char strings in YYYYMMDDHHmm format.
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        log.warning("MCD shapefile: bad zip: %s", exc)
+        return []
+
+    # Find .shp and .dbf members (case-insensitive).
+    names = zf.namelist()
+    shp_name = next((n for n in names if n.lower().endswith(".shp")), None)
+    dbf_name = next((n for n in names if n.lower().endswith(".dbf")), None)
+    if not shp_name or not dbf_name:
+        log.warning("MCD shapefile: missing .shp or .dbf in zip (files: %s)", names)
+        return []
+
+    shp_data = zf.read(shp_name)
+    dbf_data = zf.read(dbf_name)
+
+    geometries = _parse_shp(shp_data)
+    records    = _parse_dbf(dbf_data)
+
+    if len(geometries) != len(records):
+        log.warning(
+            "MCD shapefile: geometry count %d != record count %d",
+            len(geometries), len(records)
+        )
+        # Still proceed with min(len) pairs.
+
+    features = []
+    for geom, rec in zip(geometries, records):
+        if geom is None:
+            continue
+        issue_str  = (rec.get("ISSUE")  or "").strip()
+        expire_str = (rec.get("EXPIRE") or "").strip()
+        num_raw    = rec.get("NUM")
+        try:
+            num = int(float(num_raw)) if num_raw is not None else 0
+        except (TypeError, ValueError):
+            num = 0
+        if not num:
+            continue
+
+        # Parse ISSUE/EXPIRE (YYYYMMDDHHmm, 12 chars).
+        issue  = _parse_yyyymmddHHMM(issue_str)
+        expire = _parse_yyyymmddHHMM(expire_str)
+        if issue is None or expire is None:
+            continue
+        if not (issue <= filter_time <= expire):
+            continue
+
+        features.append({
+            "type": "Feature",
+            "geometry": geom,
+            "properties": dict(rec, num=num),
+        })
+
+    return features
 
 
-def _parse_iso(s: Optional[str]) -> Optional[datetime]:
-    if not s:
+def _parse_shp(data: bytes) -> list:
+    """
+    Minimal parser for ESRI Shapefile (.shp).
+    Supports Polygon (type 5) only.  Returns a list of GeoJSON geometry dicts
+    (or None for null/unsupported records).
+    """
+    if len(data) < 100:
+        return []
+
+    pos = 100  # skip 100-byte file header
+    geometries = []
+
+    while pos < len(data):
+        if pos + 12 > len(data):
+            break
+        # Record header: record number (big-endian int32), content length (big-endian int32, in 16-bit words).
+        _rec_num, content_words = struct.unpack_from(">ii", data, pos)
+        pos += 8
+        content_bytes = content_words * 2
+        if content_bytes < 4 or pos + content_bytes > len(data):
+            break
+        shape_type = struct.unpack_from("<i", data, pos)[0]
+        if shape_type == 0:
+            # Null shape.
+            geometries.append(None)
+            pos += content_bytes
+            continue
+        if shape_type != 5:
+            # Non-polygon; skip.
+            geometries.append(None)
+            pos += content_bytes
+            continue
+
+        # Polygon: bounding box (4 doubles), num_parts (int32), num_points (int32),
+        # parts array (num_parts int32s), points array (num_points pairs of doubles).
+        offset = pos + 4  # skip shape_type field
+        if offset + 32 + 8 > len(data):
+            geometries.append(None)
+            pos += content_bytes
+            continue
+        offset += 32  # skip bounding box
+        num_parts, num_points = struct.unpack_from("<ii", data, offset)
+        offset += 8
+        if num_parts <= 0 or num_points <= 0:
+            geometries.append(None)
+            pos += content_bytes
+            continue
+        part_starts = list(struct.unpack_from(f"<{num_parts}i", data, offset))
+        offset += num_parts * 4
+        pts_raw = struct.unpack_from(f"<{num_points * 2}d", data, offset)
+        points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+
+        # Split points into rings using part_starts.
+        rings = []
+        for idx_r, start in enumerate(part_starts):
+            end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
+            ring = [list(pt) for pt in points[start:end]]
+            rings.append(ring)
+
+        geometries.append({"type": "Polygon", "coordinates": rings})
+        pos += content_bytes
+
+    return geometries
+
+
+def _parse_dbf(data: bytes) -> list:
+    """
+    Minimal parser for dBASE III+ (.dbf).
+    Returns a list of dicts, one per record, with string or numeric values.
+    """
+    if len(data) < 32:
+        return []
+
+    # Header: version(1), date(3), num_records(4LE), header_bytes(2LE), record_bytes(2LE).
+    num_records  = struct.unpack_from("<I", data, 4)[0]
+    header_bytes = struct.unpack_from("<H", data, 8)[0]
+    record_bytes = struct.unpack_from("<H", data, 10)[0]
+
+    # Field descriptors start at byte 32, each 32 bytes, terminated by 0x0D.
+    fields = []
+    pos = 32
+    while pos < header_bytes - 1 and data[pos] != 0x0D:
+        if pos + 32 > len(data):
+            break
+        raw_name = data[pos:pos + 11]
+        name  = raw_name.split(b"\x00")[0].decode("ascii", errors="replace").strip()
+        ftype = chr(data[pos + 11])
+        flen  = data[pos + 16]
+        fields.append((name, ftype, flen))
+        pos += 32
+
+    records = []
+    rec_pos = header_bytes
+    for _ in range(num_records):
+        if rec_pos + record_bytes > len(data):
+            break
+        deletion_flag = data[rec_pos]
+        if deletion_flag == 0x2A:  # '*' = deleted
+            rec_pos += record_bytes
+            continue
+        field_pos = rec_pos + 1  # skip deletion flag
+        rec = {}
+        for name, ftype, flen in fields:
+            raw = data[field_pos:field_pos + flen].decode("ascii", errors="replace").strip()
+            if ftype == "N":
+                try:
+                    rec[name] = float(raw) if raw else None
+                except ValueError:
+                    rec[name] = None
+            else:
+                rec[name] = raw
+            field_pos += flen
+        records.append(rec)
+        rec_pos += record_bytes
+
+    return records
+
+
+def _parse_yyyymmddHHMM(s: str) -> Optional[datetime]:
+    """Parse a 12-char YYYYMMDDHHmm string into a UTC-aware datetime."""
+    if not s or len(s) < 12:
         return None
     try:
-        return datetime.fromisoformat(
-            s.replace("Z", "+00:00")
-        ).astimezone(timezone.utc)
-    except Exception:
+        return datetime(
+            int(s[0:4]), int(s[4:6]),  int(s[6:8]),
+            int(s[8:10]), int(s[10:12]),
+            tzinfo=timezone.utc,
+        )
+    except (ValueError, OverflowError):
         return None
+
+
+# ── Normalizers ───────────────────────────────────────────────────────────────
+
+def _normalize_sbw_geojson(raw_text: str) -> str:
+    """Normalize IEM SBW GeoJSON to match the live WWA MapServer property schema."""
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text
+    feats = []
+    for feature in payload.get("features", []):
+        props = dict(feature.get("properties") or {})
+        geom  = feature.get("geometry")
+        if not geom:
+            continue
+        # IEM uses 'phenomena' or 'phenomenon'; live mode uses 'phenom'
+        phenom = str(
+            props.get("phenomena") or props.get("phenomenon") or props.get("phenom", "")
+        ).upper()
+        props["phenom"]    = phenom
+        props["prod_type"] = str(
+            props.get("type_") or props.get("ps") or props.get("prod_type") or phenom
+        )
+        props["nws_color"]   = _nws_color_for_phenom(phenom)
+        props["wfo"]         = str(props.get("wfo", "")).upper()
+        props["event"]       = str(props.get("eventid") or props.get("event", ""))
+        props["warning_url"] = str(props.get("href") or props.get("warning_url", ""))
+        feats.append({"type": "Feature", "geometry": geom, "properties": props})
+    return json.dumps({"type": "FeatureCollection", "features": feats})
+
+
+def _normalize_watch_geojson(raw_text: str) -> str:
+    """Normalize IEM spc_watch.geojson to match the live WWA MapServer property schema."""
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text
+    feats = []
+    for feature in payload.get("features", []):
+        props = dict(feature.get("properties") or {})
+        geom  = feature.get("geometry")
+        if not geom:
+            continue
+        # IEM spc_watch: 'type' is TOR/SVR, 'num' is the watch number
+        watch_type = str(props.get("type") or props.get("phenomena") or "").upper()
+        num_raw    = props.get("num") or props.get("number") or props.get("event", "")
+        try:
+            num_str = str(int(num_raw)).zfill(4)
+        except (TypeError, ValueError):
+            num_str = str(num_raw)
+        is_tor = watch_type in ("TOR", "TO")
+        props["watch_num"]   = num_str
+        props["watch_color"] = "#FF0000" if is_tor else "#4169E1"
+        props["event"]       = "Tornado Watch" if is_tor else "Severe Thunderstorm Watch"
+        feats.append({"type": "Feature", "geometry": geom, "properties": props})
+    return json.dumps({"type": "FeatureCollection", "features": feats})
+
+
+def _normalize_mcd_geojson(raw_text: str) -> str:
+    """Normalize IEM spc_mcd.geojson to match the live SPC MapServer property schema."""
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return raw_text
+    feats = []
+    for feature in payload.get("features", []):
+        props = dict(feature.get("properties") or {})
+        geom  = feature.get("geometry")
+        if not geom:
+            continue
+        # IEM spc_mcd: 'num' is the MD number
+        num_raw = props.get("num") or props.get("number", "")
+        try:
+            name = f"MD {int(num_raw):04d}"
+        except (TypeError, ValueError):
+            name = str(num_raw) or "MD"
+        if name.strip().upper() in ("MD", "MD 0000"):
+            continue
+        props["name"] = name
+        feats.append({"type": "Feature", "geometry": geom, "properties": props})
+    return json.dumps({"type": "FeatureCollection", "features": feats})
 
 
 def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
@@ -311,6 +630,26 @@ def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
         })
 
     return json.dumps({"type": "FeatureCollection", "features": features})
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _round_to_minutes(dt: datetime, minutes: int) -> datetime:
+    """Round dt down to the nearest N-minute boundary."""
+    total_secs = int(dt.timestamp())
+    step = minutes * 60
+    return datetime.fromtimestamp(total_secs - (total_secs % step), tz=timezone.utc)
+
+
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(
+            s.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _current_outlook_cycle(t: datetime) -> datetime:
