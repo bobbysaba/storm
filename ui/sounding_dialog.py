@@ -225,7 +225,15 @@ class SoundingDialog(QDialog):
 
     def load(self, sset: SoundingSet):
         self._sset    = sset
-        self._cur_idx = 0
+        self._cur_idx = next(
+            (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
+        )
+        if sset.is_nssl:
+            self.setWindowTitle("NSSL CLAMPS Sounding")
+        elif sset.is_observed:
+            self.setWindowTitle("Observed Sounding")
+        else:
+            self.setWindowTitle("HRRR Point Sounding")
         self._rebuild_scrubber()
         self._draw()
         if not self.isVisible():
@@ -417,7 +425,7 @@ class SoundingDialog(QDialog):
         self._scrubber_widget.setVisible(count > 1)
         self._scrubber.blockSignals(True)
         self._scrubber.setMaximum(count - 1)
-        self._scrubber.setValue(0)
+        self._scrubber.setValue(self._cur_idx)
         self._scrubber.blockSignals(False)
 
         # For obs/nssl: show the day number if any two soundings share the same hour.
@@ -438,7 +446,12 @@ class SoundingDialog(QDialog):
                 else:
                     f_str = snd.valid_time.strftime("%HZ")
             else:
-                f_str = "F0" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
+                if snd.slot_offset == 0:
+                    f_str = "F0"
+                elif snd.slot_offset < 0:
+                    f_str = f"T{snd.slot_offset}h"
+                else:
+                    f_str = f"F+{snd.slot_offset}h"
             lbl = _lbl(f_str, color=_MUTED, size=8,
                        align=Qt.AlignmentFlag.AlignCenter)
             lbl.setWordWrap(True)
@@ -483,7 +496,12 @@ class SoundingDialog(QDialog):
                 return
             init_str  = f0.valid_time.strftime("%Hz %d %b %Y")
             valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
-            f_str     = "Analysis" if snd.slot_offset == 0 else f"F+{snd.slot_offset}h"
+            if snd.slot_offset == 0:
+                f_str = "Analysis"
+            elif snd.slot_offset < 0:
+                f_str = f"T{snd.slot_offset}h"
+            else:
+                f_str = f"F+{snd.slot_offset}h"
             lat, lon  = self._sset.lat, self._sset.lon
             self._header_line1.setText(
                 f"HRRR  Init {init_str}  ·  Valid {valid_str} ({f_str})"

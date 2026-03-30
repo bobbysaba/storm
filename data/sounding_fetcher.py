@@ -24,9 +24,10 @@ from core.sounding import Sounding, SoundingSet, PRESSURE_LEVELS, SOUNDING_SLOTS
 
 log = logging.getLogger(__name__)
 
-_BASE_URL       = "https://api.open-meteo.com/v1/forecast"
-_MODEL          = "ncep_hrrr_conus"
-_REQUEST_TIMEOUT = 20   # seconds
+_BASE_URL          = "https://api.open-meteo.com/v1/forecast"
+_ARCHIVE_URL       = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+_MODEL             = "ncep_hrrr_conus"
+_REQUEST_TIMEOUT   = 20   # seconds
 
 # Variables fetched at every pressure level
 _LEVEL_VARS = (
@@ -58,6 +59,7 @@ class SoundingFetcher(QObject):
         ).start()
         log.debug("sounding fetch started (%.4f, %.4f)", lat, lon)
 
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _bg_fetch(self, lat: float, lon: float):
@@ -74,6 +76,7 @@ class SoundingFetcher(QObject):
             self.fetch_error.emit(msg)
 
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _build_hourly_params() -> str:
@@ -86,9 +89,10 @@ def _build_hourly_params() -> str:
 
 
 def _fetch_sounding_set(lat: float, lon: float) -> SoundingSet:
-    """Make the API call and return a parsed SoundingSet."""
-    # Build base params without the hourly list — urlencode would encode the
-    # commas as %2C which open-meteo rejects with a 400.  Append hourly raw.
+    """Fetch F0–F3 from the forecast API and T-2/T-1 from the historical API."""
+    hourly_params = _build_hourly_params()
+
+    # ── Forward slots: F0, F1, F2, F3 ────────────────────────────────────────
     base = urlencode({
         "latitude":        lat,
         "longitude":       lon,
@@ -97,15 +101,59 @@ def _fetch_sounding_set(lat: float, lon: float) -> SoundingSet:
         "wind_speed_unit": "ms",
         "timezone":        "UTC",
     })
-    url = f"{_BASE_URL}?{base}&hourly={_build_hourly_params()}"
+    url = f"{_BASE_URL}?{base}&hourly={hourly_params}"
     log.debug("sounding URL: %s", url)
-
     with urlopen(url, timeout=_REQUEST_TIMEOUT) as resp:
         raw = resp.read()
+    fwd_data = json.loads(raw)
+    log.debug("sounding forecast response: %.1f KB", len(raw) / 1024)
 
-    data = json.loads(raw)
-    log.debug("sounding response: %.1f KB", len(raw) / 1024)
-    return _parse_response(lat, lon, data)
+    result = _parse_response(lat, lon, fwd_data)
+    f0_time = result.soundings[0].valid_time  # analysis hour
+
+    # ── Historical slots: T-2, T-1 ────────────────────────────────────────────
+    hist_date = f0_time.strftime("%Y-%m-%d")
+    hist_base = urlencode({
+        "latitude":        lat,
+        "longitude":       lon,
+        "models":          _MODEL,
+        "start_date":      hist_date,
+        "end_date":        hist_date,
+        "wind_speed_unit": "ms",
+        "timezone":        "UTC",
+    })
+    hist_url = f"{_ARCHIVE_URL}?{hist_base}&hourly={hourly_params}"
+    log.debug("sounding historical URL: %s", hist_url)
+    try:
+        with urlopen(hist_url, timeout=_REQUEST_TIMEOUT) as resp:
+            hist_raw = resp.read()
+        hist_data = json.loads(hist_raw)
+        log.debug("sounding historical response: %.1f KB", len(hist_raw) / 1024)
+
+        elevation = float(hist_data.get("elevation", result.elevation))
+        hourly    = hist_data["hourly"]
+        time_index: dict[datetime, int] = {}
+        for i, t_str in enumerate(hourly["time"]):
+            t = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+            time_index[t] = i
+
+        hist_snds = []
+        for offset, label in [(-2, "T−2h"), (-1, "T−1h")]:
+            target = f0_time + timedelta(hours=offset)
+            t_idx  = time_index.get(target)
+            if t_idx is None:
+                continue
+            snd = _extract_sounding(
+                lat, lon, hourly, t_idx, offset, label, elevation,
+                valid_time=target,
+            )
+            if snd is not None:
+                hist_snds.append(snd)
+        result.soundings = hist_snds + result.soundings
+    except Exception as exc:
+        log.warning("sounding historical fetch failed (continuing without): %s", exc)
+
+    return result
 
 
 def _parse_response(lat: float, lon: float, data: dict) -> SoundingSet:
