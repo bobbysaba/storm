@@ -6,7 +6,7 @@ REM Resolve project root (one level above scripts/)
 FOR %%I IN ("%~dp0..") DO SET "PROJECT_DIR=%%~fI"
 
 REM ── Single-instance guard ─────────────────────────────────────────────────────
-powershell -NoProfile -Command "(Get-WmiObject Win32_Process | Where-Object {$_.CommandLine -like '*main.py*'} | Measure-Object).Count" > "%TEMP%\_storm_running.tmp" 2>nul
+powershell -NoProfile -Command "(Get-WmiObject Win32_Process | Where-Object {$_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*main.py*'} | Measure-Object).Count" > "%TEMP%\_storm_running.tmp" 2>nul
 SET /P STORM_COUNT=<"%TEMP%\_storm_running.tmp"
 DEL /F /Q "%TEMP%\_storm_running.tmp" 2>nul
 IF %STORM_COUNT% GTR 0 (
@@ -68,4 +68,8 @@ REM Notify the user that STORM is starting (balloon tip in system tray)
 START "" /B powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; $n=New-Object System.Windows.Forms.NotifyIcon; $n.Icon=[System.Drawing.SystemIcons]::Application; $n.Visible=$true; $n.ShowBalloonTip(5000,'STORM','Starting up, please wait...','Info'); Start-Sleep 6; $n.Dispose()"
 
 REM pythonw suppresses the console window for GUI apps
-START "" pythonw main.py
+IF NOT EXIST "%CONDA_PREFIX%\pythonw.exe" (
+    powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('pythonw.exe not found in the storm environment.%CONDA_PREFIX%', 'STORM — Launch Error', 'OK', 'Error')"
+    EXIT /B 1
+)
+START "" "%CONDA_PREFIX%\pythonw.exe" "%PROJECT_DIR%\main.py"
