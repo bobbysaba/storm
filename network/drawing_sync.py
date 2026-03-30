@@ -49,7 +49,11 @@ class DrawingSync(QObject):
         self._publish(drawing.id, drawing.to_dict())
 
     def publish_delete(self, drawing_id: str):
-        self._publish(drawing_id, {"id": drawing_id, "deleted": True})
+        self._publish(drawing_id, {
+            "id": drawing_id,
+            "deleted": True,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     def _publish(self, drawing_id: str, payload: dict):
         if self._read_only:

@@ -6,6 +6,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -48,7 +49,11 @@ class StormConeSync(QObject):
         self._publish(cone.id, cone.to_dict())
 
     def publish_delete(self, cone_id: str):
-        self._publish(cone_id, {"id": cone_id, "deleted": True})
+        self._publish(cone_id, {
+            "id": cone_id,
+            "deleted": True,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     def _publish(self, cone_id: str, payload: dict):
         if self._read_only:

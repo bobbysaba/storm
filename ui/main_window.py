@@ -292,15 +292,19 @@ class MainWindow(QMainWindow):
         self._archive_controls.set_satellite_status("Sat: waiting")
         self._archive_controls.show()
 
-        # MQTT reader — vehicle positions.
-        mqtt_base = getattr(config, "ARCHIVE_MQTT_BASE_URL", "")
+        # MQTT reader — vehicles, annotations, cones, drawings.
         self._archive_mqtt = ArchiveMQTTReader(
-            base_url=mqtt_base,
             session_date=self._archive_time,
             parent=self,
         )
         self._archive_mqtt.vehicle_position.connect(self._on_archive_vehicle_position)
         self._archive_mqtt.vehicles_cleared.connect(self._on_archive_vehicles_cleared)
+        self._archive_mqtt.annotation_received.connect(self._recv_remote_annotation)
+        self._archive_mqtt.annotation_deleted.connect(self._recv_remote_annotation_deleted)
+        self._archive_mqtt.cone_received.connect(self._recv_remote_storm_cone)
+        self._archive_mqtt.cone_deleted.connect(self._recv_remote_storm_cone_deleted)
+        self._archive_mqtt.drawing_received.connect(self._recv_remote_drawing)
+        self._archive_mqtt.drawing_deleted.connect(self._recv_remote_drawing_deleted)
 
         # Hazard fetcher.
         self._archive_hazard = ArchiveHazardFetcher(
@@ -2976,11 +2980,11 @@ class MainWindow(QMainWindow):
         self.map_widget.add_annotation(annotation)
         log.info("remote annotation received: %s (%s)", annotation.id, annotation.type_key)
 
-    def _recv_remote_annotation_deleted(self, annotation_id: str):
+    def _recv_remote_annotation_deleted(self, annotation_id: str, deleted_at: str):
         """Inbound delete from MQTT — remove from map/dict but do NOT republish."""
         self._annotations.pop(annotation_id, None)
         self.map_widget.remove_annotation(annotation_id)
-        log.info("remote annotation deleted: %s", annotation_id)
+        log.info("remote annotation deleted: %s at %s", annotation_id, deleted_at or "unknown")
 
     # ── Drawing Annotations (Fronts & Custom Shapes) ──────────────────────────
 

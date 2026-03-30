@@ -39,7 +39,7 @@ class AnnotationSync(QObject):
     annotation_received = pyqtSignal(object)   # Annotation instance
 
     # emitted when a remote delete arrives
-    annotation_deleted = pyqtSignal(str)        # annotation_id
+    annotation_deleted = pyqtSignal(str, str)   # annotation_id, deleted_at (ISO or "")
 
     def __init__(self, mqtt_client: MQTTClient, read_only: bool = False, parent=None):
         super().__init__(parent)
@@ -64,7 +64,11 @@ class AnnotationSync(QObject):
         self._publish(annotation.id, annotation.to_dict())
 
     def publish_delete(self, annotation_id: str):
-        self._publish(annotation_id, {"id": annotation_id, "deleted": True})
+        self._publish(annotation_id, {
+            "id": annotation_id,
+            "deleted": True,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     def _publish(self, annotation_id: str, payload: dict):
         if self._read_only:
@@ -90,8 +94,9 @@ class AnnotationSync(QObject):
         if data.get("deleted"):
             ann_id = data.get("id", "")
             if ann_id:
+                deleted_at = data.get("deleted_at", "")
                 log.debug("AnnotationSync: remote delete %s", ann_id)
-                self.annotation_deleted.emit(ann_id)
+                self.annotation_deleted.emit(ann_id, deleted_at)
         else:
             try:
                 ann = Annotation.from_dict(data)

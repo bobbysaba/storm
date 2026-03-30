@@ -18,14 +18,10 @@ class ArchiveSession:
     radar_station : str | None
         NEXRAD 4-letter station ID (e.g. "KTLX").  None until the first
         vehicle position is found and the nearest station is resolved.
-    mqtt_base_url : str
-        Base URL for the server that hosts MQTT JSONL archive files.
-        Files are expected at:  {mqtt_base_url}/{YYYY-MM-DD}/{topic}.jsonl
     """
 
     start_time: datetime
     radar_station: Optional[str] = None
-    mqtt_base_url: str = ""
 
     def __post_init__(self):
         # Normalise to UTC so callers don't have to worry about tz.
