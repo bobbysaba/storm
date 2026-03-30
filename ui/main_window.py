@@ -1504,7 +1504,9 @@ class MainWindow(QMainWindow):
         import os, sys
         if success and deps_changed:
             # Can't auto-restart safely if conda env changed — tell the user
-            self.update_indicator.setText("↑ RESTART + conda env update REQUIRED")
+            _yml = "storm_windows.yml" if sys.platform == "win32" else "storm_linux.yml" if sys.platform.startswith("linux") else "storm_mac.yml"
+            _cmd = f"conda env update -f envs/{_yml} --prune"
+            self.update_indicator.setText(f"↑ DEPS CHANGED — RUN: {_cmd}  THEN RESTART")
             self.update_indicator.setStyleSheet(
                 "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
                 "color: #FFB800; background: transparent; border: none; padding: 0;"

@@ -522,7 +522,7 @@ class LaunchDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("STORM")
-        self.setFixedWidth(380)
+        self.setMinimumWidth(380)
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
         )
@@ -1031,7 +1031,10 @@ class LaunchDialog(QDialog):
 
     def _on_pull_done(self, success: bool, deps_changed: bool):
         if success and deps_changed:
-            self._update_btn.setText("⚠   DEPS CHANGED — RUN conda env update THEN RESTART")
+            import sys as _sys
+            _yml = "storm_windows.yml" if _sys.platform == "win32" else "storm_linux.yml" if _sys.platform.startswith("linux") else "storm_mac.yml"
+            _cmd = f"conda env update -f envs/{_yml} --prune"
+            self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
             self._update_btn.setStyleSheet(_UPD_WARNING)
         elif success:
             self._update_btn.setText("✓   UPDATED — RESTARTING...")
