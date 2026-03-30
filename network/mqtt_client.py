@@ -109,21 +109,18 @@ class MQTTClient(QObject):
                 log.exception("MQTT: connect failed during setup")
                 self.disconnected.emit(-1)
 
-    def publish(self, topic: str, payload: str, qos: int = 1, retain: bool = False,
-                expiry: int | None = None):
+    def publish(self, topic: str, payload: str, qos: int = 1, expiry: int = 3600):
         """Publish a UTF-8 string payload.  No-op if not connected.
 
-        expiry: optional MQTT v5 MessageExpiryInterval in seconds.
+        expiry: MQTT v5 MessageExpiryInterval in seconds (default 1 hour).
         """
         with self._lock:
             client = self._client
             if client is None:
                 return
-        props = None
-        if expiry is not None:
-            props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
-            props.MessageExpiryInterval = expiry
-        client.publish(topic, payload.encode(), qos=qos, retain=retain, properties=props)
+        props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
+        props.MessageExpiryInterval = expiry
+        client.publish(topic, payload.encode(), qos=qos, properties=props)
 
     def subscribe(self, topic: str, qos: int = 1):
         """Subscribe to a topic (wildcards supported).  No-op if not connected."""

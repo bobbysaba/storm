@@ -11,7 +11,6 @@
 #
 # Topic layout:  storm/annotations/{annotation_id}
 # Delete payload: {"id": "...", "deleted": true}
-
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -59,30 +58,21 @@ class AnnotationSync(QObject):
     # ── Publish (local → broker) ───────────────────────────────────────────────
 
     def publish_create(self, annotation: Annotation):
-        self._publish(annotation.id, annotation.to_dict(), retain=True)
+        self._publish(annotation.id, annotation.to_dict())
 
     def publish_update(self, annotation: Annotation):
-        self._publish(annotation.id, annotation.to_dict(), retain=True)
+        self._publish(annotation.id, annotation.to_dict())
 
     def publish_delete(self, annotation_id: str):
-        # Clear the retained message on the broker so late joiners don't see it.
-        topic = f"{_TOPIC_PREFIX}/{annotation_id}"
-        if not self._read_only:
-            try:
-                self._mqtt.publish(topic, "", retain=True)
-            except Exception as e:
-                log.warning("AnnotationSync: retained clear failed: %s", e)
-        # Notify live clients of the delete.
-        self._publish(annotation_id, {"id": annotation_id, "deleted": True}, retain=False)
+        self._publish(annotation_id, {"id": annotation_id, "deleted": True})
 
-    def _publish(self, annotation_id: str, payload: dict, retain: bool = False):
+    def _publish(self, annotation_id: str, payload: dict):
         if self._read_only:
             return
         topic = f"{_TOPIC_PREFIX}/{annotation_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload), retain=retain,
-                               expiry=_next_8am_utc_seconds())
-            log.debug("AnnotationSync: published %s (retain=%s)", topic, retain)
+            self._mqtt.publish(topic, json.dumps(payload), expiry=_next_8am_utc_seconds())
+            log.debug("AnnotationSync: published %s", topic)
         except Exception as e:
             log.warning("AnnotationSync: publish failed: %s", e)
 

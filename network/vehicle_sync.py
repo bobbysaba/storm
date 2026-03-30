@@ -51,7 +51,7 @@ class VehicleSync(QObject):
         topic = f"{_TOPIC_PREFIX}/{obs.vehicle_id}"
         try:
             payload = _build_payload(obs)
-            self._mqtt.publish(topic, json.dumps(payload), retain=True, expiry=10800)
+            self._mqtt.publish(topic, json.dumps(payload), expiry=10800)
             log.debug("VehicleSync: published %s", topic)
         except Exception as e:
             log.warning("VehicleSync: publish failed: %s", e)

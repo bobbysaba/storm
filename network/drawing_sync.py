@@ -56,8 +56,7 @@ class DrawingSync(QObject):
             return
         topic = f"{_TOPIC_PREFIX}/{drawing_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload), retain=True,
-                               expiry=_next_8am_utc_seconds())
+            self._mqtt.publish(topic, json.dumps(payload), expiry=_next_8am_utc_seconds())
             log.debug("DrawingSync: published %s", topic)
         except Exception as e:
             log.warning("DrawingSync: publish failed: %s", e)

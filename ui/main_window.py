@@ -727,10 +727,57 @@ class MainWindow(QMainWindow):
         if not self._disable_annotations:
             self._init_annotations()
             self._init_storm_cone()
+            threading.Thread(target=self._fetch_current_json, daemon=True).start()
         if not config.MQTT_HOST:
             self._complete_mqtt_startup_phase()
         else:
             self._mqtt_startup_timer.start(4000)
+
+    def _fetch_current_json(self):
+        """One-shot background fetch of current.json to pre-populate annotations on launch."""
+        import ssl
+        from urllib.request import urlopen, Request
+
+        _ctx = ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode    = ssl.CERT_NONE
+
+        url = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/storm/current.json"
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
+            with urlopen(req, timeout=10, context=_ctx) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            log.warning("current.json fetch failed: %s", e)
+            return
+
+        n_ann = n_cone = n_drawing = 0
+        for item in data.values():
+            if item.get("deleted"):
+                continue
+            if "type_key" in item:
+                try:
+                    ann = Annotation.from_dict(item)
+                    self._annotation_sync.annotation_received.emit(ann)
+                    n_ann += 1
+                except Exception as e:
+                    log.warning("current.json annotation parse error: %s", e)
+            elif "drawing_type" in item:
+                try:
+                    drawing = DrawingAnnotation.from_dict(item)
+                    self._drawing_sync.drawing_received.emit(drawing)
+                    n_drawing += 1
+                except Exception as e:
+                    log.warning("current.json drawing parse error: %s", e)
+            elif "speed_kts" in item or "heading" in item:
+                try:
+                    cone = StormCone.from_dict(item)
+                    self._storm_cone_sync.cone_received.emit(cone)
+                    n_cone += 1
+                except Exception as e:
+                    log.warning("current.json cone parse error: %s", e)
+
+        log.info("current.json loaded: %d annotations, %d cones, %d drawings", n_ann, n_cone, n_drawing)
 
     def _complete_mqtt_startup_phase(self):
         if self._startup_mqtt_pending:

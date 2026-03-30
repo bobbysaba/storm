@@ -55,7 +55,7 @@ class StormConeSync(QObject):
             return
         topic = f"{_TOPIC_PREFIX}/{cone_id}"
         try:
-            self._mqtt.publish(topic, json.dumps(payload), retain=True, expiry=3600)
+            self._mqtt.publish(topic, json.dumps(payload), expiry=3600)
             log.debug("StormConeSync: published %s", topic)
         except Exception as e:
             log.warning("StormConeSync: publish failed: %s", e)
