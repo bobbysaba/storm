@@ -8,6 +8,7 @@ tiles/*.mbtiles
 
 # claude details 
 .claude/
+CLAUDE.md 
 
 # python cache 
 __pycache__/
