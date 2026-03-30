@@ -10,7 +10,7 @@ REM Resolve project root (one level above scripts/) and scripts dir
 FOR %%I IN ("%~dp0..") DO SET "PROJECT_DIR=%%~fI"
 SET "SCRIPTS_DIR=%~dp0"
 
-SET "LAUNCHER=%SCRIPTS_DIR%launch_storm.bat"
+SET "LAUNCHER=%SCRIPTS_DIR%launch_storm.vbs"
 SET "ICON=%PROJECT_DIR%\storm.ico"
 SET "DESKTOP_SHORTCUT=%USERPROFILE%\Desktop\STORM.lnk"
 SET "STARTMENU_SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\STORM.lnk"

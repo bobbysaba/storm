@@ -5,6 +5,15 @@ REM This file is called by the desktop shortcut created by create_app_windows.ba
 REM Resolve project root (one level above scripts/)
 FOR %%I IN ("%~dp0..") DO SET "PROJECT_DIR=%%~fI"
 
+REM ── Single-instance guard ─────────────────────────────────────────────────────
+powershell -NoProfile -Command "(Get-WmiObject Win32_Process | Where-Object {$_.CommandLine -like '*main.py*'} | Measure-Object).Count" > "%TEMP%\_storm_running.tmp" 2>nul
+SET /P STORM_COUNT=<"%TEMP%\_storm_running.tmp"
+DEL /F /Q "%TEMP%\_storm_running.tmp" 2>nul
+IF %STORM_COUNT% GTR 0 (
+    powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('STORM is already running.', 'STORM', 'OK', 'Information')"
+    EXIT /B 0
+)
+
 REM ── Find conda ────────────────────────────────────────────────────────────────
 SET "CONDA_BAT="
 FOR %%D IN (
@@ -54,6 +63,9 @@ FOR /F "delims=" %%F IN ('dir /b /s "%CONDA_PREFIX%\Lib\site-packages\certifi\ca
     GOTO :ssl_done
 )
 :ssl_done
+
+REM Notify the user that STORM is starting (balloon tip in system tray)
+START "" /B powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; $n=New-Object System.Windows.Forms.NotifyIcon; $n.Icon=[System.Drawing.SystemIcons]::Application; $n.Visible=$true; $n.ShowBalloonTip(5000,'STORM','Starting up, please wait...','Info'); Start-Sleep 6; $n.Dispose()"
 
 REM pythonw suppresses the console window for GUI apps
 START "" pythonw main.py
