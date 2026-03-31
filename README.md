@@ -16,7 +16,8 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Surface obs (mesonet)** — live surface observation station models from OK Mesonet, KS Mesonet, and West Texas Mesonet; toggled independently per network; polled every 5 minutes
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters, kinematics table, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
-- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), or VIEWER (no MQTT, no obs) — selected at the launch dialog with passphrase authentication
+- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — selected at the launch dialog with passphrase authentication
+- **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
 
 ---
 
@@ -167,6 +168,16 @@ storm/
 │   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
 │   └── test_mqtt_send.py    # CLI tool — sends test obs payloads to MQTT broker
 │
+├── archive/                 # Archive (replay) mode — session config, clock, fetchers
+│   ├── session.py           # ArchiveSession dataclass — holds start time, radar station
+│   ├── time_controller.py   # Central archive clock (play/pause, speed, scrubber, signals)
+│   └── fetchers/            # Per-layer archive data fetchers (synchronized to clock)
+│       ├── radar_archive_fetcher.py     # Fetches historical NEXRAD Level 3 frames
+│       ├── satellite_archive_fetcher.py # Fetches historical GOES satellite frames
+│       ├── hazard_archive_fetcher.py    # Fetches historical SPC/NWS hazard products
+│       ├── sounding_archive_fetcher.py  # Fetches historical sounding data
+│       └── mqtt_reader.py               # Replays historical MQTT vehicle positions
+│
 ├── core/                    # Pure data types (no Qt, no I/O)
 │   ├── annotation.py        # Annotation dataclass + type registry
 │   ├── drawing.py           # Drawing (front/polyline/polygon) dataclass
@@ -199,7 +210,7 @@ storm/
 │   └── storm_cone_sync.py   # Bidirectional storm cone MQTT sync
 │
 ├── ui/                      # Qt widgets
-│   ├── launch_dialog.py     # Pre-launch config dialog (VEHICLE / MONITOR / VIEWER modes)
+│   ├── launch_dialog.py     # Pre-launch config dialog (VEHICLE / MONITOR / VIEWER / ARCHIVE modes)
 │   ├── main_window.py       # Top-level QMainWindow
 │   ├── map_widget.py        # MapLibre GL map + custom storm:// asset/tile scheme
 │   ├── tile_scheme_handler.py  # QWebEngineUrlSchemeHandler for storm:// (tiles + assets)
@@ -219,6 +230,8 @@ storm/
 │   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
 │   ├── sounding_dialog.py   # Skew-T log-P dialog (HRRR / OBS / NSSL sources)
+│   ├── archive_controls.py  # Archive playback controls bar (scrubber, speed, status indicators)
+│   ├── archive_loading_dialog.py  # Progress dialog shown while archive data is prefetched
 │   ├── nav_pill.py          # Compact navigation summary pill widget
 │   └── theme.py             # QSS dark theme + color constants
 │

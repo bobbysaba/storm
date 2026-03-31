@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.0] - 2026-03-31
+### Added
+- Archive mode — replay any past session with full data reconstruction; select a date/time at launch to enter archive playback
+- Central time controller with play/pause, configurable speed multipliers (1×–300×), and ←/→ step buttons (30-second steps)
+- Archive fetchers for NEXRAD radar, satellite, hazards, soundings, and MQTT vehicle position data — all synchronized to the archive clock
+- Archive controls bar with timeline scrubber, playback speed selector, and per-layer status indicators (radar, satellite)
+- Archive loading dialog — shows fetch progress before playback begins
+- Window title and status pill reflect the active archive timestamp (`[ARCHIVE YYYY-MM-DD HH:MMZ]`)
+
+---
+
 ## [0.8.0] - 2026-03-25
 ### Added
 - Mesonet surface observation overlay — live station data fetched and displayed on the map

@@ -25,18 +25,19 @@
    - 6.12 [Deployment Locations](#612-deployment-locations)
    - 6.13 [Vehicle Panel](#613-vehicle-panel)
 7. [Status Bar](#7-status-bar)
-8. [Outlook Text Panel](#8-outlook-text-panel)
-9. [Point Soundings](#9-point-soundings)
-10. [Vehicle Tracking & Observations](#10-vehicle-tracking--observations)
-11. [Network & MQTT Sync](#11-network--mqtt-sync)
-12. [Data Sources & Polling Intervals](#12-data-sources--polling-intervals)
-13. [Command-Line Options](#13-command-line-options)
-14. [Configuration & Certificates](#14-configuration--certificates)
-15. [Keyboard Shortcuts](#15-keyboard-shortcuts)
-16. [Performance Tuning](#16-performance-tuning)
-17. [Diagnostics & Error Handling](#17-diagnostics--error-handling)
-18. [Known Limitations & Quirks](#18-known-limitations--quirks)
-19. [Feature Availability Matrix](#19-feature-availability-matrix)
+8. [Archive Mode](#8-archive-mode)
+9. [Outlook Text Panel](#9-outlook-text-panel)
+10. [Point Soundings](#10-point-soundings)
+11. [Vehicle Tracking & Observations](#11-vehicle-tracking--observations)
+12. [Network & MQTT Sync](#12-network--mqtt-sync)
+13. [Data Sources & Polling Intervals](#13-data-sources--polling-intervals)
+14. [Command-Line Options](#14-command-line-options)
+15. [Configuration & Certificates](#15-configuration--certificates)
+16. [Keyboard Shortcuts](#16-keyboard-shortcuts)
+17. [Performance Tuning](#17-performance-tuning)
+18. [Diagnostics & Error Handling](#18-diagnostics--error-handling)
+19. [Known Limitations & Quirks](#19-known-limitations--quirks)
+20. [Feature Availability Matrix](#20-feature-availability-matrix)
 
 ---
 
@@ -101,6 +102,18 @@ Choose one of three mutually exclusive roles for this session:
 | **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires a vehicle passphrase. |
 | **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires a monitor passphrase. |
 | **VIEWER** | Fully offline / no-network mode — no MQTT, no obs publishing. Map, radar, satellite, and SPC/NWS hazards still function. |
+| **ARCHIVE** | Replay a past session — enter a UTC date/time and STORM fetches and plays back historical radar, satellite, hazards, soundings, and MQTT vehicle positions synchronized to a central time controller. Requires a passphrase. See [Section 8](#8-archive-mode). |
+
+#### Archive Config (ARCHIVE mode only)
+
+When ARCHIVE is selected, the vehicle-specific fields (ID, icon, data directory) are hidden and replaced with:
+
+**Archive Date/Time**
+A date/time picker (calendar popup + time fields) for choosing the UTC start time of the replay session. STORM will fetch historical data beginning at this timestamp. The most recent HRRR run prior to the selected time is used for model data; radar, satellite, and hazard products are fetched from archives nearest to the start time.
+
+The archive start time is not saved between sessions — each archive launch requires an explicit selection.
+
+---
 
 #### Vehicle Config (VEHICLE mode only)
 
@@ -415,7 +428,7 @@ Select which data source to use for Skew-T log-P soundings. Only one source is a
 
 In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
 
-See [Section 9](#9-point-soundings) for full dialog documentation.
+See [Section 10](#10-point-soundings) for full dialog documentation.
 
 ---
 
@@ -726,7 +739,91 @@ The status bar runs along the bottom of the main window.
 
 ---
 
-## 8. Outlook Text Panel
+## 8. Archive Mode
+
+Archive mode lets you replay any past session at a chosen UTC date and time. All data layers — radar, satellite, hazards, soundings, and vehicle positions — are fetched from historical archives and driven by a central time controller.
+
+### Entering Archive Mode
+
+Select **ARCHIVE** in the launch dialog, enter the passphrase, and choose a UTC start date/time using the calendar picker. Click **LAUNCH**. A loading dialog appears while STORM prefetches the initial data for each layer before playback begins.
+
+The window title and status pill display the current archive timestamp while in this mode: `[ARCHIVE YYYY-MM-DD HH:MMZ]`.
+
+---
+
+### Archive Controls Bar
+
+A controls bar appears at the top of the map window in archive mode (it is not visible in live modes).
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  ⏮  ⏪  ▶  ⏩  ⏭   ──────── scrubber ────────   1×▾   Radar: OK  Sat: OK │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+#### Playback Buttons
+
+| Button | Action |
+|--------|--------|
+| ⏮ | Jump to the session start time |
+| ⏪ | Step back 30 seconds of archive time |
+| ▶ / ⏸ | Start / pause automatic playback |
+| ⏩ | Step forward 30 seconds of archive time |
+| ⏭ | Jump to the current real-world time (end of archive) |
+
+#### Timeline Scrubber
+
+Drag the slider to jump to any time within the archive session. The scrubber position represents seconds elapsed since midnight UTC of the session date.
+
+#### Speed Selector
+
+A dropdown next to the scrubber controls the playback speed multiplier:
+
+| Setting | Meaning |
+|---------|---------|
+| 1× | Real-time (1 second of wall clock = 1 second of archive time) |
+| 5× | 5 seconds of archive time per wall-clock second |
+| 10× | — |
+| 30× | — |
+| 60× | — |
+| 120× | — |
+| 300× | 5 minutes of archive time per wall-clock second |
+
+#### Layer Status Indicators
+
+| Indicator | What It Shows |
+|-----------|---------------|
+| **Radar:** | Current radar fetch status ("OK", "waiting", "no data") |
+| **Sat:** | Current satellite fetch status |
+
+These update as each fetcher resolves data for the current archive timestamp.
+
+---
+
+### How Archive Data Works
+
+| Layer | Source | Behavior |
+|-------|--------|----------|
+| NEXRAD Radar | Unidata THREDDS archive | Fetches the Level 3 scan nearest to the current archive time |
+| GOES Satellite | IEM WMS historical endpoint | Fetches the frame nearest to the current archive time |
+| SPC/NWS Hazards | Archived GeoJSON products | Fetched once at session start for the session date |
+| Soundings | open-meteo HRRR archive | Fetched on demand (map click), using archive time as valid time |
+| Vehicle Positions | MQTT message log | Historical vehicle obs replayed in time order |
+
+Each layer updates automatically as the archive clock advances. Data fetches are triggered when the clock crosses boundaries (e.g., every radar scan interval).
+
+---
+
+### Limitations in Archive Mode
+
+- Vehicle positions are read from stored MQTT message logs — only vehicles that were active and publishing during the original session will appear.
+- Real-time MQTT sync (annotations, drawings) is inactive in archive mode.
+- Local file watcher (Track A) and GPS reader (Track B) are inactive.
+- Network connectivity is still required — archive data is fetched from remote servers at playback time.
+
+---
+
+## 9. Outlook Text Panel
 
 The Outlook Panel is a right-side panel that expands horizontally to display the full text of SPC and NWS products.
 
@@ -752,7 +849,7 @@ Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, t
 
 ---
 
-## 9. Point Soundings
+## 10. Point Soundings
 
 STORM supports three independent sounding sources, selected via the **SOUNDINGS** drawer (see [Section 6.4](#64-soundings)). All three sources display in the same Skew-T log-P dialog.
 
@@ -898,7 +995,7 @@ Hovering over the Skew-T axes displays a live readout below the plot:
 
 ---
 
-## 10. Vehicle Tracking & Observations
+## 11. Vehicle Tracking & Observations
 
 STORM tracks vehicles through several parallel data input channels. All inputs feed into the live vehicle state used by the vehicle panel, station plots, and map markers.
 
@@ -930,7 +1027,7 @@ Automatically detects and reads NMEA sentences from a connected serial GPS devic
 
 Receives observations from other vehicles via the `storm/vehicles/{id}` topic. Active whenever MQTT is connected and not disabled.
 
-## 11. Network & MQTT Sync
+## 12. Network & MQTT Sync
 
 STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, and vehicle observations across all connected vehicles in the network.
 
@@ -952,7 +1049,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 
 ---
 
-## 12. Data Sources & Polling Intervals
+## 13. Data Sources & Polling Intervals
 
 | Data Source | Polling Interval | Notes |
 |-------------|-----------------|-------|
@@ -976,7 +1073,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 
 ---
 
-## 13. Command-Line Options
+## 14. Command-Line Options
 
 Run `python main.py --help` for the full list. Key options:
 
@@ -1031,7 +1128,7 @@ Run `python main.py --help` for the full list. Key options:
 
 ---
 
-## 14. Configuration & Certificates
+## 15. Configuration & Certificates
 
 ### config.py
 
@@ -1069,7 +1166,7 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 
 ---
 
-## 15. Keyboard Shortcuts
+## 16. Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
@@ -1080,7 +1177,7 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 
 ---
 
-## 16. Performance Tuning
+## 17. Performance Tuning
 
 ### Radar Grid Size
 
@@ -1116,7 +1213,7 @@ Safe mode reduces grid size to 128, disables some overlays, and minimizes backgr
 
 ---
 
-## 17. Diagnostics & Error Handling
+## 18. Diagnostics & Error Handling
 
 ### Debug Mode
 
@@ -1158,7 +1255,7 @@ STORM uses an internal TCP port (19876) as a process lock. If a second instance 
 
 ---
 
-## 18. Known Limitations & Quirks
+## 19. Known Limitations & Quirks
 
 **Canvas Readback**
 MapLibre GL running inside QWebEngineView cannot reliably read back canvas pixel data. Hatch patterns (CIG/SIGN significant areas) are therefore built entirely as raw `Uint8Array` pixel data and added to MapLibre via `addImage()`, rather than drawn on a canvas. This is a known architectural constraint.
@@ -1183,7 +1280,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 
 ---
 
-## 19. Feature Availability Matrix
+## 20. Feature Availability Matrix
 
 | Feature | Default | Disabled By |
 |---------|---------|-------------|
@@ -1213,6 +1310,12 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | GPS Reader (Track B) | ✅ Enabled (if device present) | `--disable-data-inputs` |
 | Radar Playback (loop mode) | ✅ Enabled | `--disable-radar` |
 | Satellite Playback (loop mode) | ✅ Enabled | n/a |
+| Archive Mode (session replay) | ✅ Enabled | Requires passphrase; selected at launch |
+| Archive Radar Playback | ✅ Enabled in archive mode | n/a |
+| Archive Satellite Playback | ✅ Enabled in archive mode | n/a |
+| Archive Hazard Products | ✅ Enabled in archive mode | n/a |
+| Archive Vehicle Positions (MQTT log) | ✅ Enabled in archive mode | n/a |
+| Archive Soundings | ✅ On demand in archive mode | n/a |
 
 ---
 
