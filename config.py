@@ -23,6 +23,7 @@ VEHICLE_ICON = "car"
 
 # define the path to the obs file (will be overwritten)
 OBS_FILE_DIR = ""
+OBS_FILE_GPS_MODE = False   # True → GPS Ka column layout instead of FOFS
 
 # define the interval to poll the obs file (local GUI update rate)
 OBS_FILE_POLL_S = 1

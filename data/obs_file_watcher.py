@@ -54,17 +54,15 @@ class FieldMap:
 
 class ObsFileWatcher(QObject):
     """
-    Watches today's YYYYMMDD.txt inside a directory for new rows and
+    Watches today's *YYYYMMDD.txt inside a directory for new rows and
     emits obs_ready for each one.  Rolls over to the next day's file
     automatically at midnight.
 
-    Usage:
-        watcher = ObsFileWatcher(
-            data_dir="veh_data",
-            vehicle_id=config.VEHICLE_ID,
-        )
-        watcher.obs_ready.connect(main_window.update_vehicle_obs)
-        watcher.start()
+    When gps_mode=True the GPS Ka FieldMap is expected (Longitude/Latitude
+    columns, no met fields).  When False the FOFS FieldMap is used.
+
+    If both a bare YYYYMMDD.txt and a prefixed GPS_*YYYYMMDD.txt exist,
+    the file matching the current gps_mode is preferred.
     """
 
     obs_ready = pyqtSignal(object)   # Observation
@@ -73,12 +71,14 @@ class ObsFileWatcher(QObject):
                  vehicle_id: str,
                  field_map: FieldMap | None = None,
                  poll_interval_s: int = 10,
+                 gps_mode: bool = False,
                  parent=None):
         super().__init__(parent)
         self._data_dir   = Path(data_dir)
         self._vehicle_id = vehicle_id
         self._fields     = field_map or FieldMap()
         self._poll_ms    = poll_interval_s * 1000
+        self._gps_mode   = gps_mode
 
         self._current_date: date | None = None
         self._current_path: Path | None = None
@@ -95,6 +95,8 @@ class ObsFileWatcher(QObject):
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def start(self):
+        if not self._gps_mode:
+            self._current_date = datetime.now(timezone.utc).date()
         self._roll_to_today()
         self._poll()
         self._timer.start(self._poll_ms)
@@ -106,11 +108,46 @@ class ObsFileWatcher(QObject):
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
-    def _today_path(self) -> Path:
-        return self._data_dir / datetime.now(timezone.utc).strftime("%Y%m%d.txt")
+    def _today_path(self) -> Optional[Path]:
+        """Return the file to watch.
+
+        FOFS mode: construct YYYYMMDD.txt from today's UTC date, with
+        multi-match preference for the bare (unprefixed) file.
+
+        GPS mode: pick the most recently modified GPS_*_????????.txt in the
+        directory — the logger keeps appending to the file it opened at
+        session start, which may be yesterday's date after midnight rollover.
+        """
+        if self._gps_mode:
+            candidates = list(self._data_dir.glob("*_????????.txt"))
+            if not candidates:
+                return None
+            return max(candidates, key=lambda p: p.stat().st_mtime)
+
+        date_suffix = datetime.now(timezone.utc).strftime("%Y%m%d.txt")
+        matches = sorted(self._data_dir.glob(f"*{date_suffix}"))
+        if not matches:
+            return self._data_dir / date_suffix  # non-existent; watcher will wait
+        if len(matches) == 1:
+            return matches[0]
+        # Multiple matches — prefer bare YYYYMMDD.txt for FOFS
+        exact = self._data_dir / date_suffix
+        return exact if exact in matches else matches[0]
 
     def _roll_to_today(self):
-        """Switch to today's file, resetting byte position."""
+        """Switch to the active file if it has changed, resetting byte position."""
+        if self._gps_mode:
+            # Re-glob for the newest GPS file; switch if a different one appears
+            new_path = self._today_path()
+            if new_path != self._current_path:
+                self._current_path  = new_path
+                self._last_mtime    = 0.0
+                self._last_size     = 0
+                self._last_pos      = 0
+                self._header_cache  = None
+                log.info("ObsFileWatcher: active GPS file → %s", self._current_path)
+            return
+
         today = datetime.now(timezone.utc).date()
         if today == self._current_date:
             return
@@ -119,7 +156,7 @@ class ObsFileWatcher(QObject):
         self._last_mtime    = 0.0
         self._last_size     = 0
         self._last_pos      = 0
-        self._header_cache  = None   # reset header cache for the new file
+        self._header_cache  = None
         log.info("ObsFileWatcher: active file → %s", self._current_path)
 
     def _poll(self):

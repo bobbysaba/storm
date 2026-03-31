@@ -532,6 +532,7 @@ class LaunchDialog(QDialog):
         saved = {
             "vehicle_id":     s.value("launch/vehicle_id",     "",        type=str),
             "data_dir":       s.value("launch/data_dir",       "",        type=str),
+            "gps_file_mode":  s.value("launch/gps_file_mode",  False,     type=bool),
             "mode":           s.value("launch/mode",           "vehicle", type=str),
             "vehicle_icon":   s.value("launch/vehicle_icon",   "car",     type=str),
             "auto_spc":       s.value("launch/auto_spc",       False,     type=bool),
@@ -621,6 +622,20 @@ class LaunchDialog(QDialog):
         dir_row.addWidget(self._browse_btn)
 
         vs.addLayout(dir_row)
+        vs.addSpacing(8)
+
+        # GPS data file checkbox
+        from PyQt6.QtWidgets import QCheckBox  # noqa: PLC0415
+        self._gps_mode_check = QCheckBox("GPS data file (no met obs)")
+        self._gps_mode_check.setChecked(saved.get("gps_file_mode", False))
+        self._gps_mode_check.setStyleSheet(
+            "QCheckBox { color: #8E97AB; font-size: 11px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #1E1E2E;"
+            " border-radius: 3px; background: #1A1A2E; }"
+            "QCheckBox::indicator:checked { background: #00CFFF; border-color: #00CFFF; }"
+            "QCheckBox:disabled { color: #2A2A3E; }"
+        )
+        vs.addWidget(self._gps_mode_check)
         vs.addSpacing(14)
 
         # Vehicle icon picker
@@ -919,6 +934,7 @@ class LaunchDialog(QDialog):
         self._vid_input.setReadOnly(locked)
         self._dir_input.setReadOnly(locked)
         self._browse_btn.setEnabled(not locked)
+        self._gps_mode_check.setEnabled(not locked)
         self._lock_btn.setText("🔒" if locked else "🔓")
         self._lock_btn.setToolTip("Unlock all fields" if locked else "Lock all fields")
         for btn in self._icon_btns.values():
@@ -1103,6 +1119,7 @@ class LaunchDialog(QDialog):
         s = QSettings()
         s.setValue("launch/vehicle_id",     self._vid_input.text().strip())
         s.setValue("launch/data_dir",       self._dir_input.text().strip())
+        s.setValue("launch/gps_file_mode",  self._gps_mode_check.isChecked())
         mode = getattr(self, "_selected_mode", "vehicle")
         # Don't persist archive mode as the default (it needs explicit selection).
         s.setValue("launch/mode", mode if mode != "archive" else "viewer")
@@ -1129,6 +1146,11 @@ class LaunchDialog(QDialog):
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return ""
         return self._dir_input.text().strip()
+
+    def gps_file_mode(self) -> bool:
+        if getattr(self, "_selected_mode", "vehicle") != "vehicle":
+            return False
+        return self._gps_mode_check.isChecked()
 
     def monitor(self) -> bool:
         return getattr(self, "_selected_mode", "vehicle") == "monitor"

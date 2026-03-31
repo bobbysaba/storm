@@ -3643,27 +3643,42 @@ class MainWindow(QMainWindow):
 
         # Track A — instrument file watcher (surface obs vehicles)
         if config.OBS_FILE_DIR:
-            field_map = FieldMap(
-                lat=config.OBS_FILE_COL_LAT,
-                lon=config.OBS_FILE_COL_LON,
-                date_col=config.OBS_FILE_COL_DATE,
-                time_col=config.OBS_FILE_COL_TIME,
-                temperature_c=config.OBS_FILE_COL_TEMP,
-                dewpoint_c=config.OBS_FILE_COL_DEWP,
-                wind_speed_ms=config.OBS_FILE_COL_WSPD,
-                wind_dir_deg=config.OBS_FILE_COL_WDIR,
-                pressure_mb=config.OBS_FILE_COL_PRES,
-            )
+            if config.OBS_FILE_GPS_MODE:
+                field_map = FieldMap(
+                    lat="Latitude",
+                    lon="Longitude",
+                    date_col="ddmmyy",
+                    time_col="hhmmss[UTC]",
+                    temperature_c="",
+                    dewpoint_c="",
+                    wind_speed_ms="",
+                    wind_dir_deg="",
+                    pressure_mb="",
+                )
+            else:
+                field_map = FieldMap(
+                    lat=config.OBS_FILE_COL_LAT,
+                    lon=config.OBS_FILE_COL_LON,
+                    date_col=config.OBS_FILE_COL_DATE,
+                    time_col=config.OBS_FILE_COL_TIME,
+                    temperature_c=config.OBS_FILE_COL_TEMP,
+                    dewpoint_c=config.OBS_FILE_COL_DEWP,
+                    wind_speed_ms=config.OBS_FILE_COL_WSPD,
+                    wind_dir_deg=config.OBS_FILE_COL_WDIR,
+                    pressure_mb=config.OBS_FILE_COL_PRES,
+                )
             self._obs_watcher = ObsFileWatcher(
                 data_dir=config.OBS_FILE_DIR,
                 vehicle_id=config.VEHICLE_ID,
                 field_map=field_map,
                 poll_interval_s=config.OBS_FILE_POLL_S,
+                gps_mode=config.OBS_FILE_GPS_MODE,
                 parent=self,
             )
             self._obs_watcher.obs_ready.connect(self._on_local_vehicle_obs)
             self._obs_watcher.start()
-            log.info("Obs file watcher started: dir=%s", config.OBS_FILE_DIR)
+            log.info("Obs file watcher started: dir=%s gps_mode=%s",
+                     config.OBS_FILE_DIR, config.OBS_FILE_GPS_MODE)
         else:
             log.info("Obs file dir not configured (obs_file.data_dir empty) — Track A disabled")
 

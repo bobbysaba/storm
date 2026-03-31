@@ -448,7 +448,8 @@ def main() -> None:
         config.VEHICLE_ICON = dialog.vehicle_icon()
 
         # get the directory for real-time observation files (if any)
-        config.OBS_FILE_DIR = dialog.data_dir()
+        config.OBS_FILE_DIR      = dialog.data_dir()
+        config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
 
         # get mode from the dialog
         monitor      = dialog.monitor()
