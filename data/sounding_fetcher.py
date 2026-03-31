@@ -109,49 +109,6 @@ def _fetch_sounding_set(lat: float, lon: float) -> SoundingSet:
     log.debug("sounding forecast response: %.1f KB", len(raw) / 1024)
 
     result = _parse_response(lat, lon, fwd_data)
-    f0_time = result.soundings[0].valid_time  # analysis hour
-
-    # ── Historical slots: T-2, T-1 ────────────────────────────────────────────
-    hist_date = f0_time.strftime("%Y-%m-%d")
-    hist_base = urlencode({
-        "latitude":        lat,
-        "longitude":       lon,
-        "models":          _MODEL,
-        "start_date":      hist_date,
-        "end_date":        hist_date,
-        "wind_speed_unit": "ms",
-        "timezone":        "UTC",
-    })
-    hist_url = f"{_ARCHIVE_URL}?{hist_base}&hourly={hourly_params}"
-    log.debug("sounding historical URL: %s", hist_url)
-    try:
-        with urlopen(hist_url, timeout=_REQUEST_TIMEOUT) as resp:
-            hist_raw = resp.read()
-        hist_data = json.loads(hist_raw)
-        log.debug("sounding historical response: %.1f KB", len(hist_raw) / 1024)
-
-        elevation = float(hist_data.get("elevation", result.elevation))
-        hourly    = hist_data["hourly"]
-        time_index: dict[datetime, int] = {}
-        for i, t_str in enumerate(hourly["time"]):
-            t = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
-            time_index[t] = i
-
-        hist_snds = []
-        for offset, label in [(-2, "T−2h"), (-1, "T−1h")]:
-            target = f0_time + timedelta(hours=offset)
-            t_idx  = time_index.get(target)
-            if t_idx is None:
-                continue
-            snd = _extract_sounding(
-                lat, lon, hourly, t_idx, offset, label, elevation,
-                valid_time=target,
-            )
-            if snd is not None:
-                hist_snds.append(snd)
-        result.soundings = hist_snds + result.soundings
-    except Exception as exc:
-        log.warning("sounding historical fetch failed (continuing without): %s", exc)
 
     return result
 

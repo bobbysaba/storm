@@ -2459,7 +2459,7 @@ class MainWindow(QMainWindow):
             self.map_widget.set_sounding_mode(False)
             self.map_widget.set_obs_sounding_mode(False)
             self.map_widget.clear_sounding_stations()
-            self.status_msg_label.setText("Fetching NSSL CLAMPS soundings…")
+            self.status_msg_label.setText("Fetching NSSL soundings…")
             self._clamps_sounding_fetcher.fetch()
 
     def _on_sounding_map_click(self, lat: float, lon: float):

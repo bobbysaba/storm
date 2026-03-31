@@ -229,7 +229,7 @@ class SoundingDialog(QDialog):
             (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
         )
         if sset.is_nssl:
-            self.setWindowTitle("NSSL CLAMPS Sounding")
+            self.setWindowTitle("NSSL Observed Sounding")
         elif sset.is_observed:
             self.setWindowTitle("Observed Sounding")
         else:
@@ -478,7 +478,7 @@ class SoundingDialog(QDialog):
 
         if self._sset.is_nssl:
             valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
-            self._header_line1.setText("NSSL CLAMPS  ·  DL Truck")
+            self._header_line1.setText("NSSL  ·  DL Truck")
             self._header_line2.setText(
                 f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL"
             )
