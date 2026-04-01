@@ -223,15 +223,16 @@ def _parse_profile(
         if float(hght) < site_elev - 10:
             continue
 
-        # Wind: use zero components when missing
+        # Wind: use NaN components when missing so hodograph gaps render
+        # correctly instead of snapping to the origin.
         if drct is not None and sknt is not None:
             speed_ms  = float(sknt) * _KNOTS_TO_MS
             drct_rad  = math.radians(float(drct))
             u = -speed_ms * math.sin(drct_rad)
             v = -speed_ms * math.cos(drct_rad)
         else:
-            u = 0.0
-            v = 0.0
+            u = np.nan
+            v = np.nan
 
         pressures.append(float(pres))
         temps.append(float(tmpc))

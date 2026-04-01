@@ -699,9 +699,16 @@ class SoundingDialog(QDialog):
             ax.text(spd * 0.72, spd * 0.72, f"{spd}", fontsize=5,
                     color=_MUTED, ha="center", va="center", alpha=0.7)
 
-        # Thin to mandatory pressure levels — mirrors SPC's hodograph display and
-        # avoids a jagged trace from hundreds of significant-level wind reports.
-        thin       = _thin_to_mandatory(snd.pressure)
+        # Use only levels that have actual wind observations — skipping T/Td-only
+        # significant levels that carry no wind data.  For high-res soundings
+        # (CLAMPS etc.) first thin to mandatory levels to avoid noise, then
+        # filter to wind-observed levels.  This matches SPC's hodograph approach.
+        if len(snd.pressure) > 200:
+            candidate_idx = _thin_to_mandatory(snd.pressure)
+        else:
+            candidate_idx = np.arange(len(snd.pressure))
+        wind_mask  = ~np.isnan(snd.u_wind[candidate_idx])
+        thin       = candidate_idx[wind_mask]
         u_kt       = (snd.u_wind[thin] * units("m/s")).to("knots").magnitude
         v_kt       = (snd.v_wind[thin] * units("m/s")).to("knots").magnitude
         pres_thin  = snd.pressure[thin]
