@@ -4,9 +4,9 @@ import csv
 import io
 import json
 import logging
-import math
+import ssl
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -15,29 +15,16 @@ from core.observation import Observation
 
 log = logging.getLogger(__name__)
 
+# NSSL THREDDS uses a cert that Python's default SSL context rejects
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode    = ssl.CERT_NONE
 
-OK_CURRENT_URL      = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
-KS_STATIONNAMES_URL = "http://mesonet.k-state.edu/rest/stationnames/"
-KS_STATIONDATA_URL  = "http://mesonet.k-state.edu/rest/stationdata/"
-WTM_SITES_URL       = "https://api.mesonet.ttu.edu/mesoweb/sites/"
-WTM_LATEST_URL      = "https://api.mesonet.ttu.edu/mesoweb/public/table/latest/"
+OK_THREDDS_URL  = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/ok_mesonet.json"
+OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
+WTM_THREDDS_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/wtx_mesonet.json"
+WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 
-_MDF_MISSING  = frozenset({-999.0, -998.0, -997.0, -996.0, -995.0, -994.0})
-_CARDINAL_DEG = {
-    "N": 0.0, "NNE": 22.5, "NE": 45.0, "ENE": 67.5,
-    "E": 90.0, "ESE": 112.5, "SE": 135.0, "SSE": 157.5,
-    "S": 180.0, "SSW": 202.5, "SW": 225.0, "WSW": 247.5,
-    "W": 270.0, "WNW": 292.5, "NW": 315.0, "NNW": 337.5,
-}
-_KS_UTC_OFFSET = timedelta(hours=6)  # Kansas Mesonet API uses CST (UTC-6) year-round
-
-
-def _dewpoint_from_rh(temp_c: float, rh_pct: float) -> float:
-    """Magnus formula: compute dewpoint (°C) from temperature (°C) and RH (%)."""
-    rh_pct = max(1.0, min(100.0, rh_pct))
-    a, b   = 17.625, 243.04
-    alpha  = math.log(rh_pct / 100.0) + a * temp_c / (b + temp_c)
-    return b * alpha / (a - alpha)
 
 
 class SurfaceFetcher(QObject):
@@ -56,11 +43,10 @@ class SurfaceFetcher(QObject):
         self._pending_refresh = False
         self._ok_enabled  = False
         self._wtm_enabled = False
-        self._ks_enabled  = False
-        self._wtm_meta: dict[int, dict] | None   = None
-        self._ks_meta:  dict[str, dict] | None   = None
+        self._ok_meta:  dict[str, dict] | None = None
+        self._wtm_meta: dict[str, dict] | None = None
         self._headers = {
-            "User-Agent": "STORM/1.0",
+            "User-Agent": "Mozilla/5.0 STORM/1.0",
             "Accept": "application/json, text/html, application/xml, text/xml",
         }
 
@@ -80,13 +66,8 @@ class SurfaceFetcher(QObject):
         self._update_timer()
         self.fetch_now()
 
-    def set_ks_enabled(self, enabled: bool):
-        self._ks_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
-
     def _update_timer(self):
-        if self._ok_enabled or self._wtm_enabled or self._ks_enabled:
+        if self._ok_enabled or self._wtm_enabled:
             self._timer.start()
         else:
             self._timer.stop()
@@ -113,11 +94,6 @@ class SurfaceFetcher(QObject):
                 wtm_obs = self._fetch_source("WTM", self._fetch_wtm)
                 payload.extend(wtm_obs)
                 parts.append(f"WTM {len(wtm_obs)}")
-
-            if self._ks_enabled:
-                ks_obs = self._fetch_source("KS", self._fetch_ks_mesonet)
-                payload.extend(ks_obs)
-                parts.append(f"KS {len(ks_obs)}")
 
             payload = [item for item in payload if self._source_enabled(item.get("source", ""))]
 
@@ -147,219 +123,119 @@ class SurfaceFetcher(QObject):
                 threading.Thread(target=self._fetch_worker, daemon=True).start()
 
     def _fetch_ok_mesonet(self) -> list[dict]:
-        raw = self._http_get(OK_CURRENT_URL).decode("utf-8", errors="ignore")
-        reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
+        if self._ok_meta is None:
+            self._ok_meta = self._fetch_ok_metadata()
 
-        now_utc = datetime.now(timezone.utc)
+        raw  = self._http_get(OK_THREDDS_URL, ssl_ctx=_SSL_CTX).decode("utf-8", errors="ignore")
+        data = json.loads(raw)
+        obs_time = self._parse_iso_utc(data.get("time"))
+        obs_data = data.get("data", {})
+
+        # Build per-station dict: stid -> {var: value}
+        all_stids: set[str] = set()
+        for var_vals in obs_data.values():
+            all_stids.update(var_vals.keys())
+
         observations: list[dict] = []
+        for stid in all_stids:
+            meta = (self._ok_meta or {}).get(stid)
+            if not meta:
+                continue
+            obs = Observation(
+                vehicle_id=f"surface:ok:{stid}",
+                lat=meta["lat"],
+                lon=meta["lon"],
+                timestamp=obs_time,
+                icon_type="mesonet",
+                temperature_c=self._float_or_none(obs_data.get("tair", {}).get(stid)),
+                dewpoint_c=self._float_or_none(obs_data.get("tdew", {}).get(stid)),
+                wind_speed_ms=self._float_or_none(obs_data.get("wspd", {}).get(stid)),
+                wind_dir_deg=self._float_or_none(obs_data.get("wdir", {}).get(stid)),
+                pressure_mb=self._float_or_none(obs_data.get("pres", {}).get(stid)),
+            )
+            observations.append({
+                "id": obs.vehicle_id,
+                "source": "ok",
+                "name": meta.get("name", stid.upper()),
+                "obs": obs,
+            })
 
+        if not observations:
+            raise RuntimeError("OK Mesonet THREDDS data returned no station rows")
+
+        return observations
+
+    def _fetch_ok_metadata(self) -> dict[str, dict]:
+        """Fetch OK Mesonet station lat/lon/name from the public CSV."""
+        raw    = self._http_get(OK_META_URL).decode("utf-8", errors="ignore")
+        reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
+        meta: dict[str, dict] = {}
         for row in reader:
             stid = (row.get("STID") or "").strip().lower()
             lat  = self._float_or_none(row.get("LAT"))
             lon  = self._float_or_none(row.get("LON"))
             if not stid or lat is None or lon is None:
                 continue
-
-            try:
-                obs_time = now_utc.replace(
-                    hour=int(row.get("HR", 0)),
-                    minute=int(row.get("MI", 0)),
-                    second=0, microsecond=0,
-                )
-            except (ValueError, TypeError):
-                obs_time = now_utc
-
-            tair_f = self._mdf_float(row.get("TAIR"))
-            tdew_f = self._mdf_float(row.get("TDEW"))
-            temp_c = (tair_f - 32) * 5 / 9 if tair_f is not None else None
-            dewp_c = (tdew_f - 32) * 5 / 9 if tdew_f is not None else None
-
-            wspd_mph = self._mdf_float(row.get("WSPD"))
-            wspd_ms  = wspd_mph * 0.44704 if wspd_mph is not None else None
-
-            wdir_str = (row.get("WDIR") or "").strip().upper()
-            wdir_deg = _CARDINAL_DEG.get(wdir_str)
-
-            obs = Observation(
-                vehicle_id=f"surface:ok:{stid}",
-                lat=lat,
-                lon=lon,
-                timestamp=obs_time,
-                icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=dewp_c,
-                wind_speed_ms=wspd_ms,
-                wind_dir_deg=wdir_deg,
-                pressure_mb=self._mdf_float(row.get("PRES")),
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "ok",
+            meta[stid] = {
+                "lat": lat,
+                "lon": lon,
                 "name": (row.get("NAME") or stid.upper()).strip(),
-                "obs": obs,
-            })
-
-        if not observations:
-            raise RuntimeError("OK Mesonet current data returned no station rows")
-
-        return observations
+            }
+        return meta
 
     def _fetch_wtm(self) -> list[dict]:
         if self._wtm_meta is None:
             self._wtm_meta = self._fetch_wtm_metadata()
 
-        raw = self._http_get(WTM_LATEST_URL).decode("utf-8", errors="ignore")
+        raw  = self._http_get(WTM_THREDDS_URL, ssl_ctx=_SSL_CTX).decode("utf-8", errors="ignore")
         data = json.loads(raw)
-        results = data.get("results", [])
         observations: list[dict] = []
 
-        for row in results:
-            station_num = row.get("station")
-            if station_num is None:
+        for row in data.get("results", []):
+            mid = (row.get("mid") or "").strip().lower()
+            if not mid:
                 continue
-            meta = (self._wtm_meta or {}).get(int(station_num))
+            meta = (self._wtm_meta or {}).get(mid)
             if not meta:
                 continue
-
-            temp_c = self._float_or_none(row.get("temp1p5m"))
-            dewpoint_c = self._float_or_none(row.get("dp1p5m"))
-            wind_speed_ms = self._float_or_none(row.get("wspd10m"))
-            wind_dir_deg = self._float_or_none(row.get("wdir10m"))
-            pressure_mb = self._float_or_none(row.get("pres"))
-            obs_time = self._parse_iso_utc(row.get("utc"))
-
             obs = Observation(
-                vehicle_id=f"surface:wtm:{meta['mesonet_id'].lower()}",
-                lat=float(meta["latitude"]),
-                lon=float(meta["longitude"]),
-                timestamp=obs_time,
+                vehicle_id=f"surface:wtm:{mid}",
+                lat=meta["lat"],
+                lon=meta["lon"],
+                timestamp=self._parse_iso_utc(row.get("utc")),
                 icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=dewpoint_c,
-                wind_speed_ms=wind_speed_ms,
-                wind_dir_deg=wind_dir_deg,
-                pressure_mb=pressure_mb,
+                temperature_c=self._float_or_none(row.get("temp1p5m")),
+                dewpoint_c=self._float_or_none(row.get("dp1p5m")),
+                wind_speed_ms=self._float_or_none(row.get("wspd10m")),
+                wind_dir_deg=self._float_or_none(row.get("wdir10m")),
+                pressure_mb=self._float_or_none(row.get("pres")),
             )
             observations.append({
                 "id": obs.vehicle_id,
                 "source": "wtm",
-                "name": meta.get("name", row.get("name", meta["mesonet_id"])),
+                "name": meta.get("name", row.get("name", mid.upper())),
                 "obs": obs,
             })
 
         return observations
 
-    def _fetch_wtm_metadata(self) -> dict[int, dict]:
-        raw = self._http_get(WTM_SITES_URL).decode("utf-8", errors="ignore")
+    def _fetch_wtm_metadata(self) -> dict[str, dict]:
+        raw  = self._http_get(WTM_SITES_URL).decode("utf-8", errors="ignore")
         data = json.loads(raw)
         return {
-            int(row["station_id"]): row
+            row["mesonet_id"].lower(): {
+                "lat": float(row["latitude"]),
+                "lon": float(row["longitude"]),
+                "name": row.get("name", row["mesonet_id"]),
+            }
             for row in data.get("results", [])
-            if row.get("station_id") is not None
+            if row.get("mesonet_id") and row.get("latitude") and row.get("longitude")
         }
 
-    def _fetch_ks_mesonet(self) -> list[dict]:
-        if self._ks_meta is None:
-            self._ks_meta = self._fetch_ks_metadata()
-
-        now_cst = datetime.now(timezone.utc) - _KS_UTC_OFFSET
-        t_end   = now_cst.strftime("%Y%m%d%H%M%S")
-        t_start = (now_cst - timedelta(minutes=15)).strftime("%Y%m%d%H%M%S")
-        url = (
-            f"{KS_STATIONDATA_URL}?net=KSRE&int=5min"
-            f"&t_start={t_start}&t_end={t_end}"
-            f"&vars=TIMESTAMP,STATION,TEMP2MAVG,RELHUM2MAVG,WSPD10MAVG,WDIR10M,PRESSUREAVG"
-        )
-        raw    = self._http_get(url).decode("utf-8", errors="ignore")
-        reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
-
-        # Keep only the most recent row per station that has valid (non-M) data.
-        # The KS API often returns an incomplete latest interval with all-M values;
-        # prefer the most recent row where TEMP2MAVG is present over a newer all-M row.
-        latest: dict[str, dict] = {}       # most recent row with valid temp
-        latest_any: dict[str, dict] = {}   # most recent row regardless of validity
-        for row in reader:
-            name = (row.get("STATION") or "").strip()
-            if not name:
-                continue
-            ts_str = (row.get("TIMESTAMP") or "").strip()
-            if name not in latest_any or ts_str > latest_any[name].get("TIMESTAMP", ""):
-                latest_any[name] = row
-            temp_val = (row.get("TEMP2MAVG") or "").strip()
-            if temp_val and temp_val != "M":
-                if name not in latest or ts_str > latest[name].get("TIMESTAMP", ""):
-                    latest[name] = row
-        # Fall back to any row for stations that had no valid-temp rows at all
-        for name, row in latest_any.items():
-            if name not in latest:
-                latest[name] = row
-
-        observations: list[dict] = []
-        for name, row in latest.items():
-            meta = (self._ks_meta or {}).get(name)
-            if not meta:
-                continue
-
-            temp_c = self._float_m(row.get("TEMP2MAVG"))
-            rh_pct = self._float_m(row.get("RELHUM2MAVG"))
-            dewp_c = _dewpoint_from_rh(temp_c, rh_pct) if temp_c is not None and rh_pct is not None else None
-            wspd_ms  = self._float_m(row.get("WSPD10MAVG"))
-            wdir_deg = self._float_m(row.get("WDIR10M"))
-            pres_kpa = self._float_m(row.get("PRESSUREAVG"))
-            pres_mb  = pres_kpa * 10.0 if pres_kpa is not None else None
-
-            ts_str = (row.get("TIMESTAMP") or "").strip()
-            try:
-                ts_naive = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                ks_tz    = timezone(-_KS_UTC_OFFSET)
-                obs_time = ts_naive.replace(tzinfo=ks_tz).astimezone(timezone.utc)
-            except (ValueError, TypeError):
-                obs_time = datetime.now(timezone.utc)
-
-            station_id = f"surface:ks:{name.lower().replace(' ', '_')}"
-            obs = Observation(
-                vehicle_id=station_id,
-                lat=meta["lat"],
-                lon=meta["lon"],
-                timestamp=obs_time,
-                icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=dewp_c,
-                wind_speed_ms=wspd_ms,
-                wind_dir_deg=wdir_deg,
-                pressure_mb=pres_mb,
-            )
-            observations.append({
-                "id": station_id,
-                "source": "ks",
-                "name": meta.get("display_name", name),
-                "obs": obs,
-            })
-
-        return observations
-
-    def _fetch_ks_metadata(self) -> dict[str, dict]:
-        """Fetch Kansas Mesonet station list; returns {NAME: {lat, lon, display_name}}."""
-        raw    = self._http_get(KS_STATIONNAMES_URL).decode("utf-8", errors="ignore")
-        reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
-        meta: dict[str, dict] = {}
-        for row in reader:
-            name = (row.get("NAME") or "").strip()
-            lat  = self._float_or_none(row.get("LATITUDE"))
-            lon  = self._float_or_none(row.get("LONGITUDE"))
-            if not name or lat is None or lon is None:
-                continue
-            meta[name] = {
-                "lat": lat,
-                "lon": lon,
-                "display_name": name,
-            }
-        return meta
-
-    def _http_get(self, url: str) -> bytes:
+    def _http_get(self, url: str, ssl_ctx=None) -> bytes:
         req = Request(url, headers=self._headers)
         with self._lock:
-            with urlopen(req, timeout=25) as resp:
+            with urlopen(req, timeout=25, context=ssl_ctx) as resp:
                 return resp.read()
 
     def _fetch_source(self, label: str, fetch_fn) -> list[dict]:
@@ -374,27 +250,7 @@ class SurfaceFetcher(QObject):
         return (
             (source == "ok"  and self._ok_enabled)
             or (source == "wtm" and self._wtm_enabled)
-            or (source == "ks"  and self._ks_enabled)
         )
-
-    @staticmethod
-    def _float_m(value: str | None) -> float | None:
-        """Like _float_or_none but also treats the Kansas Mesonet missing sentinel 'M' as None."""
-        if value is None:
-            return None
-        value = str(value).strip()
-        if not value or value == "M":
-            return None
-        try:
-            return float(value)
-        except ValueError:
-            return None
-
-    @classmethod
-    def _mdf_float(cls, value: str | None) -> float | None:
-        """Like _float_or_none but also treats MDF sentinel values as missing."""
-        v = cls._float_or_none(value)
-        return None if v in _MDF_MISSING else v
 
     @staticmethod
     def _float_or_none(value: str | None) -> float | None:
