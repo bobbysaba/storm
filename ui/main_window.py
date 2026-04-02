@@ -801,7 +801,6 @@ class MainWindow(QMainWindow):
         self._launch_auto_satellite  = s.value("launch/auto_satellite",  "",    type=str)
         self._launch_auto_obs_ok     = s.value("launch/auto_obs_ok",     False, type=bool)
         self._launch_auto_obs_wtm    = s.value("launch/auto_obs_wtm",    False, type=bool)
-        self._launch_auto_obs_ks     = s.value("launch/auto_obs_ks",     False, type=bool)
 
         if not self._disable_radar:
             self._init_radar()
@@ -826,8 +825,6 @@ class MainWindow(QMainWindow):
             self.surface_controls._btn_ok.setChecked(True)
         if self._launch_auto_obs_wtm:
             self.surface_controls._btn_wtm.setChecked(True)
-        if self._launch_auto_obs_ks:
-            self.surface_controls._btn_ks.setChecked(True)
         sat = self._launch_auto_satellite
         if sat == "conus":
             self.satellite_controls._btn_conus.setChecked(True)
@@ -1833,7 +1830,6 @@ class MainWindow(QMainWindow):
 
         self.surface_controls.ok_toggled.connect(self._surface_fetcher.set_ok_enabled)
         self.surface_controls.wtm_toggled.connect(self._surface_fetcher.set_wtm_enabled)
-        self.surface_controls.ks_toggled.connect(self._surface_fetcher.set_ks_enabled)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)

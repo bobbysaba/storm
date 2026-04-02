@@ -7,7 +7,6 @@ class SurfaceControls(QWidget):
 
     ok_toggled = pyqtSignal(bool)
     wtm_toggled = pyqtSignal(bool)
-    ks_toggled = pyqtSignal(bool)
     plots_toggled = pyqtSignal(bool)
     content_resized = pyqtSignal()
 
@@ -37,13 +36,10 @@ class SurfaceControls(QWidget):
 
         self._btn_ok = self._btn("OK MESONET")
         self._btn_wtm = self._btn("WTM")
-        self._btn_ks = self._btn("KS MESONET")
         self._btn_ok.toggled.connect(self.ok_toggled.emit)
         self._btn_wtm.toggled.connect(self.wtm_toggled.emit)
-        self._btn_ks.toggled.connect(self.ks_toggled.emit)
         r1.addWidget(self._btn_ok)
         r1.addWidget(self._btn_wtm)
-        r1.addWidget(self._btn_ks)
 
         r1.addWidget(self._vdiv())
 

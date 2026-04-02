@@ -6,7 +6,7 @@ import json
 import logging
 import ssl
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -88,12 +88,16 @@ class SurfaceFetcher(QObject):
             if self._ok_enabled:
                 ok_obs = self._fetch_source("OK", self._fetch_ok_mesonet)
                 payload.extend(ok_obs)
-                parts.append(f"OK {len(ok_obs)}")
+                ok_time = max((i["obs"].timestamp for i in ok_obs), default=None)
+                stamp = ok_time.strftime("%H:%MZ") if ok_time else "?"
+                parts.append(f"OK {len(ok_obs)} {stamp}")
 
             if self._wtm_enabled:
                 wtm_obs = self._fetch_source("WTM", self._fetch_wtm)
                 payload.extend(wtm_obs)
-                parts.append(f"WTM {len(wtm_obs)}")
+                wtm_time = max((i["obs"].timestamp for i in wtm_obs), default=None)
+                stamp = wtm_time.strftime("%H:%MZ") if wtm_time else "?"
+                parts.append(f"WTM {len(wtm_obs)} {stamp}")
 
             payload = [item for item in payload if self._source_enabled(item.get("source", ""))]
 
@@ -101,12 +105,7 @@ class SurfaceFetcher(QObject):
                 self.status_updated.emit("Surface obs idle")
                 self.observations_updated.emit([])
             else:
-                latest_obs_time = max(
-                    (item["obs"].timestamp for item in payload),
-                    default=datetime.now(timezone.utc),
-                )
-                stamp = latest_obs_time.strftime("%H:%MZ")
-                self.status_updated.emit(f"{'  |  '.join(parts)}  |  OBS {stamp}")
+                self.status_updated.emit("  |  ".join(parts))
                 self.observations_updated.emit(payload)
         except Exception as exc:
             log.error("surface fetch failed: %s", exc, exc_info=True)
