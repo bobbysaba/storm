@@ -1,9 +1,9 @@
 # data/routing_fetcher.py
-# On-demand routing via OSRM public API + Nominatim geocoding.
+# On-demand routing via OpenRouteService (ORS) + Nominatim geocoding.
 #
-# OSRM demo server: router.project-osrm.org — no API key, ~5–50 KB per request.
-# Nominatim:        nominatim.openstreetmap.org — no API key, ~2–5 KB per lookup.
-#                   OSM usage policy requires a User-Agent header.
+# ORS:       api.openrouteservice.org — API key required (free tier: 2,000 req/day).
+# Nominatim: nominatim.openstreetmap.org — no API key, ~2–5 KB per lookup.
+#            OSM usage policy requires a User-Agent header.
 
 import json
 import logging
@@ -13,45 +13,31 @@ from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 
+import config
 from PyQt6.QtCore import QObject, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-_OSRM_BASE       = "https://router.project-osrm.org/route/v1/driving"
+_ORS_BASE        = "https://api.openrouteservice.org/v2/directions/driving-car"
 _NOMINATIM_BASE  = "https://nominatim.openstreetmap.org/search"
 _USER_AGENT      = "STORM-App/1.0 (storm-chasing field operations)"
 _REQUEST_TIMEOUT = 15  # seconds
 
-# Maps OSRM maneuver (type, modifier) → display arrow + short verb
-_MANEUVER_MAP: dict[tuple[str, str], tuple[str, str]] = {
-    ("depart",  ""):               ("↑", "Head"),
-    ("arrive",  ""):               ("⦿", "Arrive at"),
-    ("turn",    "left"):           ("←", "Turn left onto"),
-    ("turn",    "right"):          ("→", "Turn right onto"),
-    ("turn",    "slight left"):    ("↖", "Turn slight left onto"),
-    ("turn",    "slight right"):   ("↗", "Turn slight right onto"),
-    ("turn",    "sharp left"):     ("↙", "Turn sharp left onto"),
-    ("turn",    "sharp right"):    ("↘", "Turn sharp right onto"),
-    ("turn",    "straight"):       ("↑", "Continue straight on"),
-    ("turn",    "uturn"):          ("↩", "Make a U-turn"),
-    ("continue","straight"):       ("↑", "Continue on"),
-    ("continue","left"):           ("←", "Keep left on"),
-    ("continue","right"):          ("→", "Keep right on"),
-    ("fork",    "left"):           ("↖", "Keep left at fork onto"),
-    ("fork",    "right"):          ("↗", "Keep right at fork onto"),
-    ("merge",   "left"):           ("↖", "Merge left onto"),
-    ("merge",   "right"):          ("↗", "Merge right onto"),
-    ("on ramp", "left"):           ("↖", "Take ramp on left onto"),
-    ("on ramp", "right"):          ("↗", "Take ramp on right onto"),
-    ("off ramp","left"):           ("↖", "Take exit left onto"),
-    ("off ramp","right"):          ("↗", "Take exit right onto"),
-    ("end of road","left"):        ("←", "Turn left at end of road onto"),
-    ("end of road","right"):       ("→", "Turn right at end of road onto"),
-    ("new name","straight"):       ("↑", "Continue onto"),
-    ("roundabout",""):             ("↻", "Enter roundabout"),
-    ("exit roundabout",""):        ("↑", "Exit roundabout onto"),
-    ("rotary",""):                 ("↻", "Enter traffic circle"),
-    ("exit rotary",""):            ("↑", "Exit traffic circle onto"),
+# Maps ORS step type integer → (arrow, verb)
+# https://giscience.github.io/openrouteservice/documentation/Instruction-Types
+_MANEUVER_MAP: dict[int, tuple[str, str]] = {
+    0:  ("←",  "Turn left onto"),
+    1:  ("→",  "Turn right onto"),
+    2:  ("↙",  "Turn sharp left onto"),
+    3:  ("↘",  "Turn sharp right onto"),
+    4:  ("↖",  "Turn slight left onto"),
+    5:  ("↗",  "Turn slight right onto"),
+    6:  ("↑",  "Continue straight on"),
+    7:  ("↻",  "Enter roundabout"),
+    8:  ("↑",  "Exit roundabout onto"),
+    9:  ("↩",  "Make a U-turn"),
+    10: ("⦿", "Arrive at"),
+    11: ("↑",  "Head"),
 }
 
 
@@ -142,11 +128,15 @@ class RoutingFetcher(QObject):
 
 # ── Network helpers ───────────────────────────────────────────────────────────
 
-def _get_json(url: str) -> dict | list:
-    req = Request(url, headers={"User-Agent": _USER_AGENT})
+def _get_json(url: str, headers: dict | None = None) -> dict | list:
+    log.debug("fetch → %s", url)
+    req_headers = {"User-Agent": _USER_AGENT}
+    if headers:
+        req_headers.update(headers)
+    req = Request(url, headers=req_headers)
     with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
         raw = resp.read()
-    log.debug("fetch %s → %.1f KB", url[:80], len(raw) / 1024)
+    log.debug("fetch ✓ %.1f KB ← %s", len(raw) / 1024, url[:80])
     return json.loads(raw)
 
 
@@ -160,68 +150,52 @@ def _geocode_address(address: str) -> tuple[str, float, float]:
     return hit.get("display_name", address), float(hit["lat"]), float(hit["lon"])
 
 
-def _pick_ref_badge(ref: str) -> str:
-    """Return the most significant route reference as a [badge], or ''.
-
-    OSRM often gives semicolon-separated designations, e.g. "I-44;US-270".
-    Priority: Interstate > US Highway > everything else (state/county/local).
-    """
-    if not ref:
-        return ""
-    parts = [p.strip() for p in ref.split(";") if p.strip()]
-    if not parts:
-        return ""
-    up = [p.upper() for p in parts]
-    for i, u in enumerate(up):
-        if u.startswith("I-") or u.startswith("I "):
-            return f"[{parts[i]}]"
-    for i, u in enumerate(up):
-        if u.startswith("US") or u.startswith("U.S."):
-            return f"[{parts[i]}]"
-    return f"[{parts[0]}]"
-
-
 def _fetch_route(
     olat: float, olon: float, dlat: float, dlon: float
 ) -> RouteResult:
-    url = (
-        f"{_OSRM_BASE}/{olon},{olat};{dlon},{dlat}"
-        f"?steps=true&geometries=geojson&overview=full"
-    )
+    params = urlencode({
+        "api_key": config.ORS_API_KEY,
+        "start":   f"{olon},{olat}",
+        "end":     f"{dlon},{dlat}",
+    })
+    url  = f"{_ORS_BASE}?{params}"
     data = _get_json(url)
 
-    if data.get("code") != "Ok" or not data.get("routes"):
-        raise ValueError(f"OSRM returned: {data.get('code', 'unknown error')}")
+    features = data.get("features", [])
+    if not features:
+        raise ValueError("ORS returned no route features")
 
-    route = data["routes"][0]
-    geometry   = route["geometry"]          # GeoJSON LineString
-    distance_m = route.get("distance", 0.0)
-    duration_s = route.get("duration", 0.0)
+    props      = features[0]["properties"]
+    geometry   = features[0]["geometry"]          # GeoJSON LineString
+    summary    = props.get("summary", {})
+    distance_m = summary.get("distance", 0.0)
+    duration_s = summary.get("duration", 0.0)
+
+    # ORS geometry coordinates are [lon, lat]; extract for step location lookup
+    coords = geometry.get("coordinates", [])
 
     steps: list[RouteStep] = []
-    for leg in route.get("legs", []):
-        for step in leg.get("steps", []):
-            maneuver = step.get("maneuver", {})
-            m_type   = maneuver.get("type", "")
-            m_mod    = maneuver.get("modifier", "")
-            name     = step.get("name", "")
-            badge    = _pick_ref_badge(step.get("ref", ""))
+    for segment in props.get("segments", []):
+        for step in segment.get("steps", []):
+            step_type  = step.get("type", 6)      # default: straight
+            name       = step.get("name", "") or ""
+            icon, verb = _MANEUVER_MAP.get(step_type, ("↑", "Continue"))
 
-            icon, verb = _MANEUVER_MAP.get(
-                (m_type, m_mod),
-                _MANEUVER_MAP.get((m_type, ""), ("↑", m_type.capitalize() or "Continue")),
-            )
-            # Combine badge + name: "[I-44] Oklahoma Turnpike", "[I-44]", or "Main St"
-            road = " ".join(filter(None, [badge, name]))
-            instruction = f"{verb} {road}".strip() if road else verb
+            instruction = f"{verb} {name}".strip() if name else verb
 
-            loc = maneuver.get("location", [0.0, 0.0])  # OSRM: [lon, lat]
+            # way_points[0] is the index into geometry.coordinates for this step
+            wp_idx = step.get("way_points", [0])[0]
+            if wp_idx < len(coords):
+                loc_lon, loc_lat = coords[wp_idx][0], coords[wp_idx][1]
+            else:
+                loc_lat, loc_lon = olat, olon
+
             steps.append(RouteStep(
                 icon        = icon,
                 instruction = instruction,
                 distance_m  = step.get("distance", 0.0),
                 duration_s  = step.get("duration", 0.0),
-                location    = (loc[1], loc[0]),           # store as (lat, lon)
+                location    = (loc_lat, loc_lon),
             ))
 
     return RouteResult(

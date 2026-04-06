@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
-    QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout
+    QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -61,6 +61,8 @@ from data.gps_reader import GPSReader
 from data.obs_file_watcher import ObsFileWatcher, FieldMap
 from ui.station_plot_layer import StationPlotLayer
 from ui.surface_plot_layer import SurfacePlotLayer
+from ui.layer_order_pill import LayerOrderPill, MAPLIBRE_LAYERS
+from ui.debug_pill import DebugPill
 
 log = logging.getLogger(__name__)
 
@@ -232,6 +234,13 @@ class MainWindow(QMainWindow):
             self.restoreState(_s.value("windowState"))
             # keep toolbar button in sync with current vehicle panel visibility
             self.btn_vehicles.setChecked(self.vehicle_panel.isVisible())
+
+        # Layer order pill — floats above the bottom-left status pill
+        self._layer_pill = LayerOrderPill(self._map_container)
+        self._layer_pill.order_changed.connect(self._apply_layer_order)
+        self._layer_pill.order_changed.connect(lambda _: self._layout_overlays())
+        self._layer_pill.size_changed.connect(self._layout_overlays)
+        self._layer_pill.show()
 
         # Extra startup layout passes avoid first-paint clipping in floating pills.
         QTimer.singleShot(0, self._layout_overlays)
@@ -1052,12 +1061,14 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_route_calculated(self, result):
+        self._set_layer_active("route", True)
         import json as _json
         geojson_str = _json.dumps(result.geometry)
         dlat, dlon  = result.dest_latlon
         self.map_widget.set_route(geojson_str, dlon, dlat)
 
     def _on_route_cleared(self):
+        self._set_layer_active("route", False)
         self.map_widget.clear_route()
         self.map_widget.set_route_pick_mode(False)
 
@@ -1227,6 +1238,8 @@ class MainWindow(QMainWindow):
         _s = QSettings("NSSL", "STORM")
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
+        from ui.layer_order_pill import save_layer_order
+        save_layer_order(self._layer_pill.current_order())
 
         # Stop all background workers before closing so threads don't outlive
         # the window and fire signals on deleted objects.
@@ -1249,6 +1262,7 @@ class MainWindow(QMainWindow):
             self._obs_watcher.stop()
         if hasattr(self, "_mqtt_client"):
             self._mqtt_client.disconnect()
+        self._cleanup_debug_panel()
 
         super().closeEvent(event)
         QApplication.quit()
@@ -1360,15 +1374,37 @@ class MainWindow(QMainWindow):
             ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, arc_bar_h)
             ac.raise_()
 
+        # debug pill — bottom-center, sits above archive controls (or above bottom margin)
+        if hasattr(self, "_debug_pill"):
+            dp = self._debug_pill
+            dp_w = dp.width()
+            dp_h = dp.height()
+            dp_x = max(MARGIN, (r.width() - dp_w) // 2)
+            dp_bottom = r.height() - arc_bar_h - MARGIN if arc_bar_h else r.height() - MARGIN
+            dp.move(dp_x, dp_bottom - dp_h)
+            dp.raise_()
+
         # left status pill — bottom-left corner (never offset by centered archive bar)
         if hasattr(self, "_status_left"):
             self._status_left.adjustSize()
             sl = self._status_left.size()
+            _status_y = r.height() - sl.height() - MARGIN
             self._status_left.setGeometry(
-                MARGIN, r.height() - sl.height() - MARGIN,
+                MARGIN, _status_y,
                 sl.width(), sl.height()
             )
             self._status_left.raise_()
+
+        # layer order pill — sits directly above the status pill
+        if hasattr(self, "_layer_pill"):
+            lp_w = self._layer_pill.width()
+            lp_h = self._layer_pill.height()
+            # anchor bottom of pill to just above the status pill
+            lp_bottom = _status_y - 4
+            lp_y = lp_bottom - lp_h
+            self._layer_pill.move(MARGIN, lp_y)
+            self._layer_pill._relayout()
+            self._layer_pill.raise_()
 
         # re-center button — bottom-right, above MapLibre zoom controls (~70px tall)
         if hasattr(self, "btn_recenter"):
@@ -1861,6 +1897,7 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_satellite_toggled(self, checked: bool):
+        self._set_layer_active("satellite", checked)
         if self._archive:
             # Archive mode: simply show/hide the overlay the archive fetcher is updating.
             has_data = getattr(self, "_archive_sat_has_data", False)
@@ -2016,6 +2053,7 @@ class MainWindow(QMainWindow):
             self._layout_overlays()
 
     def _on_radar_toggled(self, enabled: bool):
+        self._set_layer_active("radar", enabled)
         if enabled:
             self._radar_fetcher.start()
             self._radar_fetcher.fetch_now()
@@ -2079,6 +2117,7 @@ class MainWindow(QMainWindow):
         self._hazard_fetcher.fetch_now()
 
     def _on_spc_mds_toggled(self, enabled: bool):
+        self._set_layer_active("spc_mds", enabled)
         self._hazard_fetcher.set_spc_mds_enabled(enabled)
         self.map_widget.set_spc_mds_visible(enabled)
         if enabled:
@@ -2315,6 +2354,10 @@ class MainWindow(QMainWindow):
             self.outlook_panel.show_text(title, text)
 
     def _on_spc_mode_changed(self, mode: str):
+        self._set_layer_active("spc_outlook", mode == "outlook")
+        self._set_layer_active("spc_tor",     mode == "tor")
+        self._set_layer_active("spc_wind",    mode == "wind")
+        self._set_layer_active("spc_hail",    mode == "hail")
         outlook_on = mode == "outlook"
         for key in ("MRGL", "SLGHT", "ENH", "MDT", "HIGH"):
             self._hazard_fetcher.set_spc_category_enabled(key, outlook_on)
@@ -2350,6 +2393,7 @@ class MainWindow(QMainWindow):
         self._update_hazard_legend()
 
     def _on_spc_watches_toggled(self, enabled: bool):
+        self._set_layer_active("spc_watches", enabled)
         self._hazard_fetcher.set_spc_watches_enabled(enabled)
         self.map_widget.set_spc_watches_visible(enabled)
         if enabled:
@@ -2362,6 +2406,7 @@ class MainWindow(QMainWindow):
         self._update_hazard_legend()
 
     def _on_nws_warnings_toggled(self, enabled: bool):
+        self._set_layer_active("nws_warnings", enabled)
         self._hazard_fetcher.set_nws_enabled(enabled)
         self.map_widget.set_nws_warnings_visible(enabled)
         if enabled:
@@ -3799,38 +3844,50 @@ class MainWindow(QMainWindow):
             self._layout_overlays()
             self._clock_layout_synced = True
 
-    # ── Debug Panel ───────────────────────────────────────────────────────────
+    # ── Layer Order ────────────────────────────────────────────────────────────
+
+    def _apply_layer_order(self, order: list[str]) -> None:
+        """Reorder MapLibre layers to match the confirmed layer stack (bottom → top)."""
+        # Walk bottom→top.  For each group, move every layer in the group
+        # before the first layer of the *next* group that has real MapLibre IDs.
+        def _first_ml_id(key: str) -> str | None:
+            for lid in MAPLIBRE_LAYERS.get(key, []):
+                return lid
+            return None
+
+        for i, key in enumerate(order):
+            ml_ids = MAPLIBRE_LAYERS.get(key, [])
+            if not ml_ids:
+                continue
+            # Find the before-anchor: first MapLibre ID of the next group above
+            before = None
+            for j in range(i + 1, len(order)):
+                before = _first_ml_id(order[j])
+                if before:
+                    break
+            for lid in ml_ids:
+                self.map_widget.move_layer_before(lid, before)
+
+    def _set_layer_active(self, key: str, active: bool) -> None:
+        """Notify the layer pill that a layer's visibility changed."""
+        if hasattr(self, "_layer_pill"):
+            self._layer_pill.set_layer_active(key, active)
+
+    # ── Debug Pill ────────────────────────────────────────────────────────────
 
     def _init_debug_panel(self):
-        # collapsible dock showing live fetch/cache/loop state
-        self._debug_dock = QDockWidget("DEBUG", self)
-        self._debug_dock.setObjectName("debugDock")
-        self._debug_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self._debug_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        """Create the floating debug pill and wire up the status refresh timer."""
+        self._debug_pill = DebugPill(self._map_container)
+        self._debug_pill.size_changed.connect(self._layout_overlays)
+        self._debug_pill.show()
+        self._layout_overlays()
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
-
-        self._debug_text = QLabel("initializing...")
-        self._debug_text.setFont(QFont("Courier New", 9))
-        self._debug_text.setStyleSheet(
-            "color: #39D98A; background: #050508; padding: 6px; border-radius: 4px;"
-        )
-        self._debug_text.setWordWrap(True)
-        layout.addWidget(self._debug_text)
-
-        self._debug_dock.setWidget(container)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._debug_dock)
-
-        # refresh debug text every second
         self._debug_timer = QTimer()
         self._debug_timer.timeout.connect(self._refresh_debug_panel)
         self._debug_timer.start(1000)
 
     def _refresh_debug_panel(self):
-        if not hasattr(self, "_debug_text"):
+        if not hasattr(self, "_debug_pill"):
             return
 
         lines = ["─── RADAR ───────────────────────────────"]
@@ -3890,13 +3947,17 @@ class MainWindow(QMainWindow):
         if spl:
             lines.append(f"station plot cache: {list(spl._cache.keys())}")
 
-        self._debug_text.setText("\n".join(lines))
+        self._debug_pill.set_status("\n".join(lines))
 
     def _toggle_debug_panel(self):
-        if not hasattr(self, "_debug_dock"):
+        if not hasattr(self, "_debug_pill"):
             self._init_debug_panel()
         else:
-            self._debug_dock.setVisible(not self._debug_dock.isVisible())
+            self._debug_pill.toggle()
+
+    def _cleanup_debug_panel(self):
+        if hasattr(self, "_debug_pill"):
+            self._debug_pill.cleanup()
 
     # ── Error Log Panel ────────────────────────────────────────────────────────
 

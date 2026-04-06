@@ -72,6 +72,9 @@ ACCENT_COLOR = "#00CFFF"
 # Leave blank to disable MQTT replay in archive mode.
 ARCHIVE_MQTT_BASE_URL = ""
 
+# OpenRouteService API key (used by routing_fetcher.py)
+ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0="
+
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 

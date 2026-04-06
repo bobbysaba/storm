@@ -767,6 +767,22 @@ QDialog#annotationDialog QLineEdit:focus {
     border-color: #FF6B35;
 }
 
+/* ── Layer Order Pill ────────────────────────────────── */
+#layerOrderPill {
+    background: transparent;
+}
+
+#layerOrderPanel {
+    background-color: rgba(15, 15, 26, 0.95);
+    border-radius: 10px;
+    border: 1px solid rgba(74, 83, 108, 0.55);
+    min-width: 200px;
+}
+
+#layerOrderPanel QWidget {
+    background: transparent;
+}
+
 /* ── Archive Controls Bar ─────────────────────────────── */
 #archiveControls {
     background-color: rgba(15, 15, 26, 0.88);

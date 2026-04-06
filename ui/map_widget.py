@@ -1682,18 +1682,20 @@ def build_map_html() -> str:
         window._stormAnnotations[id].remove();
         delete window._stormAnnotations[id];
       }}
-      // fork: fullscreen overlay that fills the map viewport
+      // fork: fixed screen overlay — always centered on the map, ignores pan/zoom
       if (typeKey === 'fork') {{
-        // Giant fork marker that scales with map zoom (geographic object).
-        // At the reference zoom the fork is ~600px tall; each zoom level doubles it.
-        var forkRefZoom = map.getZoom();
-        var forkBasePx  = 600;
         var forkEl = document.createElement('div');
-        forkEl.style.cssText = 'display:flex;flex-direction:column;align-items:center;'
-          + 'cursor:pointer;user-select:none;pointer-events:auto;';
+        forkEl.id = 'storm-fork-overlay-' + id;
+        forkEl.style.cssText = (
+          'position:absolute;top:50%;left:50%;'
+          + 'transform:translate(-50%,-50%);'
+          + 'display:flex;flex-direction:column;align-items:center;'
+          + 'pointer-events:auto;cursor:pointer;user-select:none;z-index:50;'
+        );
         forkEl.innerHTML =
           '<svg viewBox="0 0 80 245" xmlns="http://www.w3.org/2000/svg"'
-          + ' style="fill:#C0C0C0;filter:drop-shadow(0 0 20px rgba(192,192,192,0.6));">'
+          + ' style="width:130px;height:400px;fill:#C0C0C0;'
+          + '        filter:drop-shadow(0 0 20px rgba(192,192,192,0.6));">'
           + '  <rect x="4"  y="2" width="11" height="72" rx="5.5"/>'
           + '  <rect x="23" y="2" width="11" height="72" rx="5.5"/>'
           + '  <rect x="43" y="2" width="11" height="72" rx="5.5"/>'
@@ -1701,32 +1703,22 @@ def build_map_html() -> str:
           + '  <path d="M4,56 C4,82 32,100 32,100 L48,100 C48,100 73,82 73,56 Z"/>'
           + '  <rect x="32" y="98" width="16" height="145" rx="7"/>'
           + '</svg>'
-          + '<div style="color:#C0C0C0;font-weight:700;letter-spacing:6px;'
+          + '<div style="color:#C0C0C0;font-size:22px;font-weight:700;letter-spacing:6px;'
           + '  font-family:monospace;text-shadow:0 0 12px rgba(192,192,192,0.8);'
-          + '  white-space:nowrap;">'
+          + '  white-space:nowrap;margin-top:6px;">'
           + (label || 'FORK').toUpperCase() + '</div>';
-        var forkSvg  = forkEl.querySelector('svg');
-        var forkText = forkEl.querySelector('div');
-        function _sizeFork() {{
-          var scale = Math.pow(2, map.getZoom() - forkRefZoom);
-          var h = Math.max(40, forkBasePx * scale);
-          forkSvg.style.width  = Math.round(h * 80 / 245) + 'px';
-          forkSvg.style.height = Math.round(h) + 'px';
-          forkText.style.fontSize = Math.max(8, Math.round(20 * scale)) + 'px';
-        }}
-        _sizeFork();
-        map.on('zoom', _sizeFork);
-        forkEl.title = label;
         forkEl.addEventListener('click', function(e) {{
           e.stopPropagation();
           if (bridge) bridge.on_annotation_click(id);
         }});
-        var forkMarker = new maplibregl.Marker({{element: forkEl, anchor: 'center'}})
-          .setLngLat([lon, lat])
-          .addTo(map);
-        forkMarker._isFork = true;
-        forkMarker._cleanupZoom = function() {{ map.off('zoom', _sizeFork); }};
-        window._stormAnnotations[id] = forkMarker;
+        map.getContainer().appendChild(forkEl);
+        // Store as a plain object (not a Marker) so stormRemoveAnnotation can clean it up
+        window._stormAnnotations[id] = {{
+          _isFork: true,
+          _el: forkEl,
+          remove: function() {{ if (forkEl.parentNode) forkEl.parentNode.removeChild(forkEl); }},
+          _cleanupZoom: function() {{}}
+        }};
         return;
       }}
       const cfg = _ANNO_TYPES[typeKey] || {{symbol:'?', color:'#FF6B35'}};
@@ -3309,3 +3301,18 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(
             f"if(window.stormSetSpcMdsVisible) stormSetSpcMdsVisible({'true' if visible else 'false'});"
         )
+
+    def move_layer_before(self, layer_id: str, before_layer_id: str | None) -> None:
+        """Move a MapLibre layer before another layer (or to the top if before_layer_id is None)."""
+        import json
+        if before_layer_id is None:
+            self.run_js(
+                f"(function(){{ if(map.getLayer({json.dumps(layer_id)})) "
+                f"map.moveLayer({json.dumps(layer_id)}); }})();"
+            )
+        else:
+            self.run_js(
+                f"(function(){{ if(map.getLayer({json.dumps(layer_id)}) && "
+                f"map.getLayer({json.dumps(before_layer_id)})) "
+                f"map.moveLayer({json.dumps(layer_id)}, {json.dumps(before_layer_id)}); }})();"
+            )
