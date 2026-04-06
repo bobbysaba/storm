@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QToolButton,
     QTabWidget, QPlainTextEdit,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
 
 
@@ -143,15 +143,27 @@ class DebugPill(QWidget):
         self._panel.hide()
 
         # ── Logging handler ───────────────────────────────────────────────
+        # Use a signal to marshal log records onto the main thread — calling
+        # Qt widget methods directly from background threads causes segfaults.
         _widget = self._log_view
+
+        class _Bridge(QObject):
+            message = pyqtSignal(str)
+
+        self._log_bridge = _Bridge()
+        self._log_bridge.message.connect(
+            lambda msg: (
+                _widget.appendPlainText(msg),
+                _widget.verticalScrollBar().setValue(_widget.verticalScrollBar().maximum()),
+            )
+        )
+
+        _bridge = self._log_bridge
 
         class _QtLogHandler(logging.Handler):
             def emit(self_, record):
                 try:
-                    msg = self_.format(record)
-                    _widget.appendPlainText(msg)
-                    sb = _widget.verticalScrollBar()
-                    sb.setValue(sb.maximum())
+                    _bridge.message.emit(self_.format(record))
                 except Exception:
                     pass
 

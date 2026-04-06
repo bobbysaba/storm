@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+import config
 from core.annotation import Annotation
 from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
@@ -27,7 +28,7 @@ from network.vehicle_sync import _observation_from_payload
 
 log = logging.getLogger(__name__)
 
-_THREDDS_FILESERVER = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/storm"
+_THREDDS_BASE = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/annotations"
 _TOPICS = ("vehicles", "annotations", "cones", "drawings")
 
 
@@ -35,6 +36,7 @@ def _ssl_ctx() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    ctx.load_cert_chain(certfile=config.MQTT_CERT_FILE, keyfile=config.MQTT_KEY_FILE)
     return ctx
 
 
@@ -114,7 +116,7 @@ class ArchiveMQTTReader(QObject):
     error(str)
     """
 
-    vehicle_position    = pyqtSignal(str, float, float, float, float)
+    vehicle_position    = pyqtSignal(object)  # Observation
     vehicles_cleared    = pyqtSignal()
     annotation_received = pyqtSignal(object)
     annotation_deleted  = pyqtSignal(str, str)
@@ -123,18 +125,24 @@ class ArchiveMQTTReader(QObject):
     drawing_received    = pyqtSignal(object)
     drawing_deleted     = pyqtSignal(str)
     error               = pyqtSignal(str)
+    _load_complete      = pyqtSignal()   # internal — fires on bg thread, triggers main-thread replay
 
     def __init__(self, session_date: datetime, parent=None):
         super().__init__(parent)
         self._date_str = session_date.strftime("%Y%m%d")
         self._data: dict[str, list[tuple[datetime, dict]]] = {t: [] for t in _TOPICS}
         self._loaded = False
+        self._pending_time: Optional[datetime] = None
         self._last_emit_time: Optional[datetime] = None
         # Track which annotation/cone/drawing ids have been emitted so we can
         # detect backward jumps and re-emit from scratch.
         self._emitted_ids: dict[str, set[str]] = {
             "annotations": set(), "cones": set(), "drawings": set()
         }
+        # _load_complete is queued automatically by Qt (bg thread → main thread)
+        # so on_time_changed is only ever called after data is fully loaded
+        # and always on the main thread.
+        self._load_complete.connect(self._on_load_complete)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -144,11 +152,19 @@ class ArchiveMQTTReader(QObject):
 
     def on_time_changed(self, archive_time: datetime) -> None:
         if not self._loaded:
+            self._pending_time = archive_time
             return
 
-        # Backward jump — clear all state and re-emit from scratch.
+        # Backward jump — remove anything placed after the new time, then re-emit from scratch.
         if self._last_emit_time is not None and archive_time < self._last_emit_time:
             self.vehicles_cleared.emit()
+            # Explicitly delete annotations/cones/drawings that are now in the future.
+            for ann_id in list(self._emitted_ids["annotations"]):
+                self.annotation_deleted.emit(ann_id, "")
+            for cone_id in list(self._emitted_ids["cones"]):
+                self.cone_deleted.emit(cone_id)
+            for drawing_id in list(self._emitted_ids["drawings"]):
+                self.drawing_deleted.emit(drawing_id)
             self._emitted_ids = {"annotations": set(), "cones": set(), "drawings": set()}
 
         self._last_emit_time = archive_time
@@ -174,12 +190,19 @@ class ArchiveMQTTReader(QObject):
                 continue
         return result
 
+    def _on_load_complete(self) -> None:
+        """Called on the main thread once background fetch finishes."""
+        self._loaded = True
+        if self._pending_time is not None:
+            self.on_time_changed(self._pending_time)
+            self._pending_time = None
+
     # ── Fetching ──────────────────────────────────────────────────────────────
 
     def _fetch_all(self) -> None:
         errors = []
         for topic in _TOPICS:
-            url = f"{_THREDDS_FILESERVER}/storm.{topic}.{self._date_str}"
+            url = f"{_THREDDS_BASE}/storm.{topic}.{self._date_str}"
             try:
                 text = _fetch_text(url)
                 if text:
@@ -194,9 +217,10 @@ class ArchiveMQTTReader(QObject):
                 log.error("ArchiveMQTTReader: fetch failed for %s: %s", topic, exc)
                 errors.append(f"{topic}: {exc}")
 
-        self._loaded = True
+        self._loaded = False  # set True on main thread via _load_complete signal
         if errors:
             self.error.emit(f"Archive MQTT load errors: {'; '.join(errors)}")
+        self._load_complete.emit()
 
     # ── Emission helpers ──────────────────────────────────────────────────────
 
@@ -212,11 +236,7 @@ class ArchiveMQTTReader(QObject):
         for obj in latest.values():
             try:
                 obs = _observation_from_payload(obj)
-                self.vehicle_position.emit(
-                    obs.vehicle_id, obs.lat, obs.lon,
-                    obs.wind_speed_ms or 0.0,
-                    obs.wind_dir_deg or 0.0,
-                )
+                self.vehicle_position.emit(obs)
             except Exception as exc:
                 log.debug("ArchiveMQTTReader: vehicle parse error: %s", exc)
 

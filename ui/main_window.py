@@ -302,6 +302,12 @@ class MainWindow(QMainWindow):
         self._archive_controls.show()
 
         # MQTT reader — vehicles, annotations, cones, drawings.
+        # Initialize annotation/cone/drawing dicts (normally set in _init_annotations
+        # and _init_storm_cone, which are skipped in archive mode).
+        self._annotations: dict = {}
+        self._drawings: dict = {}
+        self._storm_cones: dict = {}
+
         self._archive_mqtt = ArchiveMQTTReader(
             session_date=self._archive_time,
             parent=self,
@@ -619,22 +625,9 @@ class MainWindow(QMainWindow):
         if self.btn_satellite.isChecked():
             self.map_widget.set_satellite_visible(True)
 
-    def _on_archive_vehicle_position(
-        self, vid: str, lat: float, lon: float, speed: float, heading: float
-    ) -> None:
+    def _on_archive_vehicle_position(self, obs) -> None:
         """Update a vehicle marker from the MQTT archive."""
-        from core.vehicle import Vehicle
-        v = self._vehicles.get(vid)
-        if v is None:
-            v = Vehicle(vehicle_id=vid, lat=lat, lon=lon)
-            self._vehicles[vid] = v
-        v.lat = lat
-        v.lon = lon
-        self.map_widget.update_vehicle(
-            vid, lat, lon, speed, heading,
-            getattr(v, "icon", "car"),
-        )
-        self.update_vehicle_count(len(self._vehicles))
+        self.update_vehicle_obs(obs)
 
     def _on_archive_vehicles_cleared(self) -> None:
         """Remove all vehicle markers when time jumps backward."""
@@ -3460,7 +3453,12 @@ class MainWindow(QMainWindow):
         self._update_recenter_btn_visibility()
 
     def _obs_age_minutes(self, obs: Observation) -> float:
-        age = datetime.now(timezone.utc) - obs.timestamp
+        ref = (
+            self._time_ctrl.current_time
+            if self._archive and hasattr(self, "_time_ctrl")
+            else datetime.now(timezone.utc)
+        )
+        age = ref - obs.timestamp
         return max(0.0, age.total_seconds() / 60.0)
 
     def _obs_age_color(self, obs: Observation) -> str:
