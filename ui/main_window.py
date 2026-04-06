@@ -2930,6 +2930,17 @@ class MainWindow(QMainWindow):
             self.annotation_tools.deactivate_tool()
             self._clear_placement_prompt()
             self._place_storm_cone(cone)
+        elif self._active_annotation_type == "fork":
+            # remove any existing fork annotations before placing new one
+            existing_forks = [aid for aid, a in self._annotations.items() if a.type_key == "fork"]
+            for fid in existing_forks:
+                self._delete_annotation(fid)
+            annotation = Annotation.new(type_key="fork", lat=lat, lon=lon)
+            self._active_annotation_type = ""
+            self.map_widget.set_annotation_mode(False)
+            self.annotation_tools.deactivate_tool()
+            self._clear_placement_prompt()
+            self._place_annotation(annotation)
         elif self._active_annotation_type:
             dlg = AnnotationPlaceDialog(self._active_annotation_type, lat, lon, viewer_mode=self._viewer, parent=self)
             if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:

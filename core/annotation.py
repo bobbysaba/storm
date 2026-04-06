@@ -11,6 +11,7 @@ ANNOTATION_TYPES = [
     {"key": "flooded", "label": "Flooded Road", "symbol": "~", "color": "#4A9EFF"},
     {"key": "downed_lines", "label": "Downed Power Lines", "symbol": "\u26A1", "color": "#FFD166"},
     {"key": "debris", "label": "Road Debris", "symbol": "!", "color": "#FF6B35"},
+    {"key": "fork", "label": "Fork", "symbol": "\U0001F374", "color": "#C0C0C0"},
 ]
 
 # quick lookup by key

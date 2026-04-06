@@ -7,7 +7,7 @@ from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer, Q
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QPainterPath, QIcon
 
 from config import ACCENT_COLOR
-from core.annotation import ANNOTATION_TYPES
+from core.annotation import ANNOTATION_TYPES, ANNOTATION_TYPE_MAP
 from core.drawing import FRONT_TYPES, CUSTOM_TYPES
 
 
@@ -222,6 +222,8 @@ class AnnotationTools(QWidget):
         row1_layout.setSpacing(4)
 
         for type_def in ANNOTATION_TYPES:
+            if type_def["key"] == "fork":
+                continue  # fork is placed separately after storm_motion
             btn = AnnotationButton(
                 type_key=type_def["key"],
                 symbol=type_def["symbol"],
@@ -246,6 +248,22 @@ class AnnotationTools(QWidget):
         btn_storm.clicked.connect(lambda checked, b=btn_storm: self._on_button_clicked(b))
         self._buttons.append(btn_storm)
         row1_layout.addWidget(btn_storm)
+
+        sep_fork = QFrame()
+        sep_fork.setFrameShape(QFrame.Shape.VLine)
+        sep_fork.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        row1_layout.addWidget(sep_fork)
+
+        fork_def = ANNOTATION_TYPE_MAP["fork"]
+        btn_fork = AnnotationButton(
+            type_key="fork",
+            symbol=fork_def["symbol"],
+            label=fork_def["label"],
+            color=fork_def["color"],
+        )
+        btn_fork.clicked.connect(lambda checked, b=btn_fork: self._on_button_clicked(b))
+        self._buttons.append(btn_fork)
+        row1_layout.addWidget(btn_fork)
 
         drawer_layout.addWidget(row1)
 

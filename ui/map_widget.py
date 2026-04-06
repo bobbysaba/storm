@@ -1682,6 +1682,53 @@ def build_map_html() -> str:
         window._stormAnnotations[id].remove();
         delete window._stormAnnotations[id];
       }}
+      // fork: fullscreen overlay that fills the map viewport
+      if (typeKey === 'fork') {{
+        // Giant fork marker that scales with map zoom (geographic object).
+        // At the reference zoom the fork is ~600px tall; each zoom level doubles it.
+        var forkRefZoom = map.getZoom();
+        var forkBasePx  = 600;
+        var forkEl = document.createElement('div');
+        forkEl.style.cssText = 'display:flex;flex-direction:column;align-items:center;'
+          + 'cursor:pointer;user-select:none;pointer-events:auto;';
+        forkEl.innerHTML =
+          '<svg viewBox="0 0 80 245" xmlns="http://www.w3.org/2000/svg"'
+          + ' style="fill:#C0C0C0;filter:drop-shadow(0 0 20px rgba(192,192,192,0.6));">'
+          + '  <rect x="4"  y="2" width="11" height="72" rx="5.5"/>'
+          + '  <rect x="23" y="2" width="11" height="72" rx="5.5"/>'
+          + '  <rect x="43" y="2" width="11" height="72" rx="5.5"/>'
+          + '  <rect x="62" y="2" width="11" height="72" rx="5.5"/>'
+          + '  <path d="M4,56 C4,82 32,100 32,100 L48,100 C48,100 73,82 73,56 Z"/>'
+          + '  <rect x="32" y="98" width="16" height="145" rx="7"/>'
+          + '</svg>'
+          + '<div style="color:#C0C0C0;font-weight:700;letter-spacing:6px;'
+          + '  font-family:monospace;text-shadow:0 0 12px rgba(192,192,192,0.8);'
+          + '  white-space:nowrap;">'
+          + (label || 'FORK').toUpperCase() + '</div>';
+        var forkSvg  = forkEl.querySelector('svg');
+        var forkText = forkEl.querySelector('div');
+        function _sizeFork() {{
+          var scale = Math.pow(2, map.getZoom() - forkRefZoom);
+          var h = Math.max(40, forkBasePx * scale);
+          forkSvg.style.width  = Math.round(h * 80 / 245) + 'px';
+          forkSvg.style.height = Math.round(h) + 'px';
+          forkText.style.fontSize = Math.max(8, Math.round(20 * scale)) + 'px';
+        }}
+        _sizeFork();
+        map.on('zoom', _sizeFork);
+        forkEl.title = label;
+        forkEl.addEventListener('click', function(e) {{
+          e.stopPropagation();
+          if (bridge) bridge.on_annotation_click(id);
+        }});
+        var forkMarker = new maplibregl.Marker({{element: forkEl, anchor: 'center'}})
+          .setLngLat([lon, lat])
+          .addTo(map);
+        forkMarker._isFork = true;
+        forkMarker._cleanupZoom = function() {{ map.off('zoom', _sizeFork); }};
+        window._stormAnnotations[id] = forkMarker;
+        return;
+      }}
       const cfg = _ANNO_TYPES[typeKey] || {{symbol:'?', color:'#FF6B35'}};
       const el = document.createElement('div');
       if (cfg.supercell) {{
@@ -1724,8 +1771,10 @@ def build_map_html() -> str:
     }};
 
     window.stormRemoveAnnotation = function(id) {{
-      if (window._stormAnnotations[id]) {{
-        window._stormAnnotations[id].remove();
+      var m = window._stormAnnotations[id];
+      if (m) {{
+        if (m._cleanupZoom) m._cleanupZoom();
+        m.remove();
         delete window._stormAnnotations[id];
       }}
     }};
