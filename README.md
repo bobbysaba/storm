@@ -13,12 +13,12 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
-- **Surface obs (mesonet)** — live surface observation station models from OK Mesonet, KS Mesonet, and West Texas Mesonet; toggled independently per network; polled every 5 minutes
+- **Surface obs (mesonet)** — live surface observation station models from OK Mesonet and West Texas Mesonet; toggled independently per network; polled every 5 minutes
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters, kinematics table, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
 - **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — selected at the launch dialog with passphrase authentication
 - **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
-- **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom, and cursor readouts with 10-second grid snapping
+- **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
 ---
 
@@ -187,7 +187,7 @@ storm/
 │   ├── obs_sounding_fetcher.py  # Observed radiosonde soundings via IEM RAOB
 │   ├── clamps_sounding_fetcher.py  # NSSL CLAMPS DL truck soundings via THREDDS
 │   ├── sounding_stations.py # Radiosonde station metadata (lat/lon lookup)
-│   ├── surface_fetcher.py   # OK Mesonet / KS Mesonet / WTM surface obs (5 min poll)
+│   ├── surface_fetcher.py   # OK Mesonet / WTM surface obs (5 min poll)
 │   ├── routing_fetcher.py   # OSRM turn-by-turn routing + Nominatim geocoding
 │   ├── update_checker.py    # Git-based update check at launch
 │   ├── obs_file_watcher.py  # Watches FOFS instrument logger file (Track A)
@@ -210,10 +210,12 @@ storm/
 │   ├── satellite_controls.py # Satellite mode/playback drawer
 │   ├── hazard_controls.py   # SPC/NWS hazard toggle drawer
 │   ├── sounding_controls.py # Sounding source selector (HRRR / OBS / NSSL) drawer
-│   ├── surface_controls.py  # Mesonet surface obs toggle drawer (OK / WTM / KS)
+│   ├── surface_controls.py  # Mesonet surface obs toggle drawer (OK / WTM)
 │   ├── surface_plot_layer.py # MetPy station model circles for surface obs
 │   ├── routing_controls.py  # Turn-by-turn routing input / directions drawer
 │   ├── deploy_locs_controls.py # Deployment location filter drawer (RANK/RQI slider)
+│   ├── layer_order_pill.py  # Floating pill for reordering map layer draw order
+│   ├── debug_pill.py        # Debug information display pill
 │   ├── outlook_panel.py     # Right-side sliding panel for SPC/NWS discussion text
 │   ├── station_plot_layer.py # MetPy station plot PNG markers at vehicle positions
 │   ├── annotation_tools.py  # Annotation type selector drawer
@@ -254,7 +256,7 @@ storm/
 - **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`, `storm/drawings/{id}`.
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
 - **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback.
-- **Surface obs** — `SurfaceFetcher` polls OK Mesonet, KS Mesonet, and West Texas Mesonet (WTM) every 5 minutes. Station model PNGs are rendered via MetPy/matplotlib and displayed as map markers.
+- **Surface obs** — `SurfaceFetcher` polls OK Mesonet and West Texas Mesonet (WTM) every 5 minutes. Station model PNGs are rendered via MetPy/matplotlib and displayed as map markers.
 - **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via NSSL THREDDS (`ClampsSoundingFetcher`).
 - **Routing** — `RoutingFetcher` geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.
 

@@ -133,7 +133,7 @@ A collapsible section lets you pre-select which data layers to enable automatica
 
 - **SPC / NWS / RADAR** — multi-select toggle buttons to auto-enable those overlays
 - **Satellite** — exclusive selector: OFF | CONUS | AUTO-MESO
-- **Surface obs** — multi-select: OK MESONET | WTM | KS MESONET
+- **Surface obs** — multi-select: OK MESONET | WTM
 
 #### Update Status
 
@@ -445,9 +445,8 @@ Displays live surface observation station models from up to three mesonet networ
 |--------|---------|----------|
 | **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
 | **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
-| **KS MESONET** | Kansas Mesonet (K-State) | ~50 stations across Kansas |
 
-Any combination can be active at once. Each network polls independently every 5 minutes.
+Either or both can be active at once. Each network polls independently every 5 minutes.
 
 #### Station Model Display
 
@@ -757,20 +756,20 @@ Displays interactive time-series plots of meteorological observations for the se
 │  [Temperature / Dewpoint subplot]                               │
 │  Red line: Temperature (°F)                                      │
 │  Green line: Dewpoint (°F)                                       │
-│  Colored readouts below axis                                    │
+│  ━ T --°F    ━ Td --°F          ← inline legend / cursor readout │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  [Wind Speed / Direction subplot]                               │
 │  Cyan line: Wind speed (kt) — left y-axis                       │
 │  Yellow scatter: Wind direction (deg) — right y-axis            │
-│  Colored readouts below axis                                    │
+│  ━ Speed -- kt    ● Dir --°     ← inline legend / cursor readout │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  [Pressure subplot]                                             │
 │  Purple line: Pressure (mb)                                     │
-│  Colored readout below axis                                     │
+│  ━ Pressure -- mb               ← inline legend / cursor readout │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -798,24 +797,22 @@ Observations are snapped to a 10-second time grid. Missing data becomes NaN, cre
 
 #### Interactive Features
 
-**Cursor Readout**
-Hover over any subplot to see a live readout below the plot showing:
-- Temperature (red)
-- Dewpoint (green)
-- Wind speed (cyan)
-- Wind direction (yellow)
-- Pressure (purple)
+**Inline Legend / Cursor Readout**
+Each subplot has an inline legend rendered directly below its axis (similar to uPlot's built-in legend). At rest, the legend shows series names with `--` placeholder values. Hover over any subplot to update all three legends with the timestamp and current values at that point:
+- Temperature and dewpoint (below panel 1)
+- Wind speed and direction (below panel 2)
+- Pressure (below panel 3)
 
-The cursor snaps to the nearest 10-second grid point and only displays values where actual observations exist (no readouts in data gaps).
+The cursor snaps to the nearest 10-second grid point and only displays values where actual observations exist (no readouts in data gaps). A vertical crosshair line appears across all three subplots at the snapped time.
 
 **Scroll Wheel Zoom**
 Scroll the mouse wheel while hovering over any subplot to zoom in/out on the x-axis, centered on the cursor position. Zoom applies to all three subplots simultaneously (shared x-axis).
 
 **Click-Drag Selection Zoom**
-Click and drag horizontally across any subplot to select a time range. Release to zoom into that range. The selection must span at least 1% of the current x-axis range to trigger zoom. Zoom applies to all three subplots.
+Click and drag horizontally across any subplot to select a time range. A translucent highlight rectangle appears across all three panels during the drag. Release to zoom into that range. The selection must span at least 1% of the current x-axis range to trigger zoom. Zoom applies to all three subplots.
 
-**Right-Click Reset**
-Right-click any subplot to reset the zoom to the full data extent.
+**Double-Click Reset**
+Double-click any subplot to reset the zoom to the full data extent.
 
 #### Live vs. Archive Mode
 
@@ -829,11 +826,11 @@ The dialog shows all observations from the archive MQTT log up to the current ar
 
 | Parameter | Color | Hex |
 |-----------|-------|-----|
-| Temperature | Red | #E74C3C |
-| Dewpoint | Green | #2ECC71 |
-| Wind Speed | Cyan | #00CFFF |
-| Wind Direction | Yellow | #F39C12 |
-| Pressure | Purple | #9B59B6 |
+| Temperature | Red | #FF6B6B |
+| Dewpoint | Green | #3DDC84 |
+| Wind Speed | Cyan | #4FC3F7 |
+| Wind Direction | Gold | #FFD700 |
+| Pressure | Purple | #B39DDB |
 
 #### Unit Conversions
 
@@ -1183,7 +1180,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
 | NSSL CLAMPS DL Truck | On demand | Fetched from NSSL THREDDS on click |
-| OK / KS / WTM Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| OK / WTM Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
 | Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
 | GPS (Track B) | Real-time / continuous | NMEA sentences |
@@ -1414,7 +1411,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | HRRR Point Soundings | ✅ Enabled | n/a |
 | Observed Radiosonde Soundings | ✅ Enabled | n/a |
 | NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
-| Surface Obs (OK / KS / WTM Mesonet) | ✅ Enabled (when toggled on) | n/a |
+| Surface Obs (OK / WTM Mesonet) | ✅ Enabled (when toggled on) | n/a |
 | Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |
 | Drawings (fronts, polylines, polygons) | ✅ Enabled | `--disable-annotations` |

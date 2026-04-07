@@ -508,75 +508,90 @@ class MainWindow(QMainWindow):
 
     def _start_archive_radar(self, station: str) -> None:
         """Instantiate and wire an ArchiveRadarFetcher for the given station."""
-        from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
-
-        if self._archive_radar is not None:
-            # Disconnect all signals from the old fetcher so it stops affecting
-            # the UI and doesn't receive further time ticks.
-            for sig in (
-                self._archive_radar.scan_ready,
-                self._archive_radar.loading_changed,
-                self._archive_radar.error,
-            ):
-                try:
-                    sig.disconnect()
-                except Exception:
-                    pass
-            try:
-                self._time_ctrl.time_changed.disconnect(self._archive_radar.on_time_changed)
-            except Exception:
-                pass
-
-        self._archive_radar = ArchiveRadarFetcher(
-            station=station,
-            session_date=self._archive_time,
-            parent=self,
-        )
-        self._archive_radar.scan_ready.connect(self._on_archive_radar_scan)
-        self._archive_radar.loading_changed.connect(
-            lambda loading: (
-                self.status_msg_label.setText(f"Radar: loading {station}…" if loading else ""),
-                self._archive_controls.set_radar_status(f"Radar: loading {station}…")
-                if loading and hasattr(self, "_archive_controls") else None
-            )
-        )
-        self._archive_radar.error.connect(self._on_archive_radar_error)
-        self._time_ctrl.time_changed.connect(self._archive_radar.on_time_changed)
-
-        # Hook into the loading dialog if it is still open.
-        # We wait for the first actual scan (scan_ready), not just the index,
-        # so the user enters the UI knowing data is already on screen.
-        # index_loaded just updates the status text to show progress.
-        # A 45-second fallback timer marks the task done if scan_ready never
-        # fires (e.g. no scan exists before the chosen archive start time).
+        # TEMPORARILY DISABLED FOR DEBUGGING
+        log.info("Archive radar fetch disabled for debugging (station=%s)", station)
+        
+        # Mark radar task as done in loading dialog if present
         loading = getattr(self, "_archive_loading", None)
         if loading is not None and loading.isVisible():
-            self._archive_radar.index_loaded.connect(
-                lambda _: loading.set_status("Fetching first radar scan…")
-            )
-            self._archive_radar.scan_ready.connect(
-                lambda _: loading.set_task_done("Radar index")
-            )
-            self._archive_radar.error.connect(
-                lambda _: loading.set_task_error("Radar index")
-            )
-            # Fallback: if the first scan hasn't arrived in 45 s, unblock anyway.
-            _radar_timeout = QTimer(self)
-            _radar_timeout.setSingleShot(True)
-            _radar_timeout.setInterval(45_000)
-            _radar_timeout.timeout.connect(
-                lambda: loading.set_task_done("Radar index")
-                if loading.isVisible() else None
-            )
-            _radar_timeout.start()
-
-        # Update the station button label in the radar controls.
+            loading.set_task_done("Radar index")
+        
+        # Update the station button label in the radar controls
         if hasattr(self, "radar_controls"):
             self.radar_controls.set_selected_site(station, emit=False)
-
-        self._archive_radar.load_index()
-        # Trigger first scan fetch at current archive time.
-        self._archive_radar.on_time_changed(self._time_ctrl.current_time)
+        
+        return
+        
+        # ORIGINAL CODE COMMENTED OUT:
+        # from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
+        #
+        # if self._archive_radar is not None:
+        #     # Disconnect all signals from the old fetcher so it stops affecting
+        #     # the UI and doesn't receive further time ticks.
+        #     for sig in (
+        #         self._archive_radar.scan_ready,
+        #         self._archive_radar.loading_changed,
+        #         self._archive_radar.error,
+        #     ):
+        #         try:
+        #             sig.disconnect()
+        #         except Exception:
+        #             pass
+        #     try:
+        #         self._time_ctrl.time_changed.disconnect(self._archive_radar.on_time_changed)
+        #     except Exception:
+        #         pass
+        #
+        # self._archive_radar = ArchiveRadarFetcher(
+        #     station=station,
+        #     session_date=self._archive_time,
+        #     parent=self,
+        # )
+        # self._archive_radar.scan_ready.connect(self._on_archive_radar_scan)
+        # self._archive_radar.loading_changed.connect(
+        #     lambda loading: (
+        #         self.status_msg_label.setText(f"Radar: loading {station}…" if loading else ""),
+        #         self._archive_controls.set_radar_status(f"Radar: loading {station}…")
+        #         if loading and hasattr(self, "_archive_controls") else None
+        #     )
+        # )
+        # self._archive_radar.error.connect(self._on_archive_radar_error)
+        # self._time_ctrl.time_changed.connect(self._archive_radar.on_time_changed)
+        #
+        # # Hook into the loading dialog if it is still open.
+        # # We wait for the first actual scan (scan_ready), not just the index,
+        # # so the user enters the UI knowing data is already on screen.
+        # # index_loaded just updates the status text to show progress.
+        # # A 45-second fallback timer marks the task done if scan_ready never
+        # # fires (e.g. no scan exists before the chosen archive start time).
+        # loading = getattr(self, "_archive_loading", None)
+        # if loading is not None and loading.isVisible():
+        #     self._archive_radar.index_loaded.connect(
+        #         lambda _: loading.set_status("Fetching first radar scan…")
+        #     )
+        #     self._archive_radar.scan_ready.connect(
+        #         lambda _: loading.set_task_done("Radar index")
+        #     )
+        #     self._archive_radar.error.connect(
+        #         lambda _: loading.set_task_error("Radar index")
+        #     )
+        #     # Fallback: if the first scan hasn't arrived in 45 s, unblock anyway.
+        #     _radar_timeout = QTimer(self)
+        #     _radar_timeout.setSingleShot(True)
+        #     _radar_timeout.setInterval(45_000)
+        #     _radar_timeout.timeout.connect(
+        #         lambda: loading.set_task_done("Radar index")
+        #         if loading.isVisible() else None
+        #     )
+        #     _radar_timeout.start()
+        #
+        # # Update the station button label in the radar controls.
+        # if hasattr(self, "radar_controls"):
+        #     self.radar_controls.set_selected_site(station, emit=False)
+        #
+        # self._archive_radar.load_index()
+        # # Trigger first scan fetch at current archive time.
+        # self._archive_radar.on_time_changed(self._time_ctrl.current_time)
 
     # ── Archive signal handlers ───────────────────────────────────────────────
 
@@ -3612,7 +3627,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
             return []
         
-        from network.vehicle_sync import _observation_from_payload
+        from network import vehicle_sync
         
         current_time = self._time_ctrl.current_time
         observations = []
@@ -3629,7 +3644,7 @@ class MainWindow(QMainWindow):
             
             # Convert to Observation
             try:
-                obs = _observation_from_payload(record)
+                obs = vehicle_sync._observation_from_payload(record)
                 # Only include if has met data
                 if (obs.temperature_c is not None or obs.dewpoint_c is not None or 
                     obs.wind_speed_ms is not None or obs.pressure_mb is not None):
