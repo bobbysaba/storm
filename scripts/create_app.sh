@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/create_app.sh — builds STORM.app in the project root.
-# Called by setup_mac.sh, or run manually from the project root:
+# Called by setup.py, or run manually from the project root:
 #   bash scripts/create_app.sh
 #
 # The resulting STORM.app can be double-clicked from Finder or dragged
@@ -72,7 +72,7 @@ for ENV_NAME in storm storm311; do
 done
 
 if [ -z "$PYTHON" ]; then
-    osascript -e 'display alert "STORM — Launch Error" message "The \"storm\" conda environment was not found.\n\nCreate it with:\n  conda env create -f envs/storm_mac.yml" as critical'
+    osascript -e 'display alert "STORM — Launch Error" message "The \"storm\" conda environment was not found.\n\nCreate it with:\n  python setup.py" as critical'
     exit 1
 fi
 

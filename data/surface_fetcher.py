@@ -6,7 +6,7 @@ import json
 import logging
 import ssl
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal

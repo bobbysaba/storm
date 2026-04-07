@@ -24,6 +24,7 @@
    - 6.11 [Station Plots](#611-station-plots)
    - 6.12 [Deployment Locations](#612-deployment-locations)
    - 6.13 [Vehicle Panel](#613-vehicle-panel)
+   - 6.14 [Vehicle Timeseries](#614-vehicle-timeseries)
 7. [Status Bar](#7-status-bar)
 8. [Archive Mode](#8-archive-mode)
 9. [Outlook Text Panel](#9-outlook-text-panel)
@@ -724,6 +725,124 @@ Click a vehicle row to **zoom the map to that vehicle's location**.
 
 Vehicles are sorted by most-recently-updated first.
 
+#### Vehicle Detail Section (lower section)
+
+When a vehicle is selected, the detail section shows:
+
+| Field | Description |
+|-------|-------------|
+| **Temperature** | Current temperature in °F (red text) |
+| **Dewpoint** | Current dewpoint in °F (green text) |
+| **Wind** | Wind speed (kt) and direction (deg) with arrow icon |
+| **Pressure** | Atmospheric pressure in mb (purple text) |
+| **TIMESERIES Button** | Opens the vehicle timeseries dialog (only shown for vehicles with observation history) |
+
+The TIMESERIES button appears only for non-local vehicles that have published meteorological observations. See [Section 6.14](#614-vehicle-timeseries) for full timeseries documentation.
+
+---
+
+### 6.14 Vehicle Timeseries
+
+**Access:** Click the **TIMESERIES** button in the vehicle detail section of the Vehicle Panel.
+
+Displays interactive time-series plots of meteorological observations for the selected vehicle. Works in both live MQTT mode and archive mode.
+
+#### Dialog Layout
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Vehicle Timeseries — {vehicle_id}                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  [Temperature / Dewpoint subplot]                               │
+│  Red line: Temperature (°F)                                      │
+│  Green line: Dewpoint (°F)                                       │
+│  Colored readouts below axis                                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  [Wind Speed / Direction subplot]                               │
+│  Cyan line: Wind speed (kt) — left y-axis                       │
+│  Yellow scatter: Wind direction (deg) — right y-axis            │
+│  Colored readouts below axis                                    │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  [Pressure subplot]                                             │
+│  Purple line: Pressure (mb)                                     │
+│  Colored readout below axis                                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Three Subplots (shared x-axis)
+
+**1. Temperature / Dewpoint**
+- Red line: Temperature (°F)
+- Green line: Dewpoint (°F)
+- Y-axis label: °F
+
+**2. Wind Speed / Direction (dual y-axes)**
+- Cyan line: Wind speed (kt) — left y-axis
+- Yellow scatter points: Wind direction (deg) — right y-axis
+- Left y-axis label: kt
+- Right y-axis label: deg
+
+**3. Pressure**
+- Purple line: Pressure (mb)
+- Y-axis label: mb
+
+#### Data Grid & Gap Handling
+
+Observations are snapped to a 10-second time grid. Missing data becomes NaN, creating visual gaps in the plots without connecting across missing points. This prevents misleading interpolation across data outages.
+
+#### Interactive Features
+
+**Cursor Readout**
+Hover over any subplot to see a live readout below the plot showing:
+- Temperature (red)
+- Dewpoint (green)
+- Wind speed (cyan)
+- Wind direction (yellow)
+- Pressure (purple)
+
+The cursor snaps to the nearest 10-second grid point and only displays values where actual observations exist (no readouts in data gaps).
+
+**Scroll Wheel Zoom**
+Scroll the mouse wheel while hovering over any subplot to zoom in/out on the x-axis, centered on the cursor position. Zoom applies to all three subplots simultaneously (shared x-axis).
+
+**Click-Drag Selection Zoom**
+Click and drag horizontally across any subplot to select a time range. Release to zoom into that range. The selection must span at least 1% of the current x-axis range to trigger zoom. Zoom applies to all three subplots.
+
+**Right-Click Reset**
+Right-click any subplot to reset the zoom to the full data extent.
+
+#### Live vs. Archive Mode
+
+**Live Mode:**
+The dialog shows all observations received via MQTT since the vehicle first appeared in the current session. The plot updates automatically as new observations arrive.
+
+**Archive Mode:**
+The dialog shows all observations from the archive MQTT log up to the current archive time. As you scrub the archive timeline or play forward, the plot updates dynamically to reflect the data available at that moment in the replay.
+
+#### Color Palette
+
+| Parameter | Color | Hex |
+|-----------|-------|-----|
+| Temperature | Red | #E74C3C |
+| Dewpoint | Green | #2ECC71 |
+| Wind Speed | Cyan | #00CFFF |
+| Wind Direction | Yellow | #F39C12 |
+| Pressure | Purple | #9B59B6 |
+
+#### Unit Conversions
+
+Wind speed is converted from m/s (stored in Observation records) to knots using the factor 1.94384.
+
+#### Dialog Behavior
+
+The dialog is reusable — if you close it and click TIMESERIES again for the same vehicle, the same dialog instance is raised and focused rather than creating a duplicate. Each vehicle has its own independent dialog instance.
+
 ---
 
 ## 7. Status Bar
@@ -1316,6 +1435,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | Archive Hazard Products | ✅ Enabled in archive mode | n/a |
 | Archive Vehicle Positions (MQTT log) | ✅ Enabled in archive mode | n/a |
 | Archive Soundings | ✅ On demand in archive mode | n/a |
+| Vehicle Timeseries Plots | ✅ Enabled (for vehicles with obs history) | n/a |
 
 ---
 

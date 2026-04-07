@@ -2,7 +2,9 @@
 # Startup dialog — shown on every launch to confirm vehicle ID and data
 # directory.  Persists settings via QSettings so they survive across sessions.
 
+import base64
 import hashlib
+import hmac
 import os
 import sys
 from pathlib import Path
@@ -510,6 +512,20 @@ class _LogViewerDialog(QDialog):
 
     def _copy(self):
         QApplication.clipboard().setText(self._text.toPlainText())
+
+
+_PBKDF2_ITERATIONS = 600_000
+
+def _verify_pbkdf2(passphrase: str, stored: str) -> bool:
+    """Verify *passphrase* against a ``base64(salt):base64(dk)`` hash."""
+    try:
+        salt_b64, dk_b64 = stored.split(":", 1)
+        salt = base64.b64decode(salt_b64)
+        expected_dk = base64.b64decode(dk_b64)
+    except Exception:
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, _PBKDF2_ITERATIONS)
+    return hmac.compare_digest(dk, expected_dk)
 
 
 class LaunchDialog(QDialog):
@@ -1047,8 +1063,7 @@ class LaunchDialog(QDialog):
     def _on_pull_done(self, success: bool, deps_changed: bool):
         if success and deps_changed:
             import sys as _sys
-            _yml = "storm_windows.yml" if _sys.platform == "win32" else "storm_linux.yml" if _sys.platform.startswith("linux") else "storm_mac.yml"
-            _cmd = f"conda env update -f envs/{_yml} --prune"
+            _cmd = "conda env update -f envs/storm.yml --prune"
             self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
             self._update_btn.setStyleSheet(_UPD_WARNING)
         elif success:
@@ -1083,14 +1098,13 @@ class LaunchDialog(QDialog):
         # Validate passphrase for vehicle, monitor, and archive modes
         if mode not in ("viewer",):
             passphrase = self._passphrase_input.text()
-            entered_hash = hashlib.sha256(passphrase.encode()).hexdigest()
             if mode == "vehicle":
-                expected_hash = _config.VEHICLE_PASSPHRASE_HASH
+                stored = _config.VEHICLE_PASSPHRASE_HASH
             elif mode == "archive":
-                expected_hash = _config.ARCHIVE_PASSPHRASE_HASH
+                stored = _config.ARCHIVE_PASSPHRASE_HASH
             else:
-                expected_hash = _config.MONITOR_PASSPHRASE_HASH
-            if entered_hash != expected_hash:
+                stored = _config.MONITOR_PASSPHRASE_HASH
+            if not _verify_pbkdf2(passphrase, stored):
                 QMessageBox.warning(
                     self,
                     "Incorrect Passphrase",

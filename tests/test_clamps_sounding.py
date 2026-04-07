@@ -9,7 +9,7 @@ import sys
 import os
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from PyQt6.QtWidgets import QApplication
 from core.sounding import SoundingSet

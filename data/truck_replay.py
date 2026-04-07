@@ -74,7 +74,10 @@ def _float_or_none(raw: str | None) -> float | None:
     text = raw.strip()
     if not text:
         return None
-    return float(text)
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def _str_or(row: dict, key: str, default: str) -> str:

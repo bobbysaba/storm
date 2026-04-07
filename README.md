@@ -18,6 +18,7 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
 - **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — selected at the launch dialog with passphrase authentication
 - **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
+- **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom, and cursor readouts with 10-second grid snapping
 
 ---
 
@@ -42,14 +43,13 @@ cd storm
 
 ### 2. Run the setup script
 
-The setup script creates the `storm` conda environment and places a launch shortcut on your Desktop — all in one step. If you already have Miniforge, Miniconda, or Anaconda installed, it will be used automatically and nothing extra will be installed.
+The setup script creates the `storm` conda environment and places a launch shortcut on your Desktop — all in one step. Works on macOS, Linux, and Windows.
 
-**macOS:**
+**Prerequisites:** Python 3.8+ and (optionally) conda. If you don't have conda, the script will offer to install Miniforge for you, or you can install it yourself from [Miniforge](https://github.com/conda-forge/miniforge#download).
+
 ```bash
-bash setup_mac.sh
+python setup.py
 ```
-
-**Windows:** double-click `setup_windows.bat` or run it from a terminal.
 
 > If you prefer to set up manually, see steps 2a–2b below.
 
@@ -58,15 +58,8 @@ bash setup_mac.sh
 
 **2a. Create the conda environment**
 
-macOS:
 ```bash
-conda env create -f envs/storm_mac.yml
-conda activate storm
-```
-
-Windows:
-```bash
-conda env create -f envs/storm_windows.yml
+conda env create -f envs/storm.yml
 conda activate storm
 ```
 
@@ -91,7 +84,7 @@ Pull the latest code and sync your conda environment using your normal git/conda
 
 Typical steps:
 1. Run `git pull`
-2. Run `conda env update --prune -f envs/storm_mac.yml` on macOS or `conda env update --prune -f envs/storm_windows.yml` on Windows
+2. Run `conda env update --prune -f envs/storm.yml`
 3. Rebuild the app bundle or refresh the shortcut only if you use those packaging flows
 
 > If `git pull` fails, it usually means you have local uncommitted changes that conflict. Run `git status` to see what's changed, resolve any conflicts, and re-run the update steps.
@@ -154,13 +147,11 @@ storm/
 ├── config.py                # Constants — cert paths, MQTT settings, defaults
 ├── storm.icns               # macOS app icon
 ├── storm.ico                # Windows app icon
-├── setup_mac.sh             # One-step setup: installs conda, env, Desktop shortcut (macOS)
-├── setup_windows.bat        # One-step setup: installs conda, env, Desktop shortcut (Windows)
+├── setup.py                 # Cross-platform one-step setup (macOS/Linux/Windows)
 ├── roadmap.txt              # Implementation status and planned features
 │
 ├── envs/                    # Conda environment specs
-│   ├── storm_mac.yml        # macOS environment
-│   └── storm_windows.yml    # Windows environment
+│   └── storm.yml            # Unified environment (all platforms)
 │
 ├── scripts/                 # Build and utility scripts
 │   ├── create_app.sh        # Builds STORM.app macOS bundle
@@ -230,6 +221,7 @@ storm/
 │   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
 │   ├── sounding_dialog.py   # Skew-T log-P dialog (HRRR / OBS / NSSL sources)
+│   ├── vehicle_timeseries_dialog.py  # Vehicle observation timeseries plots (temp/dewpoint, wind, pressure)
 │   ├── archive_controls.py  # Archive playback controls bar (scrubber, speed, status indicators)
 │   ├── archive_loading_dialog.py  # Progress dialog shown while archive data is prefetched
 │   ├── nav_pill.py          # Compact navigation summary pill widget

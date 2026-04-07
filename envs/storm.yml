@@ -20,13 +20,13 @@ dependencies:
   # Networking
   - paho-mqtt=2.1.0
   - requests=2.32.5
-  - boto3=1.42.59         # AWS S3 (future use)
+  - boto3=1.42.59
   # Utilities
-  - pyserial             # GPS (NMEA via serial port)
-  - pynmea2              # NMEA sentence parsing
+  - pyserial
+  - pynmea2
+  - git
   - pip
   - pip:
-      # Qt UI (macOS wheels via PyPI — not on conda-forge for PyQt6-WebEngine)
       - pyqt6==6.10.2
       - pyqt6-qt6==6.10.2
       - pyqt6-sip==13.11.0

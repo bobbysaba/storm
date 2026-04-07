@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import runtime_flags
+from collections import deque
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
@@ -32,6 +33,7 @@ from ui.outlook_panel import OutlookPanel
 from ui.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
 from ui.sounding_dialog import SoundingDialog
 from ui.sounding_controls import SoundingControls
+from ui.vehicle_timeseries_dialog import VehicleTimeseriesDialog
 from ui.annotation_tools import AnnotationTools
 from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
 from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
@@ -628,6 +630,14 @@ class MainWindow(QMainWindow):
     def _on_archive_vehicle_position(self, obs) -> None:
         """Update a vehicle marker from the MQTT archive."""
         self.update_vehicle_obs(obs)
+        
+        # Also update timeseries dialog if open
+        if obs.vehicle_id in self._vehicle_timeseries_dialogs:
+            dlg = self._vehicle_timeseries_dialogs[obs.vehicle_id]
+            if dlg.isVisible():
+                observations = self._get_archive_vehicle_history(obs.vehicle_id)
+                if observations:
+                    dlg.load(obs.vehicle_id, observations)
 
     def _on_archive_vehicles_cleared(self) -> None:
         """Remove all vehicle markers when time jumps backward."""
@@ -1530,8 +1540,7 @@ class MainWindow(QMainWindow):
         import os, sys
         if success and deps_changed:
             # Can't auto-restart safely if conda env changed — tell the user
-            _yml = "storm_windows.yml" if sys.platform == "win32" else "storm_linux.yml" if sys.platform.startswith("linux") else "storm_mac.yml"
-            _cmd = f"conda env update -f envs/{_yml} --prune"
+            _cmd = "conda env update -f envs/storm.yml --prune"
             self.update_indicator.setText(f"↑ DEPS CHANGED — RUN: {_cmd}  THEN RESTART")
             self.update_indicator.setStyleSheet(
                 "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
@@ -3286,6 +3295,8 @@ class MainWindow(QMainWindow):
 
     def _init_stations(self):
         self._vehicles: dict[str, Vehicle] = {}
+        self._vehicle_history: dict[str, deque] = {}  # vehicle_id → deque[Observation]
+        self._vehicle_timeseries_dialogs: dict[str, "VehicleTimeseriesDialog"] = {}  # vehicle_id → dialog
         self._follow_mode = False
         self._station_layer = StationPlotLayer(self.map_widget)
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
@@ -3369,6 +3380,20 @@ class MainWindow(QMainWindow):
         )
         v.icon_type = icon_type
         v.lat, v.lon, v.latest_obs = obs.lat, obs.lon, obs
+        
+        # Append to vehicle history if this is NOT the local vehicle and has met data
+        if obs.vehicle_id != config.VEHICLE_ID:
+            has_met_data = any([
+                obs.temperature_c is not None,
+                obs.dewpoint_c is not None,
+                obs.wind_speed_ms is not None,
+                obs.pressure_mb is not None,
+            ])
+            if has_met_data:
+                if obs.vehicle_id not in self._vehicle_history:
+                    self._vehicle_history[obs.vehicle_id] = deque()
+                self._vehicle_history[obs.vehicle_id].append(obs)
+        
         marker_color = self._obs_age_color(obs)
         age_label = self._obs_age_label(obs)
         self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
@@ -3552,6 +3577,68 @@ class MainWindow(QMainWindow):
         self._sync_vehicle_detail_visibility()
         self._layout_overlays()
 
+    def _on_timeseries_button_clicked(self, vehicle_id: str):
+        """Open or raise the timeseries dialog for the given vehicle."""
+        # Check if dialog already exists and is visible
+        if vehicle_id in self._vehicle_timeseries_dialogs:
+            dlg = self._vehicle_timeseries_dialogs[vehicle_id]
+            if dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+                return
+        
+        # Get observation history
+        if self._archive:
+            # Archive mode: extract from ArchiveMQTTReader
+            if not hasattr(self, "_archive_mqtt"):
+                return
+            observations = self._get_archive_vehicle_history(vehicle_id)
+        else:
+            # Live mode: use in-memory history
+            observations = list(self._vehicle_history.get(vehicle_id, []))
+        
+        if not observations:
+            return
+        
+        # Create or reuse dialog
+        if vehicle_id not in self._vehicle_timeseries_dialogs:
+            self._vehicle_timeseries_dialogs[vehicle_id] = VehicleTimeseriesDialog(self)
+        
+        dlg = self._vehicle_timeseries_dialogs[vehicle_id]
+        dlg.load(vehicle_id, observations)
+    
+    def _get_archive_vehicle_history(self, vehicle_id: str) -> list:
+        """Extract vehicle observation history from archive MQTT data."""
+        if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
+            return []
+        
+        from network.vehicle_sync import _observation_from_payload
+        
+        current_time = self._time_ctrl.current_time
+        observations = []
+        
+        # Archive MQTT records are stored as list of (timestamp, dict) tuples
+        vehicle_records = self._archive_mqtt._data.get("vehicles", [])
+        for ts, record in vehicle_records:
+            # Only include records up to current archive time
+            if ts > current_time:
+                break
+            
+            if record.get("vehicle_id") != vehicle_id:
+                continue
+            
+            # Convert to Observation
+            try:
+                obs = _observation_from_payload(record)
+                # Only include if has met data
+                if (obs.temperature_c is not None or obs.dewpoint_c is not None or 
+                    obs.wind_speed_ms is not None or obs.pressure_mb is not None):
+                    observations.append(obs)
+            except Exception:
+                continue
+        
+        return observations
+
     def _sync_vehicle_detail_visibility(self):
         if not hasattr(self, "vehicle_detail_panel"):
             return
@@ -3603,7 +3690,7 @@ class MainWindow(QMainWindow):
 
         badge_color = self._obs_age_color(obs)
 
-        # Top row: badge · name · age · lat/lon
+        # Top row: badge · name · age · TIMESERIES button · lat/lon
         top = QHBoxLayout()
         top.setSpacing(8)
 
@@ -3618,6 +3705,21 @@ class MainWindow(QMainWindow):
         age_lbl = QLabel(f"{self._obs_age_label(obs)} old")
         age_lbl.setStyleSheet("color: #C8D0DE; background: transparent; border: none;")
         top.addWidget(age_lbl)
+        
+        # Timeseries button — only shown if vehicle has met data history
+        has_history = vid in self._vehicle_history and len(self._vehicle_history[vid]) > 0
+        if has_history:
+            ts_btn = QPushButton("TIMESERIES")
+            ts_btn.setFlat(True)
+            ts_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: 1px solid #4A9EFF; "
+                "color: #4A9EFF; font-size: 8px; font-weight: 600; padding: 2px 6px; "
+                "border-radius: 3px; }"
+                "QPushButton:hover { background: rgba(74,158,255,0.1); }"
+            )
+            ts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            ts_btn.clicked.connect(lambda checked=False, v=vid: self._on_timeseries_button_clicked(v))
+            top.addWidget(ts_btn)
 
         top.addStretch()
 

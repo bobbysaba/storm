@@ -46,7 +46,7 @@ def _acquire_instance_lock() -> bool:
     automatically on crash, so no stale lockfiles accumulate.
     """
     global _instance_lock_file
-    import tempfile, os  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
 
     lock_path = os.path.join(tempfile.gettempdir(), "storm_instance.lock")
 
@@ -269,8 +269,11 @@ def _configure_logging(level_name: str) -> None:
 
     # write WARNING+ logs to a persistent file for post-session review
     try:
+        from logging.handlers import RotatingFileHandler
         _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storm_errors.log")
-        _fh = logging.FileHandler(_log_path, mode="a", encoding="utf-8")
+        _fh = RotatingFileHandler(
+            _log_path, mode="a", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        )
         _fh.setLevel(logging.WARNING)
         _fh.setFormatter(logging.Formatter(
             "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",

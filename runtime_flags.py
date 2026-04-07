@@ -90,13 +90,13 @@ def apply_overrides(**kwargs: bool | int | None) -> None:
 # function to finalize flags
 def finalize_flags() -> None:
     # Any explicit component disable implies toggle mode is enabled.
-    if any([
+    if any((
         FLAGS.disable_radar,
         FLAGS.disable_mqtt,
         FLAGS.disable_annotations,
         FLAGS.disable_deploy_locs,
         FLAGS.disable_data_inputs,
-    ]):
+    )):
         FLAGS.enable_startup_toggles = True
 
     # MQTT-off implies dependent systems off.

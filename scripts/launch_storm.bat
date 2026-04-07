@@ -39,7 +39,7 @@ FOR %%D IN (
     )
 )
 
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Could not find a conda installation.`n`nInstall miniforge or miniconda, then create the storm environment:`n  conda env create -f envs\storm_windows.yml', 'STORM — Launch Error', 'OK', 'Error')"
+powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Could not find a conda installation.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
 EXIT /B 1
 
 :found_conda
@@ -49,7 +49,7 @@ IF ERRORLEVEL 1 (
 )
 
 IF "%CONDA_DEFAULT_ENV%" == "" (
-    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('The ""storm"" conda environment was not found.`n`nCreate it with:`n  conda env create -f envs\storm_windows.yml', 'STORM — Launch Error', 'OK', 'Error')"
+    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('The ""storm"" conda environment was not found.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
     EXIT /B 1
 )
 

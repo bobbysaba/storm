@@ -117,8 +117,6 @@ def _spc_prob_label(props: dict[str, Any]) -> str | None:
     except (TypeError, ValueError):
         return s
 
-    return None
-
 
 def _fc_has_features(fc_str: str) -> bool:
     return bool(fc_str and fc_str != _EMPTY_FC_STR)

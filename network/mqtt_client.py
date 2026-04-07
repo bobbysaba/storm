@@ -118,9 +118,9 @@ class MQTTClient(QObject):
             client = self._client
             if client is None:
                 return
-        props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
-        props.MessageExpiryInterval = expiry
-        client.publish(topic, payload.encode(), qos=qos, properties=props)
+            props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
+            props.MessageExpiryInterval = expiry
+            client.publish(topic, payload.encode(), qos=qos, properties=props)
 
     def subscribe(self, topic: str, qos: int = 1):
         """Subscribe to a topic (wildcards supported).  No-op if not connected."""
@@ -128,7 +128,7 @@ class MQTTClient(QObject):
             client = self._client
             if client is None:
                 return
-        client.subscribe(topic, qos=qos)
+            client.subscribe(topic, qos=qos)
         log.debug("MQTT: subscribed to %s", topic)
 
     def disconnect(self):

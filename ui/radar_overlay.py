@@ -333,6 +333,8 @@ class RadarOverlay(QObject):
         self._slow_render_streak = 0
         # cache ScalarMappable objects keyed by (colormap, vmin, vmax)
         # avoids recreating norm+cmap on every render call
+        _MAPPER_CACHE_MAX = 32
+        self._mapper_cache_max = _MAPPER_CACHE_MAX
         self._mapper_cache: dict[tuple, mcm.ScalarMappable] = {}
 
     def update(self, scan: RadarScan):
@@ -473,6 +475,8 @@ class RadarOverlay(QObject):
         # reuse cached ScalarMappable — recreating norm+cmap every frame is wasteful
         cache_key = (scan.colormap, scan.vmin, scan.vmax)
         if cache_key not in self._mapper_cache:
+            if len(self._mapper_cache) >= self._mapper_cache_max:
+                self._mapper_cache.pop(next(iter(self._mapper_cache)))
             cmap = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
             norm = mcolors.Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
             self._mapper_cache[cache_key] = mcm.ScalarMappable(norm=norm, cmap=cmap)

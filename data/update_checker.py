@@ -73,7 +73,7 @@ class UpdateWorker(QObject):
             self.check_done.emit(-1)
 
     def _env_hash(self) -> str:
-        fname = "storm_windows.yml" if sys.platform == "win32" else "storm_mac.yml"
+        fname = "storm.yml"
         path  = os.path.join(self._root, "envs", fname)
         try:
             with open(path, "rb") as f:

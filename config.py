@@ -1,6 +1,7 @@
 # Bobby Saba - config file to store application constants
 
 # import required packages
+import os
 from pathlib import Path
 
 # determine the parent directory for the application
@@ -42,9 +43,6 @@ OBS_FILE_COL_WSPD = "sfc_wspd"
 OBS_FILE_COL_WDIR = "sfc_wdir"
 OBS_FILE_COL_PRES = "pressure"
 
-# GPS port (will be overwritten)
-GPS_PORT = ""
-
 # GPS baud rate
 GPS_BAUD = 4800
 
@@ -52,16 +50,14 @@ GPS_BAUD = 4800
 DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
 # ── Mode passphrases ──────────────────────────────────────────────────────────
-# SHA-256 hashes of the passphrases required to launch in vehicle or monitor
-# mode.  The plaintext passwords are never stored here — only hashes.
+# PBKDF2-HMAC-SHA256 hashes (600 000 iterations) of the passphrases required
+# to launch in vehicle, monitor, or archive mode.  Format: base64(salt):base64(dk)
 #
-# To generate a new hash:
-#   python3 -c "import hashlib; print(hashlib.sha256(b'your_password').hexdigest())"
-#
-# Replace the placeholder values below with hashes of your actual passwords.
-VEHICLE_PASSPHRASE_HASH = "6f3924cf58c4302ac1d1743807806f5cac6af1dd163ceea88407dee66eaa046e"
-MONITOR_PASSPHRASE_HASH = "3aa29dabcf48a07aae0fd782da7c48705f82614eaa0e0fcf02bbb42cb6db13d0"
-ARCHIVE_PASSPHRASE_HASH = "ce8c1196ed2eeceb1d6ed967566c95be2e418b306e96f13ac3a791c4987f5e3b"
+# To update a passphrase:
+#   python set_password.py vehicle <new_password>
+VEHICLE_PASSPHRASE_HASH = "CeNUNJ5o6dIu9Jgi3CKTIw==:E70QJVtj0v5u91wuOJEQJPDG+CJML30lCW+2BqzcLhM="
+MONITOR_PASSPHRASE_HASH = "AYxyUvyUW9hzxWA7UMtNfA==:Bi6XDsi3+E52eLhEP7sT80Effgm3l6mAeKCEpNGNdqY="
+ARCHIVE_PASSPHRASE_HASH = "O3uHJWRbpiJXzOOqTNrGLA==:LecEzsMFUFlijFzJpTlz8PaWGtxuTVx+l0ShiguqoVE="
 
 # accent color
 ACCENT_COLOR = "#00CFFF"
@@ -73,7 +69,11 @@ ACCENT_COLOR = "#00CFFF"
 ARCHIVE_MQTT_BASE_URL = ""
 
 # OpenRouteService API key (used by routing_fetcher.py)
-ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0="
+# Override via ORS_API_KEY env var if desired.
+ORS_API_KEY = os.environ.get(
+    "ORS_API_KEY",
+    "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0=",
+)
 
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
