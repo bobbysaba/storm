@@ -22,10 +22,12 @@ class UpdateWorker(QObject):
                                  -1 = network/git error
                                  -2 = dev build (dirty working tree or local commits)
         pull_done(bool, bool):   (success, deps_changed)
+        conda_update_done(bool, str):  (success, error_message)
     """
 
     check_done = pyqtSignal(int)
     pull_done  = pyqtSignal(bool, bool)
+    conda_update_done = pyqtSignal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -36,6 +38,16 @@ class UpdateWorker(QObject):
 
     def start_pull(self):
         threading.Thread(target=self._do_pull, daemon=True).start()
+
+    def start_conda_update(self):
+        self._conda_proc = None  # Initialize before thread starts
+        threading.Thread(target=self._do_conda_update, daemon=True).start()
+
+    def cancel_conda_update(self):
+        """Kill a running conda update subprocess, if any."""
+        proc = getattr(self, "_conda_proc", None)
+        if proc and proc.poll() is None:
+            proc.kill()
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -94,3 +106,57 @@ class UpdateWorker(QObject):
             self.pull_done.emit(True, deps_changed)
         except Exception:
             self.pull_done.emit(False, False)
+
+    def _find_conda(self) -> str | None:
+        """Locate the conda executable."""
+        # Try common conda locations
+        candidates = ["conda", "mamba"]
+        for cmd in candidates:
+            try:
+                subprocess.run(
+                    [cmd, "--version"],
+                    capture_output=True, timeout=5, check=True,
+                )
+                return cmd
+            except Exception:
+                continue
+        return None
+
+    def _do_conda_update(self):
+        """Run conda env update in the background."""
+        conda_cmd = self._find_conda()
+        if not conda_cmd:
+            self.conda_update_done.emit(False, "Conda not found in PATH")
+            return
+
+        env_file = os.path.join(self._root, "envs", "storm.yml")
+        if not os.path.isfile(env_file):
+            self.conda_update_done.emit(False, f"Environment file not found: {env_file}")
+            return
+
+        try:
+            self._conda_proc = subprocess.Popen(
+                [conda_cmd, "env", "update", "-f", env_file, "--prune"],
+                cwd=self._root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                stdout, stderr = self._conda_proc.communicate(timeout=300)
+            except subprocess.TimeoutExpired:
+                self._conda_proc.kill()
+                self._conda_proc.communicate()
+                self.conda_update_done.emit(False, "Conda update timed out after 5 minutes")
+                return
+            if self._conda_proc.returncode == 0:
+                self.conda_update_done.emit(True, "")
+            elif self._conda_proc.returncode < 0:
+                self.conda_update_done.emit(False, "Conda update was cancelled")
+            else:
+                error_msg = (stderr.strip() or stdout.strip() or "Unknown error")[:500]
+                self.conda_update_done.emit(False, error_msg)
+        except Exception as e:
+            self.conda_update_done.emit(False, str(e))
+        finally:
+            self._conda_proc = None

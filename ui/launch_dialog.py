@@ -422,8 +422,9 @@ _UPD_WARNING = """
         font-size: 10px;
         font-weight: 600;
         letter-spacing: 0.5px;
-        padding: 5px 16px;
+        padding: 8px 16px;
         min-width: 180px;
+        max-width: 420px;
     }
 """
 _LOG_BTN_STYLE = """
@@ -440,6 +441,76 @@ _LOG_BTN_STYLE = """
 
 
 from data.update_checker import UpdateWorker as _UpdateWorker
+
+
+class _CondaUpdateDialog(QDialog):
+    """Progress dialog shown while conda env update runs in the background."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("STORM — Updating Dependencies")
+        self.setMinimumWidth(480)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+        )
+        self.setStyleSheet("""
+            QDialog { background-color: #0A0A0F; }
+            QLabel  { color: #E8EAF0; font-size: 12px; background: transparent; }
+            QLabel#status { color: #00CFFF; font-size: 11px; font-weight: 600; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(14)
+
+        title = QLabel("Updating conda environment...")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        self._status = QLabel("Running: conda env update -f envs/storm.yml --prune")
+        self._status.setObjectName("status")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status.setWordWrap(True)
+        layout.addWidget(self._status)
+
+        hint = QLabel("This may take 2-5 minutes. Please wait...")
+        hint.setStyleSheet("color: #8E97AB; font-size: 11px;")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+        # Animated dots to show progress
+        self._dots_label = QLabel("●")
+        self._dots_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._dots_label.setStyleSheet("color: #00CFFF; font-size: 18px;")
+        layout.addWidget(self._dots_label)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(100)
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #8E97AB; border: 1px solid #8E97AB;
+                border-radius: 4px; padding: 4px 12px; font-size: 11px;
+            }
+            QPushButton:hover { color: #E8EAF0; border-color: #E8EAF0; }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self._dots_count = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._animate_dots)
+        self._timer.start(400)
+
+    def _animate_dots(self):
+        self._dots_count = (self._dots_count + 1) % 4
+        dots = "●" * (self._dots_count + 1)
+        self._dots_label.setText(dots)
 
 
 class _LogViewerDialog(QDialog):
@@ -1062,10 +1133,25 @@ class LaunchDialog(QDialog):
 
     def _on_pull_done(self, success: bool, deps_changed: bool):
         if success and deps_changed:
-            import sys as _sys
-            _cmd = "conda env update -f envs/storm.yml --prune"
-            self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
-            self._update_btn.setStyleSheet(_UPD_WARNING)
+            # Show dialog asking user if they want automatic update
+            reply = QMessageBox.question(
+                self,
+                "Dependencies Changed",
+                "The update includes dependency changes that require updating your conda environment.\n\n"
+                "Would you like STORM to update the environment automatically?\n\n"
+                "This will run: conda env update -f envs/storm.yml --prune",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._start_conda_update()
+            else:
+                # Show manual instructions
+                _cmd = "conda env update -f envs/storm.yml --prune"
+                self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
+                self._update_btn.setStyleSheet(_UPD_WARNING)
+                self._update_btn.setWordWrap(True)
+                QTimer.singleShot(0, self._post_layout_adjust)
         elif success:
             self._update_btn.setText("✓   UPDATED — RESTARTING...")
             self._update_btn.setStyleSheet(_UPD_SUCCESS)
@@ -1073,6 +1159,58 @@ class LaunchDialog(QDialog):
         else:
             self._update_btn.setText("UPDATE FAILED")
             self._update_btn.setStyleSheet(_UPD_ERROR)
+
+    def _start_conda_update(self):
+        """Show progress dialog and start conda update in background."""
+        # Prevent multiple simultaneous updates
+        if hasattr(self, '_conda_dialog') and self._conda_dialog:
+            return
+        
+        self._conda_dialog = _CondaUpdateDialog(self)
+        self._conda_dialog.rejected.connect(self._worker.cancel_conda_update)
+        # Use a unique-connection to avoid duplicate slots on repeated calls
+        try:
+            self._worker.conda_update_done.disconnect(self._on_conda_update_done)
+        except TypeError:
+            pass
+        self._worker.conda_update_done.connect(self._on_conda_update_done)
+        self._worker.start_conda_update()
+        self._conda_dialog.exec()
+
+    def _on_conda_update_done(self, success: bool, error_msg: str):
+        """Handle conda update completion."""
+        dialog = getattr(self, "_conda_dialog", None)
+        if dialog:
+            dialog.accept()
+            self._conda_dialog = None
+        else:
+            # Dialog already dismissed (user cancelled) — just show manual fallback
+            if not success:
+                _cmd = "conda env update -f envs/storm.yml --prune"
+                self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
+                self._update_btn.setStyleSheet(_UPD_WARNING)
+                self._update_btn.setWordWrap(True)
+                QTimer.singleShot(0, self._post_layout_adjust)
+            return
+
+        if success:
+            self._update_btn.setText("✓   UPDATED — RESTARTING...")
+            self._update_btn.setStyleSheet(_UPD_SUCCESS)
+            QTimer.singleShot(800, self._restart_app)
+        else:
+            # Show error and fall back to manual instructions
+            QMessageBox.warning(
+                self,
+                "Conda Update Failed",
+                f"Automatic conda update failed:\n\n{error_msg}\n\n"
+                "Please run the following command manually:\n"
+                "conda env update -f envs/storm.yml --prune",
+            )
+            _cmd = "conda env update -f envs/storm.yml --prune"
+            self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
+            self._update_btn.setStyleSheet(_UPD_WARNING)
+            self._update_btn.setWordWrap(True)
+            QTimer.singleShot(0, self._post_layout_adjust)
 
     def _restart_app(self):
         os.execv(sys.executable, [sys.executable] + sys.argv)
