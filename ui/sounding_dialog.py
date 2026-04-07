@@ -442,9 +442,9 @@ class SoundingDialog(QDialog):
         for i, snd in enumerate(self._sset.soundings):
             if time_based:
                 if needs_day:
-                    f_str = f"{snd.valid_time.strftime('%HZ')}\n{snd.valid_time.day}"
+                    f_str = f"{snd.valid_time.strftime('%H%MZ')}\n{snd.valid_time.day}"
                 else:
-                    f_str = snd.valid_time.strftime("%HZ")
+                    f_str = snd.valid_time.strftime("%H%MZ")
             else:
                 if snd.slot_offset == 0:
                     f_str = "F0"
@@ -477,7 +477,7 @@ class SoundingDialog(QDialog):
             return
 
         if self._sset.is_nssl:
-            valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
+            valid_str = snd.valid_time.strftime("%H%MZ %d %b %Y")
             self._header_line1.setText("NSSL  ·  DL Truck")
             self._header_line2.setText(
                 f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL"

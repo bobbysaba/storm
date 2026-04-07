@@ -40,7 +40,11 @@ log = logging.getLogger(__name__)
 
 _CATALOG_XML = (
     "https://data.nssl.noaa.gov/thredds/catalog/"
-    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltrucksonderawDL1.a1/catalog.xml"
+    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.b1/catalog.xml"
+)
+_CATALOG_HTML = (
+    "https://data.nssl.noaa.gov/thredds/catalog/"
+    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.b1/catalog.html"
 )
 _FILESERVER_BASE = "https://data.nssl.noaa.gov/thredds/fileServer/"
 _THREDDS_NS      = "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
@@ -51,7 +55,7 @@ _LOOKBACK_HOURS  = 12
 # catalog lookup.  None = normal catalog + 12-hour lookback mode.
 _TEST_FILE_URL = None
 
-_FILENAME_RE = re.compile(r"upperair\.NSSL_Lidar_sonde\.(\d{12})\.skewT$", re.IGNORECASE)
+_FILENAME_RE = re.compile(r"upperair\.NSSL_Lidar_sonde\.(\d{12})\.skewT", re.IGNORECASE)
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
 
@@ -259,4 +263,4 @@ def _parse_skewt(text: str, file_time: datetime, idx: int) -> "Sounding | None":
 
 
 def _format_label(dt: datetime) -> str:
-    return f"{dt.hour:02d}Z {dt.strftime('%b')} {dt.day}"
+    return f"{dt.strftime('%H%M')}Z {dt.strftime('%b')} {dt.day}"

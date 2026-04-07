@@ -16,9 +16,13 @@
 #    is nearest to the current archive time.
 
 import logging
+import ssl
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError, URLError
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -94,7 +98,7 @@ class ArchiveSoundingFetcher(QObject):
             daemon=True,
         ).start()
 
-    def fetch_nssl_sounding(self, base_url: str) -> None:
+    def fetch_nssl_sounding(self) -> None:
         """Fetch the NSSL mobile sounding nearest to the current archive time."""
         t = self._current_archive_time
         if t is None:
@@ -102,7 +106,7 @@ class ArchiveSoundingFetcher(QObject):
             return
         threading.Thread(
             target=self._do_fetch_nssl,
-            args=(base_url, t),
+            args=(t,),
             daemon=True,
         ).start()
 
@@ -205,46 +209,64 @@ class ArchiveSoundingFetcher(QObject):
 
     # ── NSSL sounding ─────────────────────────────────────────────────────────
 
-    def _do_fetch_nssl(self, base_url: str, t: datetime) -> None:
-        """
-        List sounding files from the server directory and pick the one whose
-        timestamp is nearest to (but not after) t.
-
-        The server is expected to return a JSON list of file entries, each with
-        a "time" ISO field and a "url" for the sounding data.
-
-        Schema will be filled in once the MQTT/sounding server is configured.
-        """
+    def _do_fetch_nssl(self, t: datetime) -> None:
+        """Fetch all NSSL soundings from the same UTC day as t, up to and including t."""
         try:
-            # Fetch directory listing.
-            resp = requests.get(base_url.rstrip("/") + "/index.json", timeout=10)
-            resp.raise_for_status()
-            entries = resp.json()  # list of {"time": "...", "url": "..."}
+            from data.clamps_sounding_fetcher import (
+                _CATALOG_XML, _FILENAME_RE,
+                _HEADERS, _REQUEST_TIMEOUT, _SSL_CTX, _fetch_and_parse, _format_label,
+            )
 
-            # Find the entry with the largest timestamp <= t.
-            best = None
-            best_time = None
-            for entry in entries:
-                entry_time = _parse_iso(entry.get("time", ""))
-                if entry_time is None:
+            req = Request(_CATALOG_XML, headers=_HEADERS)
+            with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+                root = ET.fromstring(resp.read())
+
+            ns = "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
+            day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
+            candidates: list[tuple[datetime, str]] = []
+
+            for ds in root.iter(f"{{{ns}}}dataset"):
+                m = _FILENAME_RE.search(ds.get("name", ""))
+                if not m:
                     continue
-                if entry_time <= t:
-                    if best_time is None or entry_time > best_time:
-                        best_time = entry_time
-                        best = entry
+                try:
+                    file_time = datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if day_start <= file_time <= t:
+                    url_path = ds.get("urlPath") or ds.get("ID")
+                    if url_path:
+                        candidates.append((file_time, url_path))
 
-            if best is None:
-                self.fetch_error.emit("No NSSL sounding available before archive time")
+            if not candidates:
+                self.fetch_error.emit("No NSSL soundings available for this archive time")
                 return
 
-            # Delegate to the live NSSL fetcher's HTTP fetch logic.
-            from data.clamps_sounding_fetcher import ClampsSoundingFetcher
-            fetcher = ClampsSoundingFetcher.__new__(ClampsSoundingFetcher)
-            sset = fetcher._fetch_from_url(best["url"])
-            if sset is not None:
-                self.sounding_ready.emit(sset)
-            else:
-                self.fetch_error.emit("NSSL sounding parse failed")
+            candidates.sort(key=lambda x: x[0])
+            soundings = []
+            for idx, (file_time, url_path) in enumerate(candidates):
+                try:
+                    snd = _fetch_and_parse(url_path, file_time, idx)
+                    if snd is not None:
+                        snd.label = _format_label(file_time)
+                        soundings.append(snd)
+                except Exception as e:
+                    log.warning("ArchiveSoundingFetcher: failed to fetch NSSL file %s: %s", url_path, e)
+
+            if not soundings:
+                self.fetch_error.emit("No valid NSSL soundings could be parsed")
+                return
+
+            surface_elev = float(soundings[0].height[0]) if soundings[0].height.size > 0 else 0.0
+            sset = SoundingSet(
+                lat=0.0, lon=0.0, elevation=surface_elev,
+                fetch_time=t, soundings=soundings,
+                station_id="CLAMPS", station_name="NSSL CLAMPS DL Truck", source="nssl",
+            )
+            self.sounding_ready.emit(sset)
+        except (HTTPError, URLError, TimeoutError) as exc:
+            log.warning("ArchiveSoundingFetcher: NSSL fetch failed: %s", exc)
+            self.fetch_error.emit(f"NSSL sounding error: {exc}")
         except Exception as exc:
             log.error("ArchiveSoundingFetcher: NSSL sounding failed: %s", exc)
             self.fetch_error.emit(f"NSSL sounding error: {exc}")

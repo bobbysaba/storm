@@ -2473,11 +2473,12 @@ class MainWindow(QMainWindow):
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
                 self.map_widget.set_obs_sounding_mode(True)
-            else:  # nssl — not supported in archive
+            else:  # nssl
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_obs_sounding_mode(False)
                 self.map_widget.clear_sounding_stations()
-                self.status_msg_label.setText("NSSL soundings not available in archive mode")
+                self.status_msg_label.setText("Fetching NSSL soundings…")
+                self._archive_sounding.fetch_nssl_sounding()
             return
         if not hasattr(self, "_sounding_fetcher"):
             return
