@@ -1,7 +1,7 @@
 # STORM
 **Severe Thunderstorm Observation and Reconnaissance Monitor**
 
-A standalone desktop application for storm chasing situational awareness. Runs on a laptop in the field and is designed for **low bandwidth environments** — offline map tiles, compressed radar data, and efficient MQTT messaging.
+A standalone desktop application for storm chasing situational awareness. Runs on a laptop in the field and is designed for **low bandwidth environments** — offline map tiles, compressed radar data, and efficient MQTT messaging. → **[User Guide](STORM_USER_GUIDE.md)** for full installation, features, and usage reference.
 
 ---
 
@@ -12,12 +12,13 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection)
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
+- **Drawing tools** — create fronts, polylines, and polygons on the map; synced over MQTT via DrawingSync
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
 - **Surface obs (mesonet)** — live surface observation station models from OK Mesonet and West Texas Mesonet; toggled independently per network; polled every 5 minutes
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters, kinematics table, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
 - **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — selected at the launch dialog with passphrase authentication
-- **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
+- **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD Level 2/3 radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
 - **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
 ---
@@ -68,6 +69,11 @@ conda activate storm
 macOS:
 ```bash
 bash scripts/create_app.sh
+```
+
+Linux:
+```bash
+bash scripts/create_desktop_entry.sh
 ```
 
 Windows: double-click `scripts\create_app_windows.bat`
@@ -128,14 +134,21 @@ aws/storm-public.pem.key
 ```
 These are distributed out-of-band and are never committed to the repo. Please contact [Bobby Saba](mailto:robert.saba@noaa.gov) for the files.
 
-### 6. macOS app bundle (optional)
+### 6. Platform-specific launchers (optional)
 
-To create a double-clickable `STORM.app`:
+**macOS:** Create a double-clickable `STORM.app`:
 ```bash
 bash scripts/create_app.sh
 ```
 
 The app bundle records your project folder location at build time, so it can be moved or copied anywhere — the Dock, `/Applications`, a Desktop alias — and will always launch from the correct location. If you ever move the project folder itself, just re-run `bash scripts/create_app.sh` to update the path.
+
+**Linux:** Create a desktop entry and application menu launcher:
+```bash
+bash scripts/create_desktop_entry.sh
+```
+
+**Windows:** The setup script automatically creates a desktop shortcut via `scripts\create_app_windows.bat`.
 
 ---
 
@@ -145,19 +158,25 @@ The app bundle records your project folder location at build time, so it can be 
 storm/
 ├── main.py                  # Entry point
 ├── config.py                # Constants — cert paths, MQTT settings, defaults
+├── runtime_flags.py         # Runtime configuration flags and debug profiles
+├── set_password.py          # CLI tool to update launch passphrases
 ├── storm.icns               # macOS app icon
 ├── storm.ico                # Windows app icon
+├── storm.png                # Linux app icon
 ├── setup.py                 # Cross-platform one-step setup (macOS/Linux/Windows)
-├── roadmap.txt              # Implementation status and planned features
+├── VERSION                  # Current version number
+├── CHANGELOG.md             # Version history and release notes
+├── STORM_USER_GUIDE.md      # User documentation
 │
 ├── envs/                    # Conda environment specs
 │   └── storm.yml            # Unified environment (all platforms)
 │
 ├── scripts/                 # Build and utility scripts
 │   ├── create_app.sh        # Builds STORM.app macOS bundle
+│   ├── create_desktop_entry.sh  # Creates Linux desktop entry and launcher
 │   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
 │   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
-│   └── test_mqtt_send.py    # CLI tool — sends test obs payloads to MQTT broker
+│   └── launch_storm.vbs     # Silent launcher for Windows (no console window)
 │
 ├── archive/                 # Archive (replay) mode — session config, clock, fetchers
 │   ├── session.py           # ArchiveSession dataclass — holds start time, radar station
@@ -173,13 +192,14 @@ storm/
 │   ├── annotation.py        # Annotation dataclass + type registry
 │   ├── drawing.py           # Drawing (front/polyline/polygon) dataclass
 │   ├── observation.py       # Meteorological obs record
-│   ├── radar_scan.py        # RadarScan dataclass + product metadata
+│   ├── radar_scan.py        # RadarScan dataclass + product metadata (Level 3)
+│   ├── level2_radar_scan.py # Level2RadarScan dataclass (extends RadarScan for Level 2)
 │   ├── sounding.py          # Sounding + SoundingSet dataclasses; pressure levels
 │   ├── storm_cone.py        # StormCone dataclass + GeoJSON builder
 │   └── vehicle.py           # Vehicle dataclass
 │
 ├── data/                    # Background I/O and decoding
-│   ├── radar_fetcher.py     # Polls Unidata THREDDS; backfills 12 scans
+│   ├── radar_fetcher.py     # Polls Unidata THREDDS; backfills 12 scans (Level 3)
 │   ├── radar_decoder.py     # MetPy Level 3 decode → RadarScan
 │   ├── satellite_fetcher.py # WMS satellite imagery fetch + cache
 │   ├── hazard_fetcher.py    # SPC/NWS hazard polygons
@@ -198,6 +218,7 @@ storm/
 │   ├── mqtt_client.py       # Paho-MQTT wrapper (TLS, reconnect, signals)
 │   ├── vehicle_sync.py      # Bidirectional vehicle obs sync via storm/vehicles/{id}
 │   ├── annotation_sync.py   # Bidirectional annotation MQTT sync
+│   ├── drawing_sync.py      # Bidirectional drawing MQTT sync (fronts/polylines/polygons)
 │   └── storm_cone_sync.py   # Bidirectional storm cone MQTT sync
 │
 ├── ui/                      # Qt widgets
@@ -220,7 +241,7 @@ storm/
 │   ├── station_plot_layer.py # MetPy station plot PNG markers at vehicle positions
 │   ├── annotation_tools.py  # Annotation type selector drawer
 │   ├── annotation_dialog.py # Place / edit annotation dialogs
-│   ├── drawing_dialog.py    # Polyline/polygon drawing dialogs
+│   ├── drawing_dialog.py    # Front/polyline/polygon drawing dialogs
 │   ├── storm_cone_dialog.py # Storm motion cone input dialog
 │   ├── sounding_dialog.py   # Skew-T log-P dialog (HRRR / OBS / NSSL sources)
 │   ├── vehicle_timeseries_dialog.py  # Vehicle observation timeseries plots (temp/dewpoint, wind, pressure)
@@ -236,13 +257,27 @@ storm/
 │   ├── indicator_off.svg
 │   └── fonts/               # Noto Sans glyph PBFs (Latin ranges)
 │
+├── locs/
+│   └── deployment_locations.csv  # Deployment location database
+│
+├── tests/                   # Unit tests
+│   ├── test_annotation.py
+│   ├── test_clamps_parser.py
+│   ├── test_clamps_sounding.py
+│   ├── test_drawing.py
+│   ├── test_observation.py
+│   ├── test_runtime_flags.py
+│   ├── test_sounding.py
+│   └── test_storm_cone.py
+│
 ├── tiles/
 │   └── storm.mbtiles        # NOT in git — download separately
 │
 └── aws/                    # AWS IoT TLS credentials — NOT in git
     ├── storm.pem
     ├── storm.pem.crt
-    └── storm-private.pem.key
+    ├── storm-private.pem.key
+    └── storm-public.pem.key
 ```
 
 ---
@@ -250,12 +285,12 @@ storm/
 ## Architecture Notes
 
 - **Tile/asset serving** — `StormSchemeHandler` (`ui/tile_scheme_handler.py`) registers a custom `storm://` URL scheme that serves the map HTML, MapLibre assets, fonts, and MBTiles vector tiles entirely in-process — no Flask server, no TCP port required.
-- **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
+- **Radar pipeline** — `RadarFetcher` polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Archive mode supports Level 2 radar via `Level2RadarScan` with multiple elevation tilts and dual-pol products. Data flows: `RadarFetcher` → `decode_nexrad_l3()` → `RadarScan` → `RadarOverlay` → base64 PNG → MapLibre raster source.
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context. Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
 - **Data paths** — Track A: obs file watcher reads FOFS instrument logger CSV. Track B: GPS reader reads NMEA from serial port. Both update the live vehicle state and publish via `VehicleSync`.
-- **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`, `storm/drawings/{id}`.
+- **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`, `storm/drawings/{id}`. Messages expire at 08:00 UTC the following day.
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
-- **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback.
+- **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback. Archive mode supports Level 2 radar with full dual-pol products.
 - **Surface obs** — `SurfaceFetcher` polls OK Mesonet and West Texas Mesonet (WTM) every 5 minutes. Station model PNGs are rendered via MetPy/matplotlib and displayed as map markers.
 - **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via NSSL THREDDS (`ClampsSoundingFetcher`).
 - **Routing** — `RoutingFetcher` geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.

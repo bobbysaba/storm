@@ -61,25 +61,39 @@ STORM is a standalone desktop application purpose-built for severe weather storm
 
 **Run Command:**
 ```bash
+conda activate storm
 python main.py
 ```
+
+**Platform-Specific Launchers:**
+- **macOS:** Double-click `STORM.app` (created via `bash scripts/create_app.sh`)
+- **Linux:** Use desktop launcher (created via `bash scripts/create_desktop_entry.sh`)
+- **Windows:** Double-click desktop shortcut (created via setup script)
 
 ---
 
 ## 2. Installation & Requirements
 
 ### Prerequisites
-- Python 3.10+
-- PyQt6 with WebEngine (`pip install PyQt6 PyQt6-WebEngine`)
-- MetPy, matplotlib, numpy, scipy (`pip install metpy matplotlib numpy scipy`)
-- paho-mqtt (`pip install paho-mqtt`)
+- Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
+- conda environment: `storm` (created via `python setup.py` or `conda env create -f envs/storm.yml`)
 - The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately)
+
+**Quick Setup:**
+```bash
+git clone https://github.com/bobbysaba/storm.git
+cd storm
+python setup.py
+```
+
+The setup script creates the conda environment and desktop launcher automatically. See the README for detailed installation instructions.
 
 ### MQTT Certificates
 Certain network features (vehicle sync, annotation/drawing sync) require AWS IoT TLS certificates. Place them at:
-- `/aws/storm.pem` — CA certificate
-- `/aws/storm.pem.crt` — device certificate
-- `/aws/storm-private.pem.key` — private key
+- `aws/storm.pem` — CA certificate
+- `aws/storm.pem.crt` — device certificate
+- `aws/storm-private.pem.key` — private key
+- `aws/storm-public.pem.key` — public key
 
 If certificates are missing, STORM starts in a degraded state — map, radar, satellite, and SPC/NWS hazard features remain fully functional, but MQTT-dependent sync features are disabled.
 
@@ -109,8 +123,11 @@ Choose one of three mutually exclusive roles for this session:
 
 When ARCHIVE is selected, the vehicle-specific fields (ID, icon, data directory) are hidden and replaced with:
 
-**Archive Date/Time**
-A date/time picker (calendar popup + time fields) for choosing the UTC start time of the replay session. STORM will fetch historical data beginning at this timestamp. The most recent HRRR run prior to the selected time is used for model data; radar, satellite, and hazard products are fetched from archives nearest to the start time.
+**Archive Start Time (UTC)**
+A date/time picker (calendar popup + time fields) for choosing the UTC start time of the replay session. STORM will fetch historical data beginning at this timestamp. All data products (radar, satellite, hazards, soundings, vehicle positions) replay from this time.
+
+**Passphrase**
+Archive mode requires a passphrase for authentication (separate from vehicle/monitor passphrases).
 
 The archive start time is not saved between sessions — each archive launch requires an explicit selection.
 
@@ -535,7 +552,9 @@ Changes and deletions are published to all connected vehicles.
 
 Drawings are meteorological features sketched on the map — synced to all vehicles over MQTT.
 
-#### Front Types
+#### Drawing Types
+
+**Fronts:**
 
 | Button | Front | Symbol | Color |
 |--------|-------|--------|-------|
@@ -920,7 +939,7 @@ These update as each fetcher resolves data for the current archive timestamp.
 
 | Layer | Source | Behavior |
 |-------|--------|----------|
-| NEXRAD Radar | Unidata THREDDS archive | Fetches the Level 3 scan nearest to the current archive time |
+| NEXRAD Radar | Unidata THREDDS archive | Fetches Level 2 or Level 3 scans nearest to the current archive time |
 | GOES Satellite | IEM WMS historical endpoint | Fetches the frame nearest to the current archive time |
 | SPC/NWS Hazards | Archived GeoJSON products | Fetched once at session start for the session date |
 | Soundings | open-meteo HRRR archive | Fetched on demand (map click), using archive time as valid time |
@@ -1169,7 +1188,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 
 | Data Source | Polling Interval | Notes |
 |-------------|-----------------|-------|
-| NEXRAD Radar (Unidata THREDDS) | Every 2 minutes | Level 3 products; no auth required |
+| NEXRAD Radar (Unidata THREDDS) | Every 2 minutes | Level 3 products; no auth required; Level 2 in archive mode |
 | SPC Categorical Outlook | Every 15 minutes | Day 1 only |
 | SPC Tornado / Wind / Hail Probabilities | Every 15 minutes | All fetched together with categorical |
 | SPC Watches | Every 2 minutes | County polygons, tornado + SVR tstm |
@@ -1419,15 +1438,10 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | Station Plots (vehicle obs) | ✅ Enabled | `--disable-annotations` |
 | Measurement Tool | ✅ Enabled | n/a |
 | Deployment Locations | ✅ Enabled | `--disable-deploy-locs` or missing data file |
-| Vehicle Panel | ✅ Enabled | n/a |
-| MQTT Sync (annotations, drawings, cones) | ✅ Enabled | `--disable-mqtt` or `--disable-annotations` |
-| MQTT Vehicle Obs (inbound) | ✅ Enabled | `--disable-mqtt` |
-| Local File Watcher (Track A) | ✅ Enabled (if dir set) | `--disable-data-inputs` or no dir selected |
-| GPS Reader (Track B) | ✅ Enabled (if device present) | `--disable-data-inputs` |
 | Radar Playback (loop mode) | ✅ Enabled | `--disable-radar` |
 | Satellite Playback (loop mode) | ✅ Enabled | n/a |
 | Archive Mode (session replay) | ✅ Enabled | Requires passphrase; selected at launch |
-| Archive Radar Playback | ✅ Enabled in archive mode | n/a |
+| Archive Radar Playback (Level 2/3) | ✅ Enabled in archive mode | n/a |
 | Archive Satellite Playback | ✅ Enabled in archive mode | n/a |
 | Archive Hazard Products | ✅ Enabled in archive mode | n/a |
 | Archive Vehicle Positions (MQTT log) | ✅ Enabled in archive mode | n/a |

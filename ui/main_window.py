@@ -3382,7 +3382,12 @@ class MainWindow(QMainWindow):
                 if obs.vehicle_id not in self._vehicle_history:
                     self._vehicle_history[obs.vehicle_id] = deque()
                 self._vehicle_history[obs.vehicle_id].append(obs)
-        
+                # Live-update timeseries dialog if open
+                if obs.vehicle_id in self._vehicle_timeseries_dialogs:
+                    dlg = self._vehicle_timeseries_dialogs[obs.vehicle_id]
+                    if dlg.isVisible():
+                        dlg.load(obs.vehicle_id, list(self._vehicle_history[obs.vehicle_id]))
+
         marker_color = self._obs_age_color(obs)
         age_label = self._obs_age_label(obs)
         self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
