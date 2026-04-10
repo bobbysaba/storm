@@ -19,9 +19,11 @@ _TOPIC_PREFIX = "storm/drawings"
 
 
 def _next_8am_utc_seconds() -> int:
-    """Seconds until 08:00 UTC the following calendar day."""
+    """Seconds until the next 08:00 UTC (today if before 08z, tomorrow if at or after 08z)."""
     now = datetime.now(timezone.utc)
-    target = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+    target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
     return max(1, int((target - now).total_seconds()))
 
 
