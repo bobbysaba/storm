@@ -136,6 +136,11 @@ class StormConeInputDialog(QDialog):
             btn_delete.clicked.connect(self._on_delete)
             btn_row.addWidget(btn_delete)
 
+            btn_move = QPushButton("Move")
+            btn_move.setToolTip("Drag this cone to a new location")
+            btn_move.clicked.connect(self._on_move)
+            btn_row.addWidget(btn_move)
+
         btn_row.addStretch()
 
         btn_cancel = QPushButton("Cancel")
@@ -163,6 +168,10 @@ class StormConeInputDialog(QDialog):
         self._action = "delete"
         self.accept()
 
+    def _on_move(self):
+        self._action = "move"
+        self.accept()
+
     # ── accessors ─────────────────────────────────────────────────────────────
 
     def action(self) -> str:
@@ -174,3 +183,91 @@ class StormConeInputDialog(QDialog):
 
     def heading(self) -> int:
         return self._heading_spin.value()
+
+
+class StormConePlaceConfirmDialog(QDialog):
+    """Shown after a storm cone placement drag, before the cone is created."""
+
+    def __init__(self, lat: float, lon: float, speed_kts: float, heading: int, parent=None):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Storm Cone")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title_label = QLabel("Storm Motion Cone")
+        title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ACCENT}; background: transparent;")
+        layout.addWidget(title_label)
+
+        info = QLabel(
+            f"LAT {lat:.4f}   LON {lon:.4f}\n"
+            f"Speed {speed_kts:.0f} kts   Heading {heading:d}°"
+        )
+        info.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        layout.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)
+
+
+class StormConeMoveConfirmDialog(QDialog):
+    """Shown after an existing storm cone has been dragged."""
+
+    def __init__(self, old_lat: float, old_lon: float, new_lat: float, new_lon: float, parent=None):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Move")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title_label = QLabel("Storm Motion Cone")
+        title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ACCENT}; background: transparent;")
+        layout.addWidget(title_label)
+
+        info = QLabel(
+            f"Move from  {old_lat:.4f}, {old_lon:.4f}\n"
+            f"       to  {new_lat:.4f}, {new_lon:.4f}"
+        )
+        info.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        layout.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)

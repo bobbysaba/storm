@@ -106,7 +106,7 @@ Only one instance of STORM can run per machine (an internal port is used as a lo
 
 ### Launch Dialog
 
-Every time STORM starts (unless `--monitor` mode is passed on the command line), a configuration dialog appears before the main window opens.
+Every time STORM starts, a configuration dialog appears before the main window opens.
 
 #### Launch Mode
 
@@ -261,11 +261,12 @@ Enables or disables radar fetching. When unchecked, radar is hidden from the map
 |--------|--------|
 | ⏮ | Jump to oldest cached frame |
 | ⏪ | Step back one frame |
-| ▶ / ⏸ | Start / pause auto-playback loop (500 ms per frame) |
+| ▶ / ⏸ | Start / pause auto-playback loop |
 | ⏩ | Step forward one frame |
 | ⏭ | Jump to most recent (live) frame |
 | Timeline slider | Scrub to any cached frame by dragging |
 | Time label | Shows current frame's UTC time (HH:MMZ) |
+| Speed dropdown | Playback speed: 0.5× (1000 ms), 1× (500 ms), 2× (250 ms), 3× (167 ms) |
 
 #### How Radar Data Works
 
@@ -415,11 +416,12 @@ Identical layout to the radar playback row:
 |--------|--------|
 | ⏮ | Jump to oldest frame |
 | ⏪ | Step back one frame |
-| ▶ / ⏸ | Start / pause auto-playback (500 ms per frame) |
+| ▶ / ⏸ | Start / pause auto-playback |
 | ⏩ | Step forward one frame |
 | ⏭ | Jump to newest frame |
 | Timeline slider | Scrub to any cached frame |
 | Time label | Current frame UTC time (--:--Z if no data yet) |
+| Speed dropdown | Playback speed: 0.5× (1200 ms), 1× (600 ms), 2× (300 ms), 3× (200 ms) |
 
 #### How Satellite Data Works
 
@@ -538,11 +540,21 @@ Annotations are field-condition markers placed on the map and synced to all vehi
 #### Editing or Deleting an Annotation
 
 1. Click an existing annotation marker on the map.
-2. The same dialog opens, pre-filled with the existing note.
+2. The edit dialog opens, pre-filled with the existing note.
 3. Edit the note or click **Delete** to remove it.
 4. Click **Save** to confirm.
 
-Changes and deletions are published to all connected vehicles.
+#### Moving an Annotation
+
+1. Click an existing annotation marker on the map.
+2. In the edit dialog, click **Move**.
+3. The dialog closes and the marker becomes draggable — drag it to the new location.
+4. On drop, a confirmation dialog shows the old and new coordinates.
+5. Click **Confirm** to save the new position, or **Cancel** to revert.
+
+Changes, moves, and deletions are published to all connected vehicles.
+
+> **Note:** When the routing or measure tool is active, clicking on an annotation will forward the click to the active tool instead of opening the edit dialog.
 
 ---
 
@@ -1016,7 +1028,7 @@ Switch to NSSL mode in the SOUNDINGS drawer. CLAMPS truck markers appear when da
 │  [Parcel table: SB / ML / MU × CAPE / CIN / LCL / LFC / EL]│
 │  [Kinematics table: 0-500m / 0-1km / 0-3km / 0-6km × Shear / SRH / SRW]  │
 ├─────────────────────────────────────────────────────────────┤
-│  LR 700-500  LR 0-3km  SFC θe  PW  Conv Temp  STP  SCP  EHI│
+│  LR 700-500  LR 0-3km  SFC θe  PW  Conv Temp  STP  SCP  EHI  0-3km CAPE│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -1032,6 +1044,7 @@ The header shows the HRRR init time and the currently-displayed valid time. The 
 | Green curve | Dewpoint |
 | Dashed warm-tint curve | Virtual temperature |
 | White dashed curve | Surface-based parcel profile |
+| Surface T/Td labels | Bold numeric labels at the base of the temperature (red) and dewpoint (green) traces showing surface values in °C |
 | Red shading | CAPE area |
 | Blue shading | CIN area |
 | Cyan circle | LCL marker |
@@ -1090,6 +1103,7 @@ Storm motion is displayed as `RM  dir°/spd kt` and `LM  dir°/spd kt` in the ho
 | STP | Significant Tornado Parameter |
 | SCP | Supercell Composite Parameter |
 | EHI | Energy-Helicity Index |
+| 0-3km CAPE | CAPE integrated over the lowest 3 km AGL (J/kg) |
 
 ### Cursor Readout
 
@@ -1217,8 +1231,9 @@ Run `python main.py --help` for the full list. Key options:
 ```
 --debug                        Enable debug logging and the debug panel (Ctrl+D)
 --log-level LEVEL              Logging verbosity: DEBUG, INFO, WARNING, ERROR (default: WARNING)
---monitor                      Monitor mode: suppresses local obs inputs
 ```
+
+> **Note:** Mode selection (VEHICLE, MONITOR, VIEWER, ARCHIVE) is handled exclusively through the launch dialog to enforce passphrase authentication. There are no command-line flags for mode selection.
 
 ### Disable Features
 

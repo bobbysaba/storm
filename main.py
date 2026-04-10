@@ -81,28 +81,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python main.py --debug-run 2\n"
             "  python main.py --disable-mqtt --disable-radar\n"
-            "  python main.py --monitor --debug"
+            "  python main.py --debug --disable-mqtt"
         ),
     )
 
     # run in debug mode 
     parser.add_argument("--debug", action="store_true", help="enable debug logging and in-app debug panel")
 
-    # run in monitor mode
-    parser.add_argument(
-        "--monitor",
-        action="store_true",
-        help="monitor mode: skip local obs inputs; MQTT sync for map edits remains enabled",
-    )
-
-    # run in viewer mode (subscribe only, no publishing)
-    parser.add_argument(
-        "--viewer",
-        action="store_true",
-        help="viewer mode: subscribe-only, no publishing of annotations/drawings/cones",
-    )
-
-    # determine the log level to run in 
+    # determine the log level to run in
     parser.add_argument(
         "--log-level",
         default="WARNING",
@@ -430,34 +416,32 @@ def main() -> None:
         sys.exit(0)
 
 
-    # pull whether or not we're in monitor or viewer mode
-    monitor      = args.monitor
-    viewer       = args.viewer
+    # show the launch dialog for mode selection and password verification
+    monitor      = False
+    viewer       = False
     archive_time = None   # datetime | None
 
-    # if not launched via CLI mode flag, show the launch dialog
-    if not monitor and not viewer:
-        dialog = LaunchDialog()
+    dialog = LaunchDialog()
 
-        # if the diaglog is not accepted
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            # exit
-            sys.exit(0)
+    # if the dialog is not accepted
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        # exit
+        sys.exit(0)
 
-        # get the vehicle ID
-        config.VEHICLE_ID = _normalize_vehicle_id(dialog.vehicle_id())
+    # get the vehicle ID
+    config.VEHICLE_ID = _normalize_vehicle_id(dialog.vehicle_id())
 
-        # get the vehicle icon type selected by the user
-        config.VEHICLE_ICON = dialog.vehicle_icon()
+    # get the vehicle icon type selected by the user
+    config.VEHICLE_ICON = dialog.vehicle_icon()
 
-        # get the directory for real-time observation files (if any)
-        config.OBS_FILE_DIR      = dialog.data_dir()
-        config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
+    # get the directory for real-time observation files (if any)
+    config.OBS_FILE_DIR      = dialog.data_dir()
+    config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
 
-        # get mode from the dialog
-        monitor      = dialog.monitor()
-        viewer       = dialog.viewer()
-        archive_time = dialog.archive_start_time()   # None unless archive mode
+    # get mode from the dialog
+    monitor      = dialog.monitor()
+    viewer       = dialog.viewer()
+    archive_time = dialog.archive_start_time()   # None unless archive mode
 
     from ui.main_window import MainWindow  # noqa: PLC0415
 

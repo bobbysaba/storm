@@ -194,6 +194,12 @@ class AnnotationEditDialog(QDialog):
         btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(btn_delete)
 
+        if annotation.type_key != "fork":
+            btn_move = QPushButton("Move")
+            btn_move.setToolTip("Drag this annotation to a new location")
+            btn_move.clicked.connect(self._on_move)
+            btn_row.addWidget(btn_move)
+
         btn_row.addStretch()
 
         btn_cancel = QPushButton("Cancel")
@@ -217,8 +223,66 @@ class AnnotationEditDialog(QDialog):
         self._action = "delete"
         self.accept()
 
+    def _on_move(self):
+        self._action = "move"
+        self.accept()
+
     def action(self) -> str:
         return self._action
 
     def result_label(self) -> str:
         return self._result_label
+
+
+class AnnotationMoveConfirmDialog(QDialog):
+    """
+    Shown after the user drags an annotation to a new location.
+    Returns accepted (confirm) or rejected (cancel/revert).
+    """
+
+    def __init__(self, annotation: Annotation, new_lat: float, new_lon: float, parent=None):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Move")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
+        )
+
+        meta = ANNOTATION_TYPE_MAP.get(
+            annotation.type_key,
+            {"symbol": "?", "label": annotation.type_key, "color": ACCENT}
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(_header_widget(meta))
+
+        info = QLabel(
+            f"Move from  {annotation.lat:.4f}, {annotation.lon:.4f}\n"
+            f"       to  {new_lat:.4f}, {new_lon:.4f}"
+        )
+        info.setStyleSheet(
+            f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;"
+        )
+        layout.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)

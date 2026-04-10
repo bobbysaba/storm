@@ -108,6 +108,7 @@ class RadarControls(QWidget):
     fetch_requested = pyqtSignal()
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
+    speed_changed   = pyqtSignal(int)      # new interval in ms
 
     # internal — emitted from the _refresh_product_availability background thread
     # AutoConnection queues this safely to the main thread (avoids QTimer.singleShot
@@ -251,6 +252,17 @@ class RadarControls(QWidget):
         self._frame_time_label.setFixedHeight(26)
         self._frame_time_label.setMinimumWidth(52)
         r2.addWidget(self._frame_time_label)
+
+        # speed selector — 0.5×, 1×, 2×, 3×
+        self._speed_combo = QComboBox()
+        self._speed_combo.setFixedHeight(26)
+        self._speed_combo.setMaximumWidth(5)
+        self._speed_combo.setToolTip("Playback speed")
+        for label, ms in [("0.5×", 1000), ("1×", 500), ("2×", 250), ("3×", 167)]:
+            self._speed_combo.addItem(label, userData=ms)
+        self._speed_combo.setCurrentIndex(1)   # default 1×
+        self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        r2.addWidget(self._speed_combo)
 
         drawer_layout.addWidget(row2)
 
@@ -499,6 +511,11 @@ class RadarControls(QWidget):
         new_val = min(self._frame_slider.maximum(), self._frame_slider.value() + 1)
         self.set_frame(new_val)
         self.frame_requested.emit(new_val)
+
+    def _on_speed_changed(self, index: int):
+        ms = self._speed_combo.itemData(index)
+        if ms is not None:
+            self.speed_changed.emit(ms)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

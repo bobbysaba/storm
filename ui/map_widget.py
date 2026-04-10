@@ -485,9 +485,8 @@ def build_map_html() -> str:
           source: "storm-tiles", "source-layer": "boundary",
           filter: ["==", ["get", "admin_level"], 4],
           paint: {{
-            "line-color": "#2A2A3E",
-            "line-width": 1.5,
-            "line-dasharray": [4, 3]
+            "line-color": "#FFFFFF",
+            "line-width": 1.5
           }}
         }},
         {{
@@ -1008,15 +1007,17 @@ def build_map_html() -> str:
       }});
 
       // Click-to-pick destination mode
-      var _routePickMode = false;
+      window._routePickMode = false;
+      window._routePickConsumed = false;
       window.stormSetRoutePickMode = function(on) {{
-        _routePickMode = !!on;
-        map.getCanvas().style.cursor = _routePickMode ? 'crosshair' : '';
+        window._routePickMode = !!on;
+        map.getCanvas().style.cursor = window._routePickMode ? 'crosshair' : '';
       }};
 
       map.on('click', function(e) {{
-        if (!_routePickMode) return;
-        _routePickMode = false;
+        if (!window._routePickMode) return;
+        window._routePickMode = false;
+        window._routePickConsumed = true;
         map.getCanvas().style.cursor = '';
         if (bridge) bridge.on_map_pick_for_route(e.lngLat.lat, e.lngLat.lng);
       }});
@@ -1384,6 +1385,27 @@ def build_map_html() -> str:
         window._drawingRubberPt = [e.lngLat.lng, e.lngLat.lat];
         _updateDrawingPreviewGeoJSON();
       }}
+      if (window._stormDrawingDrag && window._stormDrawingDrag.dragging) {{
+        var _dd = window._stormDrawingDrag;
+        var _deltaLng = e.lngLat.lng - _dd.startLngLat[0];
+        var _deltaLat = e.lngLat.lat - _dd.startLngLat[1];
+        var _nextCoords = _dd.originalCoords.map(function(c) {{
+          return [c[0] + _deltaLat, c[1] + _deltaLng];
+        }});
+        _updateDrawingData(_dd.id, _nextCoords);
+        return;
+      }}
+      if (window._stormConeDrag && window._stormConeDrag.dragging) {{
+        var _cd = window._stormConeDrag;
+        var _coneLng = e.lngLat.lng;
+        var _coneLat = e.lngLat.lat;
+        if (_cd.id) {{
+          var _moveDeltaLng = _coneLng - _cd.startLngLat[0];
+          var _moveDeltaLat = _coneLat - _cd.startLngLat[1];
+          _updateStormConeData(_cd.id, _translateGeoJSON(_cd.originalData, _moveDeltaLng, _moveDeltaLat), _cd.originalAnchor[0] + _moveDeltaLng, _cd.originalAnchor[1] + _moveDeltaLat);
+        }}
+        return;
+      }}
 
       var _htip = document.getElementById('hazard-tooltip');
       if (_htip) {{
@@ -1480,6 +1502,15 @@ def build_map_html() -> str:
     }});
 
     map.on("click", function(e) {{
+      if (window._stormSuppressNextClick) {{
+        window._stormSuppressNextClick = false;
+        return;
+      }}
+      // Route pick was already handled by the earlier listener — skip everything
+      if (window._routePickConsumed) {{
+        window._routePickConsumed = false;
+        return;
+      }}
       // In sounding mode: capture lat/lon and forward to Python — skip all other handling
       if (window._soundingModeActive) {{
         if (bridge) bridge.on_sounding_click(e.lngLat.lat, e.lngLat.lng);
@@ -1493,6 +1524,11 @@ def build_map_html() -> str:
       // In annotation placement mode: always place, do not open existing features.
       var mapEl = document.getElementById('map');
       if (mapEl && mapEl.classList.contains('annotating')) {{
+        if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
+        return;
+      }}
+      // In measure mode: always forward as map click, skip hit detection
+      if (mapEl && mapEl.classList.contains('measuring')) {{
         if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
         return;
       }}
@@ -1575,6 +1611,83 @@ def build_map_html() -> str:
       if (window._stormDrawingActive) {{
         e.preventDefault();
         if (bridge) bridge.on_map_dblclick(e.lngLat.lat, e.lngLat.lng);
+      }}
+    }});
+
+    map.on("mousedown", function(e) {{
+      if (window._stormDrawingDrag && window._stormDrawingDrag.id) {{
+        var _dragId = window._stormDrawingDrag.id;
+        var _dragLayers = ['drawing-hit-' + _dragId, 'drawing-hit-fill-' + _dragId, 'drawing-lbl-' + _dragId]
+          .filter(function(layerId) {{ return map.getLayer(layerId); }});
+        if (_dragLayers.length > 0) {{
+          var _dragHits = map.queryRenderedFeatures(e.point, {{layers: _dragLayers}});
+          if (_dragHits.length > 0) {{
+            var _drawing = window._stormDrawings[_dragId];
+            if (_drawing) {{
+              window._stormDrawingDrag.dragging = true;
+              window._stormDrawingDrag.startLngLat = [e.lngLat.lng, e.lngLat.lat];
+              window._stormDrawingDrag.originalCoords = JSON.parse(JSON.stringify(_drawing.coordinates || []));
+              window._stormSuppressNextClick = true;
+              map.dragPan.disable();
+              map.getCanvas().style.cursor = 'grabbing';
+              e.preventDefault();
+              return;
+            }}
+          }}
+        }}
+      }}
+      if (window._stormConeDrag && (window._stormConeDrag.id || window._stormConePlacementActive)) {{
+        if (window._stormConeDrag.id) {{
+          var _coneId = window._stormConeDrag.id;
+          var _coneLayers = ['storm-cone-fill-' + _coneId, 'storm-cone-outline-' + _coneId, 'storm-cone-ribs-' + _coneId, 'storm-cone-labels-' + _coneId]
+            .filter(function(layerId) {{ return map.getLayer(layerId); }});
+          if (_coneLayers.length > 0) {{
+            var _coneHits = map.queryRenderedFeatures(e.point, {{layers: _coneLayers}});
+            if (_coneHits.length === 0) return;
+          }} else {{
+            return;
+          }}
+        }}
+        window._stormConeDrag.dragging = true;
+        window._stormConeDrag.startLngLat = [e.lngLat.lng, e.lngLat.lat];
+        if (window._stormConeDrag.id) {{
+          var _activeCone = window._stormCones[window._stormConeDrag.id];
+          if (!_activeCone) return;
+          window._stormConeDrag.originalAnchor = (_activeCone.anchor || [e.lngLat.lng, e.lngLat.lat]).slice();
+          window._stormConeDrag.originalData = JSON.parse(JSON.stringify(_activeCone.data));
+        }}
+        window._stormSuppressNextClick = true;
+        map.dragPan.disable();
+        map.getCanvas().style.cursor = 'grabbing';
+        e.preventDefault();
+      }}
+    }});
+
+    map.on("mouseup", function(e) {{
+      if (window._stormDrawingDrag && window._stormDrawingDrag.dragging) {{
+        var _done = window._stormDrawingDrag;
+        window._stormDrawingDrag.dragging = false;
+        map.dragPan.enable();
+        map.getCanvas().style.cursor = _done.id ? 'grab' : '';
+        if (bridge) {{
+          var _coordsJson = JSON.stringify((window._stormDrawings[_done.id] || {{coordinates: []}}).coordinates || []);
+          bridge.on_drawing_drag_end(_done.id, _coordsJson);
+        }}
+        return;
+      }}
+      if (window._stormConeDrag && window._stormConeDrag.dragging) {{
+        var _coneDone = window._stormConeDrag;
+        window._stormConeDrag.dragging = false;
+        map.dragPan.enable();
+        map.getCanvas().style.cursor = (_coneDone.id || window._stormConePlacementActive) ? 'grab' : '';
+        if (_coneDone.id) {{
+          var _finalCone = window._stormCones[_coneDone.id];
+          if (_finalCone && bridge) {{
+            bridge.on_storm_cone_drag_end(_coneDone.id, _finalCone.anchor[1], _finalCone.anchor[0]);
+          }}
+        }} else if (window._stormConePlacementActive && bridge) {{
+          bridge.on_storm_cone_place_drag_end(e.lngLat.lat, e.lngLat.lng);
+        }}
       }}
     }});
 
@@ -1754,6 +1867,20 @@ def build_map_html() -> str:
       el.title = label;
       el.addEventListener('click', function(e) {{
         e.stopPropagation();
+        // suppress popup when routing pick or measure tool is active
+        if (window._routePickMode) {{
+          window._routePickMode = false;
+          map.getCanvas().style.cursor = '';
+          var ll = window._stormAnnotations[id].getLngLat();
+          if (bridge) bridge.on_map_pick_for_route(ll.lat, ll.lng);
+          return;
+        }}
+        var mapEl = document.getElementById('map');
+        if (mapEl && mapEl.classList.contains('measuring')) {{
+          var ll2 = window._stormAnnotations[id].getLngLat();
+          if (bridge) bridge.on_map_click(ll2.lat, ll2.lng);
+          return;
+        }}
         if (bridge) bridge.on_annotation_click(id);
       }});
       const marker = new maplibregl.Marker({{element: el}})
@@ -1771,8 +1898,35 @@ def build_map_html() -> str:
       }}
     }};
 
+    window.stormSetAnnotationDraggable = function(id, on) {{
+      var m = window._stormAnnotations[id];
+      if (!m) return;
+      m.setDraggable(!!on);
+      if (on) {{
+        m._stormDragEnd = function() {{
+          var ll = m.getLngLat();
+          if (bridge) bridge.on_annotation_drag_end(id, ll.lat, ll.lng);
+        }};
+        m.on('dragend', m._stormDragEnd);
+        m.getElement().style.cursor = 'grab';
+      }} else {{
+        if (m._stormDragEnd) {{
+          m.off('dragend', m._stormDragEnd);
+          delete m._stormDragEnd;
+        }}
+        m.getElement().style.cursor = 'pointer';
+      }}
+    }};
+
+    window.stormMoveAnnotation = function(id, lat, lon) {{
+      var m = window._stormAnnotations[id];
+      if (m) m.setLngLat([lon, lat]);
+    }};
+
     // ── Drawing Annotations (Fronts & Custom Shapes) ──────────────────────
     window._stormDrawings = {{}};
+    window._stormDrawingDrag = {{id: null, dragging: false, startLngLat: null, originalCoords: null}};
+    window._stormSuppressNextClick = false;
 
     function _computeCentroid(coords) {{
       var sumLon = 0, sumLat = 0;
@@ -1780,18 +1934,50 @@ def build_map_html() -> str:
       return [sumLon / coords.length, sumLat / coords.length];
     }}
 
+    function _drawingLngLatCoords(coords) {{
+      return coords.map(function(c) {{ return [c[1], c[0]]; }});
+    }}
+
+    function _drawingGeometryForData(d) {{
+      var coords = _drawingLngLatCoords(d.coordinates || []);
+      if (d.drawing_type === 'polygon' && coords.length >= 3) {{
+        return {{type:'Polygon', coordinates:[[...coords, coords[0]]]}};
+      }}
+      return {{type:'LineString', coordinates:coords}};
+    }}
+
+    function _updateDrawingData(id, coordinates) {{
+      var d = window._stormDrawings[id];
+      if (!d) return;
+      d.coordinates = coordinates;
+      var src = map.getSource('drawing-' + id);
+      if (src) {{
+        src.setData({{
+          type: 'FeatureCollection',
+          features: [{{
+            type: 'Feature',
+            geometry: _drawingGeometryForData(d),
+            properties: {{drawing_id: id, drawing_type: d.drawing_type, title: d.title}}
+          }}]
+        }});
+      }}
+      var lblSrc = map.getSource('drawing-lbl-' + id);
+      if (lblSrc && d.title && coordinates.length > 0) {{
+        lblSrc.setData({{
+          type: 'FeatureCollection',
+          features: [{{
+            type: 'Feature',
+            geometry: {{type:'Point', coordinates:_computeCentroid(_drawingLngLatCoords(coordinates))}},
+            properties: {{drawing_id: id, title: d.title}}
+          }}]
+        }});
+      }}
+    }}
+
     window.stormAddDrawing = function(id, jsonStr) {{
       stormRemoveDrawing(id);
       var d = JSON.parse(jsonStr);
       window._stormDrawings[id] = d;
-
-      var coords = d.coordinates.map(function(c) {{ return [c[1], c[0]]; }});
-      var geometry;
-      if (d.drawing_type === 'polygon' && coords.length >= 3) {{
-        geometry = {{type:'Polygon', coordinates:[[...coords, coords[0]]]}};
-      }} else {{
-        geometry = {{type:'LineString', coordinates:coords}};
-      }}
 
       map.addSource('drawing-' + id, {{
         type: 'geojson',
@@ -1799,7 +1985,7 @@ def build_map_html() -> str:
           type: 'FeatureCollection',
           features: [{{
             type: 'Feature',
-            geometry: geometry,
+            geometry: _drawingGeometryForData(d),
             properties: {{drawing_id: id, drawing_type: d.drawing_type, title: d.title}}
           }}]
         }}
@@ -1837,7 +2023,7 @@ def build_map_html() -> str:
           }}
         }});
         if (d.title) {{
-          var centroid = _computeCentroid(coords);
+          var centroid = _computeCentroid(_drawingLngLatCoords(d.coordinates || []));
           map.addSource('drawing-lbl-' + id, {{
             type: 'geojson',
             data: {{
@@ -1874,12 +2060,24 @@ def build_map_html() -> str:
         .filter(function(layerId) {{ return map.getLayer(layerId); }})
         .forEach(function(layerId) {{
           map.on('mouseenter', layerId, function() {{
-            map.getCanvas().style.cursor = 'pointer';
+            map.getCanvas().style.cursor = (window._stormDrawingDrag && window._stormDrawingDrag.id === id) ? 'grab' : 'pointer';
           }});
           map.on('mouseleave', layerId, function() {{
-            map.getCanvas().style.cursor = '';
+            map.getCanvas().style.cursor = (window._stormDrawingDrag && window._stormDrawingDrag.id === id) ? 'grab' : '';
           }});
         }});
+    }};
+
+    window.stormSetDrawingDraggable = function(id, on) {{
+      if (!on) {{
+        if (window._stormDrawingDrag && window._stormDrawingDrag.id === id) {{
+          window._stormDrawingDrag = {{id: null, dragging: false, startLngLat: null, originalCoords: null}};
+        }}
+        map.getCanvas().style.cursor = '';
+        return;
+      }}
+      window._stormDrawingDrag = {{id: id, dragging: false, startLngLat: null, originalCoords: null}};
+      map.getCanvas().style.cursor = 'grab';
     }};
 
     window.stormRemoveDrawing = function(id) {{
@@ -1951,8 +2149,40 @@ def build_map_html() -> str:
 
     // ── Storm Motion Cones ────────────────────────────────────────────────
     window._stormCones = {{}};
+    window._stormConeDrag = {{id: null, dragging: false, startLngLat: null, originalAnchor: null, originalData: null}};
+    window._stormConePlacementActive = false;
 
-    window.stormAddStormCone = function(id, geojsonStr) {{
+    function _translateCoordinates(coords, deltaLng, deltaLat) {{
+      if (!Array.isArray(coords)) return coords;
+      if (coords.length === 0) return [];
+      if (typeof coords[0] === 'number') {{
+        return [coords[0] + deltaLng, coords[1] + deltaLat];
+      }}
+      return coords.map(function(part) {{
+        return _translateCoordinates(part, deltaLng, deltaLat);
+      }});
+    }}
+
+    function _translateGeoJSON(data, deltaLng, deltaLat) {{
+      var next = JSON.parse(JSON.stringify(data));
+      (next.features || []).forEach(function(feature) {{
+        if (feature.geometry && feature.geometry.coordinates) {{
+          feature.geometry.coordinates = _translateCoordinates(feature.geometry.coordinates, deltaLng, deltaLat);
+        }}
+      }});
+      return next;
+    }}
+
+    function _updateStormConeData(id, data, anchorLng, anchorLat) {{
+      var cone = window._stormCones[id];
+      if (!cone) return;
+      cone.data = data;
+      cone.anchor = [anchorLng, anchorLat];
+      var src = map.getSource('storm-cone-' + id);
+      if (src) src.setData(data);
+    }}
+
+    window.stormAddStormCone = function(id, geojsonStr, lat, lon) {{
       stormRemoveStormCone(id);
       var data = JSON.parse(geojsonStr);
       map.addSource('storm-cone-' + id, {{type: 'geojson', data: data}});
@@ -2019,13 +2249,13 @@ def build_map_html() -> str:
 
       // pointer cursor on hover
       map.on('mouseenter', 'storm-cone-fill-' + id, function() {{
-        map.getCanvas().style.cursor = 'pointer';
+        map.getCanvas().style.cursor = (window._stormConeDrag && window._stormConeDrag.id === id) ? 'grab' : 'pointer';
       }});
       map.on('mouseleave', 'storm-cone-fill-' + id, function() {{
-        map.getCanvas().style.cursor = '';
+        map.getCanvas().style.cursor = (window._stormConeDrag && window._stormConeDrag.id === id) ? 'grab' : (window._stormConePlacementActive ? 'grab' : '');
       }});
 
-      window._stormCones[id] = true;
+      window._stormCones[id] = {{data: data, anchor: [lon, lat]}};
     }};
 
     window.stormRemoveStormCone = function(id) {{
@@ -2035,6 +2265,26 @@ def build_map_html() -> str:
       }});
       if (map.getSource('storm-cone-' + id)) map.removeSource('storm-cone-' + id);
       delete window._stormCones[id];
+    }};
+
+    window.stormSetStormConeDraggable = function(id, on) {{
+      if (!on) {{
+        if (window._stormConeDrag && window._stormConeDrag.id === id) {{
+          window._stormConeDrag = {{id: null, dragging: false, startLngLat: null, originalAnchor: null, originalData: null}};
+        }}
+        map.getCanvas().style.cursor = window._stormConePlacementActive ? 'grab' : '';
+        return;
+      }}
+      window._stormConeDrag = {{id: id, dragging: false, startLngLat: null, originalAnchor: null, originalData: null}};
+      map.getCanvas().style.cursor = 'grab';
+    }};
+
+    window.stormSetStormConePlacementMode = function(active) {{
+      window._stormConePlacementActive = !!active;
+      if (!active && window._stormConeDrag && !window._stormConeDrag.id) {{
+        window._stormConeDrag = {{id: null, dragging: false, startLngLat: null, originalAnchor: null, originalData: null}};
+      }}
+      map.getCanvas().style.cursor = active ? 'grab' : '';
     }};
 
     // ── Station Plots ─────────────────────────────────────────────────────
@@ -2815,6 +3065,10 @@ class MapBridge(QObject):
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
+    annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    drawing_drag_ended    = pyqtSignal(str, str)           # id, coords json
+    storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    storm_cone_place_drag_ended = pyqtSignal(float, float)
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -2831,6 +3085,22 @@ class MapBridge(QObject):
     @pyqtSlot(str)
     def on_annotation_click(self, annotation_id: str):
         self.annotation_clicked.emit(annotation_id)
+
+    @pyqtSlot(str, float, float)
+    def on_annotation_drag_end(self, annotation_id: str, lat: float, lon: float):
+        self.annotation_drag_ended.emit(annotation_id, lat, lon)
+
+    @pyqtSlot(str, str)
+    def on_drawing_drag_end(self, drawing_id: str, coordinates_json: str):
+        self.drawing_drag_ended.emit(drawing_id, coordinates_json)
+
+    @pyqtSlot(str, float, float)
+    def on_storm_cone_drag_end(self, cone_id: str, lat: float, lon: float):
+        self.storm_cone_drag_ended.emit(cone_id, lat, lon)
+
+    @pyqtSlot(float, float)
+    def on_storm_cone_place_drag_end(self, lat: float, lon: float):
+        self.storm_cone_place_drag_ended.emit(lat, lon)
 
     @pyqtSlot(str)
     def on_storm_cone_click(self, cone_id: str):
@@ -2880,7 +3150,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     map_moved             = pyqtSignal(float, float, float)
     feature_clicked       = pyqtSignal(str)
     annotation_clicked    = pyqtSignal(str)
+    annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    drawing_drag_ended    = pyqtSignal(str, str)           # id, coords json
     storm_cone_clicked    = pyqtSignal(str)
+    storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    storm_cone_place_drag_ended = pyqtSignal(float, float)
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
@@ -2933,7 +3207,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.map_moved.connect(self.map_moved)
         self.bridge.feature_clicked.connect(self.feature_clicked)
         self.bridge.annotation_clicked.connect(self.annotation_clicked)
+        self.bridge.annotation_drag_ended.connect(self.annotation_drag_ended)
+        self.bridge.drawing_drag_ended.connect(self.drawing_drag_ended)
         self.bridge.storm_cone_clicked.connect(self.storm_cone_clicked)
+        self.bridge.storm_cone_drag_ended.connect(self.storm_cone_drag_ended)
+        self.bridge.storm_cone_place_drag_ended.connect(self.storm_cone_place_drag_ended)
         self.bridge.map_double_clicked.connect(self.map_double_clicked)
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
@@ -3153,6 +3431,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormDrawingModeSet) stormDrawingModeSet({flag}, '{type_key}');"
         )
 
+    def set_drawing_draggable(self, drawing_id: str, on: bool) -> None:
+        self.run_js(f"if(window.stormSetDrawingDraggable) stormSetDrawingDraggable('{drawing_id}', {'true' if on else 'false'});")
+
     def drawing_update_preview(self, points: list) -> None:
         import json
         self.run_js(
@@ -3179,13 +3460,25 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def remove_annotation(self, annotation_id: str) -> None:
         self.run_js(f"stormRemoveAnnotation('{annotation_id}');")
 
+    def set_annotation_draggable(self, annotation_id: str, on: bool) -> None:
+        self.run_js(f"stormSetAnnotationDraggable('{annotation_id}', {'true' if on else 'false'});")
+
+    def move_annotation(self, annotation_id: str, lat: float, lon: float) -> None:
+        self.run_js(f"stormMoveAnnotation('{annotation_id}', {lat}, {lon});")
+
     def add_storm_cone(self, cone) -> None:
         import json
         geojson_str = json.dumps(cone.build_geojson())
-        self.run_js(f"stormAddStormCone('{cone.id}', {json.dumps(geojson_str)});")
+        self.run_js(f"stormAddStormCone('{cone.id}', {json.dumps(geojson_str)}, {cone.lat}, {cone.lon});")
 
     def remove_storm_cone(self, cone_id: str) -> None:
         self.run_js(f"stormRemoveStormCone('{cone_id}');")
+
+    def set_storm_cone_draggable(self, cone_id: str, on: bool) -> None:
+        self.run_js(f"if(window.stormSetStormConeDraggable) stormSetStormConeDraggable('{cone_id}', {'true' if on else 'false'});")
+
+    def set_storm_cone_placement_mode(self, active: bool) -> None:
+        self.run_js(f"if(window.stormSetStormConePlacementMode) stormSetStormConePlacementMode({'true' if active else 'false'});")
 
     def add_station_plot(self, vehicle_id: str, lat: float, lon: float, png_bytes: bytes) -> None:
         import base64

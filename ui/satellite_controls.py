@@ -2,8 +2,8 @@
 # Collapsible toolbar drawer for GOES satellite imagery selection and playback.
 
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QSlider,
-    QSizePolicy,
+    QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QFrame, QToolButton, QLabel,
+    QSlider, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QEvent
 
@@ -30,6 +30,7 @@ class SatelliteControls(QWidget):
     opacity_changed = pyqtSignal(float)
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
+    speed_changed   = pyqtSignal(int)      # new interval in ms
     meso_preview    = pyqtSignal(int, bool)
 
     def __init__(self, parent=None):
@@ -141,6 +142,17 @@ class SatelliteControls(QWidget):
         self._time_label.setFixedHeight(26)
         self._time_label.setMinimumWidth(52)
         r2.addWidget(self._time_label)
+
+        # speed selector — 0.5×, 1×, 2×, 3×
+        self._speed_combo = QComboBox()
+        self._speed_combo.setFixedHeight(26)
+        self._speed_combo.setMaximumWidth(5)
+        self._speed_combo.setToolTip("Playback speed")
+        for label, ms in [("0.5×", 1200), ("1×", 600), ("2×", 300), ("3×", 200)]:
+            self._speed_combo.addItem(label, userData=ms)
+        self._speed_combo.setCurrentIndex(1)   # default 1×
+        self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        r2.addWidget(self._speed_combo)
 
         col.addWidget(row2)
         outer.addWidget(self._drawer)
@@ -329,3 +341,8 @@ class SatelliteControls(QWidget):
         v = min(self._frame_slider.maximum(), self._frame_slider.value() + 1)
         self.set_frame(v)
         self.frame_requested.emit(v)
+
+    def _on_speed_changed(self, index: int):
+        ms = self._speed_combo.itemData(index)
+        if ms is not None:
+            self.speed_changed.emit(ms)

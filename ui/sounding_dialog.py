@@ -73,6 +73,7 @@ _THRESHOLDS: dict[str, list] = {
                   (8, "#c0392b")],
     "scp":       [(0, _MUTED), (2,   "#f9ca24"), (4,   "#f0932b"), (8,   "#eb4d4b")],
     "ehi":       [(0, _MUTED), (1,   "#f9ca24"), (2,   "#f0932b"), (3,   "#eb4d4b")],
+    "cape3km":   [(0, _MUTED), (50,  "#f9ca24"), (100, "#f0932b"), (200, "#eb4d4b")],
     "lr75":      [(0, _MUTED), (7.0, "#f9ca24"), (8.0, "#f0932b"), (9.0, "#eb4d4b")],
     "lr03":      [(5, _MUTED), (7.0, "#f9ca24"), (8.0, "#f0932b"), (9.0, "#eb4d4b")],
     "sfc_the":   [(320, _MUTED), (335, "#f9ca24"), (350, "#f0932b"), (365, "#eb4d4b")],
@@ -101,6 +102,7 @@ _SCALAR_PARAMS = [
     ("stp",     "STP",        "",      "#fd79a8"),
     ("scp",     "SCP",        "",      "#b39ddb"),
     ("ehi",     "EHI",        "",      "#fd79a8"),
+    ("cape3km", "0-3km CAPE", "J/kg",  "#e17055"),
 ]
 
 _SLIDER_QSS = f"""
@@ -635,6 +637,17 @@ class SoundingDialog(QDialog):
         except Exception as e:
             log.debug("LCL marker failed: %s", e)
 
+        # Surface T/Td labels (SHARPpy style) — positioned just below trace endpoints
+        sfc_t = float(snd.temperature[0])
+        sfc_td = float(snd.dewpoint[0])
+        sfc_p = float(snd.pressure[0])
+        ax.text(sfc_t, sfc_p + 18, f"{sfc_t:.0f}",
+                color=_TEMP_CLR, fontsize=8, fontweight="bold",
+                ha="center", va="top", zorder=7)
+        ax.text(sfc_td, sfc_p + 18, f"{sfc_td:.0f}",
+                color=_DEWP_CLR, fontsize=8, fontweight="bold",
+                ha="center", va="top", zorder=7)
+
         ax.set_ylim(1050, 100)
         ax.set_xlim(-40, 50)
 
@@ -1151,3 +1164,21 @@ class SoundingDialog(QDialog):
         except Exception as e:
             log.debug("EHI failed: %s", e)
             _set("ehi", None)
+
+        # ── 0-3 km CAPE ──────────────────────────────────────────────────────
+        try:
+            z_sfc = snd.height[0]
+            cap_3km = z_sfc + 3000.0
+            mask_3 = snd.height <= cap_3km
+            if sb_parcel is not None and mask_3.sum() >= 2:
+                p3  = pres[mask_3]
+                t3  = temp[mask_3]
+                d3  = dewp[mask_3]
+                sb3 = sb_parcel[mask_3]
+                cape3, _ = mpcalc.cape_cin(p3, t3, d3, sb3)
+                _set("cape3km", float(cape3.to("J/kg").m))
+            else:
+                _set("cape3km", None)
+        except Exception as e:
+            log.debug("0-3km CAPE failed: %s", e)
+            _set("cape3km", None)

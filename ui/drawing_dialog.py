@@ -32,6 +32,14 @@ def _dialog_style() -> str:
     """
 
 
+def _centroid_latlon(coords: list[list[float]]) -> tuple[float, float]:
+    if not coords:
+        return 0.0, 0.0
+    lat = sum(pt[0] for pt in coords) / len(coords)
+    lon = sum(pt[1] for pt in coords) / len(coords)
+    return lat, lon
+
+
 class DrawingTitleDialog(QDialog):
     """
     Shown after finishing a polyline or polygon.
@@ -102,12 +110,59 @@ class DrawingTitleDialog(QDialog):
         return self._title
 
 
+class DrawingPlaceConfirmDialog(QDialog):
+    """Shown after finishing a drawing, before it is added to the map."""
+
+    def __init__(self, drawing_type: str, point_count: int, parent=None):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Drawing")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
+        )
+
+        meta = DRAWING_TYPE_MAP.get(drawing_type, {"label": drawing_type, "color": ACCENT})
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        header_lbl = QLabel(meta["label"])
+        header_lbl.setStyleSheet(
+            f"font-size: 14px; font-weight: 700; color: {meta['color']}; background: transparent;"
+        )
+        layout.addWidget(header_lbl)
+
+        info = QLabel(f"{point_count} point{'s' if point_count != 1 else ''}")
+        info.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        layout.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)
+
+
 class DrawingEditDialog(QDialog):
     """
     Shown when the user clicks an existing drawing.
     - Fronts: type header, Flip Sides button, Delete button.
     - Custom shapes: editable title, Save button, Delete button.
-    Returns action: 'save', 'delete', 'flip', or 'cancel'.
+    Returns action: 'save', 'delete', 'flip', 'move', or 'cancel'.
     """
 
     def __init__(self, drawing: DrawingAnnotation, parent=None):
@@ -166,6 +221,11 @@ class DrawingEditDialog(QDialog):
         btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(btn_delete)
 
+        btn_move = QPushButton("Move")
+        btn_move.setToolTip("Drag this drawing to a new location")
+        btn_move.clicked.connect(self._on_move)
+        btn_row.addWidget(btn_move)
+
         btn_row.addStretch()
 
         btn_cancel = QPushButton("Cancel")
@@ -200,8 +260,69 @@ class DrawingEditDialog(QDialog):
         self._action = "flip"
         self.accept()
 
+    def _on_move(self):
+        self._action = "move"
+        self.accept()
+
     def action(self) -> str:
         return self._action
 
     def result_title(self) -> str:
         return self._result_title
+
+
+class DrawingMoveConfirmDialog(QDialog):
+    """Shown after a drawing has been dragged to a new location."""
+
+    def __init__(self, drawing: DrawingAnnotation, new_coordinates: list[list[float]], parent=None):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Move")
+        self.setModal(True)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
+        )
+
+        meta = DRAWING_TYPE_MAP.get(
+            drawing.drawing_type,
+            {"label": drawing.drawing_type, "color": ACCENT}
+        )
+        old_lat, old_lon = _centroid_latlon(drawing.coordinates)
+        new_lat, new_lon = _centroid_latlon(new_coordinates)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        header_lbl = QLabel(meta["label"])
+        header_lbl.setStyleSheet(
+            f"font-size: 14px; font-weight: 700; color: {meta['color']}; background: transparent;"
+        )
+        layout.addWidget(header_lbl)
+
+        info = QLabel(
+            f"Move center from  {old_lat:.4f}, {old_lon:.4f}\n"
+            f"          to  {new_lat:.4f}, {new_lon:.4f}"
+        )
+        info.setStyleSheet(
+            f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;"
+        )
+        layout.addWidget(info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)

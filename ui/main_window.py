@@ -35,9 +35,14 @@ from ui.sounding_dialog import SoundingDialog
 from ui.sounding_controls import SoundingControls
 from ui.vehicle_timeseries_dialog import VehicleTimeseriesDialog
 from ui.annotation_tools import AnnotationTools
-from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog
-from ui.drawing_dialog import DrawingTitleDialog, DrawingEditDialog
-from ui.storm_cone_dialog import StormConeInputDialog
+from ui.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog, AnnotationMoveConfirmDialog
+from ui.drawing_dialog import (
+    DrawingTitleDialog, DrawingEditDialog, DrawingPlaceConfirmDialog,
+    DrawingMoveConfirmDialog,
+)
+from ui.storm_cone_dialog import (
+    StormConeInputDialog, StormConePlaceConfirmDialog, StormConeMoveConfirmDialog,
+)
 from data.radar_fetcher import RadarFetcher
 from data.sounding_fetcher import SoundingFetcher
 from data.obs_sounding_fetcher import ObsSoundingFetcher
@@ -747,7 +752,7 @@ class MainWindow(QMainWindow):
         _ctx.check_hostname = False
         _ctx.verify_mode    = ssl.CERT_NONE
 
-        url = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/storm/current.json"
+        url = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/current.json"
         try:
             req = Request(url, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
             with urlopen(req, timeout=10, context=_ctx) as resp:
@@ -1714,6 +1719,7 @@ class MainWindow(QMainWindow):
         self.radar_controls.fetch_requested.connect(self._radar_fetcher.fetch_now)
         self.radar_controls.frame_requested.connect(self._display_cached_frame)
         self.radar_controls.loop_toggled.connect(self._on_loop_toggled)
+        self.radar_controls.speed_changed.connect(self._on_radar_speed_changed)
         self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
 
         # ── wire fetcher → decoder → overlay ─────────────────────────────
@@ -1816,6 +1822,7 @@ class MainWindow(QMainWindow):
         self.satellite_controls.opacity_changed.connect(self.map_widget.set_satellite_opacity)
         self.satellite_controls.frame_requested.connect(self._on_satellite_frame_requested)
         self.satellite_controls.loop_toggled.connect(self._on_satellite_loop_toggled)
+        self.satellite_controls.speed_changed.connect(self._on_satellite_speed_changed)
         self.satellite_controls.meso_preview.connect(self._on_meso_preview)
 
         # fetcher signals → handlers
@@ -1977,6 +1984,9 @@ class MainWindow(QMainWindow):
         frame = frames[idx]
         self._render_satellite_frame(frame)
         self.satellite_controls.set_scan_time(frame.time_str)
+
+    def _on_satellite_speed_changed(self, ms: int):
+        self._satellite_loop_timer.setInterval(ms)
 
     def _on_satellite_loop_toggled(self, looping: bool):
         if looping:
@@ -2732,6 +2742,9 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(cache):
             self._show_scan(cache[idx])
 
+    def _on_radar_speed_changed(self, ms: int):
+        self._loop_timer.setInterval(ms)
+
     def _on_loop_toggled(self, looping: bool):
         if looping:
             self._loop_timer.start()
@@ -2872,6 +2885,8 @@ class MainWindow(QMainWindow):
 
         # annotation marker click → edit/delete dialog
         self.map_widget.annotation_clicked.connect(self._on_annotation_clicked)
+        self.map_widget.annotation_drag_ended.connect(self._on_annotation_drag_end)
+        self._moving_annotation_id = None
 
         # remote annotations arriving over MQTT — update map without re-publishing
         self._annotation_sync.annotation_received.connect(self._recv_remote_annotation)
@@ -2883,10 +2898,13 @@ class MainWindow(QMainWindow):
         self._drawings: dict[str, DrawingAnnotation] = {}
         self._active_drawing_type: str = ""
         self._drawing_points: list = []
+        self._moving_drawing_id: str | None = None
+        self._moving_drawing_original_coordinates: list | None = None
         self._drawing_sync = DrawingSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
         self.map_widget.map_double_clicked.connect(self._on_map_dblclick)
         self.map_widget.drawing_clicked.connect(self._on_drawing_clicked)
+        self.map_widget.drawing_drag_ended.connect(self._on_drawing_drag_end)
         self._drawing_sync.drawing_received.connect(self._recv_remote_drawing)
         self._drawing_sync.drawing_deleted.connect(self._recv_remote_drawing_deleted)
 
@@ -2915,6 +2933,7 @@ class MainWindow(QMainWindow):
         self._pending_cone_params = None
         self._active_annotation_type = ""
         self._active_drawing_type = ""
+        self.map_widget.set_storm_cone_placement_mode(False)
 
         if type_key in DRAWING_TYPE_MAP:
             # Drawing tool (front or custom shape)
@@ -2935,8 +2954,9 @@ class MainWindow(QMainWindow):
                     "heading": dlg.heading(),
                     "speed_kts": dlg.speed_kts(),
                 }
-                self.map_widget.set_annotation_mode(True)
-                self._set_placement_prompt("storm cone")
+                self.map_widget.set_annotation_mode(False)
+                self.map_widget.set_storm_cone_placement_mode(True)
+                self._set_placement_prompt("storm cone — click and drag to place", needs_click=False)
             else:
                 self._active_annotation_type = ""
                 self.annotation_tools.deactivate_tool()
@@ -2959,15 +2979,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_active_drawing_type", ""):
             self._on_drawing_click(lat, lon)
             return
-        if self._pending_cone_params is not None:
-            cone = StormCone.new(lat, lon, **self._pending_cone_params)
-            self._pending_cone_params = None
-            self._active_annotation_type = ""
-            self.map_widget.set_annotation_mode(False)
-            self.annotation_tools.deactivate_tool()
-            self._clear_placement_prompt()
-            self._place_storm_cone(cone)
-        elif self._active_annotation_type == "fork":
+        if self._active_annotation_type == "fork":
             # remove any existing fork annotations before placing new one
             existing_forks = [aid for aid, a in self._annotations.items() if a.type_key == "fork"]
             for fid in existing_forks:
@@ -3000,6 +3012,30 @@ class MainWindow(QMainWindow):
             elif dlg.action() == "save":
                 annotation.label = dlg.result_label()
                 self._update_annotation(annotation)
+            elif dlg.action() == "move":
+                self._moving_annotation_id = annotation_id
+                self.map_widget.set_annotation_draggable(annotation_id, True)
+                self.status_msg_label.setText("  ▶  Drag the annotation to its new location")
+                self.status_msg_label.setStyleSheet(
+                    f"color: {ACCENT}; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
+                )
+
+    def _on_annotation_drag_end(self, annotation_id: str, lat: float, lon: float):
+        annotation = self._annotations.get(annotation_id)
+        if annotation is None:
+            return
+        self.map_widget.set_annotation_draggable(annotation_id, False)
+        self._moving_annotation_id = None
+        self.status_msg_label.setText("")
+
+        dlg = AnnotationMoveConfirmDialog(annotation, lat, lon, parent=self)
+        if dlg.exec() == AnnotationMoveConfirmDialog.DialogCode.Accepted:
+            annotation.lat = lat
+            annotation.lon = lon
+            self._update_annotation(annotation)
+        else:
+            # revert to original position
+            self.map_widget.move_annotation(annotation_id, annotation.lat, annotation.lon)
 
     def _place_annotation(self, annotation: Annotation):
         self._annotations[annotation.id] = annotation
@@ -3093,6 +3129,9 @@ class MainWindow(QMainWindow):
             coordinates=pts,
             title=title,
         )
+        dlg = DrawingPlaceConfirmDialog(drawing_type, len(pts), parent=self)
+        if dlg.exec() != DrawingPlaceConfirmDialog.DialogCode.Accepted:
+            return
         self._place_drawing(drawing)
         if drawing_type in FRONT_TYPE_KEYS:
             self.btn_annotate.setChecked(False)
@@ -3126,9 +3165,36 @@ class MainWindow(QMainWindow):
         elif action == "flip":
             drawing.flipped = not drawing.flipped
             self._update_drawing(drawing)
+        elif action == "move":
+            self._moving_drawing_id = drawing_id
+            self._moving_drawing_original_coordinates = [pt[:] for pt in drawing.coordinates]
+            self.map_widget.set_drawing_draggable(drawing_id, True)
+            self._set_placement_prompt("drag the drawing to its new location", needs_click=False)
         elif action == "save":
             drawing.title = dlg.result_title()
             self._update_drawing(drawing)
+
+    def _on_drawing_drag_end(self, drawing_id: str, coordinates_json: str):
+        drawing = self._drawings.get(drawing_id)
+        if drawing is None:
+            return
+        self.map_widget.set_drawing_draggable(drawing_id, False)
+        self._moving_drawing_id = None
+        try:
+            new_coordinates = json.loads(coordinates_json)
+        except json.JSONDecodeError:
+            log.warning("drawing drag end parse failed for %s", drawing_id)
+            self._clear_placement_prompt()
+            self._update_drawing(drawing)
+            return
+        dlg = DrawingMoveConfirmDialog(drawing, new_coordinates, parent=self)
+        if dlg.exec() == DrawingMoveConfirmDialog.DialogCode.Accepted:
+            drawing.coordinates = new_coordinates
+        elif self._moving_drawing_original_coordinates is not None:
+            drawing.coordinates = [pt[:] for pt in self._moving_drawing_original_coordinates]
+        self._moving_drawing_original_coordinates = None
+        self._clear_placement_prompt()
+        self._update_drawing(drawing)
 
     def _place_drawing(self, drawing: DrawingAnnotation):
         self._drawings[drawing.id] = drawing
@@ -3166,9 +3232,13 @@ class MainWindow(QMainWindow):
     def _init_storm_cone(self):
         self._storm_cones: dict[str, StormCone] = {}
         self._pending_cone_params: dict | None = None
+        self._moving_cone_id: str | None = None
+        self._moving_cone_original_location: tuple[float, float] | None = None
 
         # cone placed via ANNOTATE drawer — map cone-click → edit dialog
         self.map_widget.storm_cone_clicked.connect(self._on_storm_cone_clicked)
+        self.map_widget.storm_cone_drag_ended.connect(self._on_storm_cone_drag_end)
+        self.map_widget.storm_cone_place_drag_ended.connect(self._on_storm_cone_place_drag_end)
 
         # remote cones arriving over MQTT — update map without re-publishing
         self._storm_cone_sync.cone_received.connect(self._recv_remote_storm_cone)
@@ -3191,6 +3261,54 @@ class MainWindow(QMainWindow):
                 cone.speed_kts = dlg.speed_kts()
                 cone.heading = dlg.heading()
                 self._update_storm_cone(cone)
+            elif dlg.action() == "move":
+                self._moving_cone_id = cone_id
+                self._moving_cone_original_location = (cone.lat, cone.lon)
+                self.map_widget.set_storm_cone_draggable(cone_id, True)
+                self._set_placement_prompt("drag the storm cone to its new location", needs_click=False)
+
+    def _on_storm_cone_drag_end(self, cone_id: str, lat: float, lon: float):
+        cone = self._storm_cones.get(cone_id)
+        if cone is None:
+            return
+        self.map_widget.set_storm_cone_draggable(cone_id, False)
+        self._moving_cone_id = None
+        dlg = StormConeMoveConfirmDialog(
+            self._moving_cone_original_location[0] if self._moving_cone_original_location else cone.lat,
+            self._moving_cone_original_location[1] if self._moving_cone_original_location else cone.lon,
+            lat,
+            lon,
+            parent=self,
+        )
+        if dlg.exec() == StormConeMoveConfirmDialog.DialogCode.Accepted:
+            cone.lat = lat
+            cone.lon = lon
+        elif self._moving_cone_original_location is not None:
+            cone.lat, cone.lon = self._moving_cone_original_location
+        self._moving_cone_original_location = None
+        self._clear_placement_prompt()
+        self._update_storm_cone(cone)
+
+    def _on_storm_cone_place_drag_end(self, lat: float, lon: float):
+        if self._pending_cone_params is None:
+            return
+        dlg = StormConePlaceConfirmDialog(
+            lat,
+            lon,
+            self._pending_cone_params["speed_kts"],
+            self._pending_cone_params["heading"],
+            parent=self,
+        )
+        if dlg.exec() != StormConePlaceConfirmDialog.DialogCode.Accepted:
+            self._set_placement_prompt("storm cone — click and drag to place", needs_click=False)
+            return
+        cone = StormCone.new(lat, lon, **self._pending_cone_params)
+        self._pending_cone_params = None
+        self._active_annotation_type = ""
+        self.map_widget.set_storm_cone_placement_mode(False)
+        self.annotation_tools.deactivate_tool()
+        self._clear_placement_prompt()
+        self._place_storm_cone(cone)
 
     def _place_storm_cone(self, cone: StormCone):
         self._storm_cones[cone.id] = cone

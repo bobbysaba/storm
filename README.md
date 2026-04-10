@@ -8,16 +8,16 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 ## Current Features
 
 - **Offline vector map** — OpenStreetMap tiles served entirely in-process via a custom `storm://` URL scheme; no internet required for the base map
-- **NEXRAD radar overlay** — fetches Level 3 super‑res reflectivity (N0B fallback to N0Q/N0R) and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map
-- **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection)
+- **NEXRAD radar overlay** — fetches Level 3 super‑res reflectivity (N0B fallback to N0Q/N0R) and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map; adjustable playback speed (0.5×–3×)
+- **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection); adjustable playback speed (0.5×–3×)
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
-- **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable after placement; synced over MQTT
+- **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable and movable after placement; synced over MQTT
 - **Drawing tools** — create fronts, polylines, and polygons on the map; synced over MQTT via DrawingSync
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
 - **Surface obs (mesonet)** — live surface observation station models from OK Mesonet and West Texas Mesonet; toggled independently per network; polled every 5 minutes
-- **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters, kinematics table, and hodograph
+- **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters (including 0–3 km CAPE), kinematics table, surface T/Td labels, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
-- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — selected at the launch dialog with passphrase authentication
+- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — all modes selected exclusively through the launch dialog with passphrase authentication
 - **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD Level 2/3 radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
 - **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
@@ -118,7 +118,6 @@ python main.py
 **Optional flags:**
 ```bash
 python main.py --debug                          # enable debug logging
-python main.py --monitor                        # monitor mode (no local publish)
 python main.py --truck-replay-file path/to.txt  # replay a truck logger file locally
 python main.py --render-grid-size 256           # lower radar resolution for slow hardware
 ```
