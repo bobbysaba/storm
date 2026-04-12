@@ -364,6 +364,13 @@ def build_map_html() -> str:
     window.stormSetSatelliteMode = _stormNoop;
     window.stormSetSatelliteOpacity = _stormNoop;
     window.stormSetMesoSectors = _stormNoop;
+    window.stormSetMesoanalysisFrame = _stormNoop;
+    window.stormSetMesoanalysisOpacity = _stormNoop;
+    window.stormSetMesoanalysisVisible = _stormNoop;
+    window.stormClearMesoanalysisFrame = _stormNoop;
+    window.stormSetSfcOASectors = _stormNoop;
+    window.stormPreviewSfcOASector = _stormNoop;
+    window.stormClearSfcOAPreview = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
     window.stormSetSoundingStations = _stormNoop;
@@ -2781,6 +2788,150 @@ def build_map_html() -> str:
       _applySatMesoBoxes();
     }};
 
+    // ── SfcOA (mesoanalysis) overlay API ──────────────────────────────────
+    // Raster image overlay from pre-warped PNG (Python reprojects LCC→4326
+    // so MapLibre's ImageSource can place it as a plain lat/lon rectangle).
+    var SFC_SRC       = 'sfcoa-image';
+    var SFC_LYR       = 'sfcoa-layer';
+    var SFC_SECT_SRC  = 'sfcoa-sectors';
+    var SFC_SECT_FILL = 'sfcoa-sectors-fill';
+    var SFC_SECT_LINE = 'sfcoa-sectors-line';
+    var _sfcoaVisible = false;
+    var _sfcoaOpacity = 0.75;
+    var _sfcoaPreview = 0;           // sector id currently previewed, 0 = none
+    var _sfcoaLastUrl = '';
+
+    function _placeBelowRadar(layerSpec) {{
+      try {{
+        if (map.getLayer('radar-overlay')) {{
+          map.addLayer(layerSpec, 'radar-overlay');
+          return;
+        }}
+      }} catch(_) {{}}
+      try {{
+        map.addLayer(layerSpec, 'road-unpaved');
+      }} catch(_) {{
+        map.addLayer(layerSpec);
+      }}
+    }}
+
+    function _updateSfcoaSource(dataUrl, coords) {{
+      if (map.getSource(SFC_SRC)) {{
+        map.getSource(SFC_SRC).updateImage({{ url: dataUrl, coordinates: coords }});
+      }} else {{
+        map.addSource(SFC_SRC, {{ type: 'image', url: dataUrl, coordinates: coords }});
+        _placeBelowRadar({{
+          id: SFC_LYR, type: 'raster', source: SFC_SRC,
+          paint: {{ 'raster-opacity': _sfcoaOpacity, 'raster-fade-duration': 0 }}
+        }});
+      }}
+      if (map.getLayer(SFC_LYR)) {{
+        map.setLayoutProperty(SFC_LYR, 'visibility', _sfcoaVisible ? 'visible' : 'none');
+      }}
+    }}
+
+    window.stormSetMesoanalysisFrame = function(b64, west, south, east, north) {{
+      var coords = [[west, north], [east, north], [east, south], [west, south]];
+      var dataUrl = 'data:image/png;base64,' + b64;
+      try {{
+        if (dataUrl === _sfcoaLastUrl) return;
+        _sfcoaLastUrl = dataUrl;
+        var img = new Image();
+        img.onload  = function() {{ _updateSfcoaSource(dataUrl, coords); }};
+        img.onerror = function() {{ _updateSfcoaSource(dataUrl, coords); }};
+        img.src = dataUrl;
+      }} catch(e) {{
+        console.error('[STORM] sfcoa frame inject error:', e.message || e);
+      }}
+    }};
+
+    window.stormSetMesoanalysisOpacity = function(opacity) {{
+      _sfcoaOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      if (map.getLayer(SFC_LYR))
+        map.setPaintProperty(SFC_LYR, 'raster-opacity', _sfcoaOpacity);
+    }};
+
+    window.stormSetMesoanalysisVisible = function(visible) {{
+      _sfcoaVisible = !!visible;
+      if (map.getLayer(SFC_LYR))
+        map.setLayoutProperty(SFC_LYR, 'visibility', _sfcoaVisible ? 'visible' : 'none');
+    }};
+
+    window.stormClearMesoanalysisFrame = function() {{
+      try {{
+        if (map.getLayer(SFC_LYR))  map.removeLayer(SFC_LYR);
+        if (map.getSource(SFC_SRC)) map.removeSource(SFC_SRC);
+      }} catch(_) {{}}
+      _sfcoaLastUrl = '';
+    }};
+
+    function _ensureSfcoaSectorLayers() {{
+      if (map.getSource(SFC_SECT_SRC)) return;
+      map.addSource(SFC_SECT_SRC, {{
+        type: 'geojson',
+        data: {{ type: 'FeatureCollection', features: [] }},
+      }});
+      map.addLayer({{
+        id: SFC_SECT_FILL, type: 'fill', source: SFC_SECT_SRC,
+        paint: {{ 'fill-color': '#4A9EFF', 'fill-opacity': 0.10 }},
+        layout: {{ visibility: 'none' }},
+      }});
+      map.addLayer({{
+        id: SFC_SECT_LINE, type: 'line', source: SFC_SECT_SRC,
+        paint: {{ 'line-color': '#4A9EFF', 'line-width': 2, 'line-dasharray': [2, 2] }},
+        layout: {{ visibility: 'none' }},
+      }});
+    }}
+
+    window.stormSetSfcOASectors = function(sectorsJson) {{
+      _ensureSfcoaSectorLayers();
+      var sectors = JSON.parse(sectorsJson);
+      var features = sectors.map(function(s) {{
+        return {{
+          type: 'Feature',
+          properties: {{ sector: s.sector }},
+          geometry: {{
+            type: 'Polygon',
+            coordinates: [[
+              [s.west, s.north], [s.east, s.north],
+              [s.east, s.south], [s.west, s.south],
+              [s.west, s.north]
+            ]]
+          }}
+        }};
+      }});
+      if (map.getSource(SFC_SECT_SRC)) {{
+        map.getSource(SFC_SECT_SRC).setData(
+          {{type:'FeatureCollection', features: features}}
+        );
+      }}
+    }};
+
+    function _applySfcoaPreview() {{
+      if (!map.getLayer(SFC_SECT_FILL)) return;
+      if (_sfcoaPreview > 0) {{
+        var filt = ['==', ['get', 'sector'], _sfcoaPreview];
+        map.setFilter(SFC_SECT_FILL, filt);
+        map.setFilter(SFC_SECT_LINE, filt);
+        map.setLayoutProperty(SFC_SECT_FILL, 'visibility', 'visible');
+        map.setLayoutProperty(SFC_SECT_LINE, 'visibility', 'visible');
+      }} else {{
+        map.setLayoutProperty(SFC_SECT_FILL, 'visibility', 'none');
+        map.setLayoutProperty(SFC_SECT_LINE, 'visibility', 'none');
+      }}
+    }}
+
+    window.stormPreviewSfcOASector = function(sectorId) {{
+      _sfcoaPreview = parseInt(sectorId, 10) || 0;
+      _ensureSfcoaSectorLayers();
+      _applySfcoaPreview();
+    }};
+
+    window.stormClearSfcOAPreview = function() {{
+      _sfcoaPreview = 0;
+      _applySfcoaPreview();
+    }};
+
     window.stormSetSpcGeoJSON = function(catJson, windJson, hailJson, torJson) {{
       if (map.getSource('spc-cat')) map.getSource('spc-cat').setData(JSON.parse(catJson));
       if (map.getSource('spc-wind')) map.getSource('spc-wind').setData(JSON.parse(windJson));
@@ -3289,6 +3440,49 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def clear_satellite_frame(self) -> None:
         self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
+
+    # ── SfcOA (mesoanalysis) overlay ───────────────────────────────────────
+    def set_mesoanalysis_frame(self, b64: str, west: float, south: float,
+                                east: float, north: float):
+        self.run_js(
+            f"if(window.stormSetMesoanalysisFrame) "
+            f"stormSetMesoanalysisFrame({repr(b64)},{west},{south},{east},{north});"
+        )
+
+    def set_mesoanalysis_opacity(self, opacity: float):
+        self.run_js(
+            f"if(window.stormSetMesoanalysisOpacity) "
+            f"stormSetMesoanalysisOpacity({opacity:.3f});"
+        )
+
+    def set_mesoanalysis_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(
+            f"if(window.stormSetMesoanalysisVisible) "
+            f"stormSetMesoanalysisVisible({flag});"
+        )
+
+    def clear_mesoanalysis_frame(self) -> None:
+        self.run_js(
+            "if(window.stormClearMesoanalysisFrame) stormClearMesoanalysisFrame();"
+        )
+
+    def set_sfcoa_sectors(self, sectors: list[dict]):
+        self.run_js(
+            f"if(window.stormSetSfcOASectors) "
+            f"stormSetSfcOASectors({json.dumps(json.dumps(sectors))});"
+        )
+
+    def preview_sfcoa_sector(self, sector_id: int):
+        self.run_js(
+            f"if(window.stormPreviewSfcOASector) "
+            f"stormPreviewSfcOASector({int(sector_id)});"
+        )
+
+    def clear_sfcoa_preview(self):
+        self.run_js(
+            "if(window.stormClearSfcOAPreview) stormClearSfcOAPreview();"
+        )
 
     def set_meso_sectors(self, sectors: dict):
         features = []

@@ -821,12 +821,21 @@ class MainWindow(QMainWindow):
             self.hazard_controls._btn_outlook.setChecked(True)
         if self._launch_auto_nws:
             self.hazard_controls._btn_nws_warnings.setChecked(True)
-        if self._launch_auto_radar and not self._disable_radar and hasattr(self, "_radar_fetcher"):
-            self.radar_controls._chk_show_data.blockSignals(True)
-            self.radar_controls._chk_show_data.setChecked(True)
-            self.radar_controls._chk_show_data.blockSignals(False)
-            self._auto_start_radar()
-            self.btn_radar.setChecked(True)
+        # Auto-enable radar by default (can be overridden by launch dialog preference)
+        if not self._disable_radar and hasattr(self, "_radar_fetcher"):
+            if self._launch_auto_radar:
+                # User explicitly enabled radar in launch dialog
+                self.radar_controls._chk_show_data.blockSignals(True)
+                self.radar_controls._chk_show_data.setChecked(True)
+                self.radar_controls._chk_show_data.blockSignals(False)
+                self._auto_start_radar()
+                self.btn_radar.setChecked(True)
+            else:
+                # Default: auto-enable radar without opening the drawer
+                self.radar_controls._chk_show_data.blockSignals(True)
+                self.radar_controls._chk_show_data.setChecked(True)
+                self.radar_controls._chk_show_data.blockSignals(False)
+                self._auto_start_radar()
         if self._launch_auto_obs_ok:
             self.surface_controls._btn_ok.setChecked(True)
         if self._launch_auto_obs_wtm:
@@ -1716,10 +1725,21 @@ class MainWindow(QMainWindow):
         self.radar_controls.site_changed.connect(self._on_radar_site_changed)
         self.radar_controls.stations_requested.connect(self._toggle_radar_station_picker)
         self.radar_controls.product_changed.connect(self._on_radar_product_changed)
+        self.radar_controls.products_available_changed.connect(
+            self._on_radar_products_available
+        )
+        self.radar_controls.product_availability_changed.connect(
+            self._on_radar_product_availability_changed
+        )
+        self._radar_product_availability: dict[str, bool] = {
+            "N0B": True, "N0U": True, "N0C": True, "N0K": True
+        }
         self.radar_controls.fetch_requested.connect(self._radar_fetcher.fetch_now)
         self.radar_controls.frame_requested.connect(self._display_cached_frame)
         self.radar_controls.loop_toggled.connect(self._on_loop_toggled)
         self.radar_controls.speed_changed.connect(self._on_radar_speed_changed)
+        # VAD button temporarily disabled - data not available via public sources
+        # self.radar_controls.vad_requested.connect(self._on_vad_requested)
         self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
 
         # ── wire fetcher → decoder → overlay ─────────────────────────────
@@ -1734,7 +1754,11 @@ class MainWindow(QMainWindow):
 
         initial_site = self.radar_controls.current_site()
         self._radar_fetcher.set_site(initial_site)
-        self._radar_fetcher.set_products(["N0B", "N0U"])
+        self._on_radar_products_available(["N0B", "N0U", "N0C", "N0K"])
+        
+        # Track initial backfill completion
+        self._radar_initial_backfill_complete = False
+        self._radar_backfill_products_received = set()
 
         # ── sounding ──────────────────────────────────────────────────────
         self._sounding_fetcher      = SoundingFetcher(self)
@@ -2027,6 +2051,10 @@ class MainWindow(QMainWindow):
     def _auto_start_radar(self):
         self._radar_fetcher.start()
         self._radar_fetcher.fetch_now()
+        # Show fetching status
+        site = self.radar_controls.current_site()
+        self.status_msg_label.setText(f"Fetching {site} radar data…")
+        self._layout_overlays()
 
     def _on_radar_error(self, msg: str):
         self.status_msg_label.setText(f"Radar: {msg}")
@@ -2058,6 +2086,10 @@ class MainWindow(QMainWindow):
         if enabled:
             self._radar_fetcher.start()
             self._radar_fetcher.fetch_now()
+            # Show fetching status
+            site = self.radar_controls.current_site()
+            self.status_msg_label.setText(f"Fetching {site} radar data…")
+            self._layout_overlays()
         else:
             # stop everything and clear all state when disabled
             self._set_radar_station_picker_visible(False)
@@ -2442,6 +2474,42 @@ class MainWindow(QMainWindow):
         self._last_inject_time = 0.0
         self._deferred_inject_result = None
         self._inject_throttle_timer.stop()
+        # Show fetching status
+        self._radar_initial_backfill_complete = False
+        self._radar_backfill_products_received = set()
+        self.status_msg_label.setText(f"Fetching {site} radar data…")
+        self._layout_overlays()
+
+    def _on_radar_products_available(self, products: list[str]):
+        if not hasattr(self, "_radar_fetcher"):
+            return
+        # Always fetch all 4 products regardless of THREDDS availability probe —
+        # availability only drives combo enable/disable. Missing catalogs fail
+        # silently in the fetcher (logged, not pushed to status pill).
+        self._radar_fetcher.set_products(["N0B", "N0U", "N0C", "N0K"])
+
+    def _on_radar_product_availability_changed(self, availability: dict):
+        self._radar_product_availability = dict(availability)
+        self._update_radar_unavailable_status()
+
+    def _update_radar_unavailable_status(self):
+        """If the currently selected radar product is marked unavailable for
+        the current site, surface that in the status pill."""
+        if not hasattr(self, "radar_controls"):
+            return
+        product = self.radar_controls.current_product()
+        site = self.radar_controls.current_site()
+        avail = self._radar_product_availability.get(product, True)
+        cur = self.status_msg_label.text()
+        prefix = "Radar:"
+        if not avail:
+            name_map = {"N0C": "Correlation Coefficient", "N0K": "Specific Diff. Phase"}
+            name = name_map.get(product, product)
+            self.status_msg_label.setText(f"Radar: no {name} data at {site}")
+            self._layout_overlays()
+        elif cur.startswith("Radar: no "):
+            self.status_msg_label.setText("")
+            self._layout_overlays()
 
     def _on_sounding_mode_toggled(self, active: bool):
         if not active:
@@ -2520,6 +2588,13 @@ class MainWindow(QMainWindow):
     def _on_sounding_error(self, msg: str):
         self.status_msg_label.setText(f"Sounding error: {msg}")
 
+    def _on_vad_requested(self):
+        """Open VAD wind profile hodograph dialog for the current radar site."""
+        site = self.radar_controls.current_site()
+        from ui.vad_dialog import VADDialog
+        dlg = VADDialog(site, parent=self)
+        dlg.exec()
+
     def _toggle_radar_station_picker(self):
         self._set_radar_station_picker_visible(not self._radar_station_picker_visible)
 
@@ -2560,6 +2635,12 @@ class MainWindow(QMainWindow):
             self._show_scan(cache[-1])
         else:
             self._radar_overlay.clear()
+            if not self._radar_product_availability.get(product, True):
+                self._update_radar_unavailable_status()
+            else:
+                self.status_msg_label.setText(f"Fetching radar product {product}…")
+                self._layout_overlays()
+                self._radar_fetcher.fetch_now()
 
     def _on_radar_data(self, site: str, product: str, raw_bytes: bytes):
         """Called on the main thread by the fetcher signal.  Returns immediately —
@@ -2610,6 +2691,18 @@ class MainWindow(QMainWindow):
             cache.pop(0)
 
         log.debug("cache updated: key=%s, n=%d frames", key, len(cache))
+        
+        # Track initial backfill completion
+        if not self._radar_initial_backfill_complete:
+            self._radar_backfill_products_received.add(product)
+            # Consider backfill complete when we have at least one scan for each product
+            expected_products = {"N0B", "N0U", "N0C", "N0K"}
+            if expected_products.issubset(self._radar_backfill_products_received):
+                self._radar_initial_backfill_complete = True
+                # Clear the fetching message
+                if self.status_msg_label.text().startswith("Fetching"):
+                    self.status_msg_label.setText("")
+                    self._layout_overlays()
 
         # only update display for the currently visible product;
         # background product data is still cached above for instant switching
@@ -2650,7 +2743,10 @@ class MainWindow(QMainWindow):
             log.debug("bg_render: discarding stale render gen=%d (current=%d)", gen, self._render_generation)
             return
         try:
-            png_bytes, bounds, elapsed_ms = self._render_scan_to_png(scan, grid_size)
+            mask_scan = self._velocity_mask_scan(scan)
+            png_bytes, bounds, elapsed_ms = self._render_scan_to_png(
+                scan, grid_size, mask_scan=mask_scan
+            )
         except Exception as e:
             log.error("bg_render: render failed: %s", e, exc_info=True)
             return
@@ -2726,11 +2822,23 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _show_scan(self, scan):
-        self._radar_overlay.update(scan)
+        self._radar_overlay.update(scan, mask_scan=self._velocity_mask_scan(scan))
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
         self.status_msg_label.setText(scan.label)
         self._layout_overlays()
+
+    def _velocity_mask_scan(self, scan):
+        if getattr(scan, "colormap", "") not in ("nws_vel", "nws_cc", "nws_kdp"):
+            return None
+        site = getattr(scan, "site", "")
+        ref_cache = self._scan_cache.get(f"{site}/N0B", [])
+        if not ref_cache:
+            return None
+        return min(
+            ref_cache,
+            key=lambda ref: abs((ref.scan_time - scan.scan_time).total_seconds()),
+        )
 
     def _display_cached_frame(self, idx: int):
         log.debug("displaying cached frame %d of %d",

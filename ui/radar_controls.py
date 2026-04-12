@@ -80,7 +80,8 @@ NEXRAD_SITES = [
 ]
 
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
-OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0X", "DIFF REFL"), ("N0K", "SPEC DIFF PHASE")]
+OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0K", "SPEC DIFF PHASE")]
+ALL_PRODUCTS = PRODUCTS + OPTIONAL_PRODUCTS
 THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
 class RadarControls(QWidget):
     """
@@ -109,11 +110,14 @@ class RadarControls(QWidget):
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
     speed_changed   = pyqtSignal(int)      # new interval in ms
+    vad_requested   = pyqtSignal()         # VAD hodograph dialog requested
 
     # internal — emitted from the _refresh_product_availability background thread
     # AutoConnection queues this safely to the main thread (avoids QTimer.singleShot
     # from a non-Qt thread, which is undefined behavior in PyQt6).
-    _products_refreshed = pyqtSignal(list)
+    _products_refreshed = pyqtSignal(dict)  # {code: bool} availability map
+    products_available_changed = pyqtSignal(list)
+    product_availability_changed = pyqtSignal(dict)  # {code: bool} for current site
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,7 +166,9 @@ class RadarControls(QWidget):
         self._product_combo.setFixedHeight(22)
         self._product_combo.setMinimumWidth(128)
         self._product_combo.setObjectName("radarProductCombo")
-        self._set_product_items(PRODUCTS, preserve_code=self._product)
+        # start with all 4 products; optional ones disabled until THREDDS probe confirms
+        self._set_product_items(ALL_PRODUCTS, preserve_code=self._product)
+        self._apply_availability_to_combo({"N0B": True, "N0U": True, "N0C": False, "N0K": False})
         self._product_combo.currentIndexChanged.connect(self._on_product_changed)
         r1.addWidget(self._product_combo)
 
@@ -182,6 +188,18 @@ class RadarControls(QWidget):
         self._chk_show_data.setToolTip("enable or disable radar data fetch and display")
         self._chk_show_data.toggled.connect(self._on_data_enabled_toggled)
         r1.addWidget(self._chk_show_data)
+
+        # VAD button — temporarily disabled (data not available via public sources)
+        # self._btn_vad = QToolButton()
+        # self._btn_vad.setText("VAD")
+        # self._btn_vad.setFixedHeight(22)
+        # self._btn_vad.setFixedWidth(48)
+        # self._btn_vad.setObjectName("radarVadButton")
+        # self._btn_vad.setToolTip("View VAD wind profile hodograph")
+        # self._btn_vad.clicked.connect(self.vad_requested.emit)
+        # r1.addWidget(self._btn_vad)
+
+        r1.addStretch()
 
         drawer_layout.addWidget(row1)
 
@@ -283,15 +301,27 @@ class RadarControls(QWidget):
         normalized = _normalize_site(site_id) or "KTLX"
         self._site = normalized
         self._stations_button.setText(f"Stations: {normalized}")
+        # fetcher always fetches all 4; availability only drives combo disabled state
+        self.products_available_changed.emit([code for code, _ in ALL_PRODUCTS])
+        # Apply any cached availability immediately so combo disables stale unavailable items
+        cached = {
+            code: self._product_availability.get((normalized, code), True)
+            for code, _ in ALL_PRODUCTS
+        }
+        # N0B/N0U are always assumed available (never probed)
+        cached["N0B"] = True
+        cached["N0U"] = True
+        self._apply_availability_to_combo(cached)
+        self.product_availability_changed.emit(dict(cached))
+        _site = normalized
+        threading.Thread(
+            target=self._refresh_product_availability,
+            args=(_site,),
+            daemon=True,
+        ).start()
         if emit:
             self.site_changed.emit(normalized)
             self.fetch_requested.emit()
-            _site = normalized
-            QTimer.singleShot(4000, lambda: threading.Thread(
-                target=self._refresh_product_availability,
-                args=(_site,),
-                daemon=True,
-            ).start())
 
     def set_scan_time(self, time_str: str):
         # update the time label next to the slider
@@ -397,24 +427,39 @@ class RadarControls(QWidget):
         if not site:
             return
 
-        optional = []
-        for code, label in OPTIONAL_PRODUCTS:
-            available = self._is_product_available(site, code)
-            self._product_availability[(site, code)] = available
-            if available:
-                optional.append((code, label))
+        availability: dict[str, bool] = {"N0B": True, "N0U": True}
+        for code, _label in OPTIONAL_PRODUCTS:
+            avail = self._is_product_available(site, code)
+            self._product_availability[(site, code)] = avail
+            availability[code] = avail
+
+        # Only apply if the user hasn't switched sites since the probe started
+        if site != self._site:
+            return
 
         # Emit signal instead of QTimer.singleShot — PyQt6 AutoConnection safely
         # queues this to the main thread even when emitted from a background thread.
-        self._products_refreshed.emit(list(PRODUCTS) + optional)
+        self._products_refreshed.emit(availability)
 
-    def _apply_product_items(self, items: list):
+    def _apply_product_items(self, availability: dict):
         """Slot — always runs on the main thread via the _products_refreshed signal."""
-        prev = self._product
-        self._set_product_items(items, preserve_code=prev)
-        if prev != self._product:
-            self.product_changed.emit(self._product)
-            self.fetch_requested.emit()
+        self._apply_availability_to_combo(availability)
+        self.product_availability_changed.emit(dict(availability))
+
+    def _apply_availability_to_combo(self, availability: dict):
+        """Enable/disable combo items based on availability map."""
+        model = self._product_combo.model()
+        for i in range(self._product_combo.count()):
+            code = self._product_combo.itemData(i)
+            item = model.item(i)
+            if item is None:
+                continue
+            avail = bool(availability.get(code, True))
+            item.setEnabled(avail)
+            if not avail:
+                item.setToolTip(f"No {code} data available for {self._site}")
+            else:
+                item.setToolTip("")
 
     def _is_product_available(self, site: str, product: str) -> bool:
         key = (site, product)
@@ -428,9 +473,14 @@ class RadarControls(QWidget):
                 xml_text = resp.read().decode("utf-8", errors="replace")
             root = ET.fromstring(xml_text)
             ns = {"cat": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
-            # If any dataset entries exist, treat as available
+            # Site catalogs typically contain day subcatalog refs, not dataset
+            # entries directly, so treat either as evidence that the product is
+            # currently available for this site.
             for ds in root.findall(".//cat:dataset", ns):
                 if ds.attrib.get("urlPath"):
+                    return True
+            for ref in root.findall(".//cat:catalogRef", ns):
+                if ref.attrib.get("{http://www.w3.org/1999/xlink}href"):
                     return True
         except Exception:
             return False

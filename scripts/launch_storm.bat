@@ -6,11 +6,11 @@ REM Resolve project root (one level above scripts/)
 FOR %%I IN ("%~dp0..") DO SET "PROJECT_DIR=%%~fI"
 
 REM ── Single-instance guard ─────────────────────────────────────────────────────
-powershell -NoProfile -Command "(Get-WmiObject Win32_Process | Where-Object {$_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*main.py*'} | Measure-Object).Count" > "%TEMP%\_storm_running.tmp" 2>nul
+powershell -NoProfile -WindowStyle Hidden -Command "(Get-WmiObject Win32_Process | Where-Object {$_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*main.py*'} | Measure-Object).Count" > "%TEMP%\_storm_running.tmp" 2>nul
 SET /P STORM_COUNT=<"%TEMP%\_storm_running.tmp"
 DEL /F /Q "%TEMP%\_storm_running.tmp" 2>nul
 IF %STORM_COUNT% GTR 0 (
-    powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('STORM is already running.', 'STORM', 'OK', 'Information')"
+    powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('STORM is already running.', 'STORM', 'OK', 'Information')"
     EXIT /B 0
 )
 
@@ -39,7 +39,7 @@ FOR %%D IN (
     )
 )
 
-powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Could not find a conda installation.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
+powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('Could not find a conda installation.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
 EXIT /B 1
 
 :found_conda
@@ -49,7 +49,7 @@ IF ERRORLEVEL 1 (
 )
 
 IF "%CONDA_DEFAULT_ENV%" == "" (
-    powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('The ""storm"" conda environment was not found.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
+    powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('The ""storm"" conda environment was not found.`n`nRun setup: python setup.py', 'STORM — Launch Error', 'OK', 'Error')"
     EXIT /B 1
 )
 
@@ -69,7 +69,8 @@ START "" /B powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -Assemb
 
 REM pythonw suppresses the console window for GUI apps
 IF NOT EXIST "%CONDA_PREFIX%\pythonw.exe" (
-    powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('pythonw.exe not found in the storm environment.%CONDA_PREFIX%', 'STORM — Launch Error', 'OK', 'Error')"
+    powershell -NoProfile -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('pythonw.exe not found in the storm environment.%CONDA_PREFIX%', 'STORM — Launch Error', 'OK', 'Error')"
     EXIT /B 1
 )
-START "" "%CONDA_PREFIX%\pythonw.exe" "%PROJECT_DIR%\main.py"
+REM Use START with /B to prevent a new console window from appearing
+START "" /B "%CONDA_PREFIX%\pythonw.exe" "%PROJECT_DIR%\main.py"

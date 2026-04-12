@@ -205,7 +205,9 @@ class RadarFetcher(QObject):
                 result.append((dataset_id, dataset_url))
             return result
 
-        self.fetch_error.emit(f"Radar catalog failed for {site}/{product}")
+        # Catalog may legitimately be empty for optional products (N0C/N0K) at
+        # some sites — log it but don't push a red pill to the status bar.
+        log.info("no THREDDS catalog entries for %s/%s", site, product)
         return []
 
     def fetch_now(self):

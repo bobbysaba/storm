@@ -117,6 +117,7 @@ class LayerOrderPill(QWidget):
         # ── Expanded panel (child of pill, shown above toggle button) ─────
         self._panel = QWidget(self)
         self._panel.setObjectName("layerOrderPanel")
+        self._panel.setMinimumWidth(248)
         panel_layout = QVBoxLayout(self._panel)
         panel_layout.setContentsMargins(10, 8, 10, 8)
         panel_layout.setSpacing(4)
@@ -191,9 +192,9 @@ class LayerOrderPill(QWidget):
         if self._expanded and not self._panel.isHidden():
             self._rows_widget.layout().activate()
             self._panel.layout().activate()
-            self._panel.setMinimumWidth(220)
+            self._rows_widget.adjustSize()
             self._panel.adjustSize()
-            panel_w = max(self._panel.sizeHint().width(), btn_w, 220)
+            panel_w = max(self._panel.sizeHint().width(), btn_w, self._panel.minimumWidth())
             panel_h = self._panel.sizeHint().height()
             GAP = 4
             total_w = panel_w
@@ -216,11 +217,13 @@ class LayerOrderPill(QWidget):
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
             if item.widget():
+                item.widget().setParent(None)
                 item.widget().deleteLater()
 
-        display_order = list(reversed(self._order))  # top-of-stack first
+        display_order = self._display_order()
         for i, key in enumerate(display_order):
             self._rows_layout.addWidget(self._make_row(key, i, len(display_order)))
+        self._rows_layout.addStretch(1)
 
     def _make_row(self, key: str, display_idx: int, total: int) -> QWidget:
         active = key in self._active
@@ -281,13 +284,15 @@ class LayerOrderPill(QWidget):
         self._relayout()
 
     def _move_layer(self, key: str, direction: int):
-        # _order is bottom→top; display is reversed.
-        # direction -1 = up in display = toward end of _order list.
-        stack_idx = self._order.index(key)
-        new_idx = max(0, min(len(self._order) - 1, stack_idx + (-direction)))
+        visible = self._visible_order()
+        if key not in visible:
+            return
+        stack_idx = visible.index(key)
+        new_idx = max(0, min(len(visible) - 1, stack_idx + (-direction)))
         if new_idx == stack_idx:
             return
-        self._order.insert(new_idx, self._order.pop(stack_idx))
+        visible.insert(new_idx, visible.pop(stack_idx))
+        self._order = self._merge_order(visible)
         self._build_rows()
         self._relayout()
 
@@ -321,7 +326,28 @@ class LayerOrderPill(QWidget):
 
     def _refresh_label(self):
         arrow = "▲" if self._expanded else "▼"
+        visible = len(self._active)
         self._toggle_btn.setText(
-            f"LAYERS  {len(self._active)}/{len(self._order)}  {arrow}"
+            f"LAYERS  {visible}  {arrow}"
         )
         self._toggle_btn.adjustSize()
+
+    def _visible_order(self) -> list[str]:
+        return [key for key in self._order if key in self._active]
+
+    def _display_order(self) -> list[str]:
+        visible = list(reversed(self._visible_order()))
+        if visible:
+            return visible
+        return []
+
+    def _merge_order(self, visible: list[str]) -> list[str]:
+        merged: list[str] = []
+        visible_iter = iter(visible)
+        active_set = set(self._active)
+        for key in self._order:
+            if key in active_set:
+                merged.append(next(visible_iter))
+            else:
+                merged.append(key)
+        return merged

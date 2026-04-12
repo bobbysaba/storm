@@ -450,6 +450,14 @@ def main() -> None:
     # user understands why certain features may be broken.
     _warn_missing_files()
 
+    # ── Loading screen ─────────────────────────────────────────────────────────
+    # Show a loading dialog while the map initializes to prevent users from
+    # clicking the app icon again or thinking the app has frozen.
+    from ui.loading_dialog import LoadingDialog  # noqa: PLC0415
+    loading_dialog = LoadingDialog()
+    loading_dialog.show()
+    app.processEvents()  # Force the dialog to render immediately
+
     # create the main window
     window = MainWindow(
         debug=args.debug,
@@ -457,6 +465,10 @@ def main() -> None:
         viewer=viewer,
         archive_time=archive_time,
     )
+
+    # Close loading dialog once main window is ready
+    loading_dialog.close()
+    loading_dialog = None
 
     # define the JS console message handler
     js_log = logging.getLogger("storm.js")
