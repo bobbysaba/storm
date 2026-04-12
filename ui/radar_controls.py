@@ -189,15 +189,14 @@ class RadarControls(QWidget):
         self._chk_show_data.toggled.connect(self._on_data_enabled_toggled)
         r1.addWidget(self._chk_show_data)
 
-        # VAD button — temporarily disabled (data not available via public sources)
-        # self._btn_vad = QToolButton()
-        # self._btn_vad.setText("VAD")
-        # self._btn_vad.setFixedHeight(22)
-        # self._btn_vad.setFixedWidth(48)
-        # self._btn_vad.setObjectName("radarVadButton")
-        # self._btn_vad.setToolTip("View VAD wind profile hodograph")
-        # self._btn_vad.clicked.connect(self.vad_requested.emit)
-        # r1.addWidget(self._btn_vad)
+        self._btn_vad = QToolButton()
+        self._btn_vad.setText("VAD")
+        self._btn_vad.setFixedHeight(22)
+        self._btn_vad.setFixedWidth(48)
+        self._btn_vad.setObjectName("radarVadButton")
+        self._btn_vad.setToolTip("View VAD wind profile hodograph")
+        self._btn_vad.clicked.connect(self.vad_requested.emit)
+        r1.addWidget(self._btn_vad)
 
         r1.addStretch()
 

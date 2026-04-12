@@ -1738,8 +1738,7 @@ class MainWindow(QMainWindow):
         self.radar_controls.frame_requested.connect(self._display_cached_frame)
         self.radar_controls.loop_toggled.connect(self._on_loop_toggled)
         self.radar_controls.speed_changed.connect(self._on_radar_speed_changed)
-        # VAD button temporarily disabled - data not available via public sources
-        # self.radar_controls.vad_requested.connect(self._on_vad_requested)
+        self.radar_controls.vad_requested.connect(self._on_vad_requested)
         self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
 
         # ── wire fetcher → decoder → overlay ─────────────────────────────
