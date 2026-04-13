@@ -19,6 +19,7 @@ class HazardControls(QWidget):
     spc_watches_toggled  = pyqtSignal(bool)
     spc_mds_toggled      = pyqtSignal(bool)
     nws_warnings_toggled = pyqtSignal(bool)
+    cwa_toggled          = pyqtSignal(bool)
     fetch_requested      = pyqtSignal()
     content_resized      = pyqtSignal()      # triggers layout pulse in main_window
 
@@ -130,6 +131,11 @@ class HazardControls(QWidget):
         self._btn_nws_warnings = self._btn("NWS WARNINGS")
         self._btn_nws_warnings.toggled.connect(self._on_nws_warnings_toggled)
         row.addWidget(self._btn_nws_warnings)
+
+        # NWS County Warning Areas (CWA) overlay toggle
+        self._btn_cwa = self._btn("NWS CWA")
+        self._btn_cwa.toggled.connect(self._on_cwa_toggled)
+        row.addWidget(self._btn_cwa)
 
         row.addStretch(1)
         col.addWidget(btn_row)
@@ -277,3 +283,7 @@ class HazardControls(QWidget):
         self.nws_warnings_toggled.emit(checked)
         if checked:
             self.fetch_requested.emit()
+
+    def _on_cwa_toggled(self, checked: bool):
+        """Emit cwa_toggled when the CWA button changes. No fetch required."""
+        self.cwa_toggled.emit(checked)

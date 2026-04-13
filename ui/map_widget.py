@@ -306,6 +306,12 @@ def build_map_html() -> str:
         <svg width="28" height="6"><line x1="0" y1="3" x2="28" y2="3" stroke="#1A1A28" stroke-width="1"/></svg>
         <span class="legend-label">County</span>
       </div>
+
+      <div class="legend-section-title">Overlays</div>
+      <div class="legend-item">
+        <input type="checkbox" id="cwa-toggle" onchange="if(window.stormSetCwaVisible) stormSetCwaVisible(this.checked);" />
+        <span class="legend-label">NWS CWA</span>
+      </div>
     </div>
 
     <div id="legend-toggle">
@@ -378,6 +384,9 @@ def build_map_html() -> str:
     window.stormSetRoute = _stormNoop;
     window.stormClearRoute = _stormNoop;
     window.stormSetRoutePickMode = _stormNoop;
+    // CWA overlay hooks (populated when the map loads)
+    window.stormSetCwaGeoJSON = _stormNoop;
+    window.stormSetCwaVisible = _stormNoop;
     window.stormSetDestinationMarker = _stormNoop;
     window._radarStationsVisible = false;
     window._stormDrawings = {{}};
@@ -1346,6 +1355,58 @@ def build_map_html() -> str:
           'circle-opacity': 0.85
         }}
       }});
+
+      // ── CWA overlay (NWS County Warning Areas) ───────────────────────────
+      map.addSource('cwa', {{type:'geojson', data:{{type:'FeatureCollection',features:[]}}}});
+      map.addLayer({{
+        id: 'cwa-fill',
+        type: 'fill',
+        source: 'cwa',
+        layout: {{ 'visibility': 'none' }},
+        paint: {{ 'fill-color': '#FFCC00', 'fill-opacity': 0.18 }}
+      }});
+      map.addLayer({{
+        id: 'cwa-line',
+        type: 'line',
+        source: 'cwa',
+        layout: {{ 'visibility': 'none' }},
+        paint: {{ 'line-color': '#FFCC00', 'line-width': 1.5, 'line-opacity': 0.9 }}
+      }});
+      map.addLayer({{
+        id: 'cwa-label',
+        type: 'symbol',
+        source: 'cwa',
+        layout: {{
+          'visibility': 'none',
+          'text-field': ['coalesce', ['get', 'WFO'], ['get', 'CWA']],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 12,
+          'text-anchor': 'center',
+          'text-offset': [0, 0],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        }},
+        paint: {{ 'text-color': '#E8EDF5', 'text-halo-color': '#0A0A0F', 'text-halo-width': 2 }}
+      }});
+
+      // Restore any CWA data queued before the map was ready
+      if (window._cwaData) {{ try {{ map.getSource('cwa').setData(JSON.parse(window._cwaData)); }} catch(e) {{}} window._cwaData = null; }}
+
+      // Pointer cursor on CWA polygons when visible
+      map.on('mouseenter', 'cwa-fill', function() {{ map.getCanvas().style.cursor = 'pointer'; }});
+      map.on('mouseleave', 'cwa-fill', function() {{ map.getCanvas().style.cursor = ''; }});
+
+      // JS bridge functions for CWA data
+      window.stormSetCwaGeoJSON = function(geojsonStr) {{
+        var src = map.getSource('cwa');
+        if (!src) {{ window._cwaData = geojsonStr; return; }}
+        try {{ src.setData(JSON.parse(geojsonStr)); }} catch(e) {{ console.warn('CWA setData failed', e); }}
+      }};
+      window.stormSetCwaVisible = function(visible) {{
+        var v = visible ? 'visible' : 'none';
+        ['cwa-fill','cwa-line','cwa-label'].forEach(function(lid) {{ if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', v); }});
+        if (!visible) {{ var tip = document.getElementById('hazard-tooltip'); if (tip) tip.style.display = 'none'; }}
+      }};
     }});
 
     map.on("error", function(e) {{
@@ -1501,6 +1562,24 @@ def build_map_html() -> str:
             _htip.style.display = 'none';
           }}
         }} else {{
+          // No hazard layer hit — check for CWA polygon under cursor first
+          if (map.getLayer('cwa-fill') && map.getLayoutProperty('cwa-fill','visibility') === 'visible') {{
+            var cwaHits = map.queryRenderedFeatures(e.point, {{layers: ['cwa-fill']}}) || [];
+            if (cwaHits.length > 0) {{
+              var props = cwaHits[0].properties || {{}};
+              var wfo = props.WFO || props.CWA || props.wfo || props.cwa || '';
+              if (wfo) {{
+                _htip.textContent = wfo;
+                var _mx = e.originalEvent.clientX;
+                var _my = e.originalEvent.clientY;
+                var _mc = map.getContainer().getBoundingClientRect();
+                _htip.style.left = (_mx - _mc.left + 14) + 'px';
+                _htip.style.top  = (_my - _mc.top  - 10) + 'px';
+                _htip.style.display = 'block';
+                return;
+              }}
+            }}
+          }}
           // No hazard layer hit — check for a nearby surface station.
           var _stLabel = null;
           if (window._stormSurfacePlotsVisible) {{
@@ -3569,6 +3648,142 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(
             f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
         )
+
+    # ── CWA (County Warning Areas) overlay helpers ─────────────────────────
+    def set_cwa_geojson(self, geojson: dict):
+        """Set the CWA GeoJSON on the map (expects a FeatureCollection dict)."""
+        self.run_js(
+            f"if(window.stormSetCwaGeoJSON) stormSetCwaGeoJSON({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_cwa_visible(self, visible: bool):
+        """Toggle CWA overlay visibility."""
+        flag = "true" if visible else "false"
+        self.run_js(
+            f"if(window.stormSetCwaVisible) stormSetCwaVisible({flag});"
+        )
+
+    def load_cwa_shapefile(self, shp_base: str | None = None):
+        """Load a local CWA shapefile (shp + dbf) and push it to the map as GeoJSON.
+
+        shp_base may be a basename (without extension) or a full .shp path. If
+        omitted, defaults to the bundled cwa_shp/w_16ap26 shapefile.
+        """
+        import os, struct, json
+
+        if shp_base is None:
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'cwa_shp', 'w_16ap26'))
+        else:
+            base = shp_base
+        shp_path = base if base.lower().endswith('.shp') else base + '.shp'
+        dbf_path = shp_path[:-4] + '.dbf'
+
+        try:
+            with open(shp_path, 'rb') as f:
+                shp_data = f.read()
+            with open(dbf_path, 'rb') as f:
+                dbf_data = f.read()
+        except Exception:
+            return
+
+        # Minimal SHP parser (Polygon type 5) — adapted from archive fetcher.
+        def _parse_shp(data: bytes):
+            if len(data) < 100:
+                return []
+            pos = 100
+            geometries = []
+            while pos < len(data):
+                if pos + 12 > len(data):
+                    break
+                _rec_num, content_words = struct.unpack_from('>ii', data, pos)
+                pos += 8
+                content_bytes = content_words * 2
+                if content_bytes < 4 or pos + content_bytes > len(data):
+                    break
+                shape_type = struct.unpack_from('<i', data, pos)[0]
+                if shape_type == 0:
+                    geometries.append(None)
+                    pos += content_bytes
+                    continue
+                if shape_type != 5:
+                    geometries.append(None)
+                    pos += content_bytes
+                    continue
+                offset = pos + 4
+                if offset + 32 + 8 > len(data):
+                    geometries.append(None)
+                    pos += content_bytes
+                    continue
+                offset += 32
+                num_parts, num_points = struct.unpack_from('<ii', data, offset)
+                offset += 8
+                if num_parts <= 0 or num_points <= 0:
+                    geometries.append(None)
+                    pos += content_bytes
+                    continue
+                part_starts = list(struct.unpack_from(f'<{num_parts}i', data, offset))
+                offset += num_parts * 4
+                pts_raw = struct.unpack_from(f'<{num_points * 2}d', data, offset)
+                points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+                rings = []
+                for idx_r, start in enumerate(part_starts):
+                    end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
+                    ring = [list(pt) for pt in points[start:end]]
+                    rings.append(ring)
+                geometries.append({'type': 'Polygon', 'coordinates': rings})
+                pos += content_bytes
+            return geometries
+
+        # Minimal DBF parser — adapted from archive fetcher.
+        def _parse_dbf(data: bytes):
+            if len(data) < 32:
+                return []
+            num_records = struct.unpack_from('<I', data, 4)[0]
+            header_bytes = struct.unpack_from('<H', data, 8)[0]
+            record_bytes = struct.unpack_from('<H', data, 10)[0]
+            fields = []
+            pos = 32
+            while pos < header_bytes - 1 and data[pos] != 0x0D:
+                raw_name = data[pos:pos + 11]
+                name = raw_name.split(b"\x00")[0].decode('ascii', errors='replace').strip()
+                ftype = chr(data[pos + 11])
+                flen = data[pos + 16]
+                fields.append((name, ftype, flen))
+                pos += 32
+            records = []
+            rec_pos = header_bytes
+            for _ in range(num_records):
+                if rec_pos + record_bytes > len(data):
+                    break
+                deletion_flag = data[rec_pos]
+                if deletion_flag == 0x2A:  # '*' = deleted
+                    rec_pos += record_bytes
+                    continue
+                field_pos = rec_pos + 1
+                rec = {}
+                for name, ftype, flen in fields:
+                    raw = data[field_pos:field_pos + flen].decode('ascii', errors='replace').strip()
+                    if ftype == 'N':
+                        try:
+                            rec[name] = float(raw) if raw else None
+                        except ValueError:
+                            rec[name] = None
+                    else:
+                        rec[name] = raw
+                    field_pos += flen
+                records.append(rec)
+                rec_pos += record_bytes
+            return records
+
+        geoms = _parse_shp(shp_data)
+        recs = _parse_dbf(dbf_data)
+        features = []
+        for geom, rec in zip(geoms, recs):
+            if geom is None:
+                continue
+            features.append({'type': 'Feature', 'geometry': geom, 'properties': rec})
+        geojson = {'type': 'FeatureCollection', 'features': features}
+        self.set_cwa_geojson(geojson)
 
     def set_route(self, geojson_str: str, dest_lon: float, dest_lat: float):
         """Draw a route polyline on the map and place a destination marker."""

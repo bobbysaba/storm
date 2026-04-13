@@ -177,6 +177,8 @@ class MainWindow(QMainWindow):
         self._startup_local_pending = False
         self._startup_mqtt_pending = False
         self._post_startup_fetchers_started = False
+        # Track whether CWA shapefile has been loaded into the map
+        self._cwa_loaded = False
         self._local_startup_timer = QTimer(self)
         self._local_startup_timer.setSingleShot(True)
         self._local_startup_timer.timeout.connect(self._complete_local_startup_phase)
@@ -835,6 +837,22 @@ class MainWindow(QMainWindow):
         if not self._disable_radar:
             self._init_radar()
         self._init_hazards()
+
+        # Load the CWA shapefile into the map and enable it by default.
+        # Safe to call even if the map isn't fully painted yet — MapWidget queues JS until ready.
+        try:
+            if not self._cwa_loaded:
+                self.map_widget.load_cwa_shapefile()
+                self._cwa_loaded = True
+                # Reflect default visible state in the hazard controls
+                try:
+                    self.hazard_controls._btn_cwa.setChecked(True)
+                except Exception:
+                    pass
+                self.map_widget.set_cwa_visible(True)
+        except Exception:
+            pass
+
         self._init_satellite()
         self._init_surface_obs()
         self._apply_launch_prefs()
@@ -1822,6 +1840,7 @@ class MainWindow(QMainWindow):
         self.hazard_controls.spc_watches_toggled.connect(self._on_spc_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_nws_warnings_toggled)
+        self.hazard_controls.cwa_toggled.connect(self._on_cwa_toggled)
         self.hazard_controls.fetch_requested.connect(self._on_hazard_fetch_requested)
 
         self._hazard_fetcher.spc_received.connect(self._on_spc_received)
@@ -2498,6 +2517,20 @@ class MainWindow(QMainWindow):
                 self._layout_overlays()
                 self._hazard_fetcher.fetch_now()
         self._update_hazard_legend()
+
+    def _on_cwa_toggled(self, enabled: bool):
+        """Toggle the CWA overlay visibility and mark the layer active.
+
+        If the shapefile hasn't been loaded yet, attempt to load it first.
+        """
+        self._set_layer_active("cwa", enabled)
+        if enabled and not self._cwa_loaded:
+            try:
+                self.map_widget.load_cwa_shapefile()
+                self._cwa_loaded = True
+            except Exception:
+                pass
+        self.map_widget.set_cwa_visible(enabled)
 
     def _on_radar_site_changed(self, site: str):
         # increment generation so any in-flight decodes/renders for old site are discarded
