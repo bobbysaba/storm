@@ -846,10 +846,9 @@ class MainWindow(QMainWindow):
                 self._cwa_loaded = True
                 # Reflect default visible state in the hazard controls
                 try:
-                    self.hazard_controls._btn_cwa.setChecked(True)
+                    self.hazard_controls._btn_cwa.setChecked(False)
                 except Exception:
                     pass
-                self.map_widget.set_cwa_visible(True)
         except Exception:
             pass
 

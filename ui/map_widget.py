@@ -306,12 +306,6 @@ def build_map_html() -> str:
         <svg width="28" height="6"><line x1="0" y1="3" x2="28" y2="3" stroke="#1A1A28" stroke-width="1"/></svg>
         <span class="legend-label">County</span>
       </div>
-
-      <div class="legend-section-title">Overlays</div>
-      <div class="legend-item">
-        <input type="checkbox" id="cwa-toggle" onchange="if(window.stormSetCwaVisible) stormSetCwaVisible(this.checked);" />
-        <span class="legend-label">NWS CWA</span>
-      </div>
     </div>
 
     <div id="legend-toggle">
@@ -1363,14 +1357,14 @@ def build_map_html() -> str:
         type: 'fill',
         source: 'cwa',
         layout: {{ 'visibility': 'none' }},
-        paint: {{ 'fill-color': '#FFCC00', 'fill-opacity': 0.18 }}
+        paint: {{ 'fill-color': '#FFCC00', 'fill-opacity': 0 }}
       }});
       map.addLayer({{
         id: 'cwa-line',
         type: 'line',
         source: 'cwa',
         layout: {{ 'visibility': 'none' }},
-        paint: {{ 'line-color': '#FFCC00', 'line-width': 1.5, 'line-opacity': 0.9 }}
+        paint: {{ 'line-color': '#00CFFF', 'line-width': 1.5, 'line-opacity': 0.9 }}
       }});
       map.addLayer({{
         id: 'cwa-label',
@@ -1389,8 +1383,13 @@ def build_map_html() -> str:
         paint: {{ 'text-color': '#E8EDF5', 'text-halo-color': '#0A0A0F', 'text-halo-width': 2 }}
       }});
 
-      // Restore any CWA data queued before the map was ready
-      if (window._cwaData) {{ try {{ map.getSource('cwa').setData(JSON.parse(window._cwaData)); }} catch(e) {{}} window._cwaData = null; }}
+      // Restore any CWA data queued before the map was ready (but do NOT auto-show)
+      if (window._cwaData) {{ 
+        try {{ map.getSource('cwa').setData(JSON.parse(window._cwaData)); }} catch(e) {{}} 
+        window._cwaData = null; 
+      }}
+      // Explicitly keep CWA hidden on initial load
+      window.stormSetCwaVisible(false);
 
       // Pointer cursor on CWA polygons when visible
       map.on('mouseenter', 'cwa-fill', function() {{ map.getCanvas().style.cursor = 'pointer'; }});
