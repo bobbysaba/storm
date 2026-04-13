@@ -226,16 +226,20 @@ class SoundingDialog(QDialog):
     # ── Public ───────────────────────────────────────────────────────────────
 
     def load(self, sset: SoundingSet):
-        self._sset    = sset
-        self._cur_idx = next(
-            (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
-        )
-        if sset.is_nssl:
-            self.setWindowTitle("NSSL Observed Sounding")
-        elif sset.is_observed:
-            self.setWindowTitle("Observed Sounding")
+        self._sset = sset
+        
+        # Check if this is an observed or NSSL sounding set
+        if sset.is_observed or sset.is_nssl:
+            # Default to the most recent (last) sounding
+            self._cur_idx = len(sset.soundings) - 1
+            self.setWindowTitle("NSSL Observed Sounding" if sset.is_nssl else "Observed Sounding")
         else:
+            # Existing logic for HRRR/Model soundings: default to F0 (Analysis)
+            self._cur_idx = next(
+                (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
+            )
             self.setWindowTitle("HRRR Point Sounding")
+
         self._rebuild_scrubber()
         self._draw()
         if not self.isVisible():
