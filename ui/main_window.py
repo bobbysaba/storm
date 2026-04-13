@@ -16,9 +16,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QIcon, QPixmap, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 
 from ui.theme import DARK_THEME, ACCENT
 from ui.map_widget import MapWidget, TILES_PATH
@@ -72,6 +74,25 @@ from ui.layer_order_pill import LayerOrderPill, MAPLIBRE_LAYERS
 from ui.debug_pill import DebugPill
 
 log = logging.getLogger(__name__)
+
+
+def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
+    """Return a minimal camera QIcon rendered from inline SVG."""
+    svg = (
+        '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
+        '<path d="M4 8 H8 L9.5 6 H14.5 L16 8 H20 V18 H4 Z"'
+        ' fill="none" stroke="{c}" stroke-width="1.8"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<circle cx="12" cy="13" r="3.2"'
+        ' fill="none" stroke="{c}" stroke-width="1.8"/>'
+        '</svg>'
+    ).format(c=color)
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(px)
+    QSvgRenderer(svg.encode()).render(painter)
+    painter.end()
+    return QIcon(px)
 
 
 def _coords_close(a, b, tol: float = 1e-4) -> bool:
@@ -241,6 +262,9 @@ class MainWindow(QMainWindow):
             self.restoreState(_s.value("windowState"))
             # keep toolbar button in sync with current vehicle panel visibility
             self.btn_vehicles.setChecked(self.vehicle_panel.isVisible())
+
+        # Screenshot button — persistent, bottom-right above zoom controls
+        self._init_screenshot_button()
 
         # Layer order pill — floats above the bottom-left status pill
         self._layer_pill = LayerOrderPill(self._map_container)
@@ -1413,16 +1437,29 @@ class MainWindow(QMainWindow):
             self._layer_pill.raise_()
 
         # re-center button — bottom-right, above MapLibre zoom controls (~70px tall)
+        _ZOOM_CTRL_H = 70   # approximate height of MapLibre NavigationControl
+        _GAP = 6
+        _recenter_top = r.height() - _ZOOM_CTRL_H - _GAP
         if hasattr(self, "btn_recenter"):
-            _ZOOM_CTRL_H = 70   # approximate height of MapLibre NavigationControl
-            _GAP = 6
             btn_w = self.btn_recenter.width()
             btn_h = self.btn_recenter.height()
             self.btn_recenter.move(
                 r.width() - btn_w - MARGIN,
-                r.height() - _ZOOM_CTRL_H - _GAP - btn_h,
+                _recenter_top - btn_h,
             )
             self.btn_recenter.raise_()
+            if self.btn_recenter.isVisible():
+                _recenter_top = _recenter_top - btn_h - _GAP
+
+        # screenshot button — stacks above re-center button (or above zoom ctrls)
+        if hasattr(self, "btn_screenshot"):
+            sb_w = self.btn_screenshot.width()
+            sb_h = self.btn_screenshot.height()
+            self.btn_screenshot.move(
+                r.width() - sb_w - MARGIN,
+                _recenter_top - sb_h,
+            )
+            self.btn_screenshot.raise_()
 
 
     def _start_layout_pulse(self):
@@ -3668,6 +3705,87 @@ class MainWindow(QMainWindow):
             target = self._vehicles.get(self._follow_target_id())
             if target:
                 self.map_widget.follow_move(target.lat, target.lon)
+
+    def _init_screenshot_button(self) -> None:
+        self.btn_screenshot = QToolButton(self._map_container)
+        self.btn_screenshot.setIcon(_make_camera_icon(18))
+        self.btn_screenshot.setIconSize(QSize(18, 18))
+        self.btn_screenshot.setToolTip("Save a screenshot of the map")
+        self.btn_screenshot.setFixedSize(32, 32)
+        self.btn_screenshot.setStyleSheet("""
+            QToolButton {
+                background: #1E2433;
+                border: 1px solid #2A3045;
+                border-radius: 4px;
+            }
+            QToolButton:hover {
+                background: #252D42;
+                border-color: #4A9EFF;
+            }
+            QToolButton:pressed {
+                background: #1A1F30;
+            }
+        """)
+        self.btn_screenshot.clicked.connect(self._on_screenshot_clicked)
+        self.btn_screenshot.show()
+
+    def _on_screenshot_clicked(self) -> None:
+        """Hide the floating toolbar, capture the window, then prompt to save."""
+        # Widgets we want excluded from the shot. Keep pills/drawers visible so
+        # the user can compose the view with whatever overlays they want.
+        to_hide = [self.btn_screenshot]
+        if hasattr(self, "_floating_toolbar"):
+            to_hide.append(self._floating_toolbar)
+        prev_visible = [(w, w.isVisible()) for w in to_hide]
+        for w, _ in prev_visible:
+            w.hide()
+        # Let Qt repaint without the hidden widgets before grabbing.
+        QApplication.processEvents()
+
+        try:
+            screen = self.windowHandle().screen() if self.windowHandle() else QApplication.primaryScreen()
+            if screen is None:
+                log.warning("Screenshot: no screen available")
+                return
+            # Grab the main window rect in screen coordinates.
+            top_left = self.mapToGlobal(self.rect().topLeft())
+            dpr = screen.devicePixelRatio()
+            pix = screen.grabWindow(
+                0,
+                int(top_left.x()),
+                int(top_left.y()),
+                int(self.width()),
+                int(self.height()),
+            )
+            if not pix.isNull():
+                pix.setDevicePixelRatio(dpr)
+        finally:
+            for w, was_visible in prev_visible:
+                if was_visible:
+                    w.show()
+            self._layout_overlays()
+
+        if pix.isNull():
+            log.warning("Screenshot: grabbed pixmap was null")
+            return
+
+        from pathlib import Path
+        default_dir = Path.home() / "Pictures"
+        if not default_dir.exists():
+            default_dir = Path.home()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_path = str(default_dir / f"storm_{ts}.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Screenshot", default_path, "PNG Image (*.png)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        if not pix.save(path, "PNG"):
+            log.warning("Screenshot: failed to save to %s", path)
+        else:
+            log.info("Screenshot saved to %s", path)
 
     def _update_recenter_btn_visibility(self) -> None:
         if not hasattr(self, "btn_recenter"):

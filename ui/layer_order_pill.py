@@ -5,7 +5,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton, QPushButton, QFrame,
 )
-from PyQt6.QtCore import Qt, QSettings, pyqtSignal
+from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 
 # ── Default layer stack (bottom → top) ───────────────────────────────────────
 
@@ -101,6 +101,7 @@ class LayerOrderPill(QWidget):
         self._order: list[str] = load_layer_order()
         self._saved_order: list[str] = list(self._order)
         self._active: set[str] = set()
+        self._in_relayout = False
 
         # ── Toggle button (always visible, anchored at bottom of pill) ────
         self._toggle_btn = QToolButton(self)
@@ -185,6 +186,15 @@ class LayerOrderPill(QWidget):
         The panel, when visible, sits above it.  _layout_overlays in MainWindow
         positions the pill by its bottom-left corner, so growing upward is free.
         """
+        if self._in_relayout:
+            return
+        self._in_relayout = True
+        try:
+            self._do_relayout()
+        finally:
+            self._in_relayout = False
+
+    def _do_relayout(self):
         self._toggle_btn.adjustSize()
         btn_w = self._toggle_btn.sizeHint().width()
         btn_h = self._toggle_btn.sizeHint().height()
@@ -216,9 +226,10 @@ class LayerOrderPill(QWidget):
     def _build_rows(self):
         while self._rows_layout.count():
             item = self._rows_layout.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-                item.widget().deleteLater()
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.hide()
+                w.deleteLater()
 
         display_order = self._display_order()
         for i, key in enumerate(display_order):
@@ -293,6 +304,13 @@ class LayerOrderPill(QWidget):
             return
         visible.insert(new_idx, visible.pop(stack_idx))
         self._order = self._merge_order(visible)
+        # Defer rebuild: the arrow button that emitted this click is one of
+        # the widgets about to be deleted, so unwind the signal first.
+        QTimer.singleShot(0, self._rebuild_and_relayout)
+
+    def _rebuild_and_relayout(self):
+        if not self._expanded:
+            return
         self._build_rows()
         self._relayout()
 
