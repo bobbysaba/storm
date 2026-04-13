@@ -6,6 +6,7 @@
 import io
 import base64
 import logging
+import math
 from time import perf_counter
 import numpy as np
 from typing import Optional
@@ -321,6 +322,62 @@ COLORMAPS = {
 }
 
 
+# ── Projection helpers ────────────────────────────────────────────────────────
+#
+# Two corrections live here:
+#   1. _lonlat_to_merc / _merc_to_lonlat let us build the output PNG grid
+#      uniform in Web Mercator instead of lat/lon.  A lat/lon-uniform grid
+#      shears vertically when MapLibre draws it on a Mercator basemap (its
+#      image source interpolates linearly in projected space) — at 40°N over
+#      a 460 km diameter scan that's ~10 km of mid-image displacement.
+#   2. _haversine_inverse_polar replaces the previous flat-earth +
+#      uniform cos(lat) inverse with a spherical haversine + bearing, so the
+#      polar lookup matches what the decoder produces with its spherical
+#      forward formula.
+
+_MERC_R = 6378137.0
+_MERC_LAT_LIMIT = 85.05112878
+_R_SPHERE_M = 6371000.0
+
+
+def _lonlat_to_merc(lon, lat):
+    lat_c = np.clip(lat, -_MERC_LAT_LIMIT, _MERC_LAT_LIMIT)
+    x = np.deg2rad(lon) * _MERC_R
+    y = np.log(np.tan(np.pi / 4 + np.deg2rad(lat_c) / 2)) * _MERC_R
+    return x, y
+
+
+def _merc_to_lonlat(x, y):
+    lon = np.rad2deg(x / _MERC_R)
+    lat = np.rad2deg(2 * np.arctan(np.exp(y / _MERC_R)) - np.pi / 2)
+    return lon, lat
+
+
+def _haversine_inverse_polar(
+    radar_lat: float,
+    radar_lon: float,
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spherical inverse: from (radar_lat, radar_lon) to each grid cell,
+    return (range_m, azimuth_deg) where azimuth is degrees clockwise from
+    true north (NEXRAD convention)."""
+    phi1 = math.radians(radar_lat)
+    lam1 = math.radians(radar_lon)
+    phi2 = np.deg2rad(lat_grid)
+    lam2 = np.deg2rad(lon_grid)
+    dphi = phi2 - phi1
+    dlam = lam2 - lam1
+
+    a = np.sin(dphi / 2.0) ** 2 + math.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2.0) ** 2
+    range_m = 2.0 * _R_SPHERE_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+    y = np.sin(dlam) * np.cos(phi2)
+    x = math.cos(phi1) * np.sin(phi2) - math.sin(phi1) * np.cos(phi2) * np.cos(dlam)
+    az_deg = (np.rad2deg(np.arctan2(y, x))) % 360.0
+    return range_m, az_deg
+
+
 # ── Standalone render function (thread-safe, no instance state) ───────────────
 
 def _sample_scan_to_grid(
@@ -328,26 +385,42 @@ def _sample_scan_to_grid(
     lat_grid: np.ndarray,
     lon_grid: np.ndarray,
 ) -> np.ndarray:
-    """Sample a scan onto an arbitrary lat/lon grid using nearest-neighbor."""
+    """Sample a scan onto an arbitrary lat/lon grid using nearest-neighbor.
+
+    Polar lookup is spherical (haversine distance + true bearing) so it
+    matches the spherical forward formula in data/radar_decoder.py.  Gate
+    width and first-gate offset are recovered from the scan's own lat/lon
+    arrays so the index mapping is consistent with the gate-center
+    convention used by the decoder.
+    """
     num_az, num_rng = sample_scan.data.shape
 
     radar_lat = float(sample_scan.lats[:, 0].mean())
     radar_lon = float(sample_scan.lons[:, 0].mean())
-    cos_lat = np.cos(np.deg2rad(radar_lat))
 
-    dlat = lat_grid - radar_lat
-    dlon = (lon_grid - radar_lon) * cos_lat
-    range_km = np.sqrt(dlat ** 2 + dlon ** 2) * 111.32
-    az_deg = np.degrees(np.arctan2(dlon, dlat)) % 360.0
+    range_m, az_deg = _haversine_inverse_polar(radar_lat, radar_lon, lat_grid, lon_grid)
 
-    max_range_km = float(np.nanmax(
-        np.sqrt(((sample_scan.lats - radar_lat) ** 2 +
-                 ((sample_scan.lons - radar_lon) * cos_lat) ** 2)) * 111.32
-    ))
+    # Recover gate-center spacing from the scan's own polar grid (spherical
+    # distance from the radar site to each gate center).  Median across
+    # radials is robust to occasional missing/garbled azimuths.
+    gate_range_m, _ = _haversine_inverse_polar(
+        radar_lat, radar_lon, sample_scan.lats, sample_scan.lons
+    )
+    gate_centers_m = np.median(gate_range_m, axis=0)
+    first_gate_m   = float(gate_centers_m[0])
+    if num_rng > 1:
+        gate_width_m = float(np.median(np.diff(gate_centers_m)))
+    else:
+        gate_width_m = float(np.nanmax(gate_range_m) or 1.0)
+    if not np.isfinite(gate_width_m) or gate_width_m <= 0:
+        gate_width_m = float(np.nanmax(gate_range_m)) / max(num_rng, 1)
 
-    az_idx = ((az_deg - sample_scan.az_offset) % 360.0) * num_az / 360.0
-    rng_idx = range_km / max_range_km * (num_rng - 1)
-    outside = range_km > max_range_km
+    az_idx  = ((az_deg - sample_scan.az_offset) % 360.0) * num_az / 360.0
+    rng_idx = (range_m - first_gate_m) / gate_width_m
+
+    far_edge_m = first_gate_m + (num_rng - 0.5) * gate_width_m
+    near_edge_m = max(0.0, first_gate_m - 0.5 * gate_width_m)
+    outside = (range_m > far_edge_m) | (range_m < near_edge_m)
 
     sentinel = sample_scan.vmin - 999.0
     data_filled = np.where(np.isnan(sample_scan.data), sentinel, sample_scan.data)
@@ -374,22 +447,20 @@ def render_scan_to_png(
     IMG = grid_size
     t0 = perf_counter()
 
-    radar_lat = float(scan.lats[:, 0].mean())
-    radar_lon = float(scan.lons[:, 0].mean())
+    # Build the output PNG grid uniform in Web Mercator so MapLibre's image
+    # source — which interpolates linearly in projected space — places every
+    # pixel at the right ground location.  Sampling in lat/lon would shear
+    # the image vertically with latitude (~10 km mid-image error at 40°N).
+    all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
+    x_min = float(np.nanmin(all_x))
+    x_max = float(np.nanmax(all_x))
+    y_min = float(np.nanmin(all_y))
+    y_max = float(np.nanmax(all_y))
 
-    lat_min = float(np.nanmin(scan.lats))
-    lat_max = float(np.nanmax(scan.lats))
-    lon_min = float(np.nanmin(scan.lons))
-    lon_max = float(np.nanmax(scan.lons))
-
-    out_lats = np.linspace(lat_max, lat_min, IMG)
-    out_lons = np.linspace(lon_min, lon_max, IMG)
-    lon_grid, lat_grid = np.meshgrid(out_lons, out_lats)
-
-    cos_lat = np.cos(np.deg2rad(radar_lat))
-    dlat = lat_grid - radar_lat
-    dlon = (lon_grid - radar_lon) * cos_lat
-    range_km = np.sqrt(dlat ** 2 + dlon ** 2) * 111.32
+    out_x = np.linspace(x_min, x_max, IMG)
+    out_y = np.linspace(y_max, y_min, IMG)   # rows top→bottom
+    x_grid, y_grid = np.meshgrid(out_x, out_y)
+    lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
 
     data_out = _sample_scan_to_grid(scan, lat_grid, lon_grid)
     if scan.colormap == "nws_ref":
@@ -417,7 +488,12 @@ def render_scan_to_png(
         IMG,
     )
 
-    bounds = [lon_min, lat_min, lon_max, lat_max]
+    # Lat/lon corners that correspond to the mercator extent corners.  Because
+    # the PNG pixels are uniform in mercator, MapLibre's linear-in-projected
+    # interpolation across these geographic corners is exact.
+    lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
+    lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
+    bounds = [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
     return png_bytes, bounds, elapsed_ms
 
 
@@ -484,6 +560,11 @@ class RadarOverlay(QObject):
         Much lighter than clear() — avoids the expensive removeLayer + addLayer
         cycle that forces MapLibre to tear down and rebuild its raster rendering
         pipeline.  The next inject() call will just use updateImage() (fast path).
+
+        Additionally, store a tiny transparent PNG in the scheme handler so any
+        in-flight renderer fetches decode a tiny image instead of a large PNG —
+        this prevents the Chromium renderer from doing expensive PNG decoding
+        work after the overlay is hidden, which can freeze the map.
         """
         if self._active:
             self._map.run_js(
@@ -492,6 +573,47 @@ class RadarOverlay(QObject):
             )
         self._hidden = True
         self._current_scan = None
+
+        # Replace the served radar PNG with a tiny transparent image so that
+        # any pending updateImage fetches will decode a trivial payload.
+        try:
+            scheme_handler = getattr(self._map, "scheme_handler", None)
+            if scheme_handler is not None:
+                # Import here to keep top-level imports minimal; use the same
+                # tiny PNG bytes as defined in the scheme handler module.
+                try:
+                    transparent = scheme_handler.TRANSPARENT_PNG_1X1
+                except Exception:
+                    # Fallback: decode locally if constant isn't available
+                    import base64
+
+                    transparent = base64.b64decode(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+                    )
+                scheme_handler.set_radar_png(transparent)
+        except Exception:
+            log.exception("failed to set transparent radar PNG in scheme handler")
+
+        # Tell the page to suspend handling of radar updateImage calls until
+        # we explicitly clear it.  This prevents any in-flight or soon-to-run
+        # updateImage() from triggering renderer-side PNG decode/upload work.
+        try:
+            self._map.run_js("window._stormRadarSuspend = true;")
+        except Exception:
+            pass
+
+        # Also immediately replace the image on the MapLibre source with a
+        # tiny inlined 1x1 transparent data URL.  This avoids a new storm://
+        # fetch (which may still race) and forces the renderer to decode a
+        # trivial payload synchronously rather than a large PNG.
+        try:
+            tiny_data = (
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+            )
+            js_replace = f"(function() {{ try {{ if (map.getSource(\"{self.SOURCE_ID}\")) {{ var src = map.getSource(\"{self.SOURCE_ID}\"); var coords = src && src.coordinates ? src.coordinates : null; if (!coords && window._radar_last_coords) coords = window._radar_last_coords; if (coords) {{ src.updateImage({{url: '{tiny_data}', coordinates: coords}}); console.log('[RADAR-INJECT] hid: replaced source image with tiny data URL'); }} }} }} catch(e) {{ console.error('[RADAR-INJECT] hid-replace error', e && e.message ? e.message : e); }} }})();"
+            self._map.run_js(js_replace)
+        except Exception:
+            pass
 
     def inject(self, png_bytes: bytes, bounds: list):
         """Inject a pre-rendered PNG (from background thread) into the map.
@@ -512,8 +634,12 @@ class RadarOverlay(QObject):
             # SAFE_MAP_MODE — no scheme handler; fall back to data URL
             image_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
         restoring = self._hidden
-        self._hidden = False
+        # Call into the page while _hidden is still accurate so we can skip
+        # injection entirely on the Python side without sending JS that would
+        # trigger renderer fetch/decode work.  Only clear _hidden after the
+        # attempt so a concurrent hide() correctly prevents accidental injects.
         self._inject_into_map(image_url, bounds, restore_opacity=restoring)
+        self._hidden = False
         self._active = True
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -537,20 +663,19 @@ class RadarOverlay(QObject):
             scan.label, IMG, IMG, scan.colormap, scan.vmin, scan.vmax
         )
 
-        # radar center is at range=0 for all azimuths
-        radar_lat = float(scan.lats[:, 0].mean())
-        radar_lon = float(scan.lons[:, 0].mean())
+        # Build the output grid uniform in Web Mercator (see render_scan_to_png
+        # for the rationale — a lat/lon-uniform grid would shear when MapLibre
+        # draws it on a Mercator basemap).
+        all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
+        x_min = float(np.nanmin(all_x))
+        x_max = float(np.nanmax(all_x))
+        y_min = float(np.nanmin(all_y))
+        y_max = float(np.nanmax(all_y))
 
-        # geographic bounding box
-        lat_min = float(np.nanmin(scan.lats))
-        lat_max = float(np.nanmax(scan.lats))
-        lon_min = float(np.nanmin(scan.lons))
-        lon_max = float(np.nanmax(scan.lons))
-
-        # build a square output grid in lat/lon space (north→south, west→east)
-        out_lats = np.linspace(lat_max, lat_min, IMG)
-        out_lons = np.linspace(lon_min, lon_max, IMG)
-        lon_grid, lat_grid = np.meshgrid(out_lons, out_lats)
+        out_x = np.linspace(x_min, x_max, IMG)
+        out_y = np.linspace(y_max, y_min, IMG)   # rows top→bottom
+        x_grid, y_grid = np.meshgrid(out_x, out_y)
+        lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
 
         data_out = _sample_scan_to_grid(scan, lat_grid, lon_grid)
         # for reflectivity only: mask sub-threshold pixels (~8 dBZ matches RadarScope)
@@ -589,7 +714,10 @@ class RadarOverlay(QObject):
             IMG,
         )
 
-        bounds = [lon_min, lat_min, lon_max, lat_max]
+        # Lat/lon corners corresponding to the mercator extent corners.
+        lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
+        lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
+        bounds = [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
         return png_bytes, bounds
 
     def _maybe_adjust_grid(self, elapsed_ms: float) -> None:
@@ -651,32 +779,63 @@ class RadarOverlay(QObject):
 
         log.debug("injecting radar image into map (bounds %s)", bounds)
 
+        # If Python-side overlay state indicates the overlay is hidden, skip
+        # sending JS that would call updateImage(). This avoids queuing work on
+        # the renderer when the user has hidden the overlay.
+        if self._hidden and not restore_opacity:
+            log.info("[RadarOverlay] skipping inject while hidden (bounds %s)", bounds)
+            return
+
+        if restore_opacity:
+            restore_block = """
+              // restore opacity after hide() set it to 0 for site switch
+              if (map.getLayer("{LAYER}")) {
+                map.setPaintProperty("{LAYER}", "raster-opacity", 0.75);
+                console.log('[RADAR-INJECT] restored opacity', new Date().toISOString());
+              }"""
+            restore_block = restore_block.replace('{LAYER}', self.LAYER_ID)
+        else:
+            restore_block = ""
+
         js = f"""
         (function() {{
           const imageUrl = "{image_url}";
           const coords   = {coords_js};
+          // Cache the last coords so hide() can replace the image even if the
+          // source object doesn't expose coordinates at the moment of replacement.
+          try {{ window._radar_last_coords = coords; }} catch(e) {{}}
+          const restore  = {str(restore_opacity).lower()};
 
           try {{
+            // If the page has set _stormRadarSuspend, skip non-restore injects so
+            // we avoid in-flight renderer decode/upload work while hidden.
+            if (window._stormRadarSuspend && !restore) {{
+              console.log('[RADAR-INJECT] suspended — skipping inject', new Date().toISOString());
+              return;
+            }}
+            if (restore) {{
+              // Clearing suspend before restoring the overlay ensures the
+              // subsequent updateImage will be processed normally.
+              try {{ window._stormRadarSuspend = false; }} catch(e) {{}}
+            }}
+
             if (map.getSource("{self.SOURCE_ID}")) {{
               // update existing source in-place — avoids layer flicker
-              map.getSource("{self.SOURCE_ID}").updateImage({{
-                url: imageUrl,
-                coordinates: coords
-              }});
-              {"" if not restore_opacity else f'''
-              // restore opacity after hide() set it to 0 for site switch;
-              // disable fade so the new site's data appears instantly
-              if (map.getLayer("{self.LAYER_ID}")) {{
-                map.setPaintProperty("{self.LAYER_ID}", "raster-fade-duration", 0);
-                map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0.75);
-                // re-enable fade for subsequent updates (loop playback, live updates)
-                setTimeout(function() {{
-                  if (map.getLayer("{self.LAYER_ID}"))
-                    map.setPaintProperty("{self.LAYER_ID}", "raster-fade-duration", 300);
-                }}, 500);
-              }}'''}
+              try {{
+                console.log('[RADAR-INJECT] calling updateImage', new Date().toISOString());
+                map.getSource("{self.SOURCE_ID}").updateImage({{
+                  url: imageUrl,
+                  coordinates: coords
+                }});
+                console.log('[RADAR-INJECT] updateImage returned', new Date().toISOString());
+              }} catch(uiErr) {{
+                console.error('[RADAR-INJECT] updateImage error:', uiErr && uiErr.message ? uiErr.message : uiErr);
+              }}
+
+              {restore_block}
             }} else {{
               // first time — add source and layer
+              console.log('[RADAR-INJECT] adding source', new Date().toISOString());
               map.addSource("{self.SOURCE_ID}", {{
                 type: "image",
                 url: imageUrl,
@@ -690,9 +849,10 @@ class RadarOverlay(QObject):
                   source: "{self.SOURCE_ID}",
                   paint: {{
                     "raster-opacity": 0.75,
-                    "raster-fade-duration": 300
+                    "raster-fade-duration": 0
                   }}
                 }}, "road-unpaved");   // insert below road labels/roads so they stay visible
+                console.log('[RADAR-INJECT] addLayer succeeded', new Date().toISOString());
               }} catch(layerErr) {{
                 // fallback: "road-unpaved" may not exist yet — add without beforeId
                 console.warn("[STORM] radar addLayer beforeId failed, adding on top:", layerErr.message);
@@ -702,9 +862,10 @@ class RadarOverlay(QObject):
                   source: "{self.SOURCE_ID}",
                   paint: {{
                     "raster-opacity": 0.75,
-                    "raster-fade-duration": 300
+                    "raster-fade-duration": 0
                   }}
                 }});
+                console.log('[RADAR-INJECT] fallback addLayer', new Date().toISOString());
               }}
             }}
           }} catch(e) {{
@@ -712,4 +873,14 @@ class RadarOverlay(QObject):
           }}
         }})();
         """
+        # Emit pre/post logs to help diagnose timing
+        try:
+            self._map.run_js(f"console.log('[RADAR-INJECT] pre-inject url_len={len(image_url)} restore={str(restore_opacity).lower()}');")
+        except Exception:
+            pass
+        self._map.run_js(js)
+        try:
+            self._map.run_js("console.log('[RADAR-INJECT] post-inject');")
+        except Exception:
+            pass
         self._map.run_js(js)

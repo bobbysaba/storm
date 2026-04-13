@@ -13,6 +13,7 @@
 
 import base64
 import logging
+import math
 import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -37,7 +38,10 @@ MAX_FRAMES      = 10
 REQUEST_TIMEOUT = 20
 
 # Fixed CONUS image extent — used as nominal bbox for time-only SatFrames.
-CONUS_BBOX = [-126.0, 22.0, -64.0, 52.0]
+# Must stay in sync with the `bounds:` value on the sat-wms tile source in
+# ui/map_widget.py — that bounds box is what actually gates which tiles
+# MapLibre will request.
+CONUS_BBOX = [-116.0, 28.0, -82.0, 49.0]
 
 # MESO images are square (sector ≈ 1000×1000 km)
 MESO_W, MESO_H = 2048, 2048
@@ -343,12 +347,30 @@ def _parse_time(tstr: str) -> datetime:
         return datetime.now(timezone.utc)
 
 
+_MERC_R = 6378137.0
+_MERC_LAT_LIMIT = 85.05112878
+
+
+def _lonlat_to_merc(lon: float, lat: float) -> tuple[float, float]:
+    lat = max(-_MERC_LAT_LIMIT, min(_MERC_LAT_LIMIT, lat))
+    x = math.radians(lon) * _MERC_R
+    y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * _MERC_R
+    return x, y
+
+
 def _iem_wms_url(layer: str, west: float, south: float, east: float, north: float,
                  width: int, height: int, time_str: str | None = None) -> str:
+    # Render in Web Mercator so the pixel grid matches the MapLibre basemap.
+    # If we requested EPSG:4326 the image would be equirectangular and the
+    # MapLibre image source's interior interpolation would shear vertically
+    # (the corners would line up but everything between would drift —
+    # several km of error at mid-latitudes).
+    minx, miny = _lonlat_to_merc(west, south)
+    maxx, maxy = _lonlat_to_merc(east, north)
     base = (
         f"{IEM_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-        f"&LAYERS={layer}&SRS=EPSG:4326"
-        f"&BBOX={west},{south},{east},{north}&WIDTH={width}&HEIGHT={height}"
+        f"&LAYERS={layer}&SRS=EPSG:3857"
+        f"&BBOX={minx},{miny},{maxx},{maxy}&WIDTH={width}&HEIGHT={height}"
         f"&FORMAT=image/png&TRANSPARENT=TRUE&STYLES="
     )
     if time_str:

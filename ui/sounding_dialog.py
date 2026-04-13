@@ -641,10 +641,15 @@ class SoundingDialog(QDialog):
         sfc_t = float(snd.temperature[0])
         sfc_td = float(snd.dewpoint[0])
         sfc_p = float(snd.pressure[0])
-        ax.text(sfc_t, sfc_p + 18, f"{sfc_t:.0f}",
+
+        # define t/td in F
+        sfc_t_F = sfc_t * 1.8 + 32
+        sfc_td_F = sfc_td * 1.8 + 32
+
+        ax.text(sfc_t, sfc_p + 18, f"{sfc_t_F:.0f}",
                 color=_TEMP_CLR, fontsize=8, fontweight="bold",
                 ha="center", va="top", zorder=7)
-        ax.text(sfc_td, sfc_p + 18, f"{sfc_td:.0f}",
+        ax.text(sfc_td, sfc_p + 18, f"{sfc_td_F:.0f}",
                 color=_DEWP_CLR, fontsize=8, fontweight="bold",
                 ha="center", va="top", zorder=7)
 

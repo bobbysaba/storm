@@ -45,10 +45,7 @@ def _obs_fingerprint(obs: Observation) -> tuple:
 
 
 def _render(
-    obs: Observation,
-    center_color: str = "#E8EAF0",
-    pressure_mode: str = "coded",
-) -> bytes:
+    obs: Observation) -> bytes:
     """
     Render a station plot for *obs* and return a transparent PNG as bytes.
     The image is 135×135 px (1.5" × 1.5" at 90 dpi).
@@ -70,10 +67,6 @@ def _render(
 
     sp = StationPlot(ax, [0.0], [0.0], fontsize=11, spacing=17)
 
-    # Center marker color can encode freshness/source state while keeping the
-    # rest of the station model rendering shared between vehicles and overlays.
-    ax.scatter([0.0], [0.0], s=46, c=center_color, edgecolors="#0A0A0F", linewidths=0.8, zorder=5)
-
     # Temperature (°F) — upper-left, red
     if obs.temperature_c is not None:
         t_f = round(obs.temperature_c * 9 / 5 + 32)
@@ -85,25 +78,13 @@ def _render(
         sp.plot_parameter("SW", [dp_f], color="#64FF96", fontweight="bold")
 
     if obs.pressure_mb is not None:
-        if pressure_mode == "full":
-            sp.plot_parameter(
-                "NE",
-                [float(round(obs.pressure_mb))],
-                color="#E8EAF0",
-                fontweight="bold",
-                formatter=lambda v: f"{int(round(v))}",
-            )
-        else:
-            # Standard station plot encoding: last 3 digits of (mb × 10), zero-padded.
-            # e.g. 1013.2 mb → 1132 → "132"  |  965.8 mb → 9658 → "658"
-            pres_code = int(round(obs.pressure_mb * 10)) % 1000
-            sp.plot_parameter(
-                "NE",
-                [float(pres_code)],
-                color="#E8EAF0",
-                fontweight="bold",
-                formatter=lambda v: f"{int(round(v)) % 1000:03d}",
-            )
+        sp.plot_parameter(
+            "NE",
+            [float(round(obs.pressure_mb))],
+            color="#E8EAF0",
+            fontweight="bold",
+            formatter=lambda v: f"{int(round(v))}",
+        )
 
     # Wind barb — white
     # MetPy expects u/v components in knots pointing *into* the station

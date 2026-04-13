@@ -2095,10 +2095,22 @@ class MainWindow(QMainWindow):
             self._loop_timer.stop()
             self.radar_controls.reset_cache_ui()
             self._scan_cache.clear()
+            # Bump render generation so any in-flight decode/render and any
+            # deferred inject result are discarded instead of re-adding the
+            # overlay layer after clear().
+            self._render_generation += 1
             self._pending_render_scan = None
-            self._radar_fetcher.reset_history()   # force full backfill on re-enable
+            self._render_in_flight = False
+            self._deferred_inject_result = None
+            self._inject_throttle_timer.stop()
+            self._last_inject_time = 0.0
+            
+            self._radar_fetcher.reset_history()
             self._radar_fetcher.stop()
-            self._radar_overlay.clear()
+            # hide() is much lighter than clear(): avoids expensive removeLayer/removeSource
+            # cycle in MapLibre that can block the renderer for a short time.  The next
+            # inject() will use updateImage() to restore the overlay quickly.
+            self._radar_overlay.hide()
             self.status_msg_label.setText("")
             self._layout_overlays()
 
@@ -2633,7 +2645,11 @@ class MainWindow(QMainWindow):
             self.radar_controls.set_cache_size(len(cache))
             self._show_scan(cache[-1])
         else:
-            self._radar_overlay.clear()
+            # Hide instead of clear to avoid forcing MapLibre to teardown and rebuild
+            # its raster pipeline (removeLayer/removeSource), which can briefly
+            # freeze map interactions. The overlay will be restored via updateImage
+            # on the next inject() when data arrives.
+            self._radar_overlay.hide()
             if not self._radar_product_availability.get(product, True):
                 self._update_radar_unavailable_status()
             else:

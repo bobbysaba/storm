@@ -4,6 +4,7 @@
 
 import io
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -39,7 +40,13 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
         pdata = f.sym_block[0][0]
 
         raw = np.array(pdata["data"])           # keep uint8 — map_data needs integer indices
-        azimuths = np.asarray(pdata["start_az"], dtype=float)
+        # NEXRAD `start_az` is the leading edge of each radial; the sample
+        # represents the beam center, so shift by half the beam width.
+        start_az = np.asarray(pdata["start_az"], dtype=float)
+        beam_width = _estimate_beam_width(start_az)
+        azimuths = start_az + 0.5 * beam_width
+        # `_extract_ranges_m` returns gate-center ranges (already shifted by
+        # half a gate width) so polar→latlon places samples at gate centers.
         ranges_m = _extract_ranges_m(pdata, raw.shape[-1], f)
 
         # Apply scale/offset from MetPy (requires integer input)
@@ -96,34 +103,61 @@ def _polar_to_latlon(
     center_lon: float
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Convert polar radar coordinates (azimuth, range) to lat/lon arrays.
-
-    Uses simple flat-earth approximation — accurate enough for radar display
-    at ranges up to ~460 km.
+    Convert polar radar coordinates (azimuth, range) to lat/lon arrays via the
+    spherical forward-geodesic formula. This matches what py-art / GR2Analyst
+    use and avoids the few-km drift the previous flat-earth + cos(center_lat)
+    approximation introduced at long range.
 
     Returns:
         (lats, lons) each shaped (num_azimuths, num_gates)
     """
-    R_EARTH_KM = 6371.0
+    R_EARTH_M = 6371000.0
 
     az_rad = np.deg2rad(azimuths_deg)
-    rng_km = ranges_m / 1000.0
+    lat1   = math.radians(center_lat)
+    lon1   = math.radians(center_lon)
 
     # Meshgrid: rows = azimuths, cols = range gates
-    az2d, rng2d = np.meshgrid(az_rad, rng_km, indexing="ij")
+    az2d, rng2d = np.meshgrid(az_rad, ranges_m, indexing="ij")
 
-    dlat = (rng2d * np.cos(az2d)) / R_EARTH_KM
-    dlon = (rng2d * np.sin(az2d)) / (R_EARTH_KM * np.cos(np.deg2rad(center_lat)))
+    delta = rng2d / R_EARTH_M  # angular distance (rad)
+    sin_d = np.sin(delta)
+    cos_d = np.cos(delta)
+    sin_l1 = math.sin(lat1)
+    cos_l1 = math.cos(lat1)
 
-    lats = center_lat + np.rad2deg(dlat)
-    lons = center_lon + np.rad2deg(dlon)
+    sin_lat2 = sin_l1 * cos_d + cos_l1 * sin_d * np.cos(az2d)
+    lat2 = np.arcsin(np.clip(sin_lat2, -1.0, 1.0))
+    lon2 = lon1 + np.arctan2(
+        np.sin(az2d) * sin_d * cos_l1,
+        cos_d - sin_l1 * sin_lat2,
+    )
 
-    return lats, lons
+    return np.rad2deg(lat2), np.rad2deg(lon2)
+
+
+def _estimate_beam_width(start_az_deg: np.ndarray) -> float:
+    """Median spacing between consecutive radials, in degrees.
+
+    Handles the 360°→0° wrap and falls back to 1.0° (legacy resolution) if
+    the array is degenerate.
+    """
+    if start_az_deg.size < 2:
+        return 1.0
+    diffs = np.diff(start_az_deg)
+    diffs = (diffs + 180.0) % 360.0 - 180.0
+    bw = float(np.median(np.abs(diffs)))
+    if not np.isfinite(bw) or bw <= 0:
+        return 1.0
+    return bw
 
 
 def _extract_ranges_m(pdata: dict, num_gates: int, f: Level3File) -> np.ndarray:
     """
-    Build range array in meters across multiple Level 3 packet variants.
+    Build range array in meters across multiple Level 3 packet variants,
+    returning the **center** of each gate (so polar→latlon places samples
+    at gate centers, not at the near edge).
+
     Some super-res products omit `gate_width` and instead expose other keys.
     """
     gate_width = pdata.get("gate_width")
@@ -139,8 +173,8 @@ def _extract_ranges_m(pdata: dict, num_gates: int, f: Level3File) -> np.ndarray:
         fg = float(first_gate)
         # Heuristic: widths > 20 are usually meters; otherwise kilometers.
         if gw > 20:
-            return fg + (gw * np.arange(num_gates, dtype=float))
-        return (fg + (gw * np.arange(num_gates, dtype=float))) * 1000.0
+            return fg + gw * (np.arange(num_gates, dtype=float) + 0.5)
+        return (fg + gw * (np.arange(num_gates, dtype=float) + 0.5)) * 1000.0
 
     # Fallback: derive from known max_range.
     max_range_km = None
@@ -158,7 +192,9 @@ def _extract_ranges_m(pdata: dict, num_gates: int, f: Level3File) -> np.ndarray:
     if not max_range_km:
         max_range_km = 460.0
 
-    return np.linspace(0.0, max_range_km * 1000.0, num_gates, endpoint=False, dtype=float)
+    # Gate-center spacing: place samples at half-gate intervals from 0.
+    gw_m = (max_range_km * 1000.0) / num_gates
+    return (np.arange(num_gates, dtype=float) + 0.5) * gw_m
 
 
 def _parse_scan_time(f: Level3File) -> datetime:

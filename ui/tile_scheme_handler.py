@@ -17,6 +17,7 @@ import os
 import sqlite3
 import threading
 import zlib
+import base64
 
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
@@ -37,6 +38,11 @@ _MIME_MAP = {
     ".woff":  b"font/woff",
     ".woff2": b"font/woff2",
 }
+
+# 1x1 transparent PNG (base64): tiny image used when radar overlay is hidden
+TRANSPARENT_PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+)
 
 
 def _mime_for(filename: str) -> bytes:

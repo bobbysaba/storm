@@ -408,6 +408,31 @@ def build_map_html() -> str:
       }});
     }}
 
+    // Forward console messages to Python via the Qt bridge so they can be
+    // captured in the application's stdout/logs.  This helps diagnose
+    // renderer-side stalls when updateImage/fetches are in-flight.
+    (function() {{
+      const _orig = {{ log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), info: console.info.bind(console) }};
+      function _fmtArgs(args) {{
+        try {{
+          return Array.prototype.slice.call(args).map(function(a) {{
+            try {{ if (typeof a === 'object') return JSON.stringify(a); }} catch(e) {{}}
+            return String(a);
+          }}).join(' ');
+        }} catch(e) {{ return String(args); }}
+      }}
+      function _forward(level, args) {{
+        try {{
+          const payload = level + ' ' + _fmtArgs(args);
+          if (bridge && bridge.on_js_console) try {{ bridge.on_js_console(payload); }} catch(e) {{}}
+        }} catch(e) {{}}
+      }}
+      console.log = function() {{ _forward('log', arguments); _orig.log.apply(console, arguments); }};
+      console.warn = function() {{ _forward('warn', arguments); _orig.warn.apply(console, arguments); }};
+      console.error = function() {{ _forward('error', arguments); _orig.error.apply(console, arguments); }};
+      console.info = function() {{ _forward('info', arguments); _orig.info.apply(console, arguments); }};
+    }})();
+
     // ── Map Style ─────────────────────────────────────────────────────────
     const STORM_STYLE = {{
       version: 8,
@@ -3269,6 +3294,23 @@ class MapBridge(QObject):
     def on_radar_station_click(self, site_id: str):
         self.radar_station_clicked.emit(site_id)
 
+    @pyqtSlot(str)
+    def on_js_console(self, msg: str):
+        """Receive forwarded JS console messages from the page via QWebChannel.
+
+        Logged at INFO level and printed to stdout for easier capture when the
+        application is run from a terminal.
+        """
+        try:
+            # Print to stdout so users running the app in a terminal see messages
+            print(f"JS-FWD {msg}", flush=True)
+        except Exception:
+            pass
+        try:
+            log.info("JS-FWD %s", msg)
+        except Exception:
+            pass
+
     @pyqtSlot(float, float)
     def on_sounding_click(self, lat: float, lon: float):
         self.sounding_clicked.emit(lat, lon)
@@ -3382,12 +3424,16 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         QTimer.singleShot(0, self._load_map)
 
     def javaScriptConsoleMessage(self, level, message, line, source):
-        if '[TIMING]' in message:
-            print(f"JS {message}", flush=True)
+        # Emit all JS console messages to stdout for debugging (includes errors/warnings/info)
+        try:
+            lvl_name = getattr(level, 'name', str(level))
+        except Exception:
+            lvl_name = str(level)
+        print(f"JS [{lvl_name}] {message} ({source}:{line})", flush=True)
         from PyQt6.QtWebEngineCore import QWebEnginePage
         if level in (QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel,
                      QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel):
-            log.warning("JS %s [%s:%s]: %s", level.name, source, line, message)
+            log.warning("JS %s [%s:%s]: %s", lvl_name, source, line, message)
 
     def _load_map(self):
         self.load(QUrl("storm://app/"))
