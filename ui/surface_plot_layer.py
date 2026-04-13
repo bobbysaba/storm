@@ -25,9 +25,7 @@ class SurfacePlotLayer:
         try:
             png_bytes = _render(
                 obs,
-                center_color=self._obs_age_color(obs),
-                pressure_mode="full",
-            )
+                center_color=self._obs_age_color(obs))
         except Exception as exc:
             log.error("SurfacePlotLayer: render failed for %s: %s", station_id, exc, exc_info=True)
             return

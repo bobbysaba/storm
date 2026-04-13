@@ -45,7 +45,8 @@ def _obs_fingerprint(obs: Observation) -> tuple:
 
 
 def _render(
-    obs: Observation) -> bytes:
+    obs: Observation,
+    center_color: str = "#E8EAF0") -> bytes:
     """
     Render a station plot for *obs* and return a transparent PNG as bytes.
     The image is 135×135 px (1.5" × 1.5" at 90 dpi).
@@ -66,6 +67,8 @@ def _render(
     ax.patch.set_alpha(0.0)
 
     sp = StationPlot(ax, [0.0], [0.0], fontsize=11, spacing=17)
+
+    ax.scatter([0.0], [0.0], s=46, c=center_color, edgecolors="#0A0A0F", linewidths=0.8, zorder=5)
 
     # Temperature (°F) — upper-left, red
     if obs.temperature_c is not None:
