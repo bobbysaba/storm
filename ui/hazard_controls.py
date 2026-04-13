@@ -1,9 +1,9 @@
 # ui/hazard_controls.py
 # Collapsible toolbar drawer for SPC/NWS hazard overlays.
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QMenu
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
-from PyQt6.QtGui import QFont, QAction
+from PyQt6.QtGui import QFont
 
 
 class HazardControls(QWidget):
@@ -81,12 +81,12 @@ class HazardControls(QWidget):
         super().__init__(parent)
         self._animation = None
         self._updating_spc_mode = False
-        # Suppress emitting nws_filter_changed while programmatically updating menu
-        self._suppress_nws_filter_signals = False
+        # New members for the toggleable legend (Step 1)
+        self._nws_filter_set: set[str] | None = None      # None = show all phenoms; set = show only these
+        self._last_nws_phenoms: set[str] = set()
         self._setup_ui()
 
     # ── Build ──────────────────────────────────────────────────────────────────
-
     def _setup_ui(self):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(8, 6, 8, 6)
@@ -135,24 +135,6 @@ class HazardControls(QWidget):
         self._btn_nws_warnings.toggled.connect(self._on_nws_warnings_toggled)
         row.addWidget(self._btn_nws_warnings)
 
-        # Small menu button to filter which NWS phenom types are shown
-        self._btn_nws_filter = QToolButton()
-        self._btn_nws_filter.setText("⋯")
-        self._btn_nws_filter.setToolTip("Filter NWS warning types")
-        self._btn_nws_filter.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self._nws_menu = QMenu()
-        self._nws_filter_actions = {}
-        for code, color, label in self.NWS_PHENOM_LEGEND:
-            act = QAction(label, self)
-            act.setCheckable(True)
-            act.setChecked(False)
-            act.setData(code)
-            act.toggled.connect(lambda checked, a=act: self._on_nws_filter_action_toggled(a))
-            self._nws_menu.addAction(act)
-            self._nws_filter_actions[code] = act
-        self._btn_nws_filter.setMenu(self._nws_menu)
-        row.addWidget(self._btn_nws_filter)
-
         # NWS County Warning Areas (CWA) overlay toggle
         self._btn_cwa = self._btn("NWS CWA")
         self._btn_cwa.toggled.connect(self._on_cwa_toggled)
@@ -161,15 +143,14 @@ class HazardControls(QWidget):
         row.addStretch(1)
         col.addWidget(btn_row)
 
-        # ── Legend row (hidden until a product is active) ─────────────────────
-        self._legend_label = QLabel()
-        self._legend_label.setTextFormat(Qt.TextFormat.RichText)
-        self._legend_label.setFont(QFont("Helvetica Neue", 9))
-        self._legend_label.setStyleSheet(
-            "color: #B5BDCC; background: transparent; padding: 1px 4px 2px 4px;"
-        )
-        self._legend_label.setVisible(False)
-        col.addWidget(self._legend_label)
+        # ── Legend row (now dynamic and toggleable for NWS) ─────────────────────
+        self._legend_widget = QWidget()
+        self._legend_layout = QHBoxLayout(self._legend_widget)
+        self._legend_layout.setContentsMargins(4, 1, 4, 2)
+        self._legend_layout.setSpacing(6)
+        self._legend_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._legend_widget.setVisible(False)
+        col.addWidget(self._legend_widget)
 
         outer.addWidget(self._drawer)
 
@@ -212,55 +193,66 @@ class HazardControls(QWidget):
         self._animation = anim
 
     # ── Public API ─────────────────────────────────────────────────────────────
-
     def update_legend(self, active_products: list[str], nws_phenoms: set[str] | None = None):
-        """Show a compact color-swatch legend for the active hazard products.
+        """Rebuild the legend. SPC entries are static; NWS warning entries are now toggleable buttons."""
+        # Clear all existing widgets
+        while self._legend_layout.count():
+            child = self._legend_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
 
-        nws_phenoms: set of VTEC phenom codes (e.g. {'TO', 'SV', 'FL'}) actually
-        present in the current NWS warnings data.  When provided, only those types
-        appear in the legend rather than a static catch-all entry.
-        """
-        entries: list[tuple[str, str]] = []
+        phenom_set = nws_phenoms or set()
+        self._last_nws_phenoms = phenom_set.copy()
+
+        # 1. Add static SPC entries
         for product in active_products:
-            if product == "nws-warnings":
-                # Dynamic: show only the phenom types actually on the map.
-                phenom_set = nws_phenoms or set()
-                for code, color, label in self.NWS_PHENOM_LEGEND:
-                    if code in phenom_set:
-                        entries.append((color, label))
-            else:
-                entries.extend(self.PRODUCT_LEGENDS.get(product, []))
+            if product != "nws-warnings":
+                for color, label in self.PRODUCT_LEGENDS.get(product, []):
+                    lbl = QLabel()
+                    lbl.setText(
+                        f'<span style="color:{color}; font-size:11px;">■</span>'
+                        f'&thinsp;<span style="font-size:9px;">{label}</span>'
+                    )
+                    lbl.setFont(QFont("Helvetica Neue", 9))
+                    lbl.setStyleSheet(
+                        "color: #B5BDCC; background: transparent; padding: 1px 4px 2px 4px;"
+                    )
+                    self._legend_layout.addWidget(lbl)
 
-        if entries:
-            parts = [
-                f'<span style="color:{color}; font-size:11px;">■</span>'
-                f'&thinsp;<span style="font-size:9px;">{label}</span>'
-                for color, label in entries
-            ]
-            self._legend_label.setText("&nbsp;&nbsp;".join(parts))
-            self._legend_label.setVisible(True)
-        else:
-            self._legend_label.setVisible(False)
+        # 2. Add toggleable NWS entries
+        if "nws-warnings" in active_products and phenom_set:
+            if self._legend_layout.count() > 0:
+                # Add subtle separator only if something was already added (SPC)
+                sep = QLabel("│")
+                sep.setStyleSheet("color: #4A4A5E; padding: 0 6px;")
+                self._legend_layout.addWidget(sep)
 
-        # If the drawer is open, animate to the new natural height so the
-        # parent layout doesn't squish the content into the old allocation.
+            for code, color, label in self.NWS_PHENOM_LEGEND:
+                if code in phenom_set:
+                    btn = self._create_nws_legend_item(code, color, label)
+                    self._legend_layout.addWidget(btn)
+        
+        self._legend_layout.addStretch(1)
+        # Show legend only if we added at least one item
+        self._legend_widget.setVisible(self._legend_layout.count() > 0)
+
+        # Auto-resize animation if the drawer is open
         if self.maximumHeight() > 0:
             self.setMaximumHeight(16777215)
             target = self.sizeHint().height()
             current = self.height()
-            if target == current:
-                return
-            if self._animation:
-                self._animation.stop()
-            anim = QPropertyAnimation(self, b"maximumHeight")
-            anim.setDuration(120)
-            anim.setStartValue(current)
-            anim.setEndValue(target)
-            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-            anim.start()
-            self._animation = anim
-            self.content_resized.emit()
+            if target != current:
+                if self._animation:
+                    self._animation.stop()
+                anim = QPropertyAnimation(self, b"maximumHeight")
+                anim.setDuration(120)
+                anim.setStartValue(current)
+                anim.setEndValue(target)
+                anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+                anim.finished.connect(lambda: self.setMaximumHeight(16777215))
+                anim.start()
+                self._animation = anim
+                self.content_resized.emit()
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
@@ -309,33 +301,66 @@ class HazardControls(QWidget):
         """Emit cwa_toggled when the CWA button changes. No fetch required."""
         self.cwa_toggled.emit(checked)
 
-    def _on_nws_filter_action_toggled(self, action: QAction):
-        """Update phenom filter set and emit nws_filter_changed(set)."""
-        if getattr(self, "_suppress_nws_filter_signals", False):
-            return
-        try:
-            # build set of checked codes
-            selected = {
-                str(act.data()).upper() for act in self._nws_menu.actions() if act.isChecked()
-            }
-        except Exception:
-            selected = set()
-        self.nws_filter_changed.emit(selected)
+    def _create_nws_legend_item(self, code: str, color: str, label: str) -> QToolButton:
+        """Create a toggleable legend entry for one NWS phenom type."""
+        btn = QToolButton()
+        btn.setCheckable(True)
+        btn.setText(f"■ {label}")
+        btn.setToolTip(f"Toggle {label} (click to show/hide)")
+        btn.setStyleSheet(f"""
+            QToolButton {{
+                color: {color};
+                font-size: 9px;
+                padding: 2px 6px;
+                background: transparent;
+                border: none;
+                border-radius: 3px;
+            }}
+            QToolButton:checked {{
+                background: rgba(255, 255, 255, 0.12);
+                font-weight: 600;
+            }}
+            QToolButton:hover {{
+                background: rgba(255, 255, 255, 0.06);
+            }}
+        """)
+
+        # Set initial state from current filter (no signal emitted)
+        is_checked = (self._nws_filter_set is None) or (code in self._nws_filter_set)
+        btn.blockSignals(True)
+        btn.setChecked(is_checked)
+        btn.blockSignals(False)
+
+        btn.toggled.connect(lambda checked, c=code: self._on_nws_legend_toggled(c, checked))
+        return btn
+
+    def _on_nws_legend_toggled(self, code: str, checked: bool):
+        # Initialize the set if it's currently 'Show All'
+        if self._nws_filter_set is None:
+            self._nws_filter_set = self._last_nws_phenoms.copy()
+
+        if checked:
+            self._nws_filter_set.add(code)
+        else:
+            self._nws_filter_set.discard(code)
+
+        # Only reset to None if it actually matches the full set again
+        if self._nws_filter_set == self._last_nws_phenoms:
+            self._nws_filter_set = None
+
+        self.nws_filter_changed.emit(self._nws_filter_set)
 
     def set_nws_filter_selected(self, codes: set[str] | None, emit: bool = True):
-        """Programmatically set which phenom codes are checked in the menu.
+        """Programmatically set which NWS phenom codes are enabled in the legend.
 
-        codes: set of uppercase phenom codes, or None to clear all (no filter).
-        emit: if True, emit nws_filter_changed after updating (unless suppressed).
+        This is called from outside (e.g. main window restoring state).
+        The legend buttons will reflect the new state the next time update_legend() runs.
         """
-        # Normalize
-        sel = {str(c).strip().upper() for c in (codes or set())}
-        # Suppress action callbacks while changing checked state
-        self._suppress_nws_filter_signals = True
-        try:
-            for code, act in self._nws_filter_actions.items():
-                act.setChecked(code in sel)
-        finally:
-            self._suppress_nws_filter_signals = False
+        # Normalize input
+        if codes:
+            self._nws_filter_set = {str(c).strip().upper() for c in codes}
+        else:
+            self._nws_filter_set = None   # None means "show all"
+
         if emit:
-            self.nws_filter_changed.emit(sel if sel else None)
+            self.nws_filter_changed.emit(self._nws_filter_set)
