@@ -1,9 +1,9 @@
 # ui/hazard_controls.py
 # Collapsible toolbar drawer for SPC/NWS hazard overlays.
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QMenu, QAction
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QMenu
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 
 class HazardControls(QWidget):
