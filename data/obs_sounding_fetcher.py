@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from urllib.request import urlopen
 from urllib.error import HTTPError, URLError
@@ -84,13 +85,12 @@ class ObsSoundingFetcher(QObject):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _timestamps_to_query() -> list[str]:
-    """Return list of synoptic RAOB timestamps to query.
+    """Return list of timestamps to query — every hour of the relevant UTC date(s).
 
-    Query all four standard RAOB synoptic times (00Z, 06Z, 12Z, 18Z) for the
-    current UTC date.  If we are before 12Z, also include the previous UTC date
-    so overnight continuity is preserved (e.g. 02Z on the 26th still shows the
-    25th's soundings).  The future-sounding filter in _fetch_sounding_set() will
-    discard any slot that hasn't launched yet.
+    Queries all 24 hours so special/supplemental launches are captured in
+    addition to standard synoptic times.  If we are before 12Z, also include
+    the previous UTC date for overnight continuity.  The future-sounding filter
+    in _fetch_sounding_set() discards any slot that hasn't launched yet.
     """
     now = datetime.now(timezone.utc)
     dates = [now.date()]
@@ -98,7 +98,7 @@ def _timestamps_to_query() -> list[str]:
         dates.append((now - timedelta(days=1)).date())
     timestamps: list[str] = []
     for date_obj in dates:
-        for hour in (0, 6, 12, 18):
+        for hour in range(24):
             ts = datetime(
                 date_obj.year, date_obj.month, date_obj.day, hour, 0, 0,
                 tzinfo=timezone.utc,
@@ -128,13 +128,19 @@ def _fetch_sounding_set(
     now_utc    = datetime.now(timezone.utc)
     fetch_time = now_utc
 
-    # Collect all profiles across the relevant synoptic times
+    # Collect all profiles across all hourly timestamps in parallel
     raw_profiles = []
-    for ts in _timestamps_to_query():
-        try:
-            raw_profiles.extend(_fetch_profiles_for_timestamp(station_id, ts))
-        except Exception as e:
-            log.warning("failed to fetch %s for %s: %s", station_id, ts, e)
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = {
+            pool.submit(_fetch_profiles_for_timestamp, station_id, ts): ts
+            for ts in _timestamps_to_query()
+        }
+        for future in as_completed(futures):
+            ts = futures[future]
+            try:
+                raw_profiles.extend(future.result())
+            except Exception as e:
+                log.warning("failed to fetch %s for %s: %s", station_id, ts, e)
 
     if not raw_profiles:
         raise ValueError(f"No sounding data returned for {station_id}")

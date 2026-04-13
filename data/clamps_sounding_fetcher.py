@@ -227,7 +227,7 @@ def _parse_skewt(text: str, file_time: datetime, idx: int) -> "Sounding | None":
             temp = float(parts[2])
             dwpc = float(parts[3])
             wdir = float(parts[4])
-            wspd = float(parts[5])   # m/s
+            wspd = float(parts[5]) / 1.944   # convert knots to m/s
         except ValueError:
             continue
 
