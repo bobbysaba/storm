@@ -37,8 +37,9 @@ _HDR_CLR   = "#b8b8d8"   # bright table row/column headers
 _TEMP_CLR   = "#ff6b6b"
 _DEWP_CLR   = "#3ddc84"
 _BARB_CLR   = "#aaaacc"
-_PARCEL_CLR = "#ffffff"
-_VTEMP_CLR  = "#ffaa88"
+_PARCEL_CLR  = "#ffffff"
+_VTEMP_CLR   = "#ffaa88"
+_VPARCEL_CLR = "#ff3366"    # virtual-temperature parcel trace
 _EIL_CLR    = "#00e676"
 _RM_CLR     = "#ff6b6b"
 _LM_CLR     = "#4fc3f7"
@@ -188,6 +189,44 @@ def _p_at_t(snd: Sounding, target_c: float) -> float | None:
             frac = (target_c - t0) / (t1 - t0) if t1 != t0 else 0.0
             return float(snd.pressure[i] + frac * (snd.pressure[i + 1] - snd.pressure[i]))
     return None
+
+
+def _vt_cape_cin(pres, temp, dewp, parcel_profile, init_pres, init_temp, init_dewp):
+    """Compute CAPE/CIN with virtual-temperature correction.
+
+    Converts both the environment sounding and the parcel profile to virtual
+    temperature before integrating buoyancy.  Below the LCL the parcel mixing
+    ratio is held constant at the surface value; above the LCL it equals the
+    saturation mixing ratio at the parcel temperature.
+
+    Falls back to standard (non-virtual) cape_cin if the correction fails.
+    """
+    try:
+        # Environment virtual temperature
+        _mr_env = mpcalc.saturation_mixing_ratio(pres, dewp)
+        _tv_env = mpcalc.virtual_temperature(temp, _mr_env).to("degC")
+
+        # Parcel virtual temperature
+        _r0     = mpcalc.saturation_mixing_ratio(init_pres.reshape(1)
+                      if hasattr(init_pres, "reshape") and init_pres.shape == ()
+                      else init_pres[0:1],
+                  init_dewp.reshape(1)
+                      if hasattr(init_dewp, "reshape") and init_dewp.shape == ()
+                      else init_dewp[0:1])
+        _r_sat  = mpcalc.saturation_mixing_ratio(pres, parcel_profile.to("degC"))
+        _lcl_p, _ = mpcalc.lcl(init_pres if init_pres.shape != () else init_pres[0],
+                                init_temp  if init_temp.shape  != () else init_temp[0],
+                                init_dewp  if init_dewp.shape  != () else init_dewp[0])
+        _below  = pres.m >= float(_lcl_p.to("hPa").m)
+        _r_prc  = np.where(_below, float(_r0.to("kg/kg").m),
+                           _r_sat.to("kg/kg").m) * units("kg/kg")
+        _tv_prc = mpcalc.virtual_temperature(parcel_profile, _r_prc).to("degC")
+
+        cape, cin = mpcalc.cape_cin(pres, _tv_env, dewp, _tv_prc)
+        return float(cape.to("J/kg").m), float(cin.to("J/kg").m)
+    except Exception:
+        cape, cin = mpcalc.cape_cin(pres, temp, dewp, parcel_profile)
+        return float(cape.to("J/kg").m), float(cin.to("J/kg").m)
 
 
 class SoundingDialog(QDialog):
@@ -605,12 +644,13 @@ class SoundingDialog(QDialog):
         skewt.plot(pres[_pt], temp[_pt], color=_TEMP_CLR, linewidth=2, zorder=5)
         skewt.plot(pres[_pt], dewp[_pt], color=_DEWP_CLR, linewidth=2, zorder=5)
 
-        # Virtual temperature (dashed, warm tint)
-        # Mixing ratio computed on full-res; only the plotted line is thinned.
+        # Environment virtual temperature (dashed, warm tint).
+        # Saturation mixing ratio at the dewpoint == actual mixing ratio.
+        mr_env = tv_env = None
         try:
-            mr    = mpcalc.mixing_ratio_from_dewpoint(pres, dewp)
-            vtemp = mpcalc.virtual_temperature(temp, mr).to("degC")
-            skewt.plot(pres[_pt], vtemp[_pt], color=_VTEMP_CLR, linewidth=1.1,
+            mr_env = mpcalc.saturation_mixing_ratio(pres, dewp)
+            tv_env = mpcalc.virtual_temperature(temp, mr_env).to("degC")
+            skewt.plot(pres[_pt], tv_env[_pt], color=_VTEMP_CLR, linewidth=1.1,
                        linestyle="--", alpha=0.6, zorder=5)
         except Exception as e:
             log.debug("virtual temperature plot failed: %s", e)
@@ -620,18 +660,45 @@ class SoundingDialog(QDialog):
         skewt.plot_barbs(pres[thin], u_kt[thin], v_kt[thin], color=_BARB_CLR,
                          linewidth=0.8, length=6)
 
-        # Parcel profile + CAPE/CIN shading.
-        # Parcel calculation and shading use the full-resolution profile for
-        # accuracy.  Only the plotted parcel trace is thinned.
+        # Parcel profile (white dashed) + virtual-temperature parcel (red dashed).
+        # Parcel calculation uses the full-resolution profile for accuracy; only
+        # the plotted trace is thinned.  CAPE/CIN shading uses virtual temperatures
+        # when available so the integrated buoyancy reflects moisture correction.
         sb_parcel = None
         try:
             sb_parcel = mpcalc.parcel_profile(pres, temp[0], dewp[0])
             skewt.plot(pres[_pt], sb_parcel[_pt], color=_PARCEL_CLR, linewidth=1,
-                       linestyle="--", alpha=0.5, zorder=5)
-            skewt.shade_cape(pres, temp, sb_parcel, alpha=0.18, color=_TEMP_CLR)
-            skewt.shade_cin(pres, temp, sb_parcel,  alpha=0.18, color="#4fc3f7")
+                       linestyle="--", alpha=0.4, zorder=5)
         except Exception as e:
-            log.debug("parcel profile / CAPE-CIN shading failed: %s", e)
+            log.debug("parcel profile failed: %s", e)
+
+        if sb_parcel is not None:
+            _vt_shaded = False
+            try:
+                # Virtual parcel: below LCL mixing ratio is constant (= surface value);
+                # above LCL the parcel is saturated so use saturation mixing ratio.
+                _r0      = mpcalc.saturation_mixing_ratio(pres[0:1], dewp[0:1])
+                _r_sat_p = mpcalc.saturation_mixing_ratio(pres, sb_parcel.to("degC"))
+                _lcl_p, _ = mpcalc.lcl(pres[0], temp[0], dewp[0])
+                _below = pres.m >= float(_lcl_p.to("hPa").m)
+                _r_prc = (np.where(_below, float(_r0.to("kg/kg").m),
+                                   _r_sat_p.to("kg/kg").m)) * units("kg/kg")
+                sb_parcel_vt = mpcalc.virtual_temperature(sb_parcel, _r_prc).to("degC")
+                skewt.plot(pres[_pt], sb_parcel_vt[_pt], color=_VPARCEL_CLR,
+                           linewidth=1.1, linestyle="--", alpha=0.75, zorder=5)
+                if tv_env is not None:
+                    skewt.shade_cape(pres, tv_env, sb_parcel_vt, alpha=0.18, color=_TEMP_CLR)
+                    skewt.shade_cin(pres, tv_env, sb_parcel_vt, alpha=0.18, color="#4fc3f7")
+                    _vt_shaded = True
+            except Exception as e:
+                log.debug("virtual parcel profile failed: %s", e)
+            if not _vt_shaded:
+                # Fall back to non-virtual shading
+                try:
+                    skewt.shade_cape(pres, temp, sb_parcel, alpha=0.18, color=_TEMP_CLR)
+                    skewt.shade_cin(pres, temp, sb_parcel, alpha=0.18, color="#4fc3f7")
+                except Exception as e:
+                    log.debug("CAPE-CIN shading failed: %s", e)
 
         # LCL marker
         try:
@@ -868,10 +935,10 @@ class SoundingDialog(QDialog):
         sb_parcel = sbcape_val = None
         try:
             sb_parcel = mpcalc.parcel_profile(pres, temp[0], dewp[0])
-            sbcape, sbcin = mpcalc.cape_cin(pres, temp, dewp, sb_parcel)
-            sbcape_val = float(sbcape.to("J/kg").m)
+            sbcape_val, sbcin_val = _vt_cape_cin(pres, temp, dewp, sb_parcel,
+                                                  pres[0:1], temp[0:1], dewp[0:1])
             _set("sbcape", sbcape_val)
-            _set("sbcin",  float(sbcin.to("J/kg").m))
+            _set("sbcin",  sbcin_val)
         except Exception as e:
             log.debug("SB CAPE/CIN failed: %s", e)
             _set("sbcape", None); _set("sbcin", None)
@@ -913,9 +980,10 @@ class SoundingDialog(QDialog):
                 pres, temp, dewp, depth=100 * units.hPa
             )
             ml_parcel = mpcalc.parcel_profile(pres, ml_t, ml_td)
-            mlcape, mlcin = mpcalc.cape_cin(pres, temp, dewp, ml_parcel)
-            ml_cape_val = float(mlcape.to("J/kg").m)
-            ml_cin_val  = float(mlcin.to("J/kg").m)
+            ml_cape_val, ml_cin_val = _vt_cape_cin(pres, temp, dewp, ml_parcel,
+                                                    ml_p.reshape(1) if hasattr(ml_p, "reshape") else ml_p,
+                                                    ml_t.reshape(1) if hasattr(ml_t, "reshape") else ml_t,
+                                                    ml_td.reshape(1) if hasattr(ml_td, "reshape") else ml_td)
             _set("mlcape", ml_cape_val)
             _set("mlcin",  ml_cin_val)
         except Exception as e:
@@ -960,10 +1028,12 @@ class SoundingDialog(QDialog):
             )
             mu_p, mu_t, mu_td = mu_result[0], mu_result[1], mu_result[2]
             mu_parcel = mpcalc.parcel_profile(pres, mu_t, mu_td)
-            mucape, mucin = mpcalc.cape_cin(pres, temp, dewp, mu_parcel)
-            mucape_val = float(mucape.to("J/kg").m)
+            mucape_val, mucin_val = _vt_cape_cin(pres, temp, dewp, mu_parcel,
+                                                  mu_p.reshape(1) if hasattr(mu_p, "reshape") else mu_p,
+                                                  mu_t.reshape(1) if hasattr(mu_t, "reshape") else mu_t,
+                                                  mu_td.reshape(1) if hasattr(mu_td, "reshape") else mu_td)
             _set("mucape", mucape_val)
-            _set("mucin",  float(mucin.to("J/kg").m))
+            _set("mucin",  mucin_val)
         except Exception as e:
             log.debug("MU parcel failed: %s", e)
             # Fallback for mucape only

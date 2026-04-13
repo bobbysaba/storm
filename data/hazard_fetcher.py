@@ -137,12 +137,13 @@ class HazardFetcher(QObject):
       fetch_error(str): recoverable error text
     """
 
-    spc_received         = pyqtSignal(object, object, object, object)
-    nws_received         = pyqtSignal(object)
-    spc_watches_received = pyqtSignal(object)
-    spc_mds_received     = pyqtSignal(object)
-    fetch_error          = pyqtSignal(str)
-    connectivity_changed = pyqtSignal(bool)   # True = back online, False = offline
+    spc_received             = pyqtSignal(object, object, object, object)
+    nws_received             = pyqtSignal(object)
+    nws_raw_phenoms_received = pyqtSignal(object)   # set[str] of raw (unfiltered) phenom codes
+    spc_watches_received     = pyqtSignal(object)
+    spc_mds_received         = pyqtSignal(object)
+    fetch_error              = pyqtSignal(str)
+    connectivity_changed     = pyqtSignal(bool)   # True = back online, False = offline
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -269,22 +270,22 @@ class HazardFetcher(QObject):
             self.spc_mds_received.emit(self._mds_cache)
 
     def emit_cached_nws(self):
-        if self._nws_cache is not None:
-            # If a user filter is active, filter the cached FeatureCollection before emitting.
-            if getattr(self, "_nws_filter", None):
-                try:
-                    data = json.loads(self._nws_cache)
-                    feats = [
-                        f for f in (data.get("features") or [])
-                        if str((f.get("properties") or {}).get("phenom", "")).upper() in self._nws_filter
-                    ]
-                    out = json.dumps({"type": "FeatureCollection", "features": feats})
-                    self.nws_received.emit(out)
-                    return
-                except Exception:
-                    # Fall back to emitting cached raw string on any error
-                    pass
-            self.nws_received.emit(self._nws_cache)
+        if self._nws_cache is None:
+            return
+        # _nws_cache always stores raw (unfiltered) data; apply filter at emit time.
+        _filt = getattr(self, "_nws_filter", None)
+        if _filt:
+            try:
+                data = json.loads(self._nws_cache)
+                feats = [
+                    f for f in (data.get("features") or [])
+                    if str((f.get("properties") or {}).get("phenom", "")).upper() in _filt
+                ]
+                self.nws_received.emit(json.dumps({"type": "FeatureCollection", "features": feats}))
+                return
+            except Exception:
+                pass
+        self.nws_received.emit(self._nws_cache)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -440,6 +441,29 @@ class HazardFetcher(QObject):
             if ts is not None:
                 return ts > now
         return True  # no expiration info — assume still active
+
+    def _expire_nws_cache(self, now: float):
+        """Prune locally-expired NWS features from the raw cache, then re-emit with phenom filter."""
+        if not self._nws_cache:
+            return
+        try:
+            data = json.loads(self._nws_cache)
+            feats = data.get("features", [])
+            active = [f for f in feats if self._feature_active(f, now)]
+            if len(active) == len(feats):
+                return  # nothing expired
+            self._nws_cache = json.dumps({"type": "FeatureCollection", "features": active})
+            self._nws_cache_time = now
+            # Emit updated raw phenoms
+            raw_phenoms = {
+                str((f.get("properties") or {}).get("phenom", "")).upper()
+                for f in active if (f.get("properties") or {}).get("phenom")
+            }
+            self.nws_raw_phenoms_received.emit(raw_phenoms)
+            # Emit with phenom filter applied
+            self.emit_cached_nws()
+        except Exception as exc:
+            log.warning("_expire_nws_cache failed: %s", exc)
 
     def _expire_cached_fc(self, cache_attr: str, cache_time_attr: str, signal, now: float):
         """Prune expired features from a cached FeatureCollection and re-emit if any were removed.
@@ -622,7 +646,7 @@ class HazardFetcher(QObject):
                 self._nws_cache_time = now  # refresh TTL even when data is stable
                 # Server confirmed no new warnings — but some cached ones may have
                 # expired locally.  Prune them so the map stays accurate.
-                self._expire_cached_fc("_nws_cache", "_nws_cache_time", self.nws_received, now)
+                self._expire_nws_cache(now)
                 return
             data = json.loads(raw.decode("utf-8", errors="replace"))
             feats = []
@@ -635,21 +659,32 @@ class HazardFetcher(QObject):
                 props["nws_color"]   = _nws_color_for_phenom(phenom)
                 props["warning_url"] = str(props.get("url", "")).strip()
                 feats.append({"type": "Feature", "geometry": geom, "properties": props})
-            # Apply optional user filter (self._nws_filter==None means no filter)
-            if getattr(self, "_nws_filter", None):
-                allowed = self._nws_filter
-                feats = [
-                    feat for feat in feats
-                    if str((feat.get("properties") or {}).get("phenom", "")).upper() in allowed
-                ]
-            out_str = json.dumps({"type": "FeatureCollection", "features": feats})
+            raw_str = json.dumps({"type": "FeatureCollection", "features": feats})
         except Exception as exc:
             log.warning("NWS warnings fetch failed: %s", exc)
             self.fetch_error.emit(f"NWS warnings fetch failed: {exc}")
             return
-        self._nws_cache      = out_str
+        # Store raw (unfiltered) data in cache so that clearing the filter later
+        # does not require a re-fetch to restore previously hidden phenoms.
+        self._nws_cache      = raw_str
         self._nws_cache_time = now
-        self.nws_received.emit(out_str)
+        # Emit raw phenoms for legend button tracking (always unfiltered)
+        raw_phenoms = {
+            str((f.get("properties") or {}).get("phenom", "")).upper()
+            for f in feats
+            if (f.get("properties") or {}).get("phenom")
+        }
+        self.nws_raw_phenoms_received.emit(raw_phenoms)
+        # Apply filter at emit time (not at cache time)
+        _filt = getattr(self, "_nws_filter", None)
+        if _filt:
+            emit_feats = [
+                f for f in feats
+                if str((f.get("properties") or {}).get("phenom", "")).upper() in _filt
+            ]
+            self.nws_received.emit(json.dumps({"type": "FeatureCollection", "features": emit_feats}))
+        else:
+            self.nws_received.emit(raw_str)
 
     def _fetch_spc_watches(self):
         """Fetch active SPC tornado/severe-thunderstorm watch polygons from the

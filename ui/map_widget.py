@@ -1030,16 +1030,17 @@ def build_map_html() -> str:
       // ── Route overlay ────────────────────────────────────────────────────
       var emptyLine = {{type:'Feature', geometry:{{type:'LineString', coordinates:[]}}}};
       map.addSource('route', {{type:'geojson', data:emptyLine}});
+      // Insert route layers below road labels so labels remain readable on top of the route.
       map.addLayer({{
         id: 'route-casing', type: 'line', source: 'route',
         layout: {{'line-join':'round','line-cap':'round'}},
         paint: {{'line-color':'#1A4A8A','line-width':8,'line-opacity':0.55}}
-      }});
+      }}, 'road-label-motorway');
       map.addLayer({{
         id: 'route-line', type: 'line', source: 'route',
         layout: {{'line-join':'round','line-cap':'round'}},
         paint: {{'line-color':'#4A90E2','line-width':5,'line-opacity':0.9}}
-      }});
+      }}, 'road-label-motorway');
 
       // Click-to-pick destination mode
       window._routePickMode = false;
@@ -1395,6 +1396,24 @@ def build_map_html() -> str:
       map.on('mouseenter', 'cwa-fill', function() {{ map.getCanvas().style.cursor = 'pointer'; }});
       map.on('mouseleave', 'cwa-fill', function() {{ map.getCanvas().style.cursor = ''; }});
 
+      // Pointer cursor on all SPC / NWS hazard fill layers
+      var _hazardFillLayers = [
+        'spc-cat-fill',
+        'spc-tor-fill', 'spc-tor-sig-base',
+        'spc-wind-fill', 'spc-wind-sig-base',
+        'spc-hail-fill', 'spc-hail-sig-base',
+        'spc-watches-fill', 'spc-mds-fill', 'nws-warnings-fill'
+      ];
+      _hazardFillLayers.forEach(function(lid) {{
+        map.on('mouseenter', lid, function() {{
+          if (map.getLayer(lid) && map.getLayoutProperty(lid, 'visibility') === 'visible')
+            map.getCanvas().style.cursor = 'pointer';
+        }});
+        map.on('mouseleave', lid, function() {{
+          map.getCanvas().style.cursor = '';
+        }});
+      }});
+
       // JS bridge functions for CWA data
       window.stormSetCwaGeoJSON = function(geojsonStr) {{
         var src = map.getSource('cwa');
@@ -1498,6 +1517,9 @@ def build_map_html() -> str:
         }}
         return;
       }}
+
+      // Don't interfere with vehicle marker tooltip
+      if (window._vehicleHovering) return;
 
       var _htip = document.getElementById('hazard-tooltip');
       if (_htip) {{
@@ -1824,6 +1846,7 @@ def build_map_html() -> str:
       el.innerHTML = _iconFn(_c);
 
       el.addEventListener("mouseenter", function(e) {{
+        window._vehicleHovering = true;
         var tip = document.getElementById("hazard-tooltip");
         if (tip) {{
           tip.textContent = id;
@@ -1840,6 +1863,7 @@ def build_map_html() -> str:
         }}
       }});
       el.addEventListener("mouseleave", function() {{
+        window._vehicleHovering = false;
         var tip = document.getElementById("hazard-tooltip");
         if (tip) tip.style.display = "none";
       }});

@@ -1845,6 +1845,7 @@ class MainWindow(QMainWindow):
 
         self._hazard_fetcher.spc_received.connect(self._on_spc_received)
         self._hazard_fetcher.nws_received.connect(self._on_nws_received)
+        self._hazard_fetcher.nws_raw_phenoms_received.connect(self._on_nws_raw_phenoms)
         self._hazard_fetcher.spc_watches_received.connect(self._on_spc_watches_received)
         self._hazard_fetcher.spc_mds_received.connect(self._on_spc_mds_received)
         self._hazard_fetcher.fetch_error.connect(self._on_hazard_error)
@@ -2197,19 +2198,22 @@ class MainWindow(QMainWindow):
         self._clear_hazard_fetch_msg()
         self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str)
 
+    def _on_nws_raw_phenoms(self, phenoms: set):
+        """Update the legend phenom set from the raw (unfiltered) NWS data.
+
+        Keeping this separate from _on_nws_received ensures that toggling a
+        phenom off in the legend doesn't remove its button — the user needs
+        the button to be able to re-enable it.
+        """
+        self._nws_active_phenoms = phenoms or set()
+        self._update_hazard_legend()
+
     def _on_nws_received(self, warnings_str: str):
         self._clear_hazard_fetch_msg()
         self.map_widget.set_nws_warnings_geojson(warnings_str)
-        try:
-            fc = json.loads(warnings_str)
-            self._nws_active_phenoms = {
-                str(f.get("properties", {}).get("phenom", "")).upper()
-                for f in fc.get("features", [])
-                if f.get("properties", {}).get("phenom")
-            }
-        except (json.JSONDecodeError, AttributeError):
-            self._nws_active_phenoms = set()
-        self._update_hazard_legend()
+        # _nws_active_phenoms is updated by _on_nws_raw_phenoms (raw signal),
+        # not here, so the legend always shows all phenoms present in the data
+        # regardless of the active phenom filter.
 
     def _on_spc_watches_received(self, watches_str: str):
         self._clear_hazard_fetch_msg()
