@@ -1840,6 +1840,7 @@ class MainWindow(QMainWindow):
         self.hazard_controls.spc_watches_toggled.connect(self._on_spc_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_nws_warnings_toggled)
+        self.hazard_controls.nws_filter_changed.connect(self._on_nws_filter_changed)
         self.hazard_controls.cwa_toggled.connect(self._on_cwa_toggled)
         self.hazard_controls.fetch_requested.connect(self._on_hazard_fetch_requested)
 
@@ -1873,6 +1874,20 @@ class MainWindow(QMainWindow):
                 self._hazard_fetcher.set_nws_bbox(
                     _lon_min, _lat_min, _lon_max, _lat_max
                 )
+        except Exception:
+            pass
+
+        # Load persisted NWS filter selections from QSettings and apply.
+        try:
+            s = QSettings("NSSL", "STORM")
+            stored = s.value("nws/filters", None, type=str)
+            # stored is comma-separated string or None
+            if stored:
+                codes = {c.strip().upper() for c in stored.split(",") if c.strip()}
+            else:
+                codes = None
+            # Programmatically set controls and emit handler so fetcher/font updates.
+            self.hazard_controls.set_nws_filter_selected(codes, emit=True)
         except Exception:
             pass
 
@@ -2215,6 +2230,30 @@ class MainWindow(QMainWindow):
         self.status_msg_label.setText("Refreshing hazards…")
         self._layout_overlays()
         self._hazard_fetcher.fetch_now()
+
+    def _on_nws_filter_changed(self, codes: set[str] | None):
+        """Apply user-selected NWS phenom filter (codes: set of uppercase phenom strings).
+
+        Also persist selection to QSettings so it survives restarts.
+        """
+        if not hasattr(self, "_hazard_fetcher"):
+            return
+        # None or empty set => no filter (show all)
+        self._hazard_fetcher.set_nws_filter(codes if codes else None)
+        # Persist to settings as comma-separated string (or empty to clear)
+        try:
+            s = QSettings("NSSL", "STORM")
+            if codes:
+                s.setValue("nws/filters", ",".join(sorted(codes)))
+            else:
+                s.remove("nws/filters")
+        except Exception:
+            pass
+        # Re-emit or fetch to update the map immediately.
+        if self._hazard_fetcher.is_nws_fresh():
+            self._hazard_fetcher.emit_cached_nws()
+        else:
+            self._hazard_fetcher.fetch_now()
 
     def _on_spc_mds_toggled(self, enabled: bool):
         self._set_layer_active("spc_mds", enabled)

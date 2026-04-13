@@ -1,7 +1,7 @@
 # ui/hazard_controls.py
 # Collapsible toolbar drawer for SPC/NWS hazard overlays.
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QMenu, QAction
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
 from PyQt6.QtGui import QFont
 
@@ -19,6 +19,7 @@ class HazardControls(QWidget):
     spc_watches_toggled  = pyqtSignal(bool)
     spc_mds_toggled      = pyqtSignal(bool)
     nws_warnings_toggled = pyqtSignal(bool)
+    nws_filter_changed   = pyqtSignal(object)
     cwa_toggled          = pyqtSignal(bool)
     fetch_requested      = pyqtSignal()
     content_resized      = pyqtSignal()      # triggers layout pulse in main_window
@@ -80,6 +81,8 @@ class HazardControls(QWidget):
         super().__init__(parent)
         self._animation = None
         self._updating_spc_mode = False
+        # Suppress emitting nws_filter_changed while programmatically updating menu
+        self._suppress_nws_filter_signals = False
         self._setup_ui()
 
     # ── Build ──────────────────────────────────────────────────────────────────
@@ -131,6 +134,24 @@ class HazardControls(QWidget):
         self._btn_nws_warnings = self._btn("NWS WARNINGS")
         self._btn_nws_warnings.toggled.connect(self._on_nws_warnings_toggled)
         row.addWidget(self._btn_nws_warnings)
+
+        # Small menu button to filter which NWS phenom types are shown
+        self._btn_nws_filter = QToolButton()
+        self._btn_nws_filter.setText("⋯")
+        self._btn_nws_filter.setToolTip("Filter NWS warning types")
+        self._btn_nws_filter.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._nws_menu = QMenu()
+        self._nws_filter_actions = {}
+        for code, color, label in self.NWS_PHENOM_LEGEND:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(False)
+            act.setData(code)
+            act.toggled.connect(lambda checked, a=act: self._on_nws_filter_action_toggled(a))
+            self._nws_menu.addAction(act)
+            self._nws_filter_actions[code] = act
+        self._btn_nws_filter.setMenu(self._nws_menu)
+        row.addWidget(self._btn_nws_filter)
 
         # NWS County Warning Areas (CWA) overlay toggle
         self._btn_cwa = self._btn("NWS CWA")
@@ -287,3 +308,34 @@ class HazardControls(QWidget):
     def _on_cwa_toggled(self, checked: bool):
         """Emit cwa_toggled when the CWA button changes. No fetch required."""
         self.cwa_toggled.emit(checked)
+
+    def _on_nws_filter_action_toggled(self, action: QAction):
+        """Update phenom filter set and emit nws_filter_changed(set)."""
+        if getattr(self, "_suppress_nws_filter_signals", False):
+            return
+        try:
+            # build set of checked codes
+            selected = {
+                str(act.data()).upper() for act in self._nws_menu.actions() if act.isChecked()
+            }
+        except Exception:
+            selected = set()
+        self.nws_filter_changed.emit(selected)
+
+    def set_nws_filter_selected(self, codes: set[str] | None, emit: bool = True):
+        """Programmatically set which phenom codes are checked in the menu.
+
+        codes: set of uppercase phenom codes, or None to clear all (no filter).
+        emit: if True, emit nws_filter_changed after updating (unless suppressed).
+        """
+        # Normalize
+        sel = {str(c).strip().upper() for c in (codes or set())}
+        # Suppress action callbacks while changing checked state
+        self._suppress_nws_filter_signals = True
+        try:
+            for code, act in self._nws_filter_actions.items():
+                act.setChecked(code in sel)
+        finally:
+            self._suppress_nws_filter_signals = False
+        if emit:
+            self.nws_filter_changed.emit(sel if sel else None)

@@ -156,6 +156,9 @@ class HazardFetcher(QObject):
         self._spc_watches_enabled = False
         self._spc_mds_enabled     = False
         self._nws_enabled         = False
+        # Optional user-selected set of allowed NWS phenom codes (e.g. {'TO','SV'}).
+        # None = no filter (show all).
+        self._nws_filter: set[str] | None = None
 
         # NWS warnings bbox — set from MBTiles domain at startup
         self._nws_bbox = (-116.0, 28.0, -82.0, 49.0)
@@ -200,6 +203,13 @@ class HazardFetcher(QObject):
 
     def set_nws_enabled(self, enabled: bool):
         self._nws_enabled = bool(enabled)
+
+    def set_nws_filter(self, allowed: set[str] | None):
+        """Set an optional set of allowed VTEC phenom codes (uppercase). None = no filter (show all)."""
+        if allowed is None:
+            self._nws_filter = None
+        else:
+            self._nws_filter = {str(x).strip().upper() for x in allowed}
 
     def set_spc_watches_enabled(self, enabled: bool):
         self._spc_watches_enabled = bool(enabled)
@@ -260,6 +270,20 @@ class HazardFetcher(QObject):
 
     def emit_cached_nws(self):
         if self._nws_cache is not None:
+            # If a user filter is active, filter the cached FeatureCollection before emitting.
+            if getattr(self, "_nws_filter", None):
+                try:
+                    data = json.loads(self._nws_cache)
+                    feats = [
+                        f for f in (data.get("features") or [])
+                        if str((f.get("properties") or {}).get("phenom", "")).upper() in self._nws_filter
+                    ]
+                    out = json.dumps({"type": "FeatureCollection", "features": feats})
+                    self.nws_received.emit(out)
+                    return
+                except Exception:
+                    # Fall back to emitting cached raw string on any error
+                    pass
             self.nws_received.emit(self._nws_cache)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -611,6 +635,13 @@ class HazardFetcher(QObject):
                 props["nws_color"]   = _nws_color_for_phenom(phenom)
                 props["warning_url"] = str(props.get("url", "")).strip()
                 feats.append({"type": "Feature", "geometry": geom, "properties": props})
+            # Apply optional user filter (self._nws_filter==None means no filter)
+            if getattr(self, "_nws_filter", None):
+                allowed = self._nws_filter
+                feats = [
+                    feat for feat in feats
+                    if str((feat.get("properties") or {}).get("phenom", "")).upper() in allowed
+                ]
             out_str = json.dumps({"type": "FeatureCollection", "features": feats})
         except Exception as exc:
             log.warning("NWS warnings fetch failed: %s", exc)
