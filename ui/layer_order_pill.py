@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 DEFAULT_LAYERS: list[str] = [
     "satellite",
     "radar",
+    "cwa",
     "spc_outlook",
     "spc_tor",
     "spc_wind",
@@ -22,12 +23,14 @@ DEFAULT_LAYERS: list[str] = [
     "annotations",
     "storm_cones",
     "route",
-    "surface_obs",
+    "ok_mesonet",
+    "wtm",
 ]
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
     "radar":        "Radar",
+    "cwa":          "CWA",
     "spc_outlook":  "SPC Outlook",
     "spc_tor":      "SPC Tornado",
     "spc_wind":     "SPC Wind",
@@ -38,12 +41,14 @@ LAYER_LABELS: dict[str, str] = {
     "annotations":  "Annotations",
     "storm_cones":  "Storm Cones",
     "route":        "Route",
-    "surface_obs":  "Surface Obs",
+    "ok_mesonet":   "OK Mesonet",
+    "wtm":          "WTM",
 }
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
     "radar":        ["radar-overlay"],
+    "cwa":          ["cwa-fill", "cwa-line", "cwa-label"],
     "spc_outlook":  ["spc-cat-fill", "spc-cat-line"],
     "spc_tor":      ["spc-tor-fill", "spc-tor-line", "spc-tor-sig-base",
                      "spc-tor-sign", "spc-tor-cig1", "spc-tor-cig2",
@@ -60,7 +65,8 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "annotations":  [],
     "storm_cones":  [],
     "route":        ["route-casing", "route-line"],
-    "surface_obs":  [],
+    "ok_mesonet":   [],
+    "wtm":          [],
 }
 
 _SETTINGS_KEY = "layers/order"
@@ -335,7 +341,7 @@ class LayerOrderPill(QWidget):
         self._refresh_label()
         if self._expanded:
             self._build_rows()
-            self._relayout()
+        self._relayout()
 
     def current_order(self) -> list[str]:
         return list(self._saved_order)

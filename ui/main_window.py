@@ -1960,6 +1960,13 @@ class MainWindow(QMainWindow):
         self.surface_controls.wtm_toggled.connect(self._surface_fetcher.set_wtm_enabled)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
+        self.surface_controls.ok_toggled.connect(
+            lambda v: self._set_layer_active("ok_mesonet", v)
+        )
+        self.surface_controls.wtm_toggled.connect(
+            lambda v: self._set_layer_active("wtm", v)
+        )
+
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
         self._surface_fetcher.status_updated.connect(self.status_msg_label.setText)
@@ -3276,12 +3283,14 @@ class MainWindow(QMainWindow):
         self._annotations[annotation.id] = annotation
         self.map_widget.add_annotation(annotation)
         self._annotation_sync.publish_create(annotation)
+        self._refresh_annotation_layer()
         log.info("annotation placed: %s at (%.4f, %.4f)", annotation.type_key, annotation.lat, annotation.lon)
 
     def _delete_annotation(self, annotation_id: str):
         self._annotations.pop(annotation_id, None)
         self.map_widget.remove_annotation(annotation_id)
         self._annotation_sync.publish_delete(annotation_id)
+        self._refresh_annotation_layer()
         log.info("annotation deleted: %s", annotation_id)
 
     def _update_annotation(self, annotation: Annotation):
@@ -3295,12 +3304,14 @@ class MainWindow(QMainWindow):
         """Inbound from MQTT — update map/dict but do NOT republish."""
         self._annotations[annotation.id] = annotation
         self.map_widget.add_annotation(annotation)
+        self._refresh_annotation_layer()
         log.info("remote annotation received: %s (%s)", annotation.id, annotation.type_key)
 
     def _recv_remote_annotation_deleted(self, annotation_id: str, deleted_at: str):
         """Inbound delete from MQTT — remove from map/dict but do NOT republish."""
         self._annotations.pop(annotation_id, None)
         self.map_widget.remove_annotation(annotation_id)
+        self._refresh_annotation_layer()
         log.info("remote annotation deleted: %s at %s", annotation_id, deleted_at or "unknown")
 
     # ── Drawing Annotations (Fronts & Custom Shapes) ──────────────────────────
@@ -3435,12 +3446,14 @@ class MainWindow(QMainWindow):
         self._drawings[drawing.id] = drawing
         self.map_widget.add_drawing(drawing)
         self._drawing_sync.publish_create(drawing)
+        self._refresh_annotation_layer()
         log.info("drawing placed: %s at %d points", drawing.drawing_type, len(drawing.coordinates))
 
     def _delete_drawing(self, drawing_id: str):
         self._drawings.pop(drawing_id, None)
         self.map_widget.remove_drawing(drawing_id)
         self._drawing_sync.publish_delete(drawing_id)
+        self._refresh_annotation_layer()
         log.info("drawing deleted: %s", drawing_id)
 
     def _update_drawing(self, drawing: DrawingAnnotation):
@@ -3454,12 +3467,14 @@ class MainWindow(QMainWindow):
         """Inbound from MQTT — update map/dict but do NOT republish."""
         self._drawings[drawing.id] = drawing
         self.map_widget.add_drawing(drawing)
+        self._refresh_annotation_layer()
         log.info("remote drawing received: %s (%s)", drawing.id, drawing.drawing_type)
 
     def _recv_remote_drawing_deleted(self, drawing_id: str):
         """Inbound delete from MQTT — remove from map/dict but do NOT republish."""
         self._drawings.pop(drawing_id, None)
         self.map_widget.remove_drawing(drawing_id)
+        self._refresh_annotation_layer()
         log.info("remote drawing deleted: %s", drawing_id)
 
     # ── Storm Motion Cone ─────────────────────────────────────────────────────
@@ -3549,6 +3564,7 @@ class MainWindow(QMainWindow):
         self._storm_cones[cone.id] = cone
         self.map_widget.add_storm_cone(cone)
         self._storm_cone_sync.publish_create(cone)
+        self._refresh_storm_cone_layer()
         log.info("storm cone placed: id=%s lat=%.4f lon=%.4f hdg=%.0f spd=%.0f",
                  cone.id, cone.lat, cone.lon, cone.heading, cone.speed_kts)
 
@@ -3556,6 +3572,7 @@ class MainWindow(QMainWindow):
         self._storm_cones.pop(cone_id, None)
         self.map_widget.remove_storm_cone(cone_id)
         self._storm_cone_sync.publish_delete(cone_id)
+        self._refresh_storm_cone_layer()
         log.info("storm cone deleted: %s", cone_id)
 
     def _update_storm_cone(self, cone: StormCone):
@@ -3569,12 +3586,14 @@ class MainWindow(QMainWindow):
         """Inbound from MQTT — update map/dict but do NOT republish."""
         self._storm_cones[cone.id] = cone
         self.map_widget.add_storm_cone(cone)
+        self._refresh_storm_cone_layer()
         log.info("remote storm cone received: %s", cone.id)
 
     def _recv_remote_storm_cone_deleted(self, cone_id: str):
         """Inbound delete from MQTT — remove from map/dict but do NOT republish."""
         self._storm_cones.pop(cone_id, None)
         self.map_widget.remove_storm_cone(cone_id)
+        self._refresh_storm_cone_layer()
         log.info("remote storm cone deleted: %s", cone_id)
 
     # ── Distance Measure ──────────────────────────────────────────────────────
@@ -4401,6 +4420,17 @@ class MainWindow(QMainWindow):
         """Notify the layer pill that a layer's visibility changed."""
         if hasattr(self, "_layer_pill"):
             self._layer_pill.set_layer_active(key, active)
+
+    def _refresh_annotation_layer(self) -> None:
+        """Update the annotations pill entry based on whether any annotations or drawings exist."""
+        has_content = bool(
+            getattr(self, "_annotations", None) or getattr(self, "_drawings", None)
+        )
+        self._set_layer_active("annotations", has_content)
+
+    def _refresh_storm_cone_layer(self) -> None:
+        """Update the storm_cones pill entry based on whether any cones exist."""
+        self._set_layer_active("storm_cones", bool(getattr(self, "_storm_cones", None)))
 
     # ── Debug Pill ────────────────────────────────────────────────────────────
 
