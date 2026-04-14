@@ -187,11 +187,13 @@ class AnnotationTools(QWidget):
     Collapsible toolbar drawer for annotation type selection.
 
     Signals:
-        tool_selected(str) — type_key when a button is activated;
-                             empty string when deactivated.
+        tool_selected(str)  — type_key when a button is activated;
+                              empty string when deactivated.
+        refresh_requested() — user pressed the Refresh button to re-fetch current.json.
     """
 
-    tool_selected = pyqtSignal(str)
+    tool_selected    = pyqtSignal(str)
+    refresh_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -315,6 +317,38 @@ class AnnotationTools(QWidget):
             btn.clicked.connect(lambda checked, b=btn: self._on_button_clicked(b))
             self._buttons.append(btn)
             row2_layout.addWidget(btn)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.VLine)
+        sep3.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        row2_layout.addWidget(sep3)
+
+        self._btn_refresh = QToolButton()
+        self._btn_refresh.setText("↻\nRefresh")
+        self._btn_refresh.setToolTip("Re-fetch current.json from THREDDS")
+        self._btn_refresh.setFixedHeight(38)
+        self._btn_refresh.setMinimumWidth(64)
+        self._btn_refresh.setStyleSheet("""
+            QToolButton {
+                background-color: transparent;
+                border: 1px solid #2E2E4E;
+                border-radius: 6px;
+                color: #8888AA;
+                font-size: 9px;
+                font-weight: 600;
+                padding: 2px 6px;
+            }
+            QToolButton:hover {
+                background-color: #1A1A2E;
+                border-color: #8888AA;
+                color: #CCCCEE;
+            }
+            QToolButton:pressed {
+                background-color: #2E2E4E;
+            }
+        """)
+        self._btn_refresh.clicked.connect(self.refresh_requested.emit)
+        row2_layout.addWidget(self._btn_refresh)
 
         drawer_layout.addWidget(row2)
 

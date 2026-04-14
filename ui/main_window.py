@@ -815,6 +815,10 @@ class MainWindow(QMainWindow):
 
         log.info("current.json loaded: %d annotations, %d cones, %d drawings", n_ann, n_cone, n_drawing)
 
+    def _on_refresh_current_json(self):
+        """Triggered by the Refresh button in the annotation toolbar."""
+        threading.Thread(target=self._fetch_current_json, daemon=True).start()
+
     def _complete_mqtt_startup_phase(self):
         if self._startup_mqtt_pending:
             self._startup_mqtt_pending = False
@@ -1698,6 +1702,7 @@ class MainWindow(QMainWindow):
         # detail pill (hidden until a vehicle is selected)
         self._selected_vehicle_ids = []
         self._vehicle_age_display_state: dict[str, tuple[str, str]] = {}
+        self._vehicle_row_age_labels: dict[str, QLabel] = {}
         self.vehicle_detail_panel = QWidget(self._map_container)
         self.vehicle_detail_panel.setObjectName("vehicleDetailPill")
         detail_layout = QVBoxLayout(self.vehicle_detail_panel)
@@ -3146,6 +3151,7 @@ class MainWindow(QMainWindow):
 
         # tool selection → set cursor mode
         self.annotation_tools.tool_selected.connect(self._on_annotation_tool_selected)
+        self.annotation_tools.refresh_requested.connect(self._on_refresh_current_json)
 
         # map click → place annotation (if tool is active)
         self.map_widget.map_clicked.connect(self._on_map_click)
@@ -3979,52 +3985,69 @@ class MainWindow(QMainWindow):
         hours = age_min / 60.0
         return f"{hours:.1f}h"
 
+    def _obs_status_sort_key(self, v) -> int:
+        """Return a sort key based on ob status color: 0=green, 1=yellow, 2=orange, 3=red, 4=no obs."""
+        if not v.latest_obs:
+            return 4
+        age_min = self._obs_age_minutes(v.latest_obs)
+        if age_min <= 1.0:
+            return 0
+        if age_min <= 3.0:
+            return 1
+        if age_min <= 5.0:
+            return 2
+        return 3
+
     def _refresh_vehicle_panel(self):
         if not hasattr(self, "_vehicle_rows_layout"):
             return
-        
-        _clear_layout(self._vehicle_rows_layout)
-        
-        if not self._vehicles:
-            self._vehicle_rows_widget.setVisible(False)
-            if hasattr(self, "_vehicle_placeholder"):
-                self._vehicle_placeholder.setVisible(True)
-            return
-            
-        self._vehicle_rows_widget.setVisible(True)
 
-        # 1. Group vehicles by their icon_type
-        grouped_vehicles = {}
-        for v in self._vehicles.values():
-            icon = v.icon_type if v.icon_type else "unknown"
-            grouped_vehicles.setdefault(icon, []).append(v)
+        self.vehicle_panel.setUpdatesEnabled(False)
+        try:
+            self._vehicle_row_age_labels.clear()
+            _clear_layout(self._vehicle_rows_layout)
 
-        # 2. Sort vehicles within each group by observation age (newest first)
-        for icon in grouped_vehicles:
-            grouped_vehicles[icon].sort(
-                key=lambda x: self._obs_age_minutes(x.latest_obs) if x.latest_obs else float('inf')
-            )
+            if not self._vehicles:
+                self._vehicle_rows_widget.setVisible(False)
+                if hasattr(self, "_vehicle_placeholder"):
+                    self._vehicle_placeholder.setVisible(True)
+                return
 
-        # 3. Create a vertical column for each icon type
-        for icon, vehicles in sorted(grouped_vehicles.items()):
-            col_widget = QWidget()
-            col_layout = QVBoxLayout(col_widget)
-            col_layout.setContentsMargins(0, 0, 0, 0)
-            col_layout.setSpacing(0)
-            col_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            self._vehicle_rows_widget.setVisible(True)
 
-            # Optional: Add a small header for the column so users know what it is
-            header = QLabel(icon.upper())
-            header.setStyleSheet("color: #6E7A8F; font-size: 10px; font-weight: bold; padding-bottom: 4px; padding-left: 4px;")
-            col_layout.addWidget(header)
+            # 1. Group vehicles by their icon_type
+            grouped_vehicles = {}
+            for v in self._vehicles.values():
+                icon = v.icon_type if v.icon_type else "unknown"
+                grouped_vehicles.setdefault(icon, []).append(v)
 
-            # Add the sorted vehicles to this specific column
-            for v in vehicles:
-                col_layout.addWidget(self._make_vehicle_row(v))
+            # 2. Sort vehicles within each group by ob status color (green → yellow → orange → red)
+            for icon in grouped_vehicles:
+                grouped_vehicles[icon].sort(key=self._obs_status_sort_key)
 
-            self._vehicle_rows_layout.addWidget(col_widget)
+            # 3. Create a vertical column for each icon type
+            for icon, vehicles in sorted(grouped_vehicles.items()):
+                col_widget = QWidget()
+                col_layout = QVBoxLayout(col_widget)
+                col_layout.setContentsMargins(0, 0, 0, 0)
+                col_layout.setSpacing(0)
+                col_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self._layout_overlays()
+                header = QLabel(icon.upper())
+                header.setStyleSheet("color: #6E7A8F; font-size: 10px; font-weight: bold; padding-bottom: 4px; padding-left: 4px;")
+                col_layout.addWidget(header)
+
+                for v in vehicles:
+                    col_layout.addWidget(self._make_vehicle_row(v))
+
+                self._vehicle_rows_layout.addWidget(col_widget)
+
+            # Geometry must be updated before re-enabling painting, otherwise
+            # Qt can fire a paint event between setUpdatesEnabled(True) and the
+            # _layout_overlays call, rendering the pill at its pre-rebuild geometry.
+            self._layout_overlays()
+        finally:
+            self.vehicle_panel.setUpdatesEnabled(True)
 
     def _make_vehicle_row(self, v) -> QWidget:
         obs = v.latest_obs
@@ -4067,6 +4090,7 @@ class MainWindow(QMainWindow):
             age = QLabel(f"{self._obs_age_label(obs)} old")
             age.setStyleSheet("color: #C8D0DE; font-size: 10px; background: transparent; border: none;")
             rl.addWidget(age)
+            self._vehicle_row_age_labels[v.id] = age
 
         rl.addStretch()
         return row
@@ -4419,7 +4443,8 @@ class MainWindow(QMainWindow):
         self.clock_label.setText(now.strftime("%H:%M:%S UTC"))
         self.date_label.setText(f"{now.day} {now.strftime('%b %Y')}")
         hidden_vehicle_ids: list[str] = []
-        vehicle_panel_needs_refresh = False
+        vehicle_panel_needs_rebuild = False
+        vehicle_label_only_updates: dict[str, str] = {}
         vehicle_detail_needs_refresh = False
         for v in list(self._vehicles.values()):
             obs = v.latest_obs
@@ -4433,17 +4458,27 @@ class MainWindow(QMainWindow):
             prev_state = self._vehicle_age_display_state.get(v.id)
             if prev_state == (color, age_label):
                 continue
+            prev_color = prev_state[0] if prev_state else None
             self._vehicle_age_display_state[v.id] = (color, age_label)
             self.map_widget.add_vehicle(v.id, v.lat, v.lon, color, v.icon_type)
-            vehicle_panel_needs_refresh = True
+            if prev_color != color:
+                # Color tier changed → sort order may change → full rebuild needed.
+                vehicle_panel_needs_rebuild = True
+            else:
+                vehicle_label_only_updates[v.id] = age_label
             if v.id in self._selected_vehicle_ids:
                 vehicle_detail_needs_refresh = True
 
         for vehicle_id in hidden_vehicle_ids:
             self._hide_vehicle(vehicle_id)
 
-        if vehicle_panel_needs_refresh:
+        if vehicle_panel_needs_rebuild:
             self._refresh_vehicle_panel()
+        elif vehicle_label_only_updates:
+            for vid, age_label in vehicle_label_only_updates.items():
+                lbl = self._vehicle_row_age_labels.get(vid)
+                if lbl is not None:
+                    lbl.setText(f"{age_label} old")
         if vehicle_detail_needs_refresh:
             self._refresh_vehicle_detail()
         if not self._clock_layout_synced:
