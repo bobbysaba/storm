@@ -652,12 +652,12 @@ class MainWindow(QMainWindow):
         self.update_vehicle_obs(obs)
         
         # Also update timeseries dialog if open
-        if obs.vehicle_id in self._vehicle_timeseries_dialogs:
-            dlg = self._vehicle_timeseries_dialogs[obs.vehicle_id]
-            if dlg.isVisible():
-                observations = self._get_archive_vehicle_history(obs.vehicle_id)
-                if observations:
-                    dlg.load(obs.vehicle_id, observations)
+        if (self._vehicle_timeseries_dlg is not None
+                and self._vehicle_timeseries_dlg.isVisible()):
+            observations = self._get_archive_vehicle_history(obs.vehicle_id)
+            if observations:
+                self._vehicle_timeseries_dlg.update_vehicle(
+                    obs.vehicle_id, observations)
 
     def _on_archive_vehicles_cleared(self) -> None:
         """Remove all vehicle markers when time jumps backward."""
@@ -1677,9 +1677,9 @@ class MainWindow(QMainWindow):
 
         self._vehicle_rows_widget = QWidget()
         self._vehicle_rows_widget.setObjectName("vehicleRowsContainer")
-        self._vehicle_rows_layout = QVBoxLayout(self._vehicle_rows_widget)
+        self._vehicle_rows_layout = QHBoxLayout(self._vehicle_rows_widget)
         self._vehicle_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._vehicle_rows_layout.setSpacing(0)
+        self._vehicle_rows_layout.setSpacing(16)
         self._vehicle_rows_widget.setVisible(False)
         layout.addWidget(self._vehicle_rows_widget)
 
@@ -3682,7 +3682,7 @@ class MainWindow(QMainWindow):
     def _init_stations(self):
         self._vehicles: dict[str, Vehicle] = {}
         self._vehicle_history: dict[str, deque] = {}  # vehicle_id → deque[Observation]
-        self._vehicle_timeseries_dialogs: dict[str, "VehicleTimeseriesDialog"] = {}  # vehicle_id → dialog
+        self._vehicle_timeseries_dlg: "VehicleTimeseriesDialog | None" = None
         self._follow_mode = False
         self._station_layer = StationPlotLayer(self.map_widget)
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
@@ -3780,10 +3780,11 @@ class MainWindow(QMainWindow):
                     self._vehicle_history[obs.vehicle_id] = deque()
                 self._vehicle_history[obs.vehicle_id].append(obs)
                 # Live-update timeseries dialog if open
-                if obs.vehicle_id in self._vehicle_timeseries_dialogs:
-                    dlg = self._vehicle_timeseries_dialogs[obs.vehicle_id]
-                    if dlg.isVisible():
-                        dlg.load(obs.vehicle_id, list(self._vehicle_history[obs.vehicle_id]))
+                if (self._vehicle_timeseries_dlg is not None
+                        and self._vehicle_timeseries_dlg.isVisible()):
+                    self._vehicle_timeseries_dlg.update_vehicle(
+                        obs.vehicle_id,
+                        list(self._vehicle_history[obs.vehicle_id]))
 
         marker_color = self._obs_age_color(obs)
         age_label = self._obs_age_label(obs)
@@ -3981,14 +3982,48 @@ class MainWindow(QMainWindow):
     def _refresh_vehicle_panel(self):
         if not hasattr(self, "_vehicle_rows_layout"):
             return
+        
         _clear_layout(self._vehicle_rows_layout)
+        
         if not self._vehicles:
             self._vehicle_rows_widget.setVisible(False)
+            if hasattr(self, "_vehicle_placeholder"):
+                self._vehicle_placeholder.setVisible(True)
             return
+            
         self._vehicle_rows_widget.setVisible(True)
-        for vid in sorted(self._vehicles.keys()):
-            v = self._vehicles[vid]
-            self._vehicle_rows_layout.addWidget(self._make_vehicle_row(v))
+
+        # 1. Group vehicles by their icon_type
+        grouped_vehicles = {}
+        for v in self._vehicles.values():
+            icon = v.icon_type if v.icon_type else "unknown"
+            grouped_vehicles.setdefault(icon, []).append(v)
+
+        # 2. Sort vehicles within each group by observation age (newest first)
+        for icon in grouped_vehicles:
+            grouped_vehicles[icon].sort(
+                key=lambda x: self._obs_age_minutes(x.latest_obs) if x.latest_obs else float('inf')
+            )
+
+        # 3. Create a vertical column for each icon type
+        for icon, vehicles in sorted(grouped_vehicles.items()):
+            col_widget = QWidget()
+            col_layout = QVBoxLayout(col_widget)
+            col_layout.setContentsMargins(0, 0, 0, 0)
+            col_layout.setSpacing(0)
+            col_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+            # Optional: Add a small header for the column so users know what it is
+            header = QLabel(icon.upper())
+            header.setStyleSheet("color: #6E7A8F; font-size: 10px; font-weight: bold; padding-bottom: 4px; padding-left: 4px;")
+            col_layout.addWidget(header)
+
+            # Add the sorted vehicles to this specific column
+            for v in vehicles:
+                col_layout.addWidget(self._make_vehicle_row(v))
+
+            self._vehicle_rows_layout.addWidget(col_widget)
+
         self._layout_overlays()
 
     def _make_vehicle_row(self, v) -> QWidget:
@@ -4050,34 +4085,32 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _on_timeseries_button_clicked(self, vehicle_id: str):
-        """Open or raise the timeseries dialog for the given vehicle."""
-        # Check if dialog already exists and is visible
-        if vehicle_id in self._vehicle_timeseries_dialogs:
-            dlg = self._vehicle_timeseries_dialogs[vehicle_id]
-            if dlg.isVisible():
-                dlg.raise_()
-                dlg.activateWindow()
-                return
-        
-        # Get observation history
+        """Open (or re-load) the shared timeseries dialog for the given vehicle."""
+        # Collect all vehicles that have met history
         if self._archive:
-            # Archive mode: extract from ArchiveMQTTReader
             if not hasattr(self, "_archive_mqtt"):
                 return
-            observations = self._get_archive_vehicle_history(vehicle_id)
+            all_vehicles = {
+                vid: self._get_archive_vehicle_history(vid)
+                for vid in self._vehicles
+            }
         else:
-            # Live mode: use in-memory history
-            observations = list(self._vehicle_history.get(vehicle_id, []))
-        
-        if not observations:
+            all_vehicles = {
+                vid: list(hist)
+                for vid, hist in self._vehicle_history.items()
+                if hist
+            }
+
+        # Drop vehicles with no usable observations
+        all_vehicles = {v: obs for v, obs in all_vehicles.items() if obs}
+
+        if vehicle_id not in all_vehicles:
             return
-        
-        # Create or reuse dialog
-        if vehicle_id not in self._vehicle_timeseries_dialogs:
-            self._vehicle_timeseries_dialogs[vehicle_id] = VehicleTimeseriesDialog(self)
-        
-        dlg = self._vehicle_timeseries_dialogs[vehicle_id]
-        dlg.load(vehicle_id, observations)
+
+        if self._vehicle_timeseries_dlg is None:
+            self._vehicle_timeseries_dlg = VehicleTimeseriesDialog(self)
+
+        self._vehicle_timeseries_dlg.load(vehicle_id, all_vehicles)
     
     def _get_archive_vehicle_history(self, vehicle_id: str) -> list:
         """Extract vehicle observation history from archive MQTT data."""

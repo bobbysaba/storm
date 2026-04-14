@@ -50,6 +50,14 @@ def set_render_grid_size(n: int) -> None:
     log.info("RENDER_GRID_SIZE set to %d", RENDER_GRID_SIZE)
 
 
+def set_adaptive_render_grid(enabled: bool) -> None:
+    """Enable or disable adaptive resolution scaling. Call before MainWindow is created."""
+    # pylint: disable=global-statement
+    global ADAPTIVE_RENDER_GRID
+    ADAPTIVE_RENDER_GRID = enabled
+    log.info("ADAPTIVE_RENDER_GRID set to %s", enabled)
+
+
 # ── NWS Colormaps ─────────────────────────────────────────────────────────────
 
 def _rgba255(r: int, g: int, b: int, a: int = 255) -> tuple[float, float, float, float]:

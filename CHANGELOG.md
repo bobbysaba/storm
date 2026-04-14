@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.0] - 2026-04-14
+### Added
+- Vehicle meteorological timeseries dialog — interactive time-series plots of temperature, dewpoint, wind speed/direction, and pressure for any tracked vehicle; scroll-wheel zoom, click-drag selection zoom, double-click to reset, and inline cursor readouts with 10-second grid snapping; works in both live and archive modes
+- VAD wind profile — initial support for VAD-derived wind profiles from NEXRAD data
+- Layer ordering pill — floating UI control to reorder map layer draw order (radar, satellite, hazards, annotations, drawings) at runtime
+- Screenshot capability — save the current map view as an image from the layer pill
+- CWA warning display — NWS warning polygons now include county warning area context and improved text formatting
+- Warning filtering — filter active NWS warnings by type; improved relevance for field operations
+- Annotation expiration — annotations now carry a configurable expiration time and auto-clear from the map when expired
+- Auto environment updating — `conda env update --prune` step integrated into the in-app update flow
+
+### Changed
+- NSSL/OBS sounding dialog defaults to the most recent available sounding on open
+- NSSL sounding unit handling fixed (temperature/dewpoint consistency)
+
+### Fixed
+- Radar data toggle state bug — toggling radar off/on no longer drops the last fetched frame
+- Surface station display bug during network interruptions
+- Layer pill layout and sizing on various screen resolutions
+- Satellite/radar map projection alignment fix
+- Various stability patches and minor UI refinements
+
+---
+
 ## [0.9.0] - 2026-03-31
 ### Added
 - Archive mode — replay any past session with full data reconstruction; select a date/time at launch to enter archive playback

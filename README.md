@@ -5,6 +5,24 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 
 ---
 
+## Table of Contents
+
+- [Current Features](#current-features)
+- [Requirements](#requirements)
+- [Setup](#setup)
+  - [1. Clone the repo](#1-clone-the-repo)
+  - [2. Run the setup script](#2-run-the-setup-script)
+  - [3. Download the map tiles](#3-download-the-map-tiles)
+  - [4. Run](#4-run)
+  - [5. Place your AWS IoT credentials](#5-place-your-aws-iot-credentials)
+  - [6. Platform-specific launchers](#6-platform-specific-launchers-optional)
+- [Updating](#updating)
+- [Project Structure](#project-structure)
+- [Architecture Notes](#architecture-notes)
+- [Radar Site Coverage](#radar-site-coverage)
+
+---
+
 ## Current Features
 
 - **Offline vector map** — OpenStreetMap tiles served entirely in-process via a custom `storm://` URL scheme; no internet required for the base map

@@ -9,7 +9,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QToolButton,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QSizePolicy,
-    QApplication,
+    QApplication, QMenu,
 )
 from math import radians, sin, cos, sqrt, atan2
 
@@ -41,6 +41,44 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # Text-colour styles applied inline on the QLineEdit fields
 _STYLE_GPS    = "color: #39D98A;"   # green  — set via GPS loc button
 _STYLE_MANUAL = "color: #EFF3FF;"   # white  — manually entered / map-picked
+
+
+def _make_vehicle_icon(size: int = 15) -> QIcon:
+    """Return a QIcon with a simple car silhouette for the vehicle-picker button."""
+    _SVG = (
+        '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
+        '<path d="M19 17H5a2 2 0 0 1-2-2v-4l2-5h14l2 5v4a2 2 0 0 1-2 2z"'
+        ' fill="none" stroke="{color}" stroke-width="2"'
+        ' stroke-linecap="round" stroke-linejoin="round"/>'
+        '<circle cx="7.5" cy="17" r="1.5" stroke="{color}" stroke-width="1.5" fill="none"/>'
+        '<circle cx="16.5" cy="17" r="1.5" stroke="{color}" stroke-width="1.5" fill="none"/>'
+        '</svg>'
+    )
+
+    def _pixmap(color: str) -> QPixmap:
+        svg_bytes = _SVG.format(color=color).encode()
+        renderer = QSvgRenderer(svg_bytes)
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(px)
+        renderer.render(painter)
+        painter.end()
+        return px
+
+    icon = QIcon()
+    icon.addPixmap(_pixmap("#4A9EFF"), QIcon.Mode.Normal,   QIcon.State.Off)
+    icon.addPixmap(_pixmap("#3A3F52"), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
+
+
+_VEHICLE_ICON = None
+
+
+def _vehicle_icon() -> QIcon:
+    global _VEHICLE_ICON
+    if _VEHICLE_ICON is None:
+        _VEHICLE_ICON = _make_vehicle_icon()
+    return _VEHICLE_ICON
 
 
 def _make_loc_icon(size: int = 15) -> QIcon:
@@ -105,6 +143,9 @@ class RoutingControls(QWidget):
         super().__init__(parent)
         self._animation         = None
         self._fetcher           = RoutingFetcher()
+
+        # Known vehicles: {vehicle_id: (lat, lon)}
+        self._vehicles: dict[str, tuple[float, float]] = {}
 
         # Last GPS fix received — None until a fix arrives
         self._gps_lat: float | None = None
@@ -192,10 +233,21 @@ class RoutingControls(QWidget):
         self._btn_origin_loc.setEnabled(False)
         self._btn_origin_loc.clicked.connect(self._set_origin_to_gps)
 
+        # Vehicle-picker button for origin — enabled when vehicles are known
+        self._btn_origin_vehicle = QToolButton()
+        self._btn_origin_vehicle.setIcon(_vehicle_icon())
+        self._btn_origin_vehicle.setIconSize(QSize(14, 14))
+        self._btn_origin_vehicle.setToolTip("Use a vehicle's location as start point")
+        self._btn_origin_vehicle.setObjectName("locBtn")
+        self._btn_origin_vehicle.setFixedSize(24, 24)
+        self._btn_origin_vehicle.setEnabled(False)
+        self._btn_origin_vehicle.clicked.connect(self._show_vehicle_menu_origin)
+
         ori.addWidget(ori_lbl)
         ori.addWidget(self._origin_input)
         ori.addWidget(self._btn_origin_pick)
         ori.addWidget(self._btn_origin_loc)
+        ori.addWidget(self._btn_origin_vehicle)
         col.addWidget(origin_row)
 
         # ── Destination row ───────────────────────────────────────────────────
@@ -235,10 +287,21 @@ class RoutingControls(QWidget):
         self._btn_dest_loc.setEnabled(False)
         self._btn_dest_loc.clicked.connect(self._set_dest_to_gps)
 
+        # Vehicle-picker button for destination — enabled when vehicles are known
+        self._btn_dest_vehicle = QToolButton()
+        self._btn_dest_vehicle.setIcon(_vehicle_icon())
+        self._btn_dest_vehicle.setIconSize(QSize(14, 14))
+        self._btn_dest_vehicle.setToolTip("Use a vehicle's location as destination")
+        self._btn_dest_vehicle.setObjectName("locBtn")
+        self._btn_dest_vehicle.setFixedSize(24, 24)
+        self._btn_dest_vehicle.setEnabled(False)
+        self._btn_dest_vehicle.clicked.connect(self._show_vehicle_menu_dest)
+
         dst.addWidget(dest_lbl)
         dst.addWidget(self._dest_input)
         dst.addWidget(self._btn_dest_pick)
         dst.addWidget(self._btn_dest_loc)
+        dst.addWidget(self._btn_dest_vehicle)
         col.addWidget(dest_row)
 
         # ── Action row ────────────────────────────────────────────────────────
@@ -350,6 +413,62 @@ class RoutingControls(QWidget):
         self._btn_origin_loc.setEnabled(True)
         self._btn_dest_loc.setEnabled(True)
         self._check_step_advance(lat, lon)
+
+    def update_vehicles(self, vehicles: dict):
+        """Called by MainWindow whenever the tracked-vehicle dict changes.
+
+        Stores a snapshot of {id: (lat, lon)} and enables/disables the
+        vehicle-picker buttons accordingly.
+        """
+        self._vehicles = {vid: (v.lat, v.lon) for vid, v in vehicles.items()
+                         if v.lat is not None and v.lon is not None}
+        has = bool(self._vehicles)
+        self._btn_origin_vehicle.setEnabled(has)
+        self._btn_dest_vehicle.setEnabled(has)
+
+    def _show_vehicle_menu_origin(self):
+        """Pop up a menu of known vehicles and set the FROM field on selection."""
+        if not self._vehicles:
+            return
+        menu = QMenu(self)
+        for vid, (lat, lon) in sorted(self._vehicles.items()):
+            action = menu.addAction(f"{vid}  ({lat:.4f}, {lon:.4f})")
+            action.setData((vid, lat, lon))
+        chosen = menu.exec(self._btn_origin_vehicle.mapToGlobal(
+            self._btn_origin_vehicle.rect().bottomLeft()
+        ))
+        if chosen is not None:
+            vid, lat, lon = chosen.data()
+            self._own_lat = lat
+            self._own_lon = lon
+            self._origin_input.blockSignals(True)
+            self._origin_input.setText(vid)
+            self._origin_input.setStyleSheet(_STYLE_GPS)
+            self._origin_input.blockSignals(False)
+            self._update_go_enabled()
+
+    def _show_vehicle_menu_dest(self):
+        """Pop up a menu of known vehicles and set the TO field on selection."""
+        if not self._vehicles:
+            return
+        menu = QMenu(self)
+        for vid, (lat, lon) in sorted(self._vehicles.items()):
+            action = menu.addAction(f"{vid}  ({lat:.4f}, {lon:.4f})")
+            action.setData((vid, lat, lon))
+        chosen = menu.exec(self._btn_dest_vehicle.mapToGlobal(
+            self._btn_dest_vehicle.rect().bottomLeft()
+        ))
+        if chosen is not None:
+            vid, lat, lon = chosen.data()
+            self._dest_lat = lat
+            self._dest_lon = lon
+            self._dest_input.blockSignals(True)
+            self._dest_input.setText(vid)
+            self._dest_input.setStyleSheet(_STYLE_GPS)
+            self._dest_input.blockSignals(False)
+            self._update_go_enabled()
+            if self._have_origin():
+                self._on_get_directions()
 
     def on_map_pick(self, lat: float, lon: float):
         """Called by MainWindow when the user clicks the map in pick mode."""

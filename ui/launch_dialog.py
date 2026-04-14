@@ -7,18 +7,33 @@ import hashlib
 import hmac
 import os
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QTextEdit, QApplication, QMessageBox, QSizePolicy, QWidget,
-    QDateTimeEdit, QAbstractButton, QSpinBox,
+    QDateTimeEdit, QAbstractButton, QSpinBox, QComboBox,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QByteArray, QSize, QDateTime, QPointF
 from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF
 
 import config as _config
+
+# Down-arrow SVG written to a temp file so QSS can reference it via url().
+# Qt on macOS silently ignores inline ::down-arrow without a physical file path.
+_COMBO_DOWN_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'>"
+    "<path fill='none' stroke='#8E97AB' stroke-width='2' stroke-linecap='round' "
+    "stroke-linejoin='round' d='M4 6l4 4 4-4'/></svg>"
+)
+_COMBO_DOWN_PATH = os.path.join(tempfile.gettempdir(), "storm_combo_down.svg").replace("\\", "/")
+try:
+    with open(_COMBO_DOWN_PATH, "w") as _f:
+        _f.write(_COMBO_DOWN_SVG)
+except Exception:
+    _COMBO_DOWN_PATH = ""
 
 # SVG icon definitions for the vehicle icon picker (same shapes as the map markers).
 # Color is substituted at render time so selected/unselected states differ.
@@ -296,6 +311,39 @@ QToolButton#iconBtn:disabled {
     background-color: #12121E;
     border: 1px solid #16162A;
     color: #2A2A3E;
+}
+QComboBox {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #E8EAF0;
+    font-size: 12px;
+    padding: 5px 10px;
+    selection-background-color: #00CFFF;
+}
+QComboBox:focus {
+    border: 1px solid #00CFFF;
+}
+QComboBox::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: 1px solid #1E1E2E;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background-color: #1A1A2E;
+}
+QComboBox::drop-down:hover {
+    background-color: #0D1A2E;
+    border-left-color: #00CFFF;
+}
+QComboBox QAbstractItemView {
+    background-color: #1A1A2E;
+    border: 1px solid #2A2A3E;
+    color: #E8EAF0;
+    selection-background-color: #00CFFF;
+    selection-color: #0A0A0F;
+    outline: none;
 }
 """
 
@@ -613,7 +661,15 @@ class LaunchDialog(QDialog):
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
         )
-        self.setStyleSheet(_DIALOG_STYLE)
+        _arrow_qss = ""
+        if _COMBO_DOWN_PATH:
+            _arrow_qss = (
+                f'QComboBox::down-arrow {{'
+                f'  image: url("{_COMBO_DOWN_PATH}");'
+                f'  width: 10px; height: 10px;'
+                f'}}'
+            )
+        self.setStyleSheet(_DIALOG_STYLE + _arrow_qss)
 
         s = QSettings()
         saved = {
@@ -626,8 +682,9 @@ class LaunchDialog(QDialog):
             "auto_nws":       s.value("launch/auto_nws",       False,     type=bool),
             "auto_radar":     s.value("launch/auto_radar",     False,     type=bool),
             "auto_satellite": s.value("launch/auto_satellite", "",        type=str),
-            "auto_obs_ok":    s.value("launch/auto_obs_ok",    False,     type=bool),
-            "auto_obs_wtm":   s.value("launch/auto_obs_wtm",   False,     type=bool),
+            "auto_obs_ok":       s.value("launch/auto_obs_ok",       False, type=bool),
+            "auto_obs_wtm":      s.value("launch/auto_obs_wtm",      False, type=bool),
+            "radar_resolution":  s.value("launch/radar_resolution",  -1,    type=int),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._build_ui(saved)
@@ -893,6 +950,35 @@ class LaunchDialog(QDialog):
             self._obs_btns[key] = btn
         ds.addLayout(obs_row)
 
+        # Row 4: radar render resolution
+        res_row = QHBoxLayout()
+        res_row.setSpacing(6)
+        res_lbl = QLabel("RES")
+        res_lbl.setObjectName("fieldLabel")
+        res_lbl.setFixedWidth(28)
+        res_row.addWidget(res_lbl)
+        self._res_combo = QComboBox()
+        self._res_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        _RES_OPTIONS = [
+            ("Dynamic (auto-adjust)", -1),
+            ("256 px  (fast)", 256),
+            ("384 px", 384),
+            ("512 px", 512),
+            ("768 px  (sharp)", 768),
+            ("1024 px  (ultra)", 1024),
+        ]
+        for label, value in _RES_OPTIONS:
+            self._res_combo.addItem(label, value)
+        saved_res = int(saved.get("radar_resolution", -1))
+        default_idx = 0
+        for i, (_, v) in enumerate(_RES_OPTIONS):
+            if v == saved_res:
+                default_idx = i
+                break
+        self._res_combo.setCurrentIndex(default_idx)
+        res_row.addWidget(self._res_combo)
+        ds.addLayout(res_row)
+
         self._data_section.setVisible(False)
         root.addWidget(self._data_section)
 
@@ -1046,7 +1132,7 @@ class LaunchDialog(QDialog):
             self._data_toggle_btn.setVisible(not archive_mode)
             if archive_mode and self._data_section.isVisible():
                 self._data_section.setVisible(False)
-                self._data_toggle_btn.setText("▸  DATA ON LAUNCH")
+                self._data_toggle_btn.setText("▸  DATA CONFIGURATION")
 
         if not viewer_mode:
             if archive_mode:
@@ -1283,6 +1369,7 @@ class LaunchDialog(QDialog):
         obs = getattr(self, "_selected_obs", set())
         s.setValue("launch/auto_obs_ok",  "ok"  in obs)
         s.setValue("launch/auto_obs_wtm", "wtm" in obs)
+        s.setValue("launch/radar_resolution", self._res_combo.currentData())
         self.accept()
 
     # ── Accessors (read by main.py after accept) ───────────────────────────────
@@ -1330,3 +1417,7 @@ class LaunchDialog(QDialog):
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":
             return "car"
         return getattr(self, "_selected_icon", "car")
+
+    def radar_resolution(self) -> int:
+        """Return the chosen render grid size, or -1 for dynamic (adaptive) mode."""
+        return self._res_combo.currentData()

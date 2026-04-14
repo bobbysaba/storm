@@ -14,7 +14,7 @@ import runtime_flags
 from dataclasses import replace
 from datetime import datetime, timezone
 from ui.launch_dialog import LaunchDialog
-from ui.radar_overlay import set_render_grid_size
+from ui.radar_overlay import set_render_grid_size, set_adaptive_render_grid
 from data.truck_replay import load_truck_observations
 
 # try to import PyQt packages
@@ -442,6 +442,13 @@ def main() -> None:
     monitor      = dialog.monitor()
     viewer       = dialog.viewer()
     archive_time = dialog.archive_start_time()   # None unless archive mode
+
+    # apply radar render resolution from the launch dialog
+    # (overrides any --render-grid-size CLI arg if the user picked a fixed value)
+    _dlg_res = dialog.radar_resolution()
+    if _dlg_res > 0:
+        set_render_grid_size(_dlg_res)
+        set_adaptive_render_grid(False)
 
     from ui.main_window import MainWindow  # noqa: PLC0415
 

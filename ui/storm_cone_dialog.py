@@ -1,6 +1,9 @@
 # ui/storm_cone_dialog.py
 # Speed / heading input dialog for placing and editing storm motion cones.
 
+import os
+import tempfile
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QDoubleSpinBox, QSpinBox, QPushButton, QFormLayout, QWidget
@@ -9,6 +12,21 @@ from PyQt6.QtCore import Qt
 
 from ui.theme import ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED
 
+# --- ADDED: Generate temporary SVG files for the arrows to bypass QSS limitations ---
+_UP_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path fill='none' stroke='#E8EAF0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 10l4-4 4 4'/></svg>"
+_DOWN_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path fill='none' stroke='#E8EAF0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/></svg>"
+
+_tmp = tempfile.gettempdir()
+# Qt stylesheets strictly require forward slashes, even on Windows
+_UP_PATH = os.path.join(_tmp, "storm_spin_up.svg").replace('\\', '/')
+_DOWN_PATH = os.path.join(_tmp, "storm_spin_down.svg").replace('\\', '/')
+
+try:
+    with open(_UP_PATH, "w") as f: f.write(_UP_SVG)
+    with open(_DOWN_PATH, "w") as f: f.write(_DOWN_SVG)
+except Exception:
+    pass  # fail silently if the OS strictly locks the temp dir
+# -----------------------------------------------------------------------------------
 
 def _dialog_style() -> str:
     return f"""
@@ -30,15 +48,49 @@ def _dialog_style() -> str:
         QDoubleSpinBox:focus, QSpinBox:focus {{
             border-color: {ACCENT};
         }}
-        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
-        QSpinBox::up-button, QSpinBox::down-button {{
+        
+        /* 1. Explicitly position the up button */
+        QDoubleSpinBox::up-button, QSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
             width: 18px;
             border-left: 1px solid #2E2E4E;
             background-color: {BG_ELEVATED};
+            border-top-right-radius: 5px;
         }}
-        QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
-        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+        
+        /* 2. Explicitly position the down button */
+        QDoubleSpinBox::down-button, QSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: 18px;
+            border-left: 1px solid #2E2E4E;
+            background-color: {BG_ELEVATED};
+            border-bottom-right-radius: 5px;
+        }}
+        
+        QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+        QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
             background-color: #252540;
+        }}
+        
+        /* 3. Point the arrows to the generated physical files */
+        QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
+            image: url("{_UP_PATH}");
+            width: 10px;
+            height: 10px;
+        }}
+        
+        QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
+            image: url("{_DOWN_PATH}");
+            width: 10px;
+            height: 10px;
+        }}
+        
+        /* 4. Click effect */
+        QDoubleSpinBox::up-button:pressed::up-arrow, QSpinBox::up-button:pressed::up-arrow,
+        QDoubleSpinBox::down-button:pressed::down-arrow, QSpinBox::down-button:pressed::down-arrow {{
+            margin: 1px 0 -1px 0;
         }}
     """
 
