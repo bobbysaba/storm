@@ -115,6 +115,28 @@ def _detect_gps_port(baud: int) -> str | None:
     return None
 
 
+def _extract_fix(msg) -> tuple[float, float] | None:
+    """
+    Return (lat, lon) from a GGA or RMC message only when a valid fix is
+    confirmed.  Returns None if the fix quality is zero/void or coordinates
+    are absent.
+
+    GGA: gps_qual 0 = no fix, 1 = GPS, 2 = DGPS, etc.
+    RMC: status 'A' = active (valid), 'V' = void (no fix).
+    """
+    import pynmea2
+
+    if isinstance(msg, pynmea2.types.talker.GGA):
+        if msg.gps_qual is not None and msg.gps_qual > 0 and msg.latitude is not None:
+            return float(msg.latitude), float(msg.longitude)
+
+    elif isinstance(msg, pynmea2.types.talker.RMC):
+        if msg.status == "A" and msg.latitude is not None:
+            return float(msg.latitude), float(msg.longitude)
+
+    return None
+
+
 class GPSReader(QObject):
     """
     Reads NMEA 0183 from a serial port and emits obs_ready once per
@@ -197,12 +219,19 @@ class GPSReader(QObject):
                         except pynmea2.ParseError:
                             continue
 
+                        log.debug("GPSReader: parsed %s lat=%r lon=%r",
+                                  type(msg).__name__,
+                                  getattr(msg, "latitude", "N/A"),
+                                  getattr(msg, "longitude", "N/A"))
+
                         # accept both GGA (fix + altitude) and RMC (fix + speed/heading)
                         if isinstance(msg, (pynmea2.types.talker.GGA,
                                             pynmea2.types.talker.RMC)):
-                            if msg.latitude and msg.longitude:
-                                lat = float(msg.latitude)
-                                lon = float(msg.longitude)
+                            fix = _extract_fix(msg)
+                            if fix:
+                                lat, lon = fix
+                            else:
+                                log.debug("GPSReader: sentence received but no valid fix yet")
 
                         now = time.monotonic()
                         if lat is not None and (now - last_emit) >= GPS_EMIT_INTERVAL:
