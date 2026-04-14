@@ -2161,9 +2161,13 @@ class MainWindow(QMainWindow):
     def _on_radar_toggled(self, enabled: bool):
         self._set_layer_active("radar", enabled)
         if enabled:
+            # Bump generation so any renders queued before this toggle-on are
+            # treated as stale and dropped — they carry the wrong generation and
+            # would be ignored anyway, but being explicit prevents the deferred
+            # clear (scheduled at toggle-off) from accidentally firing mid-session.
+            self._render_generation += 1
             self._radar_fetcher.start()
             self._radar_fetcher.fetch_now()
-            # Show fetching status
             site = self.radar_controls.current_site()
             self.status_msg_label.setText(f"Fetching {site} radar data…")
             self._layout_overlays()
@@ -2182,15 +2186,36 @@ class MainWindow(QMainWindow):
             self._deferred_inject_result = None
             self._inject_throttle_timer.stop()
             self._last_inject_time = 0.0
-            
             self._radar_fetcher.reset_history()
             self._radar_fetcher.stop()
-            # hide() is much lighter than clear(): avoids expensive removeLayer/removeSource
-            # cycle in MapLibre that can block the renderer for a short time.  The next
-            # inject() will use updateImage() to restore the overlay quickly.
-            self._radar_overlay.hide()
+            # Immediately hide the overlay (opacity=0).  setPaintProperty is a
+            # lightweight paint-only change — it does NOT sync with any in-flight
+            # PNG decode, so it returns instantly and the overlay vanishes visually.
+            # hide(transient=False) also swaps the scheme handler to a tiny
+            # transparent PNG so any pending storm:// fetch resolves cheaply.
+            self._radar_overlay.hide(transient=False)
             self.status_msg_label.setText("")
             self._layout_overlays()
+            # Defer the actual removeLayer + removeSource until the renderer has
+            # had time to finish whatever PNG decode was in-flight at toggle-off.
+            # Calling removeSource while a large PNG decode is in progress blocks
+            # the Chromium renderer for the full decode duration (up to ~8s).
+            # 400ms is conservative; the decode typically completes in <200ms once
+            # the scheme handler is serving the tiny transparent PNG above.
+            # The generation guard ensures this no-ops if the user re-enables radar
+            # before the timer fires.
+            _guard_gen = self._render_generation
+            QTimer.singleShot(400, lambda: self._deferred_radar_clear(_guard_gen))
+
+    def _deferred_radar_clear(self, guard_gen: int):
+        """Remove the MapLibre radar source/layer after the deferred delay.
+
+        Skipped if the render generation changed since scheduling — meaning the
+        user toggled radar back on (which bumps the generation) before the timer
+        fired.
+        """
+        if self._render_generation == guard_gen:
+            self._radar_overlay.clear()
 
     def _on_hazard_error(self, msg: str):
         self.status_msg_label.setText(f"Hazards: {msg}")

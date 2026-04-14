@@ -837,7 +837,7 @@ class LaunchDialog(QDialog):
         root.addWidget(div2)
         root.addSpacing(10)
 
-        self._data_toggle_btn = QPushButton("▸  DATA ON LAUNCH")
+        self._data_toggle_btn = QPushButton("▸  DATA CONFIGURATION")
         self._data_toggle_btn.setObjectName("dataToggleBtn")
         self._data_toggle_btn.setFixedHeight(18)
         self._data_toggle_btn.clicked.connect(self._toggle_data_section)

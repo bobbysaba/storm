@@ -545,85 +545,57 @@ class RadarOverlay(QObject):
         log.info("[RadarOverlay] updated with %s (grid=%d)", scan.label, self._grid_size)
 
     def clear(self):
-        """remove the radar overlay from the map."""
-        self._map.run_js(f"""
-          if (map.getLayer("{self.LAYER_ID}")) map.removeLayer("{self.LAYER_ID}");
-          if (map.getSource("{self.SOURCE_ID}")) map.removeSource("{self.SOURCE_ID}");
-        """)
+        """Visually clear the radar without destroying the MapLibre source (avoids render deadlocks)."""
+        self.hide(transient=False)
         self._active = False
         self._hidden = False
         self._current_scan = None
 
-    def hide(self):
-        """Hide the overlay without removing the MapLibre source/layer.
-
-        Much lighter than clear() — avoids the expensive removeLayer + addLayer
-        cycle that forces MapLibre to tear down and rebuild its raster rendering
-        pipeline.  The next inject() call will just use updateImage() (fast path).
-
-        Additionally, store a tiny transparent PNG in the scheme handler so any
-        in-flight renderer fetches decode a tiny image instead of a large PNG —
-        this prevents the Chromium renderer from doing expensive PNG decoding
-        work after the overlay is hidden, which can freeze the map.
+    def hide(self, transient: bool = True):
         """
-        if self._active:
-            self._map.run_js(
-                f'if(map.getLayer("{self.LAYER_ID}")) '
-                f'map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0);'
-            )
+        Hide the overlay instantly by forcing 0 opacity and pushing a 1x1 transparent PNG.
+        """
         self._hidden = True
         self._current_scan = None
 
-        # Replace the served radar PNG with a tiny transparent image so that
-        # any pending updateImage fetches will decode a trivial payload.
+        # Always force opacity 0 and inject a 1x1 PNG to clear the GPU pipeline
+        js = f"""
+        (function() {{
+            try {{
+                if (typeof map !== 'undefined') {{
+                    if (map.getLayer("{self.LAYER_ID}")) {{
+                        map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0);
+                    }}
+                    var src = map.getSource("{self.SOURCE_ID}");
+                    if (src && src.updateImage) {{
+                        var tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+                        var coords = window._radar_last_coords || [[0,0],[0,0],[0,0],[0,0]];
+                        src.updateImage({{url: tinyPng, coordinates: coords}});
+                    }}
+                }}
+            }} catch(e) {{ console.error("STORM Hide error:", e); }}
+        }})();
+        """
+        self._map.run_js(js)
+
+        # Clear the Python-side scheme handler
         try:
             scheme_handler = getattr(self._map, "scheme_handler", None)
             if scheme_handler is not None:
-                # Import here to keep top-level imports minimal; use the same
-                # tiny PNG bytes as defined in the scheme handler module.
-                try:
-                    transparent = scheme_handler.TRANSPARENT_PNG_1X1
-                except Exception:
-                    # Fallback: decode locally if constant isn't available
-                    import base64
-
-                    transparent = base64.b64decode(
-                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-                    )
-                scheme_handler.set_radar_png(transparent)
-        except Exception:
-            log.exception("failed to set transparent radar PNG in scheme handler")
-
-        # Tell the page to suspend handling of radar updateImage calls until
-        # we explicitly clear it.  This prevents any in-flight or soon-to-run
-        # updateImage() from triggering renderer-side PNG decode/upload work.
-        try:
-            self._map.run_js("window._stormRadarSuspend = true;")
+                import base64
+                tiny = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+                scheme_handler.set_radar_png(tiny)
         except Exception:
             pass
 
-        # Also immediately replace the image on the MapLibre source with a
-        # tiny inlined 1x1 transparent data URL.  This avoids a new storm://
-        # fetch (which may still race) and forces the renderer to decode a
-        # trivial payload synchronously rather than a large PNG.
-        try:
-            tiny_data = (
-                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-            )
-            js_replace = f"(function() {{ try {{ if (map.getSource(\"{self.SOURCE_ID}\")) {{ var src = map.getSource(\"{self.SOURCE_ID}\"); var coords = src && src.coordinates ? src.coordinates : null; if (!coords && window._radar_last_coords) coords = window._radar_last_coords; if (coords) {{ src.updateImage({{url: '{tiny_data}', coordinates: coords}}); console.log('[RADAR-INJECT] hid: replaced source image with tiny data URL'); }} }} }} catch(e) {{ console.error('[RADAR-INJECT] hid-replace error', e && e.message ? e.message : e); }} }})();"
-            self._map.run_js(js_replace)
-        except Exception:
-            pass
+        if transient:
+            try:
+                self._map.run_js("if (typeof window !== 'undefined') window._stormRadarSuspend = true;")
+            except Exception:
+                pass
 
     def inject(self, png_bytes: bytes, bounds: list):
-        """Inject a pre-rendered PNG (from background thread) into the map.
-        Must be called from the main thread.
-
-        Stores the PNG in the StormSchemeHandler and passes a short URL to
-        MapLibre instead of embedding the full base64 blob in runJavaScript.
-        This keeps the IPC message tiny so Chromium's renderer JS thread stays
-        free to process mouse/keyboard events during the image fetch.
-        """
+        """Inject a pre-rendered PNG into the map."""
         import time
         scheme_handler = getattr(self._map, "scheme_handler", None)
         if scheme_handler is not None:
@@ -631,13 +603,10 @@ class RadarOverlay(QObject):
             ts = int(time.monotonic() * 1000) & 0xFFFFFF  # cache-bust token
             image_url = f"storm://app/radar/overlay.png?t={ts}"
         else:
-            # SAFE_MAP_MODE — no scheme handler; fall back to data URL
+            import base64
             image_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        
         restoring = self._hidden
-        # Call into the page while _hidden is still accurate so we can skip
-        # injection entirely on the Python side without sending JS that would
-        # trigger renderer fetch/decode work.  Only clear _hidden after the
-        # attempt so a concurrent hide() correctly prevents accidental injects.
         self._inject_into_map(image_url, bounds, restore_opacity=restoring)
         self._hidden = False
         self._active = True
@@ -761,126 +730,66 @@ class RadarOverlay(QObject):
             )
 
     def _inject_into_map(self, image_url: str, bounds: list, restore_opacity: bool = False):
-        """
-        Add or update the radar image source and layer in MapLibre.
-
-        image_url may be a storm://app/radar/overlay.png?t=... URL (preferred —
-        small IPC message, browser fetches PNG asynchronously so the renderer's
-        JS thread stays free for input events) or a data: URL fallback.
-
-        MapLibre image sources expect coordinates as:
-          [[NW_lon, NW_lat], [NE_lon, NE_lat], [SE_lon, SE_lat], [SW_lon, SW_lat]]
-        """
+        """Add or update the radar image source and layer in MapLibre."""
         west, south, east, north = bounds
+        coords_js = f"[[{west},{north}], [{east},{north}], [{east},{south}], [{west},{south}]]"
 
-        coords_js = (
-            f"[[{west},{north}], [{east},{north}], [{east},{south}], [{west},{south}]]"
-        )
-
-        log.debug("injecting radar image into map (bounds %s)", bounds)
-
-        # If Python-side overlay state indicates the overlay is hidden, skip
-        # sending JS that would call updateImage(). This avoids queuing work on
-        # the renderer when the user has hidden the overlay.
         if self._hidden and not restore_opacity:
-            log.info("[RadarOverlay] skipping inject while hidden (bounds %s)", bounds)
             return
-
-        if restore_opacity:
-            restore_block = """
-              // restore opacity after hide() set it to 0 for site switch
-              if (map.getLayer("{LAYER}")) {
-                map.setPaintProperty("{LAYER}", "raster-opacity", 0.75);
-                console.log('[RADAR-INJECT] restored opacity', new Date().toISOString());
-              }"""
-            restore_block = restore_block.replace('{LAYER}', self.LAYER_ID)
-        else:
-            restore_block = ""
 
         js = f"""
         (function() {{
-          const imageUrl = "{image_url}";
-          const coords   = {coords_js};
-          // Cache the last coords so hide() can replace the image even if the
-          // source object doesn't expose coordinates at the moment of replacement.
-          try {{ window._radar_last_coords = coords; }} catch(e) {{}}
-          const restore  = {str(restore_opacity).lower()};
-
           try {{
-            // If the page has set _stormRadarSuspend, skip non-restore injects so
-            // we avoid in-flight renderer decode/upload work while hidden.
-            if (window._stormRadarSuspend && !restore) {{
-              console.log('[RADAR-INJECT] suspended — skipping inject', new Date().toISOString());
-              return;
-            }}
-            if (restore) {{
-              // Clearing suspend before restoring the overlay ensures the
-              // subsequent updateImage will be processed normally.
-              try {{ window._stormRadarSuspend = false; }} catch(e) {{}}
-            }}
+              const imageUrl = "{image_url}";
+              const coords   = {coords_js};
+              window._radar_last_coords = coords;
 
-            if (map.getSource("{self.SOURCE_ID}")) {{
-              // update existing source in-place — avoids layer flicker
-              try {{
-                console.log('[RADAR-INJECT] calling updateImage', new Date().toISOString());
-                map.getSource("{self.SOURCE_ID}").updateImage({{
-                  url: imageUrl,
-                  coordinates: coords
-                }});
-                console.log('[RADAR-INJECT] updateImage returned', new Date().toISOString());
-              }} catch(uiErr) {{
-                console.error('[RADAR-INJECT] updateImage error:', uiErr && uiErr.message ? uiErr.message : uiErr);
+              if (window._stormRadarSuspend && !{str(restore_opacity).lower()}) {{
+                  return;
               }}
+              window._stormRadarSuspend = false;
 
-              {restore_block}
-            }} else {{
-              // first time — add source and layer
-              console.log('[RADAR-INJECT] adding source', new Date().toISOString());
-              map.addSource("{self.SOURCE_ID}", {{
-                type: "image",
-                url: imageUrl,
-                coordinates: coords
-              }});
-
-              try {{
-                map.addLayer({{
-                  id: "{self.LAYER_ID}",
-                  type: "raster",
-                  source: "{self.SOURCE_ID}",
-                  paint: {{
-                    "raster-opacity": 0.75,
-                    "raster-fade-duration": 0
+              if (typeof map !== 'undefined') {{
+                  if (map.getSource("{self.SOURCE_ID}")) {{
+                      map.getSource("{self.SOURCE_ID}").updateImage({{
+                          url: imageUrl,
+                          coordinates: coords
+                      }});
+                      // Always restore opacity if we are actively injecting an image
+                      if (map.getLayer("{self.LAYER_ID}")) {{
+                          map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0.75);
+                      }}
+                  }} else {{
+                      map.addSource("{self.SOURCE_ID}", {{
+                          type: "image",
+                          url: imageUrl,
+                          coordinates: coords
+                      }});
+                      try {{
+                          map.addLayer({{
+                              id: "{self.LAYER_ID}",
+                              type: "raster",
+                              source: "{self.SOURCE_ID}",
+                              paint: {{
+                                  "raster-opacity": 0.75,
+                                  "raster-fade-duration": 0
+                              }}
+                          }}, "road-unpaved");
+                      }} catch(e) {{
+                          // fallback if beforeId doesn't exist
+                          map.addLayer({{
+                              id: "{self.LAYER_ID}",
+                              type: "raster",
+                              source: "{self.SOURCE_ID}",
+                              paint: {{
+                                  "raster-opacity": 0.75,
+                                  "raster-fade-duration": 0
+                              }}
+                          }});
+                      }}
                   }}
-                }}, "road-unpaved");   // insert below road labels/roads so they stay visible
-                console.log('[RADAR-INJECT] addLayer succeeded', new Date().toISOString());
-              }} catch(layerErr) {{
-                // fallback: "road-unpaved" may not exist yet — add without beforeId
-                console.warn("[STORM] radar addLayer beforeId failed, adding on top:", layerErr.message);
-                map.addLayer({{
-                  id: "{self.LAYER_ID}",
-                  type: "raster",
-                  source: "{self.SOURCE_ID}",
-                  paint: {{
-                    "raster-opacity": 0.75,
-                    "raster-fade-duration": 0
-                  }}
-                }});
-                console.log('[RADAR-INJECT] fallback addLayer', new Date().toISOString());
               }}
-            }}
-          }} catch(e) {{
-            console.error("[STORM] radar inject error:", e.message || e);
-          }}
+          }} catch(e) {{ console.error("STORM Inject error:", e); }}
         }})();
         """
-        # Emit pre/post logs to help diagnose timing
-        try:
-            self._map.run_js(f"console.log('[RADAR-INJECT] pre-inject url_len={len(image_url)} restore={str(restore_opacity).lower()}');")
-        except Exception:
-            pass
-        self._map.run_js(js)
-        try:
-            self._map.run_js("console.log('[RADAR-INJECT] post-inject');")
-        except Exception:
-            pass
         self._map.run_js(js)
