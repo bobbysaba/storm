@@ -338,7 +338,9 @@ def build_map_html() -> str:
     window.stormRemoveStationPlot = _stormNoop;
     window.stormSetStationPlotsVisible = _stormNoop;
     window.stormAddSurfaceStationPlot = _stormNoop;
+    window.stormAddSurfaceStationPlotBatch = _stormNoop;
     window.stormRemoveSurfaceStationPlot = _stormNoop;
+    window.stormRemoveSurfaceStationPlotBatch = _stormNoop;
     window.stormSetSurfaceStationPlotsVisible = _stormNoop;
     window.stormLoadDeployLocs = _stormNoop;
     window.stormSetDeployLocsVisible = _stormNoop;
@@ -1528,7 +1530,8 @@ def build_map_html() -> str:
           'spc-tor-fill','spc-tor-sig-base',
           'spc-wind-fill','spc-wind-sig-base',
           'spc-hail-fill','spc-hail-sig-base',
-          'spc-watches-fill','spc-mds-fill','nws-warnings-fill'
+          'spc-watches-fill','spc-mds-fill','nws-warnings-fill',
+          'cwa-fill'
         ].filter(function(l) {{
           return map.getLayer(l) &&
                  map.getLayoutProperty(l, 'visibility') === 'visible';
@@ -1564,6 +1567,10 @@ def build_map_html() -> str:
             }} else if (src === 'nws-warnings') {{
               key = 'warn:' + (props.event || '') + ':' + (props.wfo || '');
               if (!_tipSeen[key]) lbl = props.prod_type || props.event || 'Warning';
+            }} else if (src === 'cwa') {{
+              var _cwaCode = props.WFO || props.CWA || props.wfo || props.cwa || '';
+              key = 'cwa:' + _cwaCode;
+              if (!_tipSeen[key] && _cwaCode) lbl = _cwaCode;
             }}
             if (key && lbl && !_tipSeen[key]) {{
               _tipSeen[key] = true;
@@ -1583,25 +1590,7 @@ def build_map_html() -> str:
             _htip.style.display = 'none';
           }}
         }} else {{
-          // No hazard layer hit — check for CWA polygon under cursor first
-          if (map.getLayer('cwa-fill') && map.getLayoutProperty('cwa-fill','visibility') === 'visible') {{
-            var cwaHits = map.queryRenderedFeatures(e.point, {{layers: ['cwa-fill']}}) || [];
-            if (cwaHits.length > 0) {{
-              var props = cwaHits[0].properties || {{}};
-              var wfo = props.WFO || props.CWA || props.wfo || props.cwa || '';
-              if (wfo) {{
-                _htip.textContent = wfo;
-                var _mx = e.originalEvent.clientX;
-                var _my = e.originalEvent.clientY;
-                var _mc = map.getContainer().getBoundingClientRect();
-                _htip.style.left = (_mx - _mc.left + 14) + 'px';
-                _htip.style.top  = (_my - _mc.top  - 10) + 'px';
-                _htip.style.display = 'block';
-                return;
-              }}
-            }}
-          }}
-          // No hazard layer hit — check for a nearby surface station.
+          // No hazard or CWA hit — check for a nearby surface station.
           var _stLabel = null;
           if (window._stormSurfacePlotsVisible) {{
             var _reg = window._stormSurfaceRegistry || {{}};
@@ -1709,7 +1698,7 @@ def build_map_html() -> str:
         }}
       }}
       // Check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
-      var spcClickLayers = ['spc-cat-fill', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) {{ return map.getLayer(l); }});
+      var spcClickLayers = ['spc-cat-fill', 'spc-tor-fill', 'spc-wind-fill', 'spc-hail-fill', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) {{ return map.getLayer(l); }});
       if (spcClickLayers.length > 0) {{
         var spcHits = map.queryRenderedFeatures(e.point, {{layers: spcClickLayers}});
         if (spcHits.length > 0) {{
@@ -1720,9 +1709,12 @@ def build_map_html() -> str:
             var src = hit.source;
             var props = hit.properties || {{}};
             var key;
-            if (src === 'spc-cat')          key = 'spc-cat';
-            else if (src === 'spc-mds')     key = 'spc-mds:'      + (props.name      || '');
-            else if (src === 'spc-watches') key = 'spc-watches:'   + (props.watch_num || props.event || '');
+            if (src === 'spc-cat')           key = 'spc-cat';
+            else if (src === 'spc-tor')      key = 'spc-tor';
+            else if (src === 'spc-wind')     key = 'spc-wind';
+            else if (src === 'spc-hail')     key = 'spc-hail';
+            else if (src === 'spc-mds')      key = 'spc-mds:'      + (props.name      || '');
+            else if (src === 'spc-watches')  key = 'spc-watches:'   + (props.watch_num || props.event || '');
             else if (src === 'nws-warnings') key = 'nws-warnings:' + (props.event     || '') + ':' + (props.wfo || '');
             else return;
             if (!_clickSeen[key]) {{
@@ -2421,6 +2413,58 @@ def build_map_html() -> str:
       map.getCanvas().style.cursor = active ? 'grab' : '';
     }};
 
+    // ASOS bbox selection: click-drag a rectangle on the map and call bridge.on_asos_bbox(west,south,east,north)
+    window.stormSetAsosBoxMode = function(active) {{
+      window._stormAsosActive = !!active;
+      window._stormAsosStart = null;
+      var fc = document.getElementById('front-canvas');
+      if (!fc) return;
+      var ctx = fc.getContext('2d');
+      function _clear() {{ ctx.clearRect(0, 0, fc.width, fc.height); }}
+
+      if (active) {{
+        map.dragPan.disable();
+        map.getCanvas().style.cursor = 'crosshair';
+        map.on('mousedown', window._stormAsosMouseDown = function(e) {{
+          window._stormAsosStart = [e.lngLat.lng, e.lngLat.lat];
+          map.on('mousemove', window._stormAsosMouseMove = function(ev) {{
+            if (!window._stormAsosStart) return;
+            var startPt = map.project([window._stormAsosStart[0], window._stormAsosStart[1]]);
+            var curPt = map.project([ev.lngLat.lng, ev.lngLat.lat]);
+            var dpr = window.devicePixelRatio || 1;
+            _clear();
+            ctx.save();
+            ctx.setLineDash([6*dpr,4*dpr]);
+            ctx.strokeStyle = '#39D98A';
+            ctx.lineWidth = 2 * dpr;
+            ctx.strokeRect(startPt.x * dpr, startPt.y * dpr, (curPt.x - startPt.x) * dpr, (curPt.y - startPt.y) * dpr);
+            ctx.restore();
+          }});
+
+          map.once('mouseup', function(up) {{
+            map.off('mousemove', window._stormAsosMouseMove);
+            var s = window._stormAsosStart;
+            var e = [up.lngLat.lng, up.lngLat.lat];
+            _clear();
+            map.dragPan.enable();
+            map.getCanvas().style.cursor = '';
+            window._stormAsosStart = null;
+            var west = Math.min(s[0], e[0]), east = Math.max(s[0], e[0]);
+            var south = Math.min(s[1], e[1]), north = Math.max(s[1], e[1]);
+            if (bridge && bridge.on_asos_bbox) {{
+              try {{ bridge.on_asos_bbox(west, south, east, north); }} catch(ex) {{ console.log('ASOS bbox bridge error', ex); }}
+            }}
+          }});
+        }});
+      }} else {{
+        // disable mode and cleanup
+        map.getCanvas().style.cursor = '';
+        map.dragPan.enable();
+        _clear();
+        try {{ map.off('mousedown', window._stormAsosMouseDown); map.off('mousemove', window._stormAsosMouseMove); }} catch(e) {{}}
+      }}
+    }};
+
     // ── Station Plots ─────────────────────────────────────────────────────
     window._stormStationPlots = {{}};
     window._stormStationPlotsVisible = true;
@@ -2459,7 +2503,7 @@ def build_map_html() -> str:
       }});
     }};
 
-    window.stormAddSurfaceStationPlot = function(id, lat, lon, pngB64, name) {{
+    window.stormAddSurfaceStationPlot = function(id, lat, lon, name) {{
       if (window._stormSurfacePlots[id]) {{
         window._stormSurfacePlots[id].remove();
         delete window._stormSurfacePlots[id];
@@ -2473,7 +2517,8 @@ def build_map_html() -> str:
       if (!window._stormSurfacePlotsVisible) el.style.display = 'none';
 
       const img = document.createElement('img');
-      img.src = 'data:image/png;base64,' + pngB64;
+      // Fetch PNG from the scheme handler — no base64 in JS at all.
+      img.src = 'storm://app/plots/' + encodeURIComponent(id) + '.png';
       // display:block removes inline baseline gap so the hit-target margin
       // math below is exact: img occupies exactly 0..135px vertically.
       img.style.cssText = 'display:block;width:135px;height:135px;pointer-events:none;';
@@ -2511,6 +2556,28 @@ def build_map_html() -> str:
         delete window._stormSurfacePlots[id];
       }}
       delete window._stormSurfaceRegistry[id];
+    }};
+
+    // Batch-add: add stations in rAF chunks of 25 so the browser stays
+    // responsive while potentially hundreds of ASOS markers are inserted.
+    // Items are {{id, lat, lon, name}} — no base64; PNGs fetched via storm://app/plots/.
+    window.stormAddSurfaceStationPlotBatch = function(items) {{
+      var i = 0;
+      var CHUNK = 25;
+      function addChunk() {{
+        var end = Math.min(i + CHUNK, items.length);
+        for (; i < end; i++) {{
+          var d = items[i];
+          window.stormAddSurfaceStationPlot(d.id, d.lat, d.lon, d.name);
+        }}
+        if (i < items.length) requestAnimationFrame(addChunk);
+      }}
+      requestAnimationFrame(addChunk);
+    }};
+
+    // Batch-remove: synchronous, removals are cheap DOM ops.
+    window.stormRemoveSurfaceStationPlotBatch = function(ids) {{
+      ids.forEach(function(id) {{ window.stormRemoveSurfaceStationPlot(id); }});
     }};
 
     window.stormSetSurfaceStationPlotsVisible = function(visible) {{
@@ -3341,6 +3408,7 @@ class MapBridge(QObject):
     radar_station_clicked = pyqtSignal(str)
     sounding_clicked             = pyqtSignal(float, float)
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
+    asos_bbox_selected = pyqtSignal(float, float, float, float)
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
     annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
@@ -3421,6 +3489,14 @@ class MapBridge(QObject):
     def on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
         self.obs_sounding_station_clicked.emit(station_id, name, lat, lon, elev)
 
+    @pyqtSlot(float, float, float, float)
+    def on_asos_bbox(self, west: float, south: float, east: float, north: float):
+        """Called from JS when the user finishes drawing an ASOS bbox."""
+        try:
+            self.asos_bbox_selected.emit(west, south, east, north)
+        except Exception:
+            pass
+
     @pyqtSlot()
     def on_user_drag(self):
         self.user_dragged.emit()
@@ -3455,8 +3531,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     radar_station_clicked = pyqtSignal(str)
     sounding_clicked             = pyqtSignal(float, float)
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
+    asos_bbox_selected    = pyqtSignal(float, float, float, float)  # west, south, east, north
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
+    cwa_loaded            = pyqtSignal()
+    _cwa_parsed           = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3512,6 +3591,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
         self.bridge.sounding_clicked.connect(self.sounding_clicked)
         self.bridge.obs_sounding_station_clicked.connect(self.obs_sounding_station_clicked)
+        self.bridge.asos_bbox_selected.connect(self.asos_bbox_selected)
         self.bridge.user_dragged.connect(self.user_dragged)
         self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
 
@@ -3521,6 +3601,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         # stormAddAnnotation etc. are guaranteed to be the real functions.
         self._map_ready = False
         self._js_queue: list[str] = []
+        self._cwa_parsed.connect(self._on_cwa_parsed)
         self.bridge.map_loaded.connect(self._on_map_loaded_from_js)
 
         QTimer.singleShot(0, self._load_map)
@@ -3691,8 +3772,11 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
         shp_base may be a basename (without extension) or a full .shp path. If
         omitted, defaults to the bundled cwa_shp/w_16ap26 shapefile.
+
+        Parsing runs on a background thread; cwa_loaded is emitted on the main
+        thread when the data is visible on the map.
         """
-        import os, struct, json
+        import os, struct, threading as _threading
 
         if shp_base is None:
             base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'cwa_shp', 'w_16ap26'))
@@ -3701,112 +3785,119 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         shp_path = base if base.lower().endswith('.shp') else base + '.shp'
         dbf_path = shp_path[:-4] + '.dbf'
 
-        try:
-            with open(shp_path, 'rb') as f:
-                shp_data = f.read()
-            with open(dbf_path, 'rb') as f:
-                dbf_data = f.read()
-        except Exception:
-            return
+        def _worker():
+            try:
+                with open(shp_path, 'rb') as f:
+                    shp_data = f.read()
+                with open(dbf_path, 'rb') as f:
+                    dbf_data = f.read()
+            except Exception:
+                return
 
-        # Minimal SHP parser (Polygon type 5) — adapted from archive fetcher.
-        def _parse_shp(data: bytes):
-            if len(data) < 100:
-                return []
-            pos = 100
-            geometries = []
-            while pos < len(data):
-                if pos + 12 > len(data):
-                    break
-                _rec_num, content_words = struct.unpack_from('>ii', data, pos)
-                pos += 8
-                content_bytes = content_words * 2
-                if content_bytes < 4 or pos + content_bytes > len(data):
-                    break
-                shape_type = struct.unpack_from('<i', data, pos)[0]
-                if shape_type == 0:
-                    geometries.append(None)
+            # Minimal SHP parser (Polygon type 5) — adapted from archive fetcher.
+            def _parse_shp(data: bytes):
+                if len(data) < 100:
+                    return []
+                pos = 100
+                geometries = []
+                while pos < len(data):
+                    if pos + 12 > len(data):
+                        break
+                    _rec_num, content_words = struct.unpack_from('>ii', data, pos)
+                    pos += 8
+                    content_bytes = content_words * 2
+                    if content_bytes < 4 or pos + content_bytes > len(data):
+                        break
+                    shape_type = struct.unpack_from('<i', data, pos)[0]
+                    if shape_type == 0:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    if shape_type != 5:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    offset = pos + 4
+                    if offset + 32 + 8 > len(data):
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    offset += 32
+                    num_parts, num_points = struct.unpack_from('<ii', data, offset)
+                    offset += 8
+                    if num_parts <= 0 or num_points <= 0:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    part_starts = list(struct.unpack_from(f'<{num_parts}i', data, offset))
+                    offset += num_parts * 4
+                    pts_raw = struct.unpack_from(f'<{num_points * 2}d', data, offset)
+                    points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+                    rings = []
+                    for idx_r, start in enumerate(part_starts):
+                        end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
+                        ring = [list(pt) for pt in points[start:end]]
+                        rings.append(ring)
+                    geometries.append({'type': 'Polygon', 'coordinates': rings})
                     pos += content_bytes
-                    continue
-                if shape_type != 5:
-                    geometries.append(None)
-                    pos += content_bytes
-                    continue
-                offset = pos + 4
-                if offset + 32 + 8 > len(data):
-                    geometries.append(None)
-                    pos += content_bytes
-                    continue
-                offset += 32
-                num_parts, num_points = struct.unpack_from('<ii', data, offset)
-                offset += 8
-                if num_parts <= 0 or num_points <= 0:
-                    geometries.append(None)
-                    pos += content_bytes
-                    continue
-                part_starts = list(struct.unpack_from(f'<{num_parts}i', data, offset))
-                offset += num_parts * 4
-                pts_raw = struct.unpack_from(f'<{num_points * 2}d', data, offset)
-                points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
-                rings = []
-                for idx_r, start in enumerate(part_starts):
-                    end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
-                    ring = [list(pt) for pt in points[start:end]]
-                    rings.append(ring)
-                geometries.append({'type': 'Polygon', 'coordinates': rings})
-                pos += content_bytes
-            return geometries
+                return geometries
 
-        # Minimal DBF parser — adapted from archive fetcher.
-        def _parse_dbf(data: bytes):
-            if len(data) < 32:
-                return []
-            num_records = struct.unpack_from('<I', data, 4)[0]
-            header_bytes = struct.unpack_from('<H', data, 8)[0]
-            record_bytes = struct.unpack_from('<H', data, 10)[0]
-            fields = []
-            pos = 32
-            while pos < header_bytes - 1 and data[pos] != 0x0D:
-                raw_name = data[pos:pos + 11]
-                name = raw_name.split(b"\x00")[0].decode('ascii', errors='replace').strip()
-                ftype = chr(data[pos + 11])
-                flen = data[pos + 16]
-                fields.append((name, ftype, flen))
-                pos += 32
-            records = []
-            rec_pos = header_bytes
-            for _ in range(num_records):
-                if rec_pos + record_bytes > len(data):
-                    break
-                deletion_flag = data[rec_pos]
-                if deletion_flag == 0x2A:  # '*' = deleted
+            # Minimal DBF parser — adapted from archive fetcher.
+            def _parse_dbf(data: bytes):
+                if len(data) < 32:
+                    return []
+                num_records = struct.unpack_from('<I', data, 4)[0]
+                header_bytes = struct.unpack_from('<H', data, 8)[0]
+                record_bytes = struct.unpack_from('<H', data, 10)[0]
+                fields = []
+                pos = 32
+                while pos < header_bytes - 1 and data[pos] != 0x0D:
+                    raw_name = data[pos:pos + 11]
+                    name = raw_name.split(b"\x00")[0].decode('ascii', errors='replace').strip()
+                    ftype = chr(data[pos + 11])
+                    flen = data[pos + 16]
+                    fields.append((name, ftype, flen))
+                    pos += 32
+                records = []
+                rec_pos = header_bytes
+                for _ in range(num_records):
+                    if rec_pos + record_bytes > len(data):
+                        break
+                    deletion_flag = data[rec_pos]
+                    if deletion_flag == 0x2A:  # '*' = deleted
+                        rec_pos += record_bytes
+                        continue
+                    field_pos = rec_pos + 1
+                    rec = {}
+                    for name, ftype, flen in fields:
+                        raw = data[field_pos:field_pos + flen].decode('ascii', errors='replace').strip()
+                        if ftype == 'N':
+                            try:
+                                rec[name] = float(raw) if raw else None
+                            except ValueError:
+                                rec[name] = None
+                        else:
+                            rec[name] = raw
+                        field_pos += flen
+                    records.append(rec)
                     rec_pos += record_bytes
-                    continue
-                field_pos = rec_pos + 1
-                rec = {}
-                for name, ftype, flen in fields:
-                    raw = data[field_pos:field_pos + flen].decode('ascii', errors='replace').strip()
-                    if ftype == 'N':
-                        try:
-                            rec[name] = float(raw) if raw else None
-                        except ValueError:
-                            rec[name] = None
-                    else:
-                        rec[name] = raw
-                    field_pos += flen
-                records.append(rec)
-                rec_pos += record_bytes
-            return records
+                return records
 
-        geoms = _parse_shp(shp_data)
-        recs = _parse_dbf(dbf_data)
-        features = []
-        for geom, rec in zip(geoms, recs):
-            if geom is None:
-                continue
-            features.append({'type': 'Feature', 'geometry': geom, 'properties': rec})
-        geojson = {'type': 'FeatureCollection', 'features': features}
+            geoms = _parse_shp(shp_data)
+            recs = _parse_dbf(dbf_data)
+            features = []
+            for geom, rec in zip(geoms, recs):
+                if geom is None:
+                    continue
+                features.append({'type': 'Feature', 'geometry': geom, 'properties': rec})
+            geojson = {'type': 'FeatureCollection', 'features': features}
+            self._cwa_parsed.emit(geojson)
+
+        _threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_cwa_parsed(self, geojson: dict):
         self.set_cwa_geojson(geojson)
+        self.cwa_loaded.emit()
 
     def set_route(self, geojson_str: str, dest_lon: float, dest_lat: float):
         """Draw a route polyline on the map and place a destination marker."""
@@ -3958,6 +4049,17 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_storm_cone_placement_mode(self, active: bool) -> None:
         self.run_js(f"if(window.stormSetStormConePlacementMode) stormSetStormConePlacementMode({'true' if active else 'false'});")
 
+    def set_asos_bbox_mode(self, active: bool) -> None:
+        """Toggle JS rectangle-selection mode for ASOS bbox selection."""
+        flag = 'true' if active else 'false'
+        self.run_js(f"if(window.stormSetAsosBoxMode) stormSetAsosBoxMode({flag});")
+
+    def fit_bounds(self, west: float, south: float, east: float, north: float, padding: int = 40) -> None:
+        """Fly the map to fit the given bounding box with optional padding (px)."""
+        self.run_js(
+            f"map.fitBounds([[{west},{south}],[{east},{north}]], {{padding:{padding}}});"
+        )
+
     def add_station_plot(self, vehicle_id: str, lat: float, lon: float, png_bytes: bytes) -> None:
         import base64
         b64 = base64.b64encode(png_bytes).decode("ascii")
@@ -3971,15 +4073,33 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(f"stormSetStationPlotsVisible({v});")
 
     def add_surface_station_plot(self, station_id: str, lat: float, lon: float, png_bytes: bytes, name: str = "") -> None:
-        import base64
-        b64 = base64.b64encode(png_bytes).decode("ascii")
-        import json
+        """Single-station add (used by SurfacePlotLayer directly)."""
+        import json as _json
+        self.scheme_handler.set_station_plots({station_id: png_bytes})
         self.run_js(
-            f"stormAddSurfaceStationPlot({json.dumps(station_id)}, {lat}, {lon}, '{b64}', {json.dumps(name)});"
+            f"stormAddSurfaceStationPlot({_json.dumps(station_id)}, {lat}, {lon}, {_json.dumps(name)});"
         )
 
+    def add_surface_station_plots_batch(self, items: list) -> None:
+        """Batch-add stations. items: list of (id, lat, lon, png_bytes, name).
+        PNGs are stored in the scheme handler; JS payload contains only metadata."""
+        import json as _json
+        plots = {sid: png for sid, _, _, png, _ in items}
+        self.scheme_handler.set_station_plots(plots)
+        data = [{"id": sid, "lat": lat, "lon": lon, "name": name}
+                for sid, lat, lon, _png, name in items]
+        self.run_js(f"stormAddSurfaceStationPlotBatch({_json.dumps(data)});")
+
     def remove_surface_station_plot(self, station_id: str) -> None:
+        self.scheme_handler.remove_station_plots([station_id])
         self.run_js(f"stormRemoveSurfaceStationPlot('{station_id}');")
+
+    def remove_surface_station_plots_batch(self, station_ids) -> None:
+        """Single JS call to remove many stations at once."""
+        import json as _json
+        ids = list(station_ids)
+        self.scheme_handler.remove_station_plots(ids)
+        self.run_js(f"stormRemoveSurfaceStationPlotBatch({_json.dumps(ids)});")
 
     def set_surface_station_plots_visible(self, visible: bool) -> None:
         v = "true" if visible else "false"

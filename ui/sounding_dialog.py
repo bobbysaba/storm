@@ -857,9 +857,9 @@ class SoundingDialog(QDialog):
             lm_v_kt = float(lm[1].to("knots").m)
 
             rm_spd = float(np.sqrt(rm_u_kt**2 + rm_v_kt**2))
-            rm_dir = float(np.degrees(np.arctan2(rm[0].to("m/s").m, rm[1].to("m/s").m)) % 360)
+            rm_dir = float((np.degrees(np.arctan2(rm[0].to("m/s").m, rm[1].to("m/s").m)) + 180) % 360)
             lm_spd = float(np.sqrt(lm_u_kt**2 + lm_v_kt**2))
-            lm_dir = float(np.degrees(np.arctan2(lm[0].to("m/s").m, lm[1].to("m/s").m)) % 360)
+            lm_dir = float((np.degrees(np.arctan2(lm[0].to("m/s").m, lm[1].to("m/s").m)) + 180) % 360)
 
             ax.plot(rm_u_kt, rm_v_kt, "o", color=_RM_CLR, markersize=5,
                     markeredgecolor=_FIG_BG, markeredgewidth=0.8, zorder=7)

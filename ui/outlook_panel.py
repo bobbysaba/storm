@@ -137,6 +137,9 @@ class OutlookPanel(QWidget):
             if dash != -1:
                 return title[dash + 1:].strip()
             return title[:14]
+        if t.startswith("NWS ") and "COUNTY WARNING AREA" not in t:
+            # e.g. "NWS OUN" → "NWS OUN"
+            return title[:10]
         return title[:14]
 
     def _rebuild_tabs(self):

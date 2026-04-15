@@ -23,9 +23,7 @@ class SurfacePlotLayer:
             return
 
         try:
-            png_bytes = _render(
-                obs,
-                center_color=self._obs_age_color(obs))
+            png_bytes = _render(obs, center_color=self._obs_age_color(obs, station_id))
         except Exception as exc:
             log.error("SurfacePlotLayer: render failed for %s: %s", station_id, exc, exc_info=True)
             return
@@ -45,8 +43,16 @@ class SurfacePlotLayer:
         self._map.set_surface_station_plots_visible(visible)
 
     @staticmethod
-    def _obs_age_color(obs: Observation) -> str:
+    def _obs_age_color(obs: Observation, station_id: str = "") -> str:
         age_min = max(0.0, (datetime.now(timezone.utc) - obs.timestamp).total_seconds() / 60.0)
+        if station_id.startswith("surface:asos:"):
+            # ASOS reports hourly — use wider freshness thresholds
+            if age_min <= 70.0:
+                return "#39D98A"
+            if age_min <= 90.0:
+                return "#FFD166"
+            return "#E53935"
+        # OK Mesonet / WTM report every 5 min
         if age_min <= 5.0:
             return "#39D98A"
         if age_min <= 10.0:

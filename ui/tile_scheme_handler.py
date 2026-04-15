@@ -63,11 +63,26 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         # resource-loader thread (via requestStarted → _serve_radar_png).
         self._radar_png_lock  = threading.Lock()
         self._radar_png_bytes = b""
+        # In-memory store for station plot PNGs — keyed by station id.
+        # storm://app/plots/<id>.png  →  png bytes
+        self._plots_lock = threading.Lock()
+        self._plots: dict[str, bytes] = {}
 
     def set_radar_png(self, data: bytes) -> None:
         """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
         with self._radar_png_lock:
             self._radar_png_bytes = data
+
+    def set_station_plots(self, plots: dict[str, bytes]) -> None:
+        """Bulk-update the station plot store.  Thread-safe; called from any thread."""
+        with self._plots_lock:
+            self._plots.update(plots)
+
+    def remove_station_plots(self, ids) -> None:
+        """Remove station plots by id.  Thread-safe; called from any thread."""
+        with self._plots_lock:
+            for sid in ids:
+                self._plots.pop(sid, None)
 
     def requestStarted(self, job: QWebEngineUrlRequestJob):
         path = job.requestUrl().path()
@@ -83,6 +98,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_tile(job, path)
         elif path.startswith("/radar/overlay.png"):
             self._serve_radar_png(job)
+        elif path.startswith("/plots/"):
+            self._serve_station_plot(job, path[len("/plots/"):])
         else:
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
 
@@ -160,6 +177,18 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         with self._radar_png_lock:
             data = self._radar_png_bytes
         if not data:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, b"image/png", data)
+
+    # ── Station plot PNGs ─────────────────────────────────────────────────────
+
+    def _serve_station_plot(self, job: QWebEngineUrlRequestJob, filename: str):
+        # filename is e.g. "surface:asos:OKC.png" — strip the .png suffix to get the id
+        sid = filename[:-4] if filename.endswith(".png") else filename
+        with self._plots_lock:
+            data = self._plots.get(sid)
+        if data is None:
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
             return
         self._reply(job, b"image/png", data)

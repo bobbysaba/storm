@@ -842,20 +842,6 @@ class MainWindow(QMainWindow):
             self._init_radar()
         self._init_hazards()
 
-        # Load the CWA shapefile into the map and enable it by default.
-        # Safe to call even if the map isn't fully painted yet — MapWidget queues JS until ready.
-        try:
-            if not self._cwa_loaded:
-                self.map_widget.load_cwa_shapefile()
-                self._cwa_loaded = True
-                # Reflect default visible state in the hazard controls
-                try:
-                    self.hazard_controls._btn_cwa.setChecked(False)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
         self._init_satellite()
         self._init_surface_obs()
         self._apply_launch_prefs()
@@ -866,21 +852,12 @@ class MainWindow(QMainWindow):
             self.hazard_controls._btn_outlook.setChecked(True)
         if self._launch_auto_nws:
             self.hazard_controls._btn_nws_warnings.setChecked(True)
-        # Auto-enable radar by default (can be overridden by launch dialog preference)
-        if not self._disable_radar and hasattr(self, "_radar_fetcher"):
-            if self._launch_auto_radar:
-                # User explicitly enabled radar in launch dialog
-                self.radar_controls._chk_show_data.blockSignals(True)
-                self.radar_controls._chk_show_data.setChecked(True)
-                self.radar_controls._chk_show_data.blockSignals(False)
-                self._auto_start_radar()
-                self.btn_radar.setChecked(True)
-            else:
-                # Default: auto-enable radar without opening the drawer
-                self.radar_controls._chk_show_data.blockSignals(True)
-                self.radar_controls._chk_show_data.setChecked(True)
-                self.radar_controls._chk_show_data.blockSignals(False)
-                self._auto_start_radar()
+        if not self._disable_radar and hasattr(self, "_radar_fetcher") and self._launch_auto_radar:
+            self.radar_controls._chk_show_data.blockSignals(True)
+            self.radar_controls._chk_show_data.setChecked(True)
+            self.radar_controls._chk_show_data.blockSignals(False)
+            self._auto_start_radar()
+            self.btn_radar.setChecked(True)
         if self._launch_auto_obs_ok:
             self.surface_controls._btn_ok.setChecked(True)
         if self._launch_auto_obs_wtm:
@@ -1971,7 +1948,6 @@ class MainWindow(QMainWindow):
         self.surface_controls.wtm_toggled.connect(
             lambda v: self._set_layer_active("wtm", v)
         )
-
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
         self._surface_fetcher.status_updated.connect(self.status_msg_label.setText)
@@ -1983,18 +1959,78 @@ class MainWindow(QMainWindow):
         ))
 
     def _on_surface_observations_updated(self, items: list[dict]):
-        incoming: set[str] = set()
-        for item in items:
-            obs = item["obs"]
-            station_id = item["id"]
-            incoming.add(station_id)
-            self._surface_layer.update(
-                station_id, obs.lat, obs.lon, obs, name=item.get("name", station_id)
-            )
-
-        for station_id in self._surface_station_ids - incoming:
-            self._surface_layer.remove(station_id)
+        incoming: set[str] = {item["id"] for item in items}
+        gone = self._surface_station_ids - incoming
         self._surface_station_ids = incoming
+
+        layer      = self._surface_layer
+        map_widget = self.map_widget
+
+        class RenderSignals(QObject):
+            ready = pyqtSignal(list, set)   # (rendered_rows, ids_to_remove)
+
+        signals = RenderSignals()
+
+        def _push(rendered_data, ids_to_remove):
+            # Remove stale stations in one JS call
+            if ids_to_remove:
+                for sid in ids_to_remove:
+                    layer._cache.pop(sid, None)
+                map_widget.remove_surface_station_plots_batch(ids_to_remove)
+
+            if not rendered_data:
+                return
+
+            # Store PNG bytes in scheme handler + send tiny metadata-only JS payload
+            batch = []
+            for sid, lat, lon, fp, png, name in rendered_data:
+                layer._cache[sid] = (fp, png)
+                batch.append((sid, lat, lon, png, name))
+            map_widget.add_surface_station_plots_batch(batch)
+
+        # CRITICAL: Ensure the signal is routed to the main thread
+        signals.ready.connect(_push, Qt.ConnectionType.QueuedConnection)
+
+        def _render_worker():
+            from ui.station_plot_layer import _obs_fingerprint, _render
+            import time
+
+            _gone_to_emit = gone
+
+            # If there's nothing to render but stations to remove, clear them out
+            if not items and _gone_to_emit:
+                signals.ready.emit([], _gone_to_emit)
+                return
+
+            rendered_chunk = []
+            
+            for i, item in enumerate(items):
+                obs  = item["obs"]
+                sid  = item["id"]
+                name = item.get("name", sid)
+                fp   = _obs_fingerprint(obs)
+                cached = layer._cache.get(sid)
+                
+                if cached and cached[0] == fp:
+                    continue
+                    
+                try:
+                    color = layer._obs_age_color(obs, sid)
+                    png   = _render(obs, center_color=color)
+                    rendered_chunk.append((sid, obs.lat, obs.lon, fp, png, name))
+                except Exception as exc:
+                    log.error("surface render failed for %s: %s", sid, exc)
+                
+                # Emit in chunks of 25 to keep the UI updating smoothly
+                if len(rendered_chunk) >= 25 or i == len(items) - 1:
+                    signals.ready.emit(rendered_chunk, _gone_to_emit)
+                    rendered_chunk = []
+                    _gone_to_emit = set()  # Only emit the 'gone' list on the very first chunk
+                    
+                    # Aggressively yield the GIL to let your OS/RAM breathe!
+                    time.sleep(0.05)
+
+        threading.Thread(target=_render_worker, daemon=True).start()
 
     def _on_surface_error(self, msg: str):
         self.status_msg_label.setText(f"Surface: {msg}")
@@ -2368,7 +2404,7 @@ class MainWindow(QMainWindow):
                 if self._archive and hasattr(self, "_time_ctrl") else None
             )
 
-            if source == "spc-cat":
+            if source in ("spc-cat", "spc-tor", "spc-wind", "spc-hail"):
                 fetch_targets.append(("DAY 1 CONVECTIVE OUTLOOK", "swo", _archive_ts))
             elif source == "spc-mds":
                 name = str(props.get("name", "")).strip()
@@ -2600,16 +2636,25 @@ class MainWindow(QMainWindow):
     def _on_cwa_toggled(self, enabled: bool):
         """Toggle the CWA overlay visibility and mark the layer active.
 
-        If the shapefile hasn't been loaded yet, attempt to load it first.
+        If the shapefile hasn't been loaded yet, kick off the background load
+        and show a status message until cwa_loaded fires.
         """
         self._set_layer_active("cwa", enabled)
         if enabled and not self._cwa_loaded:
-            try:
-                self.map_widget.load_cwa_shapefile()
-                self._cwa_loaded = True
-            except Exception:
-                pass
-        self.map_widget.set_cwa_visible(enabled)
+            self.status_msg_label.setText("Loading CWA boundaries…")
+            self.map_widget.cwa_loaded.connect(self._on_cwa_load_complete)
+            self.map_widget.load_cwa_shapefile()
+        else:
+            self.map_widget.set_cwa_visible(enabled)
+
+    def _on_cwa_load_complete(self):
+        try:
+            self.map_widget.cwa_loaded.disconnect(self._on_cwa_load_complete)
+        except Exception:
+            pass
+        self._cwa_loaded = True
+        self.map_widget.set_cwa_visible(True)
+        self.status_msg_label.setText("")
 
     def _on_radar_site_changed(self, site: str):
         # increment generation so any in-flight decodes/renders for old site are discarded
@@ -2736,6 +2781,26 @@ class MainWindow(QMainWindow):
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
         self._sounding_fetcher.fetch(lat, lon)
+
+    def _on_asos_toggled(self, enabled: bool):
+        """Enable/disable ASOS; only enter draw mode if no bbox has been set yet."""
+        if enabled and self._surface_fetcher._asos_bbox is None:
+            self.map_widget.set_asos_bbox_mode(True)
+        elif not enabled:
+            self.map_widget.set_asos_bbox_mode(False)
+
+    def _on_asos_bbox_selected(self, west: float, south: float, east: float, north: float):
+        """Triggered when user finishes an ASOS bbox selection on the map."""
+        self.status_msg_label.setText("Fetching ASOS observations…")
+        # Exit drawing mode but keep the ASOS button checked (auto-refresh stays active)
+        self.map_widget.set_asos_bbox_mode(False)
+        # Fly to the selected bbox so the user can see the results
+        self.map_widget.fit_bounds(west, south, east, north)
+        try:
+            self._surface_fetcher.fetch_asos_bbox(west, south, east, north)
+        except Exception as exc:
+            log.error("ASOS fetch failed to start: %s", exc, exc_info=True)
+            self.status_msg_label.setText(f"ASOS fetch error: {exc}")
 
     def _on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
         self.status_msg_label.setText(f"Fetching OBS sounding {station_id}…")
@@ -3525,6 +3590,12 @@ class MainWindow(QMainWindow):
         self._storm_cone_sync.cone_received.connect(self._recv_remote_storm_cone)
         self._storm_cone_sync.cone_deleted.connect(self._recv_remote_storm_cone_deleted)
 
+        # Auto-expire cones older than 1 hour (checked every 60 seconds).
+        self._cone_expire_timer = QTimer(self)
+        self._cone_expire_timer.setInterval(60_000)
+        self._cone_expire_timer.timeout.connect(self._expire_storm_cones)
+        self._cone_expire_timer.start()
+
     def _on_storm_cone_clicked(self, cone_id: str):
         cone = self._storm_cones.get(cone_id)
         if cone is None:
@@ -3541,6 +3612,7 @@ class MainWindow(QMainWindow):
             elif dlg.action() == "save":
                 cone.speed_kts = dlg.speed_kts()
                 cone.heading = dlg.heading()
+                cone.created_at = datetime.now(timezone.utc)
                 self._update_storm_cone(cone)
             elif dlg.action() == "move":
                 self._moving_cone_id = cone_id
@@ -3564,6 +3636,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == StormConeMoveConfirmDialog.DialogCode.Accepted:
             cone.lat = lat
             cone.lon = lon
+            cone.created_at = datetime.now(timezone.utc)
         elif self._moving_cone_original_location is not None:
             cone.lat, cone.lon = self._moving_cone_original_location
         self._moving_cone_original_location = None
@@ -3626,6 +3699,29 @@ class MainWindow(QMainWindow):
         self.map_widget.remove_storm_cone(cone_id)
         self._refresh_storm_cone_layer()
         log.info("remote storm cone deleted: %s", cone_id)
+
+    def _expire_storm_cones(self):
+        """Remove any storm cone whose created_at is more than 1 hour ago.
+
+        Called every 60 s by _cone_expire_timer.  Expired cones are silently
+        removed from the map and dict — no MQTT delete is published, because
+        the broker's own 1-hour message-expiry will have already purged the
+        retained message on the broker side.
+        """
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=1)
+        expired = [
+            cone_id
+            for cone_id, cone in list(self._storm_cones.items())
+            if cone.created_at < cutoff
+        ]
+        for cone_id in expired:
+            self._storm_cones.pop(cone_id, None)
+            self.map_widget.remove_storm_cone(cone_id)
+            log.info("storm cone auto-expired (>1 h): %s", cone_id)
+        if expired:
+            self._refresh_storm_cone_layer()
 
     # ── Distance Measure ──────────────────────────────────────────────────────
 
