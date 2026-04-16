@@ -48,6 +48,8 @@ class DrawingAnnotation:
         creator,
         created_at,
         flipped=False,
+        color=None,
+        line_style="solid",
     ):
         # assign id
         self.id = id
@@ -63,10 +65,16 @@ class DrawingAnnotation:
         self.created_at = created_at
         # assign flipped flag
         self.flipped = flipped
+        # assign color (hex string); fall back to type default
+        meta = DRAWING_TYPE_MAP.get(drawing_type, {})
+        self.color = color or meta.get("color", "#E8EAF0")
+        # assign line style: "solid", "dashed", or "dotted"
+        self.line_style = line_style if line_style in ("solid", "dashed", "dotted") else "solid"
 
     # build a new drawing annotation
     @classmethod
-    def new(cls, drawing_type, coordinates, title="", creator="local", flipped=False):
+    def new(cls, drawing_type, coordinates, title="", creator="local", flipped=False,
+            color=None, line_style="solid"):
         # get metadata for this type
         meta = DRAWING_TYPE_MAP.get(drawing_type, {})
         # return a new annotation
@@ -78,6 +86,8 @@ class DrawingAnnotation:
             creator=creator,
             created_at=datetime.now(timezone.utc),
             flipped=flipped,
+            color=color or meta.get("color", "#E8EAF0"),
+            line_style=line_style,
         )
 
     # convert annotation to dict
@@ -91,6 +101,8 @@ class DrawingAnnotation:
             "creator": self.creator,
             "created_at": self.created_at.isoformat(),
             "flipped": self.flipped,
+            "color": self.color,
+            "line_style": self.line_style,
         }
 
     # build annotation from dict
@@ -113,4 +125,6 @@ class DrawingAnnotation:
             creator=d.get("creator", "unknown"),
             created_at=created_at,
             flipped=d.get("flipped", False),
+            color=d.get("color"),
+            line_style=d.get("line_style", "solid"),
         )

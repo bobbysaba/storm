@@ -9,6 +9,16 @@ from ui.station_plot_layer import _obs_fingerprint, _render
 log = logging.getLogger(__name__)
 
 
+def _surface_obs_fingerprint(obs: Observation) -> tuple:
+    """Surface plots include age coloring, so timestamp changes must invalidate cache."""
+    ts = obs.timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return _obs_fingerprint(obs) + (int(ts.timestamp()),)
+
+
 class SurfacePlotLayer:
     """Manages independently-toggleable surface station plots on the map."""
 
@@ -17,7 +27,7 @@ class SurfacePlotLayer:
         self._cache: dict[str, tuple[tuple, bytes]] = {}
 
     def update(self, station_id: str, lat: float, lon: float, obs: Observation, name: str = "") -> None:
-        fp = _obs_fingerprint(obs)
+        fp = _surface_obs_fingerprint(obs)
         cached = self._cache.get(station_id)
         if cached and cached[0] == fp:
             return
@@ -44,7 +54,12 @@ class SurfacePlotLayer:
 
     @staticmethod
     def _obs_age_color(obs: Observation, station_id: str = "") -> str:
-        age_min = max(0.0, (datetime.now(timezone.utc) - obs.timestamp).total_seconds() / 60.0)
+        ts = obs.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        age_min = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() / 60.0)
         if station_id.startswith("surface:asos:"):
             # ASOS reports hourly — use wider freshness thresholds
             if age_min <= 70.0:

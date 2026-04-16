@@ -1,12 +1,16 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QCheckBox
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
 
+from config import ACCENT_COLOR
+
 
 class SurfaceControls(QWidget):
     """Collapsible drawer for surface observation overlays."""
 
-    ok_toggled = pyqtSignal(bool)
-    wtm_toggled = pyqtSignal(bool)
+    ok_toggled   = pyqtSignal(bool)
+    wtm_toggled  = pyqtSignal(bool)
+    asos_toggled = pyqtSignal(bool)
+    asos_bbox_requested = pyqtSignal()
     plots_toggled = pyqtSignal(bool)
     content_resized = pyqtSignal()
 
@@ -36,10 +40,13 @@ class SurfaceControls(QWidget):
 
         self._btn_ok = self._btn("OK MESONET")
         self._btn_wtm = self._btn("WTM")
+        self._btn_asos = self._btn("ASOS")
         self._btn_ok.toggled.connect(self.ok_toggled.emit)
         self._btn_wtm.toggled.connect(self.wtm_toggled.emit)
+        self._btn_asos.toggled.connect(self.asos_toggled.emit)
         r1.addWidget(self._btn_ok)
         r1.addWidget(self._btn_wtm)
+        r1.addWidget(self._btn_asos)
 
         r1.addWidget(self._vdiv())
 
@@ -54,6 +61,12 @@ class SurfaceControls(QWidget):
         self._status = QLabel("Surface obs idle")
         self._status.setStyleSheet(
             "color: #B5BDCC; font-size: 10px; letter-spacing: 0.4px; padding: 1px 4px 2px 4px;"
+        )
+        self._status.setTextFormat(Qt.TextFormat.RichText)
+        self._status.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._status.setOpenExternalLinks(False)
+        self._status.linkActivated.connect(
+            lambda link: self.asos_bbox_requested.emit() if link == "asos-new-box" else None
         )
         col.addWidget(self._status)
 
@@ -96,9 +109,22 @@ class SurfaceControls(QWidget):
         self._animation = anim
 
     def set_status(self, text: str):
-        self._status.setText(text)
+        self._status.setText(self._with_asos_bbox_link(text))
         if self.maximumHeight() > 0:
             self.content_resized.emit()
 
+    def _with_asos_bbox_link(self, text: str) -> str:
+        link = (
+            f' <a href="asos-new-box" style="color:{ACCENT_COLOR}; '
+            'text-decoration:none; font-weight:700;">new box</a>'
+        )
+        return f"{text}{link}" if "ASOS" in text else text
+
     def plots_visible(self) -> bool:
         return self._chk_show_plots.isChecked()
+
+    def asos_enabled(self) -> bool:
+        return self._btn_asos.isChecked()
+
+    def set_asos_enabled(self, enabled: bool) -> None:
+        self._btn_asos.setChecked(enabled)

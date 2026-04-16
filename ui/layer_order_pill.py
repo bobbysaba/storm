@@ -25,6 +25,7 @@ DEFAULT_LAYERS: list[str] = [
     "route",
     "ok_mesonet",
     "wtm",
+    "asos",
 ]
 
 LAYER_LABELS: dict[str, str] = {
@@ -43,6 +44,7 @@ LAYER_LABELS: dict[str, str] = {
     "route":        "Route",
     "ok_mesonet":   "OK Mesonet",
     "wtm":          "WTM",
+    "asos":         "ASOS",
 }
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
@@ -67,6 +69,7 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "route":        ["route-casing", "route-line"],
     "ok_mesonet":   [],
     "wtm":          [],
+    "asos":         ["asos-plots"],
 }
 
 _SETTINGS_KEY = "layers/order"

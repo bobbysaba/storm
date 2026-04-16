@@ -4,6 +4,7 @@
 # (storm://app/...) — no Flask server or open TCP port required.
 
 import json
+import logging
 import os
 import sys
 import runtime_flags
@@ -25,6 +26,8 @@ if not SAFE_MAP_MODE:
     from PyQt6.QtWebChannel import QWebChannel
 
 from config import ACCENT_COLOR
+
+log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1592,22 +1595,17 @@ def build_map_html() -> str:
         }} else {{
           // No hazard or CWA hit — check for a nearby surface station.
           var _stLabel = null;
-          if (window._stormSurfacePlotsVisible) {{
-            var _reg = window._stormSurfaceRegistry || {{}};
-            var _threshold = 15;
-            var _bestDist  = Infinity;
-            var _ids = Object.keys(_reg);
-            for (var _si = 0; _si < _ids.length; _si++) {{
-              var _st = _reg[_ids[_si]];
-              var _sp = map.project([_st.lon, _st.lat]);
-              var _dx = _sp.x - e.point.x;
-              var _dy = _sp.y - e.point.y;
-              var _d  = Math.sqrt(_dx * _dx + _dy * _dy);
-              if (_d < _threshold && _d < _bestDist) {{
-                _bestDist = _d;
-                _stLabel  = _st.label;
+          if (window._stormSurfacePlotsVisible && map.getLayer('asos-plots')) {{
+            try {{
+              var _pad = 15;
+              var _surfaceHits = map.queryRenderedFeatures(
+                [[e.point.x - _pad, e.point.y - _pad], [e.point.x + _pad, e.point.y + _pad]],
+                {{layers: ['asos-plots']}}
+              );
+              if (_surfaceHits.length > 0) {{
+                _stLabel = (_surfaceHits[0].properties || {{}}).label || null;
               }}
-            }}
+            }} catch(_) {{}}
           }}
           if (_stLabel) {{
             var _smc = map.getContainer().getBoundingClientRect();
@@ -2124,6 +2122,10 @@ def build_map_html() -> str:
       }});
 
       if (d.drawing_type === 'polyline' || d.drawing_type === 'polygon') {{
+        var lineColor = d.color || '#E8EAF0';
+        var linePaint = {{'line-color': lineColor, 'line-width': 2, 'line-opacity': 0.9}};
+        if (d.line_style === 'dashed') {{ linePaint['line-dasharray'] = [4, 3]; }}
+        else if (d.line_style === 'dotted') {{ linePaint['line-dasharray'] = [1.5, 2.5]; }}
         if (d.drawing_type === 'polygon') {{
           // Invisible fill layer so clicking polygon interior selects the drawing.
           map.addLayer({{
@@ -2133,7 +2135,7 @@ def build_map_html() -> str:
           // Visible polygon fill.
           map.addLayer({{
             id: 'drawing-fill-' + id, type: 'fill', source: 'drawing-' + id,
-            paint: {{'fill-color': '#E8EAF0', 'fill-opacity': 0.12}}
+            paint: {{'fill-color': lineColor, 'fill-opacity': 0.12}}
           }});
         }}
         map.addLayer({{
@@ -2142,11 +2144,7 @@ def build_map_html() -> str:
             'line-join': 'round',
             'line-cap': 'round'
           }},
-          paint: {{
-            'line-color': '#E8EAF0',
-            'line-width': 2,
-            'line-opacity': 0.9
-          }}
+          paint: linePaint
         }});
         if (d.title) {{
           var centroid = _computeCentroid(_drawingLngLatCoords(d.coordinates || []));
@@ -2414,63 +2412,255 @@ def build_map_html() -> str:
     }};
 
     // ASOS bbox selection: click-drag a rectangle on the map and call bridge.on_asos_bbox(west,south,east,north)
+    // Uses raw DOM events on map.getCanvas() (not map.on()) to bypass MapLibre's
+    // event chain, which can swallow mousedown when dragPan is disabled.
+    function _restoreAsosMapInteractions() {{
+      try {{ map.dragPan.enable(); }} catch(_) {{}}
+      try {{ map.scrollZoom.enable(); }} catch(_) {{}}
+      try {{ map.boxZoom.enable(); }} catch(_) {{}}
+      try {{ map.doubleClickZoom.enable(); }} catch(_) {{}}
+      try {{ map.touchZoomRotate.enable(); }} catch(_) {{}}
+      map.getCanvas().style.cursor = '';
+    }}
+
+    window.stormRestoreAsosMapInteractions = _restoreAsosMapInteractions;
+
     window.stormSetAsosBoxMode = function(active) {{
       window._stormAsosActive = !!active;
       window._stormAsosStart = null;
       var fc = document.getElementById('front-canvas');
       if (!fc) return;
       var ctx = fc.getContext('2d');
-      function _clear() {{ ctx.clearRect(0, 0, fc.width, fc.height); }}
+      var mc  = map.getCanvas();
+
+      function _resizeFC() {{
+        var dpr = window.devicePixelRatio || 1;
+        var w = Math.round(mc.clientWidth  * dpr);
+        var h = Math.round(mc.clientHeight * dpr);
+        if (fc.width !== w || fc.height !== h) {{ fc.width = w; fc.height = h; }}
+      }}
+      function _clear() {{
+        _resizeFC();
+        ctx.clearRect(0, 0, fc.width, fc.height);
+      }}
+
+      // Remove any leftover DOM listeners before re-registering.
+      if (window._stormAsosMouseDownDOM) {{
+        mc.removeEventListener('mousedown', window._stormAsosMouseDownDOM);
+        window._stormAsosMouseDownDOM = null;
+      }}
+      if (window._stormAsosMouseMoveDOM) {{
+        window.removeEventListener('mousemove', window._stormAsosMouseMoveDOM);
+        window._stormAsosMouseMoveDOM = null;
+      }}
+      if (window._stormAsosMouseUpDOM) {{
+        window.removeEventListener('mouseup', window._stormAsosMouseUpDOM);
+        window._stormAsosMouseUpDOM = null;
+      }}
 
       if (active) {{
+        _resizeFC();
         map.dragPan.disable();
-        map.getCanvas().style.cursor = 'crosshair';
-        map.on('mousedown', window._stormAsosMouseDown = function(e) {{
-          window._stormAsosStart = [e.lngLat.lng, e.lngLat.lat];
-          map.on('mousemove', window._stormAsosMouseMove = function(ev) {{
+        mc.style.cursor = 'crosshair';
+
+        mc.addEventListener('mousedown', window._stormAsosMouseDownDOM = function(ev) {{
+          if (ev.button !== 0) return;   // left-button only
+          ev.preventDefault();
+          ev.stopPropagation();
+          var rect = mc.getBoundingClientRect();
+          var startPx = {{ x: ev.clientX - rect.left, y: ev.clientY - rect.top }};
+          var startLL = map.unproject([startPx.x, startPx.y]);
+          window._stormAsosStart = [startLL.lng, startLL.lat];
+
+          window.addEventListener('mousemove', window._stormAsosMouseMoveDOM = function(mev) {{
             if (!window._stormAsosStart) return;
-            var startPt = map.project([window._stormAsosStart[0], window._stormAsosStart[1]]);
-            var curPt = map.project([ev.lngLat.lng, ev.lngLat.lat]);
-            var dpr = window.devicePixelRatio || 1;
+            mev.preventDefault();
+            _resizeFC();
+            var curPx  = {{ x: mev.clientX - rect.left, y: mev.clientY - rect.top }};
+            var pdpr   = window.devicePixelRatio || 1;
             _clear();
             ctx.save();
-            ctx.setLineDash([6*dpr,4*dpr]);
-            ctx.strokeStyle = '#39D98A';
-            ctx.lineWidth = 2 * dpr;
-            ctx.strokeRect(startPt.x * dpr, startPt.y * dpr, (curPt.x - startPt.x) * dpr, (curPt.y - startPt.y) * dpr);
+            ctx.setLineDash([6 * pdpr, 4 * pdpr]);
+            ctx.strokeStyle = '{ACCENT_COLOR}';
+            ctx.lineWidth   = 2 * pdpr;
+            ctx.strokeRect(
+              startPx.x * pdpr, startPx.y * pdpr,
+              (curPx.x - startPx.x) * pdpr, (curPx.y - startPx.y) * pdpr
+            );
             ctx.restore();
           }});
 
-          map.once('mouseup', function(up) {{
-            map.off('mousemove', window._stormAsosMouseMove);
-            var s = window._stormAsosStart;
-            var e = [up.lngLat.lng, up.lngLat.lat];
-            _clear();
-            map.dragPan.enable();
-            map.getCanvas().style.cursor = '';
-            window._stormAsosStart = null;
-            var west = Math.min(s[0], e[0]), east = Math.max(s[0], e[0]);
-            var south = Math.min(s[1], e[1]), north = Math.max(s[1], e[1]);
-            if (bridge && bridge.on_asos_bbox) {{
-              try {{ bridge.on_asos_bbox(west, south, east, north); }} catch(ex) {{ console.log('ASOS bbox bridge error', ex); }}
+          window.addEventListener('mouseup', window._stormAsosMouseUpDOM = function(uev) {{
+            uev.preventDefault();
+            if (window._stormAsosMouseDownDOM) {{
+              mc.removeEventListener('mousedown', window._stormAsosMouseDownDOM);
+              window._stormAsosMouseDownDOM = null;
             }}
-          }});
+            window.removeEventListener('mousemove', window._stormAsosMouseMoveDOM);
+            window.removeEventListener('mouseup',   window._stormAsosMouseUpDOM);
+            window._stormAsosMouseMoveDOM = null;
+            window._stormAsosMouseUpDOM   = null;
+            var s  = window._stormAsosStart;
+            _clear();
+            _restoreAsosMapInteractions();
+            window._stormAsosActive = false;
+            window._stormAsosStart = null;
+            if (!s) return;
+            var endPx  = {{ x: uev.clientX - rect.left, y: uev.clientY - rect.top }};
+            var endLL  = map.unproject([endPx.x, endPx.y]);
+            var west   = Math.min(s[0], endLL.lng), east  = Math.max(s[0], endLL.lng);
+            var south  = Math.min(s[1], endLL.lat), north = Math.max(s[1], endLL.lat);
+            if (Math.abs(east - west) < 0.01 || Math.abs(north - south) < 0.01) return;
+            if (bridge && bridge.on_asos_bbox) {{
+              setTimeout(function() {{
+                try {{ bridge.on_asos_bbox(west, south, east, north); }}
+                catch(ex) {{ console.log('ASOS bbox bridge error', ex); }}
+              }}, 0);
+            }}
+          }}, {{once: true}});
         }});
       }} else {{
-        // disable mode and cleanup
-        map.getCanvas().style.cursor = '';
-        map.dragPan.enable();
+        _restoreAsosMapInteractions();
         _clear();
-        try {{ map.off('mousedown', window._stormAsosMouseDown); map.off('mousemove', window._stormAsosMouseMove); }} catch(e) {{}}
       }}
     }};
 
     // ── Station Plots ─────────────────────────────────────────────────────
     window._stormStationPlots = {{}};
     window._stormStationPlotsVisible = true;
-    window._stormSurfacePlots = {{}};
     window._stormSurfacePlotsVisible = true;
-    window._stormSurfaceRegistry = {{}};  // id → {{lon, lat, label}}
+    window._stormSurfaceRegistry = {{}};   // id → {{lon, lat, label}}
+    window._stormSurfaceImageGeneration = {{}};
+    window._stormSurfaceImageQueue = [];
+    window._stormSurfaceImageActive = 0;
+    window._asosRebuildTimer = null;
+    window._asosLayerRetry = null;
+
+    function _ensureAsosLayer() {{
+      if (map.getSource('asos-source') && map.getLayer('asos-plots')) return true;
+      if (map.isStyleLoaded && !map.isStyleLoaded()) {{
+        if (!window._asosLayerRetry) {{
+          window._asosLayerRetry = setTimeout(function() {{
+            window._asosLayerRetry = null;
+            if (_ensureAsosLayer()) _asosRebuildSource();
+          }}, 100);
+        }}
+        return false;
+      }}
+      try {{
+        if (!map.getSource('asos-source')) {{
+          map.addSource('asos-source', {{
+            type: 'geojson',
+            data: {{type: 'FeatureCollection', features: []}}
+          }});
+        }}
+        if (!map.getLayer('asos-plots')) {{
+          map.addLayer({{
+            id: 'asos-plots',
+            type: 'symbol',
+            source: 'asos-source',
+            layout: {{
+              'icon-image': ['get', 'icon_id'],
+              'icon-size': 1,
+              'icon-allow-overlap': true,
+              'icon-ignore-placement': true,
+              'icon-anchor': 'center',
+              'visibility': window._stormSurfacePlotsVisible ? 'visible' : 'none'
+            }}
+          }});
+        }}
+        return true;
+      }} catch(ex) {{
+        console.warn('ASOS layer init deferred:', ex.message || ex);
+        if (!window._asosLayerRetry) {{
+          window._asosLayerRetry = setTimeout(function() {{
+            window._asosLayerRetry = null;
+            if (_ensureAsosLayer()) _asosRebuildSource();
+          }}, 100);
+        }}
+        return false;
+      }}
+    }}
+
+    function _asosRebuildSource() {{
+      if (!_ensureAsosLayer()) return;
+      var _features = [];
+      var _reg = window._stormSurfaceRegistry;
+      for (var _rsid in _reg) {{
+        var _rv = _reg[_rsid];
+        _features.push({{
+          type: 'Feature',
+          geometry: {{type: 'Point', coordinates: [_rv.lon, _rv.lat]}},
+          properties: {{icon_id: 'asos-icon-' + _rsid, station_id: _rsid, label: _rv.label}}
+        }});
+      }}
+      var _rsrc = map.getSource('asos-source');
+      if (_rsrc) _rsrc.setData({{type: 'FeatureCollection', features: _features}});
+    }}
+
+    function _asosScheduleRebuild() {{
+      if (window._asosRebuildTimer) clearTimeout(window._asosRebuildTimer);
+      // 80 ms debounce: coalesce all images that finish loading around the same
+      // time into a single setData() call instead of one per station.
+      window._asosRebuildTimer = setTimeout(_asosRebuildSource, 80);
+    }}
+
+    function _surfacePumpImageQueue() {{
+      var MAX_ACTIVE = 8;
+      while (window._stormSurfaceImageActive < MAX_ACTIVE && window._stormSurfaceImageQueue.length > 0) {{
+        var item = window._stormSurfaceImageQueue.shift();
+        if (window._stormSurfaceImageGeneration[item.id] !== item.generation) continue;
+
+        window._stormSurfaceImageActive += 1;
+        (function(d) {{
+          var iconId = 'asos-icon-' + d.id;
+          var img = new Image(135, 135);
+          function done() {{
+            window._stormSurfaceImageActive = Math.max(0, window._stormSurfaceImageActive - 1);
+            if (window._stormSurfaceImageQueue.length > 0) {{
+              requestAnimationFrame(_surfacePumpImageQueue);
+            }}
+          }}
+          img.onload = function() {{
+            try {{
+              if (window._stormSurfaceImageGeneration[d.id] !== d.generation || !window._stormSurfaceRegistry[d.id]) {{
+                done();
+                return;
+              }}
+              if (map.hasImage(iconId)) {{
+                map.updateImage(iconId, img);
+              }} else {{
+                map.addImage(iconId, img, {{pixelRatio: 1, sdf: false}});
+              }}
+              _asosScheduleRebuild();
+            }} catch(ex) {{
+              console.warn('asos addImage failed for ' + d.id, ex);
+            }}
+            done();
+          }};
+          img.onerror = function() {{
+            done();
+          }};
+          img.src = 'storm://app/plots/' + encodeURIComponent(d.id) + '.png';
+        }})(item);
+      }}
+    }}
+
+    function _surfaceQueueImage(id, lat, lon, name) {{
+      _ensureAsosLayer();
+      var label = name || id;
+      var generation = (window._stormSurfaceImageGeneration[id] || 0) + 1;
+      window._stormSurfaceImageGeneration[id] = generation;
+      window._stormSurfaceRegistry[id] = {{lon: lon, lat: lat, label: label}};
+      window._stormSurfaceImageQueue.push({{
+        id: id,
+        lat: lat,
+        lon: lon,
+        name: label,
+        generation: generation
+      }});
+      requestAnimationFrame(_surfacePumpImageQueue);
+    }}
 
     window.stormAddStationPlot = function(id, lat, lon, pngB64) {{
       if (window._stormStationPlots[id]) {{
@@ -2504,87 +2694,43 @@ def build_map_html() -> str:
     }};
 
     window.stormAddSurfaceStationPlot = function(id, lat, lon, name) {{
-      if (window._stormSurfacePlots[id]) {{
-        window._stormSurfacePlots[id].remove();
-        delete window._stormSurfacePlots[id];
+      _surfaceQueueImage(id, lat, lon, name);
+    }};
+
+    // Batch-add: queue image loads with limited concurrency so large ASOS
+    // domains do not monopolize Chromium's main thread.
+    window.stormAddSurfaceStationPlotBatch = function(items) {{
+      for (var _ai = 0; _ai < items.length; _ai++) {{
+        var _ad = items[_ai];
+        _surfaceQueueImage(_ad.id, _ad.lat, _ad.lon, _ad.name);
       }}
-      const label = name || id;
-
-      // Outer div: pointer-events:none so the 135px image never blocks
-      // neighbouring station hit-targets underneath it.
-      const el = document.createElement('div');
-      el.style.cssText = 'width:135px;height:135px;pointer-events:none;';
-      if (!window._stormSurfacePlotsVisible) el.style.display = 'none';
-
-      const img = document.createElement('img');
-      // Fetch PNG from the scheme handler — no base64 in JS at all.
-      img.src = 'storm://app/plots/' + encodeURIComponent(id) + '.png';
-      // display:block removes inline baseline gap so the hit-target margin
-      // math below is exact: img occupies exactly 0..135px vertically.
-      img.style.cssText = 'display:block;width:135px;height:135px;pointer-events:none;';
-      img.alt = label;
-      el.appendChild(img);
-
-      // 20px hit-target centered on the station point.  Negative margin-top
-      // pulls it back up from below the image into the center of the 135px
-      // square.  No position:relative needed on the parent, so MapLibre's
-      // transform-based marker placement is unaffected.
-      //   Natural top of hit div = 135px (after block img)
-      //   Desired top            = (135 - 20) / 2 = 57.5px
-      //   margin-top             = 57.5 - 135 = -77.5px
-      const hit = document.createElement('div');
-      hit.style.cssText = (
-        'width:20px;height:20px;' +
-        'margin-top:-77.5px;' +
-        'margin-left:57.5px;' +
-        'pointer-events:auto;cursor:pointer;'
-      );
-      el.appendChild(hit);
-
-      // Tooltip is driven by map.on('mousemove') — same as SPC layers —
-      // so no DOM mouseenter/mouseleave needed here.
-      window._stormSurfaceRegistry[id] = {{lon: lon, lat: lat, label: label}};
-
-      const marker = new maplibregl.Marker({{element: el, anchor: 'center'}})
-        .setLngLat([lon, lat]).addTo(map);
-      window._stormSurfacePlots[id] = marker;
     }};
 
     window.stormRemoveSurfaceStationPlot = function(id) {{
-      if (window._stormSurfacePlots[id]) {{
-        window._stormSurfacePlots[id].remove();
-        delete window._stormSurfacePlots[id];
-      }}
+      var iconId = 'asos-icon-' + id;
+      window._stormSurfaceImageGeneration[id] = (window._stormSurfaceImageGeneration[id] || 0) + 1;
       delete window._stormSurfaceRegistry[id];
+      try {{ if (map.hasImage(iconId)) map.removeImage(iconId); }} catch(ex) {{}}
+      _asosScheduleRebuild();
     }};
 
-    // Batch-add: add stations in rAF chunks of 25 so the browser stays
-    // responsive while potentially hundreds of ASOS markers are inserted.
-    // Items are {{id, lat, lon, name}} — no base64; PNGs fetched via storm://app/plots/.
-    window.stormAddSurfaceStationPlotBatch = function(items) {{
-      var i = 0;
-      var CHUNK = 25;
-      function addChunk() {{
-        var end = Math.min(i + CHUNK, items.length);
-        for (; i < end; i++) {{
-          var d = items[i];
-          window.stormAddSurfaceStationPlot(d.id, d.lat, d.lon, d.name);
-        }}
-        if (i < items.length) requestAnimationFrame(addChunk);
-      }}
-      requestAnimationFrame(addChunk);
-    }};
-
-    // Batch-remove: synchronous, removals are cheap DOM ops.
     window.stormRemoveSurfaceStationPlotBatch = function(ids) {{
-      ids.forEach(function(id) {{ window.stormRemoveSurfaceStationPlot(id); }});
+      for (var _ri = 0; _ri < ids.length; _ri++) {{
+        var _rid = ids[_ri];
+        var _riconId = 'asos-icon-' + _rid;
+        window._stormSurfaceImageGeneration[_rid] = (window._stormSurfaceImageGeneration[_rid] || 0) + 1;
+        delete window._stormSurfaceRegistry[_rid];
+        try {{ if (map.hasImage(_riconId)) map.removeImage(_riconId); }} catch(ex) {{}}
+      }}
+      _asosScheduleRebuild();
     }};
 
     window.stormSetSurfaceStationPlotsVisible = function(visible) {{
       window._stormSurfacePlotsVisible = visible;
-      Object.values(window._stormSurfacePlots).forEach(function(m) {{
-        m.getElement().style.display = visible ? '' : 'none';
-      }});
+      _ensureAsosLayer();
+      if (map.getLayer('asos-plots')) {{
+        map.setLayoutProperty('asos-plots', 'visibility', visible ? 'visible' : 'none');
+      }}
       if (!visible) {{
         var tip = document.getElementById('hazard-tooltip');
         if (tip) tip.style.display = 'none';
@@ -2823,12 +2969,12 @@ def build_map_html() -> str:
         try {{
           map.addLayer({{
             id: SAT_LYR, type: 'raster', source: SAT_SRC,
-            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0, 'raster-brightness-min': 0.08 }}
           }}, 'road-unpaved');
         }} catch(_) {{
           map.addLayer({{
             id: SAT_LYR, type: 'raster', source: SAT_SRC,
-            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0 }}
+            paint: {{ 'raster-opacity': _satOpacity, 'raster-fade-duration': 0, 'raster-brightness-min': 0.08 }}
           }});
         }}
       }}
@@ -3493,7 +3639,10 @@ class MapBridge(QObject):
     def on_asos_bbox(self, west: float, south: float, east: float, north: float):
         """Called from JS when the user finishes drawing an ASOS bbox."""
         try:
-            self.asos_bbox_selected.emit(west, south, east, north)
+            QTimer.singleShot(
+                0,
+                lambda: self.asos_bbox_selected.emit(west, south, east, north),
+            )
         except Exception:
             pass
 
@@ -3603,6 +3752,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self._js_queue: list[str] = []
         self._cwa_parsed.connect(self._on_cwa_parsed)
         self.bridge.map_loaded.connect(self._on_map_loaded_from_js)
+        self.loadFinished.connect(self._on_page_load_finished)
 
         QTimer.singleShot(0, self._load_map)
 
@@ -3621,12 +3771,26 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def _load_map(self):
         self.load(QUrl("storm://app/"))
 
+    def _on_page_load_finished(self, ok: bool):
+        if not ok or self._map_ready:
+            return
+        QTimer.singleShot(8000, self._mark_map_ready_if_bridge_stalled)
+
     def _on_map_loaded_from_js(self):
         if self._map_ready:
             return
         self._map_ready = True
         for script in self._js_queue:
             self.page().runJavaScript(script)
+        self._js_queue.clear()
+        self.map_ready.emit()
+
+    def _mark_map_ready_if_bridge_stalled(self):
+        """Allow Python startup to continue if the JS map-ready callback stalls."""
+        if self._map_ready:
+            return
+        log.warning("Map page loaded but JS map-ready callback did not fire; continuing startup")
+        self._map_ready = True
         self._js_queue.clear()
         self.map_ready.emit()
 
@@ -4198,12 +4362,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         import json
         if before_layer_id is None:
             self.run_js(
-                f"(function(){{ if(map.getLayer({json.dumps(layer_id)})) "
-                f"map.moveLayer({json.dumps(layer_id)}); }})();"
+                f"(function(){{ var lid={json.dumps(layer_id)}; "
+                "function go(){ try { if(map.isStyleLoaded && !map.isStyleLoaded()) { setTimeout(go, 100); return; } "
+                "if(map.getLayer(lid)) map.moveLayer(lid); } catch(e) { setTimeout(go, 100); } } go(); })();"
             )
         else:
             self.run_js(
-                f"(function(){{ if(map.getLayer({json.dumps(layer_id)}) && "
-                f"map.getLayer({json.dumps(before_layer_id)})) "
-                f"map.moveLayer({json.dumps(layer_id)}, {json.dumps(before_layer_id)}); }})();"
+                f"(function(){{ var lid={json.dumps(layer_id)}, before={json.dumps(before_layer_id)}; "
+                "function go(){ try { if(map.isStyleLoaded && !map.isStyleLoaded()) { setTimeout(go, 100); return; } "
+                "if(map.getLayer(lid) && map.getLayer(before)) map.moveLayer(lid, before); } "
+                "catch(e) { setTimeout(go, 100); } } go(); })();"
             )

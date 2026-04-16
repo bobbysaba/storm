@@ -1937,9 +1937,12 @@ class MainWindow(QMainWindow):
         self._surface_fetcher = SurfaceFetcher(parent=self)
         self._surface_layer = SurfacePlotLayer(self.map_widget)
         self._surface_station_ids: set[str] = set()
+        self._surface_render_generation = 0
 
         self.surface_controls.ok_toggled.connect(self._surface_fetcher.set_ok_enabled)
         self.surface_controls.wtm_toggled.connect(self._surface_fetcher.set_wtm_enabled)
+        self.surface_controls.asos_toggled.connect(self._on_asos_toggled)
+        self.surface_controls.asos_bbox_requested.connect(self._start_new_asos_bbox)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
         self.surface_controls.ok_toggled.connect(
@@ -1948,6 +1951,7 @@ class MainWindow(QMainWindow):
         self.surface_controls.wtm_toggled.connect(
             lambda v: self._set_layer_active("wtm", v)
         )
+        self.map_widget.asos_bbox_selected.connect(self._on_asos_bbox_selected)
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
         self._surface_fetcher.status_updated.connect(self.status_msg_label.setText)
@@ -1959,6 +1963,8 @@ class MainWindow(QMainWindow):
         ))
 
     def _on_surface_observations_updated(self, items: list[dict]):
+        self._surface_render_generation += 1
+        render_generation = self._surface_render_generation
         incoming: set[str] = {item["id"] for item in items}
         gone = self._surface_station_ids - incoming
         self._surface_station_ids = incoming
@@ -1968,10 +1974,13 @@ class MainWindow(QMainWindow):
 
         class RenderSignals(QObject):
             ready = pyqtSignal(list, set)   # (rendered_rows, ids_to_remove)
+            status = pyqtSignal(str)
 
         signals = RenderSignals()
 
         def _push(rendered_data, ids_to_remove):
+            if render_generation != self._surface_render_generation:
+                return
             # Remove stale stations in one JS call
             if ids_to_remove:
                 for sid in ids_to_remove:
@@ -1990,30 +1999,48 @@ class MainWindow(QMainWindow):
 
         # CRITICAL: Ensure the signal is routed to the main thread
         signals.ready.connect(_push, Qt.ConnectionType.QueuedConnection)
+        signals.status.connect(self.surface_controls.set_status, Qt.ConnectionType.QueuedConnection)
+        signals.status.connect(self.status_msg_label.setText, Qt.ConnectionType.QueuedConnection)
 
         def _render_worker():
-            from ui.station_plot_layer import _obs_fingerprint, _render
+            from ui.station_plot_layer import _render
+            from ui.surface_plot_layer import _surface_obs_fingerprint
             import time
 
             _gone_to_emit = gone
+            has_asos = any(item.get("source") == "asos" for item in items)
 
             # If there's nothing to render but stations to remove, clear them out
-            if not items and _gone_to_emit:
-                signals.ready.emit([], _gone_to_emit)
+            if not items:
+                if _gone_to_emit and render_generation == self._surface_render_generation:
+                    signals.ready.emit([], _gone_to_emit)
                 return
 
-            rendered_chunk = []
-            
-            for i, item in enumerate(items):
+            # Snapshot the cache once to avoid live dict mutation from the main thread
+            cache_snapshot = dict(layer._cache)
+
+            to_render = []
+            for item in items:
+                if render_generation != self._surface_render_generation:
+                    return
                 obs  = item["obs"]
                 sid  = item["id"]
                 name = item.get("name", sid)
-                fp   = _obs_fingerprint(obs)
-                cached = layer._cache.get(sid)
-                
+                fp   = _surface_obs_fingerprint(obs)
+                cached = cache_snapshot.get(sid)
                 if cached and cached[0] == fp:
                     continue
-                    
+                to_render.append((item, obs, sid, name, fp))
+
+            if has_asos and to_render:
+                signals.status.emit(f"ASOS: rendering {len(to_render)} station plots…")
+
+            rendered_chunk = []
+            chunk_size = 1 if has_asos else max(1, len(to_render))
+
+            for i, (item, obs, sid, name, fp) in enumerate(to_render):
+                if render_generation != self._surface_render_generation:
+                    return
                 try:
                     color = layer._obs_age_color(obs, sid)
                     png   = _render(obs, center_color=color)
@@ -2021,14 +2048,21 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     log.error("surface render failed for %s: %s", sid, exc)
                 
-                # Emit in chunks of 25 to keep the UI updating smoothly
-                if len(rendered_chunk) >= 25 or i == len(items) - 1:
+                # Emit ASOS in small chunks, but keep OK/WTM as one batch.
+                if len(rendered_chunk) >= chunk_size or i == len(to_render) - 1:
+                    if render_generation != self._surface_render_generation:
+                        return
                     signals.ready.emit(rendered_chunk, _gone_to_emit)
                     rendered_chunk = []
                     _gone_to_emit = set()  # Only emit the 'gone' list on the very first chunk
                     
-                    # Aggressively yield the GIL to let your OS/RAM breathe!
-                    time.sleep(0.05)
+                    if has_asos:
+                        time.sleep(0.08)
+                elif has_asos:
+                    time.sleep(0.02)
+
+            if has_asos and render_generation == self._surface_render_generation:
+                signals.status.emit(f"ASOS: rendered {len(to_render)} station plots")
 
         threading.Thread(target=_render_worker, daemon=True).start()
 
@@ -2784,23 +2818,58 @@ class MainWindow(QMainWindow):
 
     def _on_asos_toggled(self, enabled: bool):
         """Enable/disable ASOS; only enter draw mode if no bbox has been set yet."""
+        self._surface_fetcher.set_asos_enabled(enabled)
+        self._set_layer_active("asos", enabled)
         if enabled and self._surface_fetcher._asos_bbox is None:
             self.map_widget.set_asos_bbox_mode(True)
         elif not enabled:
             self.map_widget.set_asos_bbox_mode(False)
 
+    def _start_new_asos_bbox(self):
+        """Let the user replace the saved ASOS bbox with a freshly drawn one."""
+        self._surface_render_generation += 1
+        self._surface_fetcher.clear_asos_bbox()
+        asos_ids = [
+            sid for sid in self._surface_station_ids
+            if sid.startswith("surface:asos:")
+        ]
+        self._surface_station_ids = {
+            sid for sid in self._surface_station_ids
+            if not sid.startswith("surface:asos:")
+        }
+        if asos_ids:
+            for sid in asos_ids:
+                self._surface_layer._cache.pop(sid, None)
+            self.map_widget.remove_surface_station_plots_batch(asos_ids)
+        if not self.surface_controls.asos_enabled():
+            self.surface_controls.set_asos_enabled(True)
+        else:
+            self._surface_fetcher.set_asos_enabled(True)
+            self._set_layer_active("asos", True)
+        self.status_msg_label.setText("ASOS: draw a new bounding box")
+        self.surface_controls.set_status("ASOS: draw a new bounding box")
+        self.map_widget.set_asos_bbox_mode(True)
+
     def _on_asos_bbox_selected(self, west: float, south: float, east: float, north: float):
         """Triggered when user finishes an ASOS bbox selection on the map."""
         self.status_msg_label.setText("Fetching ASOS observations…")
+        self.surface_controls.set_status("ASOS: fetching observations…")
         # Exit drawing mode but keep the ASOS button checked (auto-refresh stays active)
         self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
         # Fly to the selected bbox so the user can see the results
         self.map_widget.fit_bounds(west, south, east, north)
-        try:
-            self._surface_fetcher.fetch_asos_bbox(west, south, east, north)
-        except Exception as exc:
-            log.error("ASOS fetch failed to start: %s", exc, exc_info=True)
-            self.status_msg_label.setText(f"ASOS fetch error: {exc}")
+
+        def _start_asos_fetch():
+            try:
+                self._surface_fetcher.fetch_asos_bbox(west, south, east, north)
+            except Exception as exc:
+                log.error("ASOS fetch failed to start: %s", exc, exc_info=True)
+                self.status_msg_label.setText(f"ASOS fetch error: {exc}")
+
+        QTimer.singleShot(50, _start_asos_fetch)
 
     def _on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
         self.status_msg_label.setText(f"Fetching OBS sounding {station_id}…")
@@ -3463,13 +3532,19 @@ class MainWindow(QMainWindow):
             if dlg.exec() != DrawingTitleDialog.DialogCode.Accepted:
                 return
             title = dlg.title()
+            color = dlg.color()
+            line_style = dlg.line_style()
         else:
             title = DRAWING_TYPE_MAP.get(drawing_type, {}).get("label", drawing_type)
+            color = None
+            line_style = "solid"
 
         drawing = DrawingAnnotation.new(
             drawing_type=drawing_type,
             coordinates=pts,
             title=title,
+            color=color,
+            line_style=line_style,
         )
         dlg = DrawingPlaceConfirmDialog(drawing_type, len(pts), parent=self)
         if dlg.exec() != DrawingPlaceConfirmDialog.DialogCode.Accepted:
@@ -3514,6 +3589,8 @@ class MainWindow(QMainWindow):
             self._set_placement_prompt("drag the drawing to its new location", needs_click=False)
         elif action == "save":
             drawing.title = dlg.result_title()
+            drawing.color = dlg.result_color()
+            drawing.line_style = dlg.result_line_style()
             self._update_drawing(drawing)
 
     def _on_drawing_drag_end(self, drawing_id: str, coordinates_json: str):

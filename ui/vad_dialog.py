@@ -447,10 +447,10 @@ class VADDialog(QDialog):
         import matplotlib.pyplot as plt
         for ring_kt in [20, 40, 60, 80, 100]:
             circle = plt.Circle((0, 0), ring_kt, fill=False,
-                                color=_BORDER, linewidth=0.8, linestyle="--")
+                                color="#556080", linewidth=0.9, linestyle="--")
             ax.add_patch(circle)
             ax.text(ring_kt * 0.707, ring_kt * 0.707, f"{ring_kt}",
-                    color=_MUTED, fontsize=7, ha="left", va="bottom")
+                    color="#aaaacc", fontsize=7, ha="left", va="bottom")
 
         # Cursor dot (hidden until mouse hover)
         self._cursor_dot, = ax.plot([], [], 'o', color=_ACCENT, markersize=8,

@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] - 2026-04-16
+### Added
+- ASOS/AWOS surface observations — draw a map bounding box to fetch IEM ASOS current observations, then render them as full station plots alongside OK Mesonet and West Texas Mesonet data
+- ASOS bbox reuse and redraw workflow — toggling ASOS back on reuses the last domain; the surface status text includes a `new box` link to select a replacement domain
+- Surface station freshness coloring — surface station plots color their center dot by observation age, with wider freshness thresholds for hourly ASOS reports
+- Custom drawing styling — polylines and polygons can be titled and styled with custom color and line style; saved edits sync through the existing drawing workflow
+- ASOS station plot transport optimization — station plot PNGs are served through the in-process `storm://` scheme instead of being embedded as base64 payloads
+
+### Changed
+- Surface obs drawer now supports OK Mesonet, WTM, and ASOS controls from one place
+- ASOS selection uses the application accent color for the click-drag bounding box
+- Surface plot caching now includes observation timestamp so station freshness colors update from the observation valid time rather than stale cached plot images
+- OK Mesonet and WTM surface plots render and appear as a single batch; ASOS plots are chunked because user-selected domains may contain many stations
+
+### Fixed
+- ASOS plot URL decoding for station IDs served via `storm://app/plots/...`
+- ASOS bbox draw mode now exits and restores map interaction state immediately after selection
+- Stale ASOS render batches are discarded when a new bbox is requested
+
+---
+
 ## [1.0.0] - 2026-04-14
 ### Added
 - Vehicle meteorological timeseries dialog — interactive time-series plots of temperature, dewpoint, wind speed/direction, and pressure for any tracked vehicle; scroll-wheel zoom, click-drag selection zoom, double-click to reset, and inline cursor readouts with 10-second grid snapping; works in both live and archive modes

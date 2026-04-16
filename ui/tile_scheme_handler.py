@@ -18,6 +18,7 @@ import sqlite3
 import threading
 import zlib
 import base64
+from urllib.parse import unquote
 
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
@@ -186,6 +187,7 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
     def _serve_station_plot(self, job: QWebEngineUrlRequestJob, filename: str):
         # filename is e.g. "surface:asos:OKC.png" — strip the .png suffix to get the id
         sid = filename[:-4] if filename.endswith(".png") else filename
+        sid = unquote(sid)
         with self._plots_lock:
             data = self._plots.get(sid)
         if data is None:

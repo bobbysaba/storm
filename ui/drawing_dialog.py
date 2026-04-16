@@ -3,11 +3,36 @@
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt
 
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from ui.theme import ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED
+
+_COLOR_PRESETS = [
+    ("White",  "#E8EAF0"),
+    ("Red",    "#E53935"),
+    ("Blue",   "#4A9EFF"),
+    ("Pink",   "#FF69B4"),
+    ("Green",  "#39D98A"),
+]
+_DEFAULT_COLOR = "#E8EAF0"
+
+
+def _make_color_combo(current_hex: str = _DEFAULT_COLOR) -> QComboBox:
+    combo = QComboBox()
+    combo.setStyleSheet(
+        "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+        "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+    )
+    selected = 0
+    for i, (name, hex_val) in enumerate(_COLOR_PRESETS):
+        combo.addItem(name, hex_val)
+        if hex_val.lower() == current_hex.lower():
+            selected = i
+    combo.setCurrentIndex(selected)
+    return combo
 
 
 def _dialog_style() -> str:
@@ -43,7 +68,7 @@ def _centroid_latlon(coords: list[list[float]]) -> tuple[float, float]:
 class DrawingTitleDialog(QDialog):
     """
     Shown after finishing a polyline or polygon.
-    Requires a title that will appear on the map at the shape's centroid.
+    Requires a title and lets the user choose color and line style.
     """
 
     def __init__(self, drawing_type: str, parent=None):
@@ -58,6 +83,8 @@ class DrawingTitleDialog(QDialog):
         )
 
         self._title = ""
+        self._color = _DEFAULT_COLOR
+        self._line_style = "solid"
         meta = DRAWING_TYPE_MAP.get(drawing_type, {"label": drawing_type, "color": ACCENT})
 
         layout = QVBoxLayout(self)
@@ -77,6 +104,34 @@ class DrawingTitleDialog(QDialog):
         self._title_edit = QLineEdit()
         self._title_edit.setPlaceholderText("Enter a label…")
         layout.addWidget(self._title_edit)
+
+        # color + line style row
+        style_row = QHBoxLayout()
+        style_row.setSpacing(8)
+
+        color_lbl = QLabel("Color")
+        color_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        style_row.addWidget(color_lbl)
+
+        self._color_combo = _make_color_combo(self._color)
+        style_row.addWidget(self._color_combo)
+
+        style_row.addSpacing(12)
+
+        style_lbl = QLabel("Style")
+        style_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        style_row.addWidget(style_lbl)
+
+        self._style_combo = QComboBox()
+        self._style_combo.addItems(["Solid", "Dashed", "Dotted"])
+        self._style_combo.setStyleSheet(
+            "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+            "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+        )
+        style_row.addWidget(self._style_combo)
+        style_row.addStretch()
+
+        layout.addLayout(style_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -104,10 +159,18 @@ class DrawingTitleDialog(QDialog):
             )
             return
         self._title = text
+        self._color = self._color_combo.currentData()
+        self._line_style = ["solid", "dashed", "dotted"][self._style_combo.currentIndex()]
         self.accept()
 
     def title(self) -> str:
         return self._title
+
+    def color(self) -> str:
+        return self._color
+
+    def line_style(self) -> str:
+        return self._line_style
 
 
 class DrawingPlaceConfirmDialog(QDialog):
@@ -178,6 +241,8 @@ class DrawingEditDialog(QDialog):
 
         self._action = "cancel"
         self._result_title = drawing.title
+        self._result_color = getattr(drawing, "color", _DEFAULT_COLOR)
+        self._result_line_style = getattr(drawing, "line_style", "solid")
         meta = DRAWING_TYPE_MAP.get(
             drawing.drawing_type,
             {"label": drawing.drawing_type, "color": ACCENT}
@@ -212,6 +277,37 @@ class DrawingEditDialog(QDialog):
             self._title_edit = QLineEdit()
             self._title_edit.setText(drawing.title)
             layout.addWidget(self._title_edit)
+
+            # color + line style row
+            style_row = QHBoxLayout()
+            style_row.setSpacing(8)
+
+            color_lbl = QLabel("Color")
+            color_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+            style_row.addWidget(color_lbl)
+
+            self._color_combo = _make_color_combo(self._result_color)
+            style_row.addWidget(self._color_combo)
+
+            style_row.addSpacing(12)
+
+            style_lbl = QLabel("Style")
+            style_lbl.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+            style_row.addWidget(style_lbl)
+
+            self._style_combo = QComboBox()
+            self._style_combo.addItems(["Solid", "Dashed", "Dotted"])
+            self._style_combo.setCurrentIndex(
+                {"solid": 0, "dashed": 1, "dotted": 2}.get(self._result_line_style, 0)
+            )
+            self._style_combo.setStyleSheet(
+                "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+                "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+            )
+            style_row.addWidget(self._style_combo)
+            style_row.addStretch()
+
+            layout.addLayout(style_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -250,6 +346,8 @@ class DrawingEditDialog(QDialog):
     def _on_save(self):
         self._action = "save"
         self._result_title = self._title_edit.text().strip() or self._result_title
+        self._result_color = self._color_combo.currentData()
+        self._result_line_style = ["solid", "dashed", "dotted"][self._style_combo.currentIndex()]
         self.accept()
 
     def _on_delete(self):
@@ -269,6 +367,12 @@ class DrawingEditDialog(QDialog):
 
     def result_title(self) -> str:
         return self._result_title
+
+    def result_color(self) -> str:
+        return self._result_color
+
+    def result_line_style(self) -> str:
+        return self._result_line_style
 
 
 class DrawingMoveConfirmDialog(QDialog):

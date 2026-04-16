@@ -30,6 +30,7 @@ WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 IEM_METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/metar.geojson"
 IEM_CURRENTS_URL  = "https://mesonet.agron.iastate.edu/api/1/currents.json"
 IEM_CURRENTS_BATCH = 100   # stations per IEM request
+MAX_ASOS_STATIONS  = 400   # cap to keep map rendering fast
 
 _ASOS_STATIONS_FILE = pathlib.Path(__file__).parent / "asos_stations.json"
 
@@ -269,6 +270,11 @@ class SurfaceFetcher(QObject):
         self._update_timer()
         self.fetch_now()
 
+    def clear_asos_bbox(self):
+        """Clear the saved ASOS bbox so the next ASOS action asks for a new domain."""
+        self._asos_bbox = None
+        self._update_timer()
+
     def _ensure_asos_stations(self) -> dict[str, dict]:
         """Return in-memory station dict, building/loading it if needed."""
         if self._asos_stations is not None:
@@ -326,6 +332,13 @@ class SurfaceFetcher(QObject):
         if not in_bbox:
             log.info("ASOS: no stations found in bbox %s", self._asos_bbox)
             return []
+
+        if len(in_bbox) > MAX_ASOS_STATIONS:
+            log.warning(
+                "ASOS: bbox contains %d stations; capping at %d — draw a smaller box",
+                len(in_bbox), MAX_ASOS_STATIONS,
+            )
+            in_bbox = in_bbox[:MAX_ASOS_STATIONS]
 
         # Batch-fetch from IEM (100 stations per request)
         observations: list[dict] = []

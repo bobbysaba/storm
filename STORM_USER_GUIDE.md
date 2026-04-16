@@ -216,7 +216,7 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 6. NWS warnings (storm-polygon fills, phenom-specific colors)
 7. GOES satellite imagery (optional, opacity-controlled)
 8. NEXRAD radar overlay (semi-transparent PNG raster)
-9. Surface obs station model circles (mesonet obs)
+9. Surface obs station models (OK Mesonet, WTM, ASOS)
 10. Station plot icons (MetPy-style, at vehicle positions)
 11. Vehicle markers (colored dots + info popups)
 12. Annotations (road closure / construction / flooding / downed-lines / debris markers)
@@ -456,7 +456,7 @@ See [Section 10](#10-point-soundings) for full dialog documentation.
 
 **Button:** `SURFACE` (checkable toggle, expands drawer)
 
-Displays live surface observation station models from up to three mesonet networks simultaneously.
+Displays live surface observation station models from OK Mesonet, West Texas Mesonet, and ASOS/AWOS stations.
 
 #### Network Toggles (multi-select)
 
@@ -464,8 +464,20 @@ Displays live surface observation station models from up to three mesonet networ
 |--------|---------|----------|
 | **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
 | **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
+| **ASOS** | IEM ASOS/AWOS current observations | User-drawn bounding box |
 
-Either or both can be active at once. Each network polls independently every 5 minutes.
+Any combination can be active at once. OK Mesonet and WTM poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
+
+#### ASOS Bounding Box
+
+When **ASOS** is enabled for the first time, the map enters bounding-box mode:
+
+1. Click and drag on the map to draw the ASOS domain.
+2. Release the mouse to accept the box.
+3. STORM fetches current ASOS/AWOS observations from IEM for stations inside that box.
+4. Station plots render on the map. Large boxes may briefly pause the UI while plots are prepared.
+
+Toggling ASOS off and back on reuses the last selected bounding box. To replace it, click the **new box** link in the surface status text, then draw a new domain.
 
 #### Station Model Display
 
@@ -476,9 +488,28 @@ Each station renders a compact model circle on the map showing:
 | Upper-left | Temperature (°F) |
 | Lower-left | Dewpoint (°F) |
 | Center | Wind barb |
-| Right | Wind speed / direction |
+| Upper-right | Pressure in mb/hPa |
 
 Toggle station models on or off with the **Show plots** checkbox.
+
+#### Freshness Coloring
+
+The station-plot center dot is colored by observation age, not fetch time. OK Mesonet and WTM use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
+
+| Source | Green | Yellow | Red |
+|--------|-------|--------|-----|
+| OK Mesonet / WTM | ≤5 min | ≤10 min | >10 min |
+| ASOS | ≤70 min | ≤90 min | >90 min |
+
+The ASOS timestamp comes from IEM's `valid` observation time.
+
+#### Data Sources
+
+| Source | Endpoint |
+|--------|----------|
+| OK Mesonet | NSSL THREDDS OK Mesonet JSON + Oklahoma Mesonet metadata |
+| West Texas Mesonet | NSSL THREDDS WTM JSON + TTU Mesonet site metadata |
+| ASOS/AWOS | IEM `currents.json` for selected station IDs; station metadata from IEM METAR GeoJSON |
 
 ---
 
@@ -578,17 +609,17 @@ Drawings are meteorological features sketched on the map — synced to all vehic
 
 #### Custom Shapes
 
-| Button | Shape | Color |
-|--------|-------|-------|
-| — | Polyline | White (#E8EAF0) |
-| □ | Polygon | White (#E8EAF0) |
+| Button | Shape | Styling |
+|--------|-------|---------|
+| — | Polyline | Custom title, color, and line style |
+| □ | Polygon | Custom title, color, and line style; fill follows line color |
 
 #### Drawing a Front or Shape
 
 1. Click the front type or shape button — it highlights and the map enters drawing mode (crosshair cursor).
 2. Click the map to place the first point, then continue clicking to trace the line.
 3. **Finish:** Right-click anywhere or press **Escape**.
-4. A dialog prompts for a title (optional for fronts; required for polylines and polygons; defaults to the type name if left blank).
+4. A dialog prompts for a title. Polylines and polygons also provide color and line-style controls.
 5. The feature appears on the map with the appropriate symbol and a title label at its center.
 
 #### Editing or Deleting a Drawing
@@ -596,8 +627,9 @@ Drawings are meteorological features sketched on the map — synced to all vehic
 1. Click an existing drawing on the map.
 2. The dialog opens with the current title.
 3. For fronts: an option to flip direction (reverses the symbol orientation) is available.
-4. Edit the title, flip direction, or click **Delete**.
-5. Click **Save** to confirm.
+4. For polylines and polygons: edit the title, color, or line style.
+5. Click **Delete** to remove the drawing if needed.
+6. Click **Save** to confirm.
 
 All changes are synced via MQTT.
 
@@ -676,7 +708,7 @@ Displays MetPy-style meteorological station plot icons at each tracked vehicle's
 #### Station Plot Layout
 
 ```
-  [Temp °F]   [Pressure code]
+  [Temp °F]   [Pressure mb]
        ○──wind barb
   [Dewpt °F]
 ```
@@ -685,7 +717,7 @@ Displays MetPy-style meteorological station plot icons at each tracked vehicle's
 |----------|------|-------|
 | Upper-left (NW) | Temperature (°F) | Red text |
 | Lower-left (SW) | Dewpoint (°F) | Green text |
-| Upper-right (NE) | Pressure code (last 3 digits × 10, e.g., 1013.2 mb → "132") | White text |
+| Upper-right (NE) | Pressure in mb/hPa, rounded to nearest whole value | White text |
 | Center | Wind barb (meteorological convention, barbs point toward station) | White |
 | Center dot | Anchor | White circle |
 
@@ -1214,6 +1246,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
 | NSSL CLAMPS DL Truck | On demand | Fetched from NSSL THREDDS on click |
 | OK / WTM Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| ASOS/AWOS Surface Obs (IEM) | Every 5 minutes after bbox selection | User-drawn bbox; capped for performance |
 | Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
 | GPS (Track B) | Real-time / continuous | NMEA sentences |
@@ -1445,7 +1478,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | HRRR Point Soundings | ✅ Enabled | n/a |
 | Observed Radiosonde Soundings | ✅ Enabled | n/a |
 | NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
-| Surface Obs (OK / WTM Mesonet) | ✅ Enabled (when toggled on) | n/a |
+| Surface Obs (OK / WTM / ASOS) | ✅ Enabled (when toggled on) | n/a |
 | Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |
 | Drawings (fronts, polylines, polygons) | ✅ Enabled | `--disable-annotations` |
