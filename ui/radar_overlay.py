@@ -30,8 +30,9 @@ log = logging.getLogger(__name__)
 #   256 → ~20-40 ms render   (older/slower field laptop — recommended minimum)
 # Override at launch with:  python main.py --render-grid-size 256
 RENDER_GRID_SIZE = 768
+MAX_RENDER_GRID_SIZE = 1536
 ADAPTIVE_RENDER_GRID = True
-ADAPTIVE_GRID_STEPS = (128, 192, 256, 320, 384, 512, 640, 768, 1024)
+ADAPTIVE_GRID_STEPS = (128, 192, 256, 320, 384, 512, 640, 768, 1024, 1280, 1536)
 ADAPTIVE_DOWN_MS = 280.0
 ADAPTIVE_UP_MS = 130.0
 ADAPTIVE_DOWN_SCANS = 2
@@ -43,8 +44,8 @@ def set_render_grid_size(n: int) -> None:
     # pylint: disable=global-statement
     global RENDER_GRID_SIZE
 
-    # clamp to 64-1024
-    RENDER_GRID_SIZE = max(64, min(1024, n))
+    # clamp to a practical range; higher values are expensive for PNG rendering.
+    RENDER_GRID_SIZE = max(64, min(MAX_RENDER_GRID_SIZE, n))
 
     # log it
     log.info("RENDER_GRID_SIZE set to %d", RENDER_GRID_SIZE)

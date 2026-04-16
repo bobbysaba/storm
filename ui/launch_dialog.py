@@ -966,6 +966,7 @@ class LaunchDialog(QDialog):
             ("512 px", 512),
             ("768 px  (sharp)", 768),
             ("1024 px  (ultra)", 1024),
+            ("1536 px  (max)", 1536),
         ]
         for label, value in _RES_OPTIONS:
             self._res_combo.addItem(label, value)

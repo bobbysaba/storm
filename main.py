@@ -128,8 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         metavar="N",
         help=(
-            "radar render resolution override (default runtime value: 512). "
-            "Suggested values: 512, 384, 256, 128"
+            "radar render resolution override (default runtime value: adaptive, starts at 768). "
+            "Suggested values: 1536, 1024, 768, 512, 384, 256, 128"
         ),
     )
 

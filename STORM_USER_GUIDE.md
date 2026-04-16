@@ -243,7 +243,7 @@ Clicking the button expands the radar drawer. Checking the checkbox inside enabl
 #### Drawer Controls
 
 **Site Selector (dropdown)**
-Choose from 31 pre-configured NEXRAD sites (e.g., KTLX, KOUN, KVNX, KFWS, etc.) or type a custom 4-letter site code. Changing the site immediately clears cached frames and begins fetching for the new site.
+Choose from pre-configured NEXRAD sites (e.g., KTLX, KOUN, KVNX, KDYX, KFWS, etc.) or type a custom 4-letter site code. Changing the site immediately clears cached frames and begins fetching for the new site.
 
 **Product Selector (dropdown)**
 
@@ -275,8 +275,8 @@ Enables or disables radar fetching. When unchecked, radar is hidden from the map
 - **Frame cache:** Up to 12 frames per product
 - **First fetch:** Backfills 6 reflectivity frames and 6 velocity frames
 - **Render pipeline:** Level 3 polar data decoded by MetPy → reprojected to lat/lon grid → rendered as RGBA PNG via matplotlib → base64-encoded → pushed to MapLibre as a raster layer
-- **Grid size:** 512×512 by default (configurable via `--render-grid-size`)
-- **Render time:** ~80–150 ms on modern hardware at default grid size
+- **Grid size:** Dynamic by default, starting at 768×768 (configurable via `--render-grid-size`)
+- **Render time:** ~140–260 ms on modern hardware at 768×768
 
 #### Disabling Radar
 
@@ -1289,7 +1289,7 @@ Run `python main.py --help` for the full list. Key options:
 ### Performance
 
 ```
---render-grid-size N            Radar rendering grid: 128, 256, 512 (default), 768, or 1024
+--render-grid-size N            Radar rendering grid: 128, 256, 512, 768, 1024, or 1536
 ```
 
 ### Debug Run Profiles
@@ -1370,9 +1370,10 @@ The radar rendering grid controls the sharpness and rendering time of the NEXRAD
 |-----------|----------------------|-----------------|
 | 128 | ~5–10 ms | Very slow hardware, emergency fallback |
 | 256 | ~20–40 ms | Older laptops, safe-mode deployments |
-| **512** | **~80–150 ms** | **Default — balanced quality/speed** |
-| 768 | ~200–400 ms | High-end hardware, sharper image |
+| 512 | ~80–150 ms | Balanced quality/speed |
+| **768** | **~200–400 ms** | **Default starting point in dynamic mode** |
 | 1024 | ~400–800 ms | Workstation-class machines only |
+| 1536 | ~900–1800 ms | Maximum sharpness, very fast machines only |
 
 Pass `--render-grid-size N` to override. Lower grid sizes make the radar appear blockier but keep the CPU free for other tasks.
 

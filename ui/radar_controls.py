@@ -31,6 +31,7 @@ NEXRAD_SITES = [
     ("KLZK", "Little Rock, AR", 34.836, -92.262),
     ("KAMA", "Amarillo, TX", 35.233, -101.709),
     ("KFWS", "Dallas/Ft. Worth, TX", 32.573, -97.303),
+    ("KDYX", "Dyess AFB, TX", 32.539, -99.254),
     ("KSHV", "Shreveport, LA", 32.451, -93.841),
     ("KLBB", "Lubbock, TX", 33.654, -101.814),
     ("KMAF", "Midland, TX", 31.943, -102.189),
