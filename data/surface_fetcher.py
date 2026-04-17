@@ -21,9 +21,9 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode    = ssl.CERT_NONE
 
-OK_THREDDS_URL  = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/ok_mesonet.json"
+OK_THREDDS_URL  = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/ok_mesonet.json"
 OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
-WTM_THREDDS_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/wtx_mesonet.json"
+WTM_THREDDS_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/wtx_mesonet.json"
 WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 
 # IEM endpoints for ASOS
