@@ -1345,10 +1345,20 @@ class MainWindow(QMainWindow):
                 layout = widget.layout()
                 if layout is not None:
                     layout.activate()
-                widget.adjustSize()
-                w = widget.width()
+                # For the vehicle panel, use the cached size so it never
+                # shrinks to an intermediate sizeHint between rebuilds.
+                cached = getattr(self, "_vehicle_panel_cached_size", None)
+                if (widget is self.vehicle_panel
+                        and cached is not None
+                        and cached.isValid()
+                        and cached.height() > 0):
+                    w = cached.width()
+                    h = cached.height()
+                else:
+                    widget.adjustSize()
+                    w = widget.width()
+                    h = widget.height()
                 x = max(0, (r.width() - w) // 2)
-                h = widget.height()
                 widget.setGeometry(x, _stack_y, w, h)
                 widget.raise_()
                 _stack_y += h + 6
@@ -3147,7 +3157,8 @@ class MainWindow(QMainWindow):
         self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
-        self.status_msg_label.setText(scan.label)
+        if not self._pending_cone_motion_fix:
+            self.status_msg_label.setText(scan.label)
         self._layout_overlays()
 
     def _show_scan(self, scan):
@@ -3155,7 +3166,8 @@ class MainWindow(QMainWindow):
         self._radar_overlay.update(scan, mask_scan=self._velocity_mask_scan(scan))
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
-        self.status_msg_label.setText(scan.label)
+        if not self._pending_cone_motion_fix:
+            self.status_msg_label.setText(scan.label)
         self._layout_overlays()
 
     def _velocity_mask_scan(self, scan):
@@ -3370,6 +3382,16 @@ class MainWindow(QMainWindow):
         # cancel any in-progress drawing when tool switches
         if getattr(self, "_active_drawing_type", ""):
             self._cancel_drawing()
+
+        # If the drawer is closing (type_key=="") but a storm motion fix is
+        # in progress, keep the placement state alive so the user can open
+        # the RADAR drawer to step frames without losing their first fix.
+        if (
+            not type_key
+            and self._active_annotation_type == "storm_motion"
+            and self._pending_cone_motion_fix is not None
+        ):
+            return
 
         self._pending_cone_params = None
         self._pending_cone_motion_fix = None
@@ -4484,6 +4506,8 @@ class MainWindow(QMainWindow):
                 self._vehicle_rows_widget.setVisible(False)
                 if hasattr(self, "_vehicle_placeholder"):
                     self._vehicle_placeholder.setVisible(True)
+                # Reset cached size so the pill can shrink to header-only
+                self._vehicle_panel_cached_size = QSize(280, 0)
                 return
 
             self._vehicle_rows_widget.setVisible(True)
@@ -4527,8 +4551,8 @@ class MainWindow(QMainWindow):
                 self._layout_overlays()
                 hint = self.vehicle_panel.sizeHint()
                 self._vehicle_panel_cached_size = QSize(
-                    max(280, hint.width(), self.vehicle_panel.width()),
-                    max(hint.height(), self.vehicle_panel.height()),
+                    max(280, hint.width()),
+                    hint.height(),
                 )
             self.vehicle_panel.setMinimumSize(previous_min_size)
             self.vehicle_panel.setUpdatesEnabled(True)
