@@ -51,6 +51,7 @@ class ScanSectorSync(QObject):
                 topic,
                 json.dumps(scan.to_dict()),
                 expiry=_next_8am_utc_seconds(),
+                retain=True,
             )
             log.debug("ScanSectorSync: published %s", topic)
         except Exception as e:

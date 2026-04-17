@@ -4515,26 +4515,23 @@ class MainWindow(QMainWindow):
 
                 self._vehicle_rows_layout.addWidget(col_widget)
 
-            # Geometry must be updated before re-enabling painting, otherwise
-            # Qt can fire a paint event between setUpdatesEnabled(True) and the
-            # _layout_overlays call, rendering the pill at its pre-rebuild geometry.
+            # Activate geometry so sizeHint is correct before re-enabling paint.
             self.vehicle_panel.layout().activate()
             self._vehicle_rows_layout.activate()
-            self._layout_overlays()
             rebuilt_rows = True
         finally:
+            if rebuilt_rows:
+                # Compute final geometry and cache BEFORE removing the min-size
+                # constraint and re-enabling paints, so Qt never renders an
+                # intermediate (shrunken) frame.
+                self._layout_overlays()
+                hint = self.vehicle_panel.sizeHint()
+                self._vehicle_panel_cached_size = QSize(
+                    max(280, hint.width(), self.vehicle_panel.width()),
+                    max(hint.height(), self.vehicle_panel.height()),
+                )
             self.vehicle_panel.setMinimumSize(previous_min_size)
             self.vehicle_panel.setUpdatesEnabled(True)
-
-        if rebuilt_rows:
-            self.vehicle_panel.layout().activate()
-            self._vehicle_rows_layout.activate()
-            self._layout_overlays()
-            hint = self.vehicle_panel.sizeHint()
-            self._vehicle_panel_cached_size = QSize(
-                max(280, hint.width(), self.vehicle_panel.width()),
-                max(hint.height(), self.vehicle_panel.height()),
-            )
 
     def _make_vehicle_row(self, v) -> QWidget:
         obs = v.latest_obs

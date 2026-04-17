@@ -1049,6 +1049,11 @@ def build_map_html() -> str:
 
       // ── Vehicle scan-sector overlay ─────────────────────────────────────
       map.addSource('scan-sectors', {{type:'geojson', data:{{type:'FeatureCollection',features:[]}}}});
+      if (window._scanSectorsData) {{
+        try {{ map.getSource('scan-sectors').setData(JSON.parse(window._scanSectorsData)); }}
+        catch(e) {{ console.warn('scan sector flush failed', e); }}
+        window._scanSectorsData = null;
+      }}
       map.addLayer({{
         id: 'scan-sector-fill', type: 'fill', source: 'scan-sectors',
         filter: ['==', ['geometry-type'], 'Polygon'],
