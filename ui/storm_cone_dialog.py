@@ -281,6 +281,68 @@ class StormConePlaceConfirmDialog(QDialog):
         layout.addLayout(btn_row)
 
 
+class StormConeMotionConfirmDialog(QDialog):
+    """Confirms an automatically calculated storm motion cone."""
+
+    def __init__(
+        self,
+        origin_lat: float,
+        origin_lon: float,
+        speed_kts: float,
+        heading: int,
+        first_time: str,
+        second_time: str,
+        distance_nm: float,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("annotationDialog")
+        self.setWindowTitle("Confirm Storm Motion")
+        self.setModal(True)
+        self.setMinimumWidth(330)
+        self.setStyleSheet(_dialog_style())
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title_label = QLabel("Storm Motion Cone")
+        title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ACCENT}; background: transparent;")
+        layout.addWidget(title_label)
+
+        info = QLabel(
+            f"Fixes {first_time} → {second_time}\n"
+            f"Distance {distance_nm:.1f} nm\n"
+            f"Speed {speed_kts:.0f} kts   Heading {heading:d}°\n"
+            f"Origin {origin_lat:.4f}, {origin_lon:.4f}"
+        )
+        info.setStyleSheet(f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;")
+        layout.addWidget(info)
+
+        if speed_kts > 120:
+            warn = QLabel("Calculated speed is unusually high. Confirm only if the same feature was selected.")
+            warn.setWordWrap(True)
+            warn.setStyleSheet("font-size: 10px; color: #F5C542; background: transparent;")
+            layout.addWidget(warn)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+
+        btn_confirm = QPushButton("Confirm")
+        btn_confirm.setObjectName("primaryButton")
+        btn_confirm.setDefault(True)
+        btn_confirm.clicked.connect(self.accept)
+        btn_row.addWidget(btn_confirm)
+
+        layout.addLayout(btn_row)
+
+
 class StormConeMoveConfirmDialog(QDialog):
     """Shown after an existing storm cone has been dragged."""
 

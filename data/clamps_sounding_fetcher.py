@@ -9,7 +9,7 @@
 #   %TITLE%
 #   NSSL_LIDAR YYMMDD/HHMM
 #   %RAW%
-#   pressure(hPa), height(m MSL), temp(°C), dewpoint(°C), wind_dir(deg), wind_speed(m/s)
+#   pressure(hPa), height(m MSL), temp(°C), dewpoint(°C), wind_dir(deg), wind_speed(kt)
 #   ...
 #   %END%
 #

@@ -43,8 +43,10 @@ from ui.drawing_dialog import (
     DrawingMoveConfirmDialog,
 )
 from ui.storm_cone_dialog import (
-    StormConeInputDialog, StormConePlaceConfirmDialog, StormConeMoveConfirmDialog,
+    StormConeInputDialog, StormConePlaceConfirmDialog, StormConeMotionConfirmDialog,
+    StormConeMoveConfirmDialog,
 )
+from ui.scan_sector_dialog import ScanSectorDialog
 from data.radar_fetcher import RadarFetcher
 from data.sounding_fetcher import SoundingFetcher
 from data.obs_sounding_fetcher import ObsSoundingFetcher
@@ -57,7 +59,8 @@ from data.surface_fetcher import SurfaceFetcher
 from data.radar_decoder import decode_nexrad_l3
 import config
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
-from core.storm_cone import StormCone
+from core.storm_cone import StormCone, motion_from_fixes
+from core.scan_sector import ScanSector, feature_collection
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from core.observation import Observation
 from core.vehicle import Vehicle
@@ -65,6 +68,7 @@ from network.mqtt_client import MQTTClient
 from network.annotation_sync import AnnotationSync
 from network.storm_cone_sync import StormConeSync
 from network.drawing_sync import DrawingSync
+from network.scan_sector_sync import ScanSectorSync
 from network.vehicle_sync import VehicleSync
 from data.gps_reader import GPSReader
 from data.obs_file_watcher import ObsFileWatcher, FieldMap
@@ -74,6 +78,9 @@ from ui.layer_order_pill import LayerOrderPill, MAPLIBRE_LAYERS
 from ui.debug_pill import DebugPill
 
 log = logging.getLogger(__name__)
+
+SCAN_MOVE_THRESHOLD_KM = 0.1
+SCAN_MOVE_FIXES_TO_STOP = 3
 
 
 def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
@@ -151,6 +158,7 @@ class MainWindow(QMainWindow):
         self._viewer = viewer
         self._archive_time = archive_time    # None = live mode
         self._archive = archive_time is not None
+        self._current_radar_scan = None
         self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
 
         self.setWindowTitle(
@@ -267,6 +275,7 @@ class MainWindow(QMainWindow):
 
         # Screenshot button — persistent, bottom-right above zoom controls
         self._init_screenshot_button()
+        self._init_scan_button()
 
         # Layer order pill — floats above the bottom-left status pill
         self._layer_pill = LayerOrderPill(self._map_container)
@@ -603,6 +612,7 @@ class MainWindow(QMainWindow):
     def _on_archive_radar_scan(self, scan) -> None:
         """Render a Level-2 scan from the archive fetcher."""
         from ui.radar_overlay import render_scan_to_png, RENDER_GRID_SIZE
+        self._current_radar_scan = scan
 
         # Add tilt/product selectors to archive controls the first time;
         # refresh the tilt list on every subsequent scan (VCP can change).
@@ -665,6 +675,7 @@ class MainWindow(QMainWindow):
             self.map_widget.remove_vehicle(vid)
         self._vehicles.clear()
         self.update_vehicle_count(0)
+        self._sync_routing_vehicle_snapshot()
 
     def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
         if self._archive_radar:
@@ -1036,7 +1047,7 @@ class MainWindow(QMainWindow):
         self.map_widget.map_pick_for_route.connect(
             self.routing_controls.on_map_pick
         )
-        if self._viewer or self._archive:
+        if self._viewer:
             self.btn_route.hide()
         if self._archive:
             self.btn_prev_locs.hide()
@@ -1331,6 +1342,9 @@ class MainWindow(QMainWindow):
                 nonlocal _stack_y
                 if widget is None:
                     return
+                layout = widget.layout()
+                if layout is not None:
+                    layout.activate()
                 widget.adjustSize()
                 w = widget.width()
                 x = max(0, (r.width() - w) // 2)
@@ -1458,6 +1472,18 @@ class MainWindow(QMainWindow):
                 _recenter_top - sb_h,
             )
             self.btn_screenshot.raise_()
+            if self.btn_screenshot.isVisible():
+                _recenter_top = _recenter_top - sb_h - _GAP
+
+        # scan button — vehicle mode only, near the other bottom map controls
+        if hasattr(self, "btn_scan"):
+            sc_w = self.btn_scan.width()
+            sc_h = self.btn_scan.height()
+            self.btn_scan.move(
+                r.width() - sc_w - MARGIN,
+                _recenter_top - sc_h,
+            )
+            self.btn_scan.raise_()
 
 
     def _start_layout_pulse(self):
@@ -1622,6 +1648,7 @@ class MainWindow(QMainWindow):
     def _init_vehicle_panel(self):
         self.vehicle_panel = QWidget(self._map_container)
         self.vehicle_panel.setObjectName("vehiclePill")
+        self._vehicle_panel_cached_size = QSize(280, 0)
         layout = QVBoxLayout(self.vehicle_panel)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(6)
@@ -2252,6 +2279,7 @@ class MainWindow(QMainWindow):
             self._loop_timer.stop()
             self.radar_controls.reset_cache_ui()
             self._scan_cache.clear()
+            self._current_radar_scan = None
             # Bump render generation so any in-flight decode/render and any
             # deferred inject result are discarded instead of re-adding the
             # overlay layer after clear().
@@ -2700,6 +2728,7 @@ class MainWindow(QMainWindow):
         self._loop_timer.stop()
         self.radar_controls.reset_cache_ui()
         self._scan_cache.clear()
+        self._current_radar_scan = None
         if getattr(self, '_site_change_from_map_click', False):
             # JS click handler already set raster-opacity to 0 — just sync
             # Python state.  Sending JS here would freeze the renderer (the
@@ -2932,6 +2961,7 @@ class MainWindow(QMainWindow):
             # its raster pipeline (removeLayer/removeSource), which can briefly
             # freeze map interactions. The overlay will be restored via updateImage
             # on the next inject() when data arrives.
+            self._current_radar_scan = None
             self._radar_overlay.hide()
             if not self._radar_product_availability.get(product, True):
                 self._update_radar_unavailable_status()
@@ -3111,6 +3141,7 @@ class MainWindow(QMainWindow):
         """Actually inject the rendered PNG into the map."""
         import time as _time
         scan = result["scan"]
+        self._current_radar_scan = scan
         self._radar_overlay.inject(result["png_bytes"], result["bounds"])
         self._last_inject_time = _time.monotonic()
         self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
@@ -3120,6 +3151,7 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _show_scan(self, scan):
+        self._current_radar_scan = scan
         self._radar_overlay.update(scan, mask_scan=self._velocity_mask_scan(scan))
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
@@ -3184,6 +3216,8 @@ class MainWindow(QMainWindow):
         self._vehicle_sync = VehicleSync(self._mqtt_client, parent=self)
         self._vehicle_sync.vehicle_received.connect(self._on_remote_vehicle_obs)
         self._storm_cone_sync = StormConeSync(self._mqtt_client, read_only=self._viewer, parent=self)
+        self._scan_sector_sync = ScanSectorSync(self._mqtt_client, read_only=self._viewer, parent=self)
+        self._scan_sector_sync.scan_received.connect(self._recv_remote_scan_sector)
 
         # connect after a short delay so the window is fully painted first
         if config.MQTT_HOST:
@@ -3338,6 +3372,7 @@ class MainWindow(QMainWindow):
             self._cancel_drawing()
 
         self._pending_cone_params = None
+        self._pending_cone_motion_fix = None
         self._active_annotation_type = ""
         self._active_drawing_type = ""
         self.map_widget.set_storm_cone_placement_mode(False)
@@ -3355,19 +3390,11 @@ class MainWindow(QMainWindow):
         elif type_key == "storm_motion":
             self._active_annotation_type = type_key
             self.map_widget.set_drawing_mode(False)
-            dlg = StormConeInputDialog(edit_mode=False, parent=self)
-            if dlg.exec() == StormConeInputDialog.DialogCode.Accepted:
-                self._pending_cone_params = {
-                    "heading": dlg.heading(),
-                    "speed_kts": dlg.speed_kts(),
-                }
-                self.map_widget.set_annotation_mode(False)
-                self.map_widget.set_storm_cone_placement_mode(True)
-                self._set_placement_prompt("storm cone — click and drag to place", needs_click=False)
-            else:
-                self._active_annotation_type = ""
-                self.annotation_tools.deactivate_tool()
-                self._clear_placement_prompt()
+            self.map_widget.set_annotation_mode(True)
+            self._set_placement_prompt(
+                "storm cone — select first radar feature position",
+                needs_click=False,
+            )
         elif type_key:
             self._active_annotation_type = type_key
             self.map_widget.set_drawing_mode(False)
@@ -3385,6 +3412,9 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_active_drawing_type", ""):
             self._on_drawing_click(lat, lon)
+            return
+        if self._active_annotation_type == "storm_motion":
+            self._on_storm_motion_fix_click(lat, lon)
             return
         if self._active_annotation_type == "fork":
             # remove any existing fork annotations before placing new one
@@ -3655,6 +3685,7 @@ class MainWindow(QMainWindow):
     def _init_storm_cone(self):
         self._storm_cones: dict[str, StormCone] = {}
         self._pending_cone_params: dict | None = None
+        self._pending_cone_motion_fix: dict | None = None
         self._moving_cone_id: str | None = None
         self._moving_cone_original_location: tuple[float, float] | None = None
 
@@ -3672,6 +3703,101 @@ class MainWindow(QMainWindow):
         self._cone_expire_timer.setInterval(60_000)
         self._cone_expire_timer.timeout.connect(self._expire_storm_cones)
         self._cone_expire_timer.start()
+
+    def _current_displayed_radar_scan(self):
+        return self._current_radar_scan
+
+    def _on_storm_motion_fix_click(self, lat: float, lon: float):
+        scan = self._current_displayed_radar_scan()
+        if scan is None:
+            self._set_placement_prompt(
+                "storm cone — show a radar frame before selecting motion",
+                needs_click=False,
+            )
+            return
+
+        scan_time = scan.scan_time
+        if scan_time.tzinfo is None:
+            scan_time = scan_time.replace(tzinfo=timezone.utc)
+        time_label = scan_time.strftime("%H:%MZ")
+
+        if self._pending_cone_motion_fix is None:
+            self._pending_cone_motion_fix = {
+                "lat": lat,
+                "lon": lon,
+                "scan_time": scan_time,
+                "site": getattr(scan, "site", ""),
+                "product": getattr(scan, "product", ""),
+                "time_label": time_label,
+            }
+            self._set_placement_prompt(
+                f"storm cone — first fix {time_label}; move to a later radar frame and select the same feature",
+                needs_click=False,
+            )
+            return
+
+        first = self._pending_cone_motion_fix
+        if getattr(scan, "site", "") != first.get("site", ""):
+            self._set_placement_prompt(
+                "storm cone — radar site changed; select the first fix again",
+                needs_click=False,
+            )
+            self._pending_cone_motion_fix = None
+            return
+
+        try:
+            motion = motion_from_fixes(
+                first["lat"], first["lon"], first["scan_time"],
+                lat, lon, scan_time,
+            )
+        except ValueError:
+            self._set_placement_prompt(
+                "storm cone — choose a radar frame later than the first fix",
+                needs_click=False,
+            )
+            return
+
+        if motion["distance_nm"] < 0.05:
+            self._set_placement_prompt(
+                "storm cone — second fix is too close; choose the same feature on a later frame",
+                needs_click=False,
+            )
+            return
+
+        speed_kts = motion["speed_kts"]
+        heading = int(round(motion["heading"])) % 360
+        dlg = StormConeMotionConfirmDialog(
+            lat,
+            lon,
+            speed_kts,
+            heading,
+            first["time_label"],
+            time_label,
+            motion["distance_nm"],
+            parent=self,
+        )
+        if dlg.exec() != StormConeMotionConfirmDialog.DialogCode.Accepted:
+            self._set_placement_prompt(
+                f"storm cone — first fix {first['time_label']}; select a second point",
+                needs_click=False,
+            )
+            return
+
+        cone = StormCone.new(
+            lat,
+            lon,
+            heading=heading,
+            speed_kts=speed_kts,
+            valid_at=scan_time,
+        )
+        self._pending_cone_motion_fix = None
+        self._pending_cone_params = None
+        self._active_annotation_type = ""
+        self.map_widget.set_annotation_mode(False)
+        self.map_widget.set_storm_cone_placement_mode(False)
+        self.annotation_tools.deactivate_tool()
+        self._clear_placement_prompt()
+        self._place_storm_cone(cone)
 
     def _on_storm_cone_clicked(self, cone_id: str):
         cone = self._storm_cones.get(cone_id)
@@ -3862,6 +3988,9 @@ class MainWindow(QMainWindow):
         self._vehicles: dict[str, Vehicle] = {}
         self._vehicle_history: dict[str, deque] = {}  # vehicle_id → deque[Observation]
         self._vehicle_timeseries_dlg: "VehicleTimeseriesDialog | None" = None
+        self._scan_sectors: dict[str, ScanSector] = {}
+        self._scan_move_count = 0
+        self._last_scan_publish = 0.0
         self._follow_mode = False
         self._station_layer = StationPlotLayer(self.map_widget)
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
@@ -3971,6 +4100,7 @@ class MainWindow(QMainWindow):
         self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
         if obs.vehicle_id == config.VEHICLE_ID and hasattr(self, "routing_controls"):
             self.routing_controls.update_own_position(obs.lat, obs.lon)
+        self._sync_routing_vehicle_snapshot()
         count = len(self._vehicles)
         self.update_vehicle_count(count)
         if hasattr(self, "_vehicle_placeholder"):
@@ -3981,6 +4111,8 @@ class MainWindow(QMainWindow):
         self._update_recenter_btn_visibility()
         if self._follow_mode and obs.vehicle_id == self._follow_target_id():
             self.map_widget.follow_move(obs.lat, obs.lon)
+        if obs.vehicle_id == config.VEHICLE_ID:
+            self._update_local_scan_from_vehicle(obs)
 
     def _follow_target_id(self) -> str | None:
         """Return the vehicle ID to follow: local vehicle, first selected, or sole vehicle."""
@@ -4027,6 +4159,159 @@ class MainWindow(QMainWindow):
         """)
         self.btn_screenshot.clicked.connect(self._on_screenshot_clicked)
         self.btn_screenshot.show()
+
+    def _init_scan_button(self) -> None:
+        self.btn_scan = QToolButton(self._map_container)
+        self.btn_scan.setText("SCAN")
+        self.btn_scan.setToolTip("Start or stop current data collection footprint")
+        self.btn_scan.setFixedSize(58, 32)
+        self.btn_scan.setStyleSheet("""
+            QToolButton {
+                background: #1E2433;
+                border: 1px solid #2A3045;
+                border-radius: 4px;
+                color: #C8D0DE;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 0.8px;
+            }
+            QToolButton:hover {
+                background: #252D42;
+                border-color: #00CFFF;
+                color: #00CFFF;
+            }
+            QToolButton[active="true"] {
+                background: rgba(0, 207, 255, 0.18);
+                border-color: #00CFFF;
+                color: #00CFFF;
+            }
+        """)
+        self.btn_scan.clicked.connect(self._on_scan_button_clicked)
+        self.btn_scan.setVisible(not (self._monitor or self._viewer or self._archive))
+
+    def _on_scan_button_clicked(self) -> None:
+        vehicle = self._vehicles.get(config.VEHICLE_ID)
+        current = self._scan_sectors.get(config.VEHICLE_ID)
+        if current and current.active:
+            lat, lon = current.lat, current.lon
+        elif vehicle is not None:
+            lat, lon = vehicle.lat, vehicle.lon
+        else:
+            lat, lon = config.HOME_LAT, config.HOME_LON
+            self.status_msg_label.setText("Scan: no local GPS yet; using configured home location")
+            self._layout_overlays()
+
+        dlg = ScanSectorDialog(
+            vehicle_id=config.VEHICLE_ID,
+            lat=lat,
+            lon=lon,
+            active_scan=current,
+            parent=self,
+        )
+        if not dlg.exec():
+            return
+
+        if dlg.action == "stop":
+            self._deactivate_local_scan()
+        elif dlg.action == "apply":
+            self._activate_local_scan(dlg.scan_sector())
+
+    def _activate_local_scan(self, scan: ScanSector) -> None:
+        self._scan_sectors[scan.vehicle_id] = scan
+        self._scan_move_count = 0
+        self._last_scan_publish = time.monotonic()
+        self._refresh_scan_sectors()
+        self._publish_scan(scan)
+        self._update_scan_button()
+
+    def _deactivate_local_scan(self, reason: str = "") -> None:
+        existing = self._scan_sectors.pop(config.VEHICLE_ID, None)
+        if existing is None:
+            self._refresh_scan_sectors()
+            self._update_scan_button()
+            return
+        inactive = ScanSector(
+            vehicle_id=config.VEHICLE_ID,
+            active=False,
+            mode=existing.mode,
+            lat=existing.lat,
+            lon=existing.lon,
+            range_m=existing.range_m,
+            inner_range_m=existing.inner_range_m,
+            azimuth_deg=existing.azimuth_deg,
+            beam_width_deg=existing.beam_width_deg,
+            follow_vehicle=existing.follow_vehicle,
+        )
+        self._publish_scan(inactive)
+        self._scan_move_count = 0
+        self._refresh_scan_sectors()
+        self._update_scan_button()
+        if reason:
+            self.status_msg_label.setText(reason)
+            self._layout_overlays()
+
+    def _recv_remote_scan_sector(self, scan: ScanSector) -> None:
+        if not (self._monitor or self._viewer or self._archive) and scan.vehicle_id == config.VEHICLE_ID:
+            return
+        if scan.active:
+            self._scan_sectors[scan.vehicle_id] = scan
+        else:
+            self._scan_sectors.pop(scan.vehicle_id, None)
+        self._refresh_scan_sectors()
+
+    def _publish_scan(self, scan: ScanSector) -> None:
+        sync = getattr(self, "_scan_sector_sync", None)
+        if sync is not None:
+            sync.publish(scan)
+
+    def _refresh_scan_sectors(self) -> None:
+        self.map_widget.set_scan_sectors_geojson(
+            feature_collection(list(self._scan_sectors.values()))
+        )
+        self._set_layer_active("scan_sectors", bool(self._scan_sectors))
+
+    def _update_scan_button(self) -> None:
+        if not hasattr(self, "btn_scan"):
+            return
+        active = config.VEHICLE_ID in self._scan_sectors
+        self.btn_scan.setProperty("active", "true" if active else "false")
+        self.btn_scan.setText("SCAN ON" if active else "SCAN")
+        scan = self._scan_sectors.get(config.VEHICLE_ID)
+        if scan and scan.active:
+            desc = scan.mode.upper()
+            if scan.range_m:
+                desc += f" {scan.range_m / 1000:.1f} km"
+            self.btn_scan.setToolTip(f"Current sampling: {desc}")
+        else:
+            self.btn_scan.setToolTip("Start or stop current data collection footprint")
+        self.btn_scan.style().unpolish(self.btn_scan)
+        self.btn_scan.style().polish(self.btn_scan)
+        self.btn_scan.adjustSize()
+        self.btn_scan.setFixedSize(max(58, self.btn_scan.sizeHint().width() + 10), 32)
+        self._layout_overlays()
+
+    def _update_local_scan_from_vehicle(self, obs: Observation) -> None:
+        scan = self._scan_sectors.get(config.VEHICLE_ID)
+        if scan is None or not scan.active:
+            return
+        if scan.follow_vehicle:
+            scan.lat = obs.lat
+            scan.lon = obs.lon
+            scan.timestamp = datetime.now(timezone.utc)
+            self._refresh_scan_sectors()
+            now = time.monotonic()
+            if now - self._last_scan_publish >= config.OBS_MQTT_PUBLISH_S:
+                self._publish_scan(scan)
+                self._last_scan_publish = now
+            return
+
+        dist_km = self._haversine_km(scan.lat, scan.lon, obs.lat, obs.lon)
+        if dist_km > SCAN_MOVE_THRESHOLD_KM:
+            self._scan_move_count += 1
+        else:
+            self._scan_move_count = 0
+        if self._scan_move_count >= SCAN_MOVE_FIXES_TO_STOP:
+            self._deactivate_local_scan("Scan stopped: vehicle moved away from the collection point")
 
     def _on_screenshot_clicked(self) -> None:
         """Hide the floating toolbar, capture the window, then prompt to save."""
@@ -4114,6 +4399,10 @@ class MainWindow(QMainWindow):
     def _should_display_vehicle_obs(self, obs: Observation) -> bool:
         return self._obs_age_minutes(obs) <= 10.0 * 60.0
 
+    def _sync_routing_vehicle_snapshot(self) -> None:
+        if hasattr(self, "routing_controls"):
+            self.routing_controls.update_vehicles(self._vehicles)
+
     def _hide_vehicle(self, vehicle_id: str) -> None:
         removed = self._vehicles.pop(vehicle_id, None)
         self._vehicle_age_display_state.pop(vehicle_id, None)
@@ -4122,6 +4411,11 @@ class MainWindow(QMainWindow):
 
         self.map_widget.remove_vehicle(vehicle_id)
         self._station_layer.remove(vehicle_id)
+        self._sync_routing_vehicle_snapshot()
+        if vehicle_id in self._scan_sectors:
+            self._scan_sectors.pop(vehicle_id, None)
+            self._refresh_scan_sectors()
+            self._update_scan_button()
         if vehicle_id in self._selected_vehicle_ids:
             self._selected_vehicle_ids = [vid for vid in self._selected_vehicle_ids if vid != vehicle_id]
         self.update_vehicle_count(len(self._vehicles))
@@ -4175,6 +4469,12 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_vehicle_rows_layout"):
             return
 
+        previous_min_size = self.vehicle_panel.minimumSize()
+        cached_size = self._vehicle_panel_cached_size
+        if self.vehicle_panel.isVisible() and cached_size.isValid() and cached_size.height() > 0:
+            self.vehicle_panel.setMinimumSize(cached_size)
+
+        rebuilt_rows = False
         self.vehicle_panel.setUpdatesEnabled(False)
         try:
             self._vehicle_row_age_labels.clear()
@@ -4218,9 +4518,23 @@ class MainWindow(QMainWindow):
             # Geometry must be updated before re-enabling painting, otherwise
             # Qt can fire a paint event between setUpdatesEnabled(True) and the
             # _layout_overlays call, rendering the pill at its pre-rebuild geometry.
+            self.vehicle_panel.layout().activate()
+            self._vehicle_rows_layout.activate()
             self._layout_overlays()
+            rebuilt_rows = True
         finally:
+            self.vehicle_panel.setMinimumSize(previous_min_size)
             self.vehicle_panel.setUpdatesEnabled(True)
+
+        if rebuilt_rows:
+            self.vehicle_panel.layout().activate()
+            self._vehicle_rows_layout.activate()
+            self._layout_overlays()
+            hint = self.vehicle_panel.sizeHint()
+            self._vehicle_panel_cached_size = QSize(
+                max(280, hint.width(), self.vehicle_panel.width()),
+                max(hint.height(), self.vehicle_panel.height()),
+            )
 
     def _make_vehicle_row(self, v) -> QWidget:
         obs = v.latest_obs

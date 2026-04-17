@@ -86,11 +86,21 @@ def _threshold_color(key: str, value) -> str | None:
     thresholds = _THRESHOLDS.get(key)
     if not thresholds or value is None:
         return None
+    if not np.isfinite(value):
+        return None
     color = thresholds[0][1]
     for threshold, c in thresholds:
         if value >= threshold:
             color = c
     return color
+
+
+def _finite_float(value) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if np.isfinite(out) else None
 
 
 # ── Scalar params (flat row at bottom) ───────────────────────────────────────
@@ -845,16 +855,26 @@ class SoundingDialog(QDialog):
 
         # Bunkers storm motion — colored dot markers + corner text
         try:
-            pres = snd.pressure * units.hPa
-            u_ms = snd.u_wind   * units("m/s")
-            v_ms = snd.v_wind   * units("m/s")
-            hgt  = snd.height   * units.m
+            wind_valid = (
+                np.isfinite(snd.pressure)
+                & np.isfinite(snd.height)
+                & np.isfinite(snd.u_wind)
+                & np.isfinite(snd.v_wind)
+            )
+            if wind_valid.sum() < 4:
+                raise ValueError("not enough finite wind levels for Bunkers motion")
+            pres = snd.pressure[wind_valid] * units.hPa
+            u_ms = snd.u_wind[wind_valid]   * units("m/s")
+            v_ms = snd.v_wind[wind_valid]   * units("m/s")
+            hgt  = snd.height[wind_valid]   * units.m
             rm, lm, _ = mpcalc.bunkers_storm_motion(pres, u_ms, v_ms, hgt)
 
             rm_u_kt = float(rm[0].to("knots").m)
             rm_v_kt = float(rm[1].to("knots").m)
             lm_u_kt = float(lm[0].to("knots").m)
             lm_v_kt = float(lm[1].to("knots").m)
+            if not all(np.isfinite(x) for x in (rm_u_kt, rm_v_kt, lm_u_kt, lm_v_kt)):
+                raise ValueError("Bunkers motion returned non-finite values")
 
             rm_spd = float(np.sqrt(rm_u_kt**2 + rm_v_kt**2))
             rm_dir = float((np.degrees(np.arctan2(rm[0].to("m/s").m, rm[1].to("m/s").m)) + 180) % 360)
@@ -913,6 +933,7 @@ class SoundingDialog(QDialog):
             lbl = self._param_labels.get(key)
             if lbl is None:
                 return
+            value = _finite_float(value)
             lbl.setText(fmt.format(value) if value is not None else "—")
             thr = _threshold_color(key, value) if value is not None else None
             color = thr if thr is not None else self._param_colors.get(key, _TEXT)
@@ -930,6 +951,17 @@ class SoundingDialog(QDialog):
         v_ms    = snd.v_wind      * units("m/s")
         hgt     = snd.height      * units.m
         hgt_agl = (snd.height - snd.height[0]) * units.m
+        wind_valid = (
+            np.isfinite(snd.pressure)
+            & np.isfinite(snd.height)
+            & np.isfinite(snd.u_wind)
+            & np.isfinite(snd.v_wind)
+        )
+        wind_pres = snd.pressure[wind_valid] * units.hPa
+        wind_u_ms = snd.u_wind[wind_valid] * units("m/s")
+        wind_v_ms = snd.v_wind[wind_valid] * units("m/s")
+        wind_hgt = snd.height[wind_valid] * units.m
+        wind_hgt_agl = (snd.height[wind_valid] - snd.height[0]) * units.m
 
         # ── Surface-based parcel ──────────────────────────────────────────────
         sb_parcel = sbcape_val = None
@@ -1129,7 +1161,11 @@ class SoundingDialog(QDialog):
         srh01_val = None
         rm_u_ms_f = rm_v_ms_f = None
         try:
-            rm, lm, _ = mpcalc.bunkers_storm_motion(pres, u_ms, v_ms, hgt)
+            if wind_valid.sum() < 4:
+                raise ValueError("not enough finite wind levels for storm motion")
+            rm, lm, _ = mpcalc.bunkers_storm_motion(
+                wind_pres, wind_u_ms, wind_v_ms, wind_hgt
+            )
             rm_u = rm[0].to("m/s")
             rm_v = rm[1].to("m/s")
             lm_u = lm[0].to("m/s")
@@ -1144,15 +1180,15 @@ class SoundingDialog(QDialog):
 
 
             srh01, _, _ = mpcalc.storm_relative_helicity(
-                hgt_agl, u_ms, v_ms, depth=1 * units.km,
+                wind_hgt_agl, wind_u_ms, wind_v_ms, depth=1 * units.km,
                 storm_u=rm_u, storm_v=rm_v,
             )
             srh03, _, _ = mpcalc.storm_relative_helicity(
-                hgt_agl, u_ms, v_ms, depth=3 * units.km,
+                wind_hgt_agl, wind_u_ms, wind_v_ms, depth=3 * units.km,
                 storm_u=rm_u, storm_v=rm_v,
             )
             srh_500, _, _ = mpcalc.storm_relative_helicity(
-                hgt_agl, u_ms, v_ms, depth=500 * units.m,
+                wind_hgt_agl, wind_u_ms, wind_v_ms, depth=500 * units.m,
                 storm_u=rm_u, storm_v=rm_v,
             )
             srh01_val = float(srh01.to("m**2/s**2").m)
@@ -1173,8 +1209,10 @@ class SoundingDialog(QDialog):
             (6    * units.km, "shear06"),
         ]:
             try:
+                if wind_valid.sum() < 2:
+                    raise ValueError("not enough finite wind levels for bulk shear")
                 us, vs = mpcalc.bulk_shear(
-                    pres, u_ms, v_ms, height=hgt_agl, depth=depth,
+                    wind_pres, wind_u_ms, wind_v_ms, height=wind_hgt_agl, depth=depth,
                 )
                 val = float(np.sqrt(us**2 + vs**2).to("knots").m)
                 _set(key, val)
@@ -1194,7 +1232,7 @@ class SoundingDialog(QDialog):
                 (6000, "srw06"),
             ]:
                 try:
-                    mask = hgt_agl_m <= depth_m
+                    mask = wind_valid & (hgt_agl_m <= depth_m)
                     if mask.sum() >= 2:
                         rel_u = snd.u_wind[mask] - rm_u_ms_f
                         rel_v = snd.v_wind[mask] - rm_v_ms_f

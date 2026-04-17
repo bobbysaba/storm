@@ -1,9 +1,9 @@
 """Tests for core.storm_cone — StormCone geometry and serialization."""
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from core.storm_cone import StormCone, _project, R_NM
+from core.storm_cone import StormCone, _project, R_NM, motion_from_fixes
 
 
 class TestProject:
@@ -89,6 +89,15 @@ class TestStormCone:
         assert "2045Z" in labels  # 20:00 + 45 min
         assert "2100Z" in labels  # 20:00 + 60 min
 
+    def test_label_times_use_valid_at(self):
+        cone = self._make_cone()
+        cone.valid_at = datetime(2026, 4, 6, 20, 10, tzinfo=timezone.utc)
+        gj = cone.build_geojson()
+        labels = [f["properties"]["text"] for f in gj["features"]
+                  if f["properties"]["ft"] == "label"]
+        assert "2025Z" in labels
+        assert "2110Z" in labels
+
     def test_to_dict_roundtrip(self):
         cone = self._make_cone()
         d = cone.to_dict()
@@ -99,6 +108,7 @@ class TestStormCone:
         assert restored.heading == cone.heading
         assert restored.speed_kts == cone.speed_kts
         assert restored.creator == cone.creator
+        assert restored.valid_at == cone.valid_at
 
     def test_from_dict_missing_creator(self):
         d = {
@@ -113,3 +123,23 @@ class TestStormCone:
         assert len(cone.id) == 8
         assert cone.creator == "bobby"
         assert cone.speed_kts == 50
+
+
+class TestStormConeMotion:
+    def test_motion_from_fixes_due_east(self):
+        t1 = datetime(2026, 4, 6, 20, 0, tzinfo=timezone.utc)
+        t2 = t1 + timedelta(minutes=30)
+        lat2, lon2 = _project(35.0, -97.0, 90.0, 20.0)
+        motion = motion_from_fixes(35.0, -97.0, t1, lat2, lon2, t2)
+        assert abs(motion["distance_nm"] - 20.0) < 0.1
+        assert abs(motion["speed_kts"] - 40.0) < 0.2
+        assert abs(motion["travel_bearing"] - 90.0) < 0.2
+        assert abs(motion["heading"] - 270.0) < 0.2
+
+    def test_motion_requires_later_second_fix(self):
+        t = datetime(2026, 4, 6, 20, 0, tzinfo=timezone.utc)
+        try:
+            motion_from_fixes(35.0, -97.0, t, 35.1, -96.9, t)
+        except ValueError:
+            return
+        assert False, "expected ValueError for same-time fixes"

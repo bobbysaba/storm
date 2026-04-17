@@ -49,10 +49,56 @@ def _project(lat, lon, azimuth_deg, dist_nm):
     return math.degrees(lat2), math.degrees(lon2)
 
 
+def _distance_nm(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two points in nautical miles."""
+    lat1_r = math.radians(lat1)
+    lon1_r = math.radians(lon1)
+    lat2_r = math.radians(lat2)
+    lon2_r = math.radians(lon2)
+    d_lat = lat2_r - lat1_r
+    d_lon = lon2_r - lon1_r
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(d_lon / 2) ** 2
+    )
+    a = min(1.0, max(0.0, a))
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R_NM * c
+
+
+def _bearing_deg(lat1, lon1, lat2, lon2):
+    """Initial bearing from the first point to the second point."""
+    lat1_r = math.radians(lat1)
+    lat2_r = math.radians(lat2)
+    d_lon = math.radians(lon2 - lon1)
+    y = math.sin(d_lon) * math.cos(lat2_r)
+    x = (
+        math.cos(lat1_r) * math.sin(lat2_r)
+        - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(d_lon)
+    )
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def motion_from_fixes(lat1, lon1, time1, lat2, lon2, time2):
+    """Return storm heading-from and speed from two position/time fixes."""
+    dt_hours = (time2 - time1).total_seconds() / 3600.0
+    if dt_hours <= 0:
+        raise ValueError("second fix must be later than first fix")
+    distance = _distance_nm(lat1, lon1, lat2, lon2)
+    travel_bearing = _bearing_deg(lat1, lon1, lat2, lon2)
+    return {
+        "distance_nm": distance,
+        "dt_hours": dt_hours,
+        "travel_bearing": travel_bearing,
+        "heading": (travel_bearing + 180) % 360,
+        "speed_kts": distance / dt_hours,
+    }
+
+
 # storm cone record
 class StormCone:
     # create a new storm cone instance
-    def __init__(self, id, lat, lon, heading, speed_kts, creator, created_at):
+    def __init__(self, id, lat, lon, heading, speed_kts, creator, created_at, valid_at=None):
         # assign id
         self.id = id
         # assign latitude
@@ -67,10 +113,13 @@ class StormCone:
         self.creator = creator
         # assign created time
         self.created_at = created_at
+        # assign valid/base time for cone labels
+        self.valid_at = valid_at or created_at
 
     # factory to create a new storm cone
     @classmethod
-    def new(cls, lat, lon, heading, speed_kts, creator="local"):
+    def new(cls, lat, lon, heading, speed_kts, creator="local", valid_at=None):
+        created_at = datetime.now(timezone.utc)
         # return a new record
         return cls(
             id=_short_uuid(),
@@ -79,7 +128,8 @@ class StormCone:
             heading=heading,
             speed_kts=speed_kts,
             creator=creator,
-            created_at=datetime.now(timezone.utc),
+            created_at=created_at,
+            valid_at=valid_at or created_at,
         )
 
     # distance (nm) along heading at time t (hours)
@@ -173,7 +223,7 @@ class StormCone:
             # label at centerline midpoint of rib
             c_lat, c_lon = _project(lat0, lon0, travel_az, d)
             # compute label time
-            label_time = (self.created_at + timedelta(minutes=minutes)).strftime("%H%MZ")
+            label_time = (self.valid_at + timedelta(minutes=minutes)).strftime("%H%MZ")
             # append label feature
             label_features.append(
                 {
@@ -188,7 +238,7 @@ class StormCone:
             # project tip
             tip_lat, tip_lon = _project(lat0, lon0, travel_az, d_max)
             # compute label time
-            tip_time = (self.created_at + timedelta(minutes=60)).strftime("%H%MZ")
+            tip_time = (self.valid_at + timedelta(minutes=60)).strftime("%H%MZ")
             # append label feature
             label_features.append(
                 {
@@ -215,6 +265,7 @@ class StormCone:
             "speed_kts": self.speed_kts,
             "creator": self.creator,
             "created_at": self.created_at.isoformat(),
+            "valid_at": self.valid_at.isoformat(),
         }
 
     # build from dict
@@ -228,6 +279,12 @@ class StormCone:
         # default to now
         elif created_at is None:
             created_at = datetime.now(timezone.utc)
+        # parse optional valid/base time
+        valid_at = d.get("valid_at")
+        if isinstance(valid_at, str):
+            valid_at = datetime.fromisoformat(valid_at)
+        elif valid_at is None:
+            valid_at = created_at
         # return the record
         return cls(
             id=d["id"],
@@ -237,4 +294,5 @@ class StormCone:
             speed_kts=d["speed_kts"],
             creator=d.get("creator", "unknown"),
             created_at=created_at,
+            valid_at=valid_at,
         )

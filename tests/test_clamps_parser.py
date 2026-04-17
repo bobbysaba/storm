@@ -37,9 +37,10 @@ class TestParseSkewt:
     def test_wind_components(self):
         ft = datetime(2026, 4, 6, 18, 0, tzinfo=timezone.utc)
         snd = _parse_skewt(SAMPLE_SKEWT, ft, 0)
-        # first row: wdir=180, wspd=5 → u = -5*sin(180°) ≈ 0, v = -5*cos(180°) = 5
+        # first row: wdir=180, wspd=5 kt → convert to m/s before components.
+        expected = 5.0 / 1.944
         assert abs(snd.u_wind[0]) < 1e-10
-        assert abs(snd.v_wind[0] - 5.0) < 1e-10
+        assert abs(snd.v_wind[0] - expected) < 1e-10
 
     def test_too_few_levels_returns_none(self):
         short = """\

@@ -1047,6 +1047,54 @@ def build_map_html() -> str:
         paint: {{'line-color':'#4A90E2','line-width':5,'line-opacity':0.9}}
       }}, 'road-label-motorway');
 
+      // ── Vehicle scan-sector overlay ─────────────────────────────────────
+      map.addSource('scan-sectors', {{type:'geojson', data:{{type:'FeatureCollection',features:[]}}}});
+      map.addLayer({{
+        id: 'scan-sector-fill', type: 'fill', source: 'scan-sectors',
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {{
+          'fill-color': ['coalesce', ['get', 'color'], '#00CFFF'],
+          'fill-opacity': 0.14
+        }}
+      }});
+      map.addLayer({{
+        id: 'scan-sector-line', type: 'line', source: 'scan-sectors',
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        layout: {{'line-join':'round','line-cap':'round'}},
+        paint: {{
+          'line-color': ['coalesce', ['get', 'color'], '#00CFFF'],
+          'line-width': 2,
+          'line-opacity': 0.85
+        }}
+      }});
+      map.addLayer({{
+        id: 'scan-sector-point', type: 'circle', source: 'scan-sectors',
+        filter: ['==', ['geometry-type'], 'Point'],
+        paint: {{
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4, 10, 7, 14, 10],
+          'circle-color': ['coalesce', ['get', 'color'], '#00CFFF'],
+          'circle-opacity': 0.45,
+          'circle-stroke-color': ['coalesce', ['get', 'color'], '#00CFFF'],
+          'circle-stroke-width': 2,
+          'circle-stroke-opacity': 0.95
+        }}
+      }});
+      map.addLayer({{
+        id: 'scan-sector-label', type: 'symbol', source: 'scan-sectors',
+        layout: {{
+          'text-field': ['coalesce', ['get', 'label'], ['get', 'vehicle_id']],
+          'text-size': 11,
+          'text-offset': [0, 1.1],
+          'text-anchor': 'top'
+        }},
+        paint: {{
+          'text-color': ['coalesce', ['get', 'color'], '#00CFFF'],
+          'text-halo-color': '#0A0A0F',
+          'text-halo-width': 1.5,
+          'text-opacity': 0.9
+        }}
+      }});
+
       // Click-to-pick destination mode
       window._routePickMode = false;
       window._routePickConsumed = false;
@@ -2756,6 +2804,23 @@ def build_map_html() -> str:
       if (!visible) map.getCanvas().style.cursor = '';
     }};
 
+    window.stormSetScanSectors = function(geojsonStr) {{
+      var src = map.getSource('scan-sectors');
+      if (!src) {{
+        window._scanSectorsData = geojsonStr;
+        return;
+      }}
+      try {{ src.setData(JSON.parse(geojsonStr)); }}
+      catch(e) {{ console.warn('scan sector setData failed', e); }}
+    }};
+
+    window.stormSetScanSectorsVisible = function(visible) {{
+      ['scan-sector-fill', 'scan-sector-line', 'scan-sector-point', 'scan-sector-label'].forEach(function(layerId) {{
+        if (!map.getLayer(layerId)) return;
+        map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+      }});
+    }};
+
     // ── Sounding Station Layer ────────────────────────────────────────────
     window.stormSetSoundingStations = function(geojsonStr) {{
       var src = map.getSource('sounding-stations-src');
@@ -4296,6 +4361,15 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def set_deploy_locs_size(self, radius: int) -> None:
         self.run_js(f"stormSetDeployLocsSize({radius});")
+
+    def set_scan_sectors_geojson(self, geojson: dict) -> None:
+        import json
+        self.run_js(
+            f"if(window.stormSetScanSectors) stormSetScanSectors({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_scan_sectors_visible(self, visible: bool) -> None:
+        self.run_js(f"if(window.stormSetScanSectorsVisible) stormSetScanSectorsVisible({'true' if visible else 'false'});")
 
     def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
         import json
