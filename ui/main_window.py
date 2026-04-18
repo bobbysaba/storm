@@ -1807,7 +1807,7 @@ class MainWindow(QMainWindow):
         self._radar_product_availability: dict[str, bool] = {
             "N0B": True, "N0U": True, "N0C": True, "N0K": True
         }
-        self.radar_controls.fetch_requested.connect(self._radar_fetcher.fetch_now)
+        self.radar_controls.fetch_requested.connect(self._on_radar_fetch_requested)
         self.radar_controls.frame_requested.connect(self._display_cached_frame)
         self.radar_controls.loop_toggled.connect(self._on_loop_toggled)
         self.radar_controls.speed_changed.connect(self._on_radar_speed_changed)
@@ -2245,7 +2245,20 @@ class MainWindow(QMainWindow):
         self.status_msg_label.setText(f"Fetching {site} radar data…")
         self._layout_overlays()
 
+    def _radar_data_enabled(self) -> bool:
+        return (
+            hasattr(self, "radar_controls")
+            and self.radar_controls.is_data_enabled()
+        )
+
+    def _on_radar_fetch_requested(self):
+        if not self._radar_data_enabled():
+            return
+        self._radar_fetcher.fetch_now()
+
     def _on_radar_error(self, msg: str):
+        if not self._radar_data_enabled():
+            return
         self.status_msg_label.setText(f"Radar: {msg}")
         self._layout_overlays()
         self._radar_error_clear_timer.start(10_000)
@@ -2752,6 +2765,10 @@ class MainWindow(QMainWindow):
         self._last_inject_time = 0.0
         self._deferred_inject_result = None
         self._inject_throttle_timer.stop()
+        if not self._radar_data_enabled():
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+            return
         # Show fetching status
         self._radar_initial_backfill_complete = False
         self._radar_backfill_products_received = set()
@@ -2960,6 +2977,12 @@ class MainWindow(QMainWindow):
     def _on_radar_product_changed(self, product: str):
         # both products are always cached — just switch what's displayed
         self._loop_timer.stop()
+        if not self._radar_data_enabled():
+            self._current_radar_scan = None
+            self._radar_overlay.hide()
+            self.status_msg_label.setText("")
+            self._layout_overlays()
+            return
         key = f"{self.radar_controls.current_site()}/{product}"
         cache = self._scan_cache.get(key, [])
         self.radar_controls.reset_cache_ui()
@@ -2984,6 +3007,8 @@ class MainWindow(QMainWindow):
         """Called on the main thread by the fetcher signal.  Returns immediately —
         the actual decode is submitted to a background thread so the UI is never
         blocked by MetPy/numpy work."""
+        if not self._radar_data_enabled():
+            return
         log.debug("radar data received: %s/%s (%d bytes)", site, product, len(raw_bytes))
         gen = self._render_generation
         self._decode_executor.submit(self._bg_decode, gen, site, product, raw_bytes)
@@ -3009,6 +3034,8 @@ class MainWindow(QMainWindow):
         """Runs on the main thread (PyQt queues the signal from the decode thread).
         Updates the scan cache and submits a background render for the latest frame."""
         if gen != self._render_generation:
+            return
+        if not self._radar_data_enabled():
             return
 
         key = f"{site}/{product}"
@@ -3065,6 +3092,9 @@ class MainWindow(QMainWindow):
         scan = self._pending_render_scan
         if scan is None:
             return
+        if not self._radar_data_enabled():
+            self._pending_render_scan = None
+            return
         if self._render_in_flight:
             # Don't queue a second render — _on_render_ready will re-check pending
             return
@@ -3114,6 +3144,9 @@ class MainWindow(QMainWindow):
             if self._pending_render_scan is not None:
                 self._submit_pending_render()
             return
+        if not self._radar_data_enabled():
+            self._pending_render_scan = None
+            return
         scan = result["scan"]
         if scan.product != self.radar_controls.current_product():
             if self._pending_render_scan is not None:
@@ -3145,10 +3178,14 @@ class MainWindow(QMainWindow):
             return
         if result["gen"] != self._render_generation:
             return
+        if not self._radar_data_enabled():
+            return
         self._do_inject(result)
 
     def _do_inject(self, result: dict):
         """Actually inject the rendered PNG into the map."""
+        if not self._radar_data_enabled():
+            return
         import time as _time
         scan = result["scan"]
         self._current_radar_scan = scan
@@ -3162,6 +3199,8 @@ class MainWindow(QMainWindow):
         self._layout_overlays()
 
     def _show_scan(self, scan):
+        if not self._radar_data_enabled():
+            return
         self._current_radar_scan = scan
         self._radar_overlay.update(scan, mask_scan=self._velocity_mask_scan(scan))
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
@@ -3183,6 +3222,8 @@ class MainWindow(QMainWindow):
         )
 
     def _display_cached_frame(self, idx: int):
+        if not self._radar_data_enabled():
+            return
         log.debug("displaying cached frame %d of %d",
                   idx, len(self._scan_cache.get(
                       f"{self.radar_controls.current_site()}/{self.radar_controls.current_product()}", []
@@ -3196,6 +3237,9 @@ class MainWindow(QMainWindow):
         self._loop_timer.setInterval(ms)
 
     def _on_loop_toggled(self, looping: bool):
+        if looping and not self._radar_data_enabled():
+            self._loop_timer.stop()
+            return
         if looping:
             self._loop_timer.start()
         else:
@@ -3208,6 +3252,9 @@ class MainWindow(QMainWindow):
                 self._show_scan(cache[-1])
 
     def _advance_loop_frame(self):
+        if not self._radar_data_enabled():
+            self._loop_timer.stop()
+            return
         key = f"{self.radar_controls.current_site()}/{self.radar_controls.current_product()}"
         cache = self._scan_cache.get(key, [])
         if not cache:

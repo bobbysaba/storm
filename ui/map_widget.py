@@ -649,6 +649,18 @@ def build_map_html() -> str:
         }},
 
         // ── Road Labels ───────────────────────────────────────────────────
+        // Invisible, wide line layer for road-name hover picking. The visible
+        // road line source has surface/class data, but names live here.
+        {{
+          id: "road-hover-hit", type: "line",
+          source: "storm-tiles", "source-layer": "transportation_name",
+          minzoom: 8,
+          paint: {{
+            "line-color": "#000000",
+            "line-opacity": 0.01,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 14, 14, 22]
+          }}
+        }},
         // Motorway + trunk: orange, bold, ref number preferred
         {{
           id: "road-label-motorway", type: "symbol",
@@ -779,16 +791,16 @@ def build_map_html() -> str:
             "text-halo-width": 2
           }}
         }},
-        // Villages: only shown when zoomed in, collision-filtered
+        // Villages: shown at regional zooms, collision-filtered
         {{
           id: "place-village", type: "symbol",
           source: "storm-tiles", "source-layer": "place",
           filter: ["in", ["get", "class"], ["literal", ["village", "hamlet", "suburb"]]],
-          minzoom: 9,
+          minzoom: 5,
           layout: {{
             "text-field": ["get", "name:latin"],
             "text-font": ["Noto Sans Regular"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 9, 9, 14, 13],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 5, 8, 14, 13],
             "text-anchor": "center",
             "text-padding": 4,
             "text-allow-overlap": false,
@@ -1541,6 +1553,101 @@ def build_map_html() -> str:
       return '';
     }}
 
+    var _ROAD_HOVER_MIN_ZOOM = 8;
+    var _ROAD_HOVER_LAYERS = [
+      'road-motorway', 'road-trunk', 'road-primary', 'road-secondary',
+      'road-minor', 'road-unpaved', 'road-track', 'road-path'
+    ];
+    var _ROAD_NAME_HOVER_LAYERS = [
+      'road-hover-hit',
+      'road-label-motorway', 'road-label-primary',
+      'road-label-tertiary', 'road-label-minor'
+    ];
+    var _UNPAVED_SURFACES = {{
+      unpaved: 'Unpaved',
+      dirt: 'Unpaved',
+      gravel: 'Gravel',
+      compacted: 'Unpaved',
+      fine_gravel: 'Gravel',
+      grass: 'Unpaved',
+      ground: 'Unpaved',
+      sand: 'Unpaved',
+      earth: 'Unpaved'
+    }};
+
+    function _hoverSuppressedByMode() {{
+      var mapEl = document.getElementById('map');
+      return window._routePickMode ||
+             window._soundingModeActive ||
+             window._soundingObsModeActive ||
+             window._stormDrawingActive ||
+             window._stormConePlacementActive ||
+             (window._stormDrawingDrag && window._stormDrawingDrag.dragging) ||
+             (window._stormConeDrag && window._stormConeDrag.dragging) ||
+             (mapEl && (
+               mapEl.classList.contains('annotating') ||
+               mapEl.classList.contains('measuring') ||
+               mapEl.classList.contains('drawing')
+             ));
+    }}
+
+    function _roadHoverSurfaceLabel(props, layerId) {{
+      var raw = String(
+        props.surface || props.surface_lit || props.surface_type || ''
+      ).toLowerCase();
+      if (_UNPAVED_SURFACES[raw]) return _UNPAVED_SURFACES[raw];
+      if (layerId === 'road-unpaved') return 'Unpaved';
+      return '';
+    }}
+
+    function _roadHoverName(props) {{
+      return props['name:latin'] || props.name || props.name_en ||
+             props.ref || props.route_ref || props.network_ref || '';
+    }}
+
+    function _roadHoverLabel(e) {{
+      if (map.getZoom() < _ROAD_HOVER_MIN_ZOOM || _hoverSuppressedByMode()) return '';
+      var nameLayers = _ROAD_NAME_HOVER_LAYERS.filter(function(l) {{ return map.getLayer(l); }});
+      if (!nameLayers.length) return '';
+      try {{
+        var namePad = 4;
+        var nameHits = map.queryRenderedFeatures(
+          [[e.point.x - namePad, e.point.y - namePad], [e.point.x + namePad, e.point.y + namePad]],
+          {{layers: nameLayers}}
+        );
+        for (var i = 0; i < nameHits.length; i++) {{
+          var props = nameHits[i].properties || {{}};
+          var roadName = _roadHoverName(props);
+          if (!roadName) continue;
+          var lineLayers = _ROAD_HOVER_LAYERS.filter(function(l) {{ return map.getLayer(l); }});
+          var lineHits = lineLayers.length
+            ? map.queryRenderedFeatures(
+                [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]],
+                {{layers: lineLayers}}
+              )
+            : [];
+          var surfaceLabel = '';
+          for (var j = 0; j < lineHits.length; j++) {{
+            surfaceLabel = _roadHoverSurfaceLabel(
+              lineHits[j].properties || {{}},
+              lineHits[j].layer && lineHits[j].layer.id
+            );
+            if (surfaceLabel) break;
+          }}
+          return surfaceLabel ? roadName + ' | ' + surfaceLabel : roadName;
+        }}
+      }} catch(_) {{}}
+      return '';
+    }}
+
+    function _showHoverTip(tip, label, e) {{
+      var mc = map.getContainer().getBoundingClientRect();
+      tip.textContent = label;
+      tip.style.left = (e.originalEvent.clientX - mc.left + 14) + 'px';
+      tip.style.top  = (e.originalEvent.clientY - mc.top  - 10) + 'px';
+      tip.style.display = 'block';
+    }}
+
     // ── Event Listeners ───────────────────────────────────────────────────
     map.on("mousemove", function(e) {{
       if (bridge) bridge.on_map_move(e.lngLat.lat, e.lngLat.lng, map.getZoom());
@@ -1635,13 +1742,7 @@ def build_map_html() -> str:
           }});
           var _lbl = _tipParts.join(' \u2502 ');
           if (_lbl) {{
-            _htip.textContent = _lbl;
-            var _mx = e.originalEvent.clientX;
-            var _my = e.originalEvent.clientY;
-            var _mc = map.getContainer().getBoundingClientRect();
-            _htip.style.left = (_mx - _mc.left + 14) + 'px';
-            _htip.style.top  = (_my - _mc.top  - 10) + 'px';
-            _htip.style.display = 'block';
+            _showHoverTip(_htip, _lbl, e);
           }} else {{
             _htip.style.display = 'none';
           }}
@@ -1661,13 +1762,14 @@ def build_map_html() -> str:
             }} catch(_) {{}}
           }}
           if (_stLabel) {{
-            var _smc = map.getContainer().getBoundingClientRect();
-            _htip.textContent = _stLabel;
-            _htip.style.left  = (e.originalEvent.clientX - _smc.left + 14) + 'px';
-            _htip.style.top   = (e.originalEvent.clientY - _smc.top  - 10) + 'px';
-            _htip.style.display = 'block';
+            _showHoverTip(_htip, _stLabel, e);
           }} else {{
-            _htip.style.display = 'none';
+            var _roadLabel = _roadHoverLabel(e);
+            if (_roadLabel) {{
+              _showHoverTip(_htip, _roadLabel, e);
+            }} else {{
+              _htip.style.display = 'none';
+            }}
           }}
         }}
       }}

@@ -321,11 +321,16 @@ class RadarControls(QWidget):
         ).start()
         if emit:
             self.site_changed.emit(normalized)
-            self.fetch_requested.emit()
+            if self.is_data_enabled():
+                self.fetch_requested.emit()
 
     def set_scan_time(self, time_str: str):
         # update the time label next to the slider
         self._frame_time_label.setText(time_str)
+
+    def is_data_enabled(self) -> bool:
+        """Return whether radar data fetch/display is enabled."""
+        return self._chk_show_data.isChecked()
 
     def _set_product_items(self, items: list[tuple[str, str]], preserve_code: str | None = None):
         self._product_combo.blockSignals(True)

@@ -214,6 +214,8 @@ class RadarFetcher(QObject):
         """trigger an immediate fetch outside the normal poll cycle."""
         if not self._site or not self._products:
             return
+        site = self._site
+        products = list(self._products)
 
         # non-blocking tryacquire — skip if poll_loop is already mid-fetch
         if not self._fetch_lock.acquire(blocking=False):
@@ -221,9 +223,9 @@ class RadarFetcher(QObject):
 
         def _run():
             try:
-                for product in self._products:
+                for product in products:
                     try:
-                        self._fetch_latest(self._site, product)
+                        self._fetch_latest(site, product)
                     except Exception as e:
                         log.warning("immediate fetch error: %s", e)
                         self.fetch_error.emit(str(e))
