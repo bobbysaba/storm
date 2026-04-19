@@ -1,6 +1,4 @@
-# bobby saba - define annotation data
 
-# import required packages
 import uuid
 from datetime import datetime, timezone
 

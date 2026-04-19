@@ -1,6 +1,4 @@
-# Bobby Saba - main script to run application
 
-# import required packages and modules
 import os
 import re
 import sys
@@ -13,9 +11,9 @@ import faulthandler
 import runtime_flags
 from dataclasses import replace
 from datetime import datetime, timezone
-from ui.launch_dialog import LaunchDialog
-from ui.radar_overlay import set_render_grid_size, set_adaptive_render_grid
-from data.truck_replay import load_truck_observations
+from ui.launch.dialog import LaunchDialog
+from ui.map.radar_overlay import set_render_grid_size, set_adaptive_render_grid
+from data.ingest.truck_replay import load_truck_observations
 
 # try to import PyQt packages
 try:
@@ -88,7 +86,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # run in debug mode 
     parser.add_argument("--debug", action="store_true", help="enable debug logging and in-app debug panel")
 
-    # determine the log level to run in
     parser.add_argument(
         "--log-level",
         default="WARNING",
@@ -156,7 +153,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 # function to register the custom storm:// URL scheme with WebEngine.
-# MUST be called before QApplication is created.
 def _register_storm_scheme() -> None:
     try:
         from PyQt6.QtWebEngineCore import QWebEngineUrlScheme
@@ -166,7 +162,7 @@ def _register_storm_scheme() -> None:
             QWebEngineUrlScheme.Flag.SecureScheme
             | QWebEngineUrlScheme.Flag.CorsEnabled
         )
-        # FetchApiAllowed lets JS fetch() use the storm:// scheme (Qt 6.2+)
+        # fetchApiAllowed lets JS fetch() use the storm:// scheme (Qt 6.2+)
         fetch_flag = getattr(QWebEngineUrlScheme.Flag, "FetchApiAllowed", None)
         if fetch_flag is not None:
             flags |= fetch_flag
@@ -206,7 +202,6 @@ def _configure_qt_application_attributes() -> None:
     )
 
 # function to generate a default vehicle ID (if in monitor mode)
-# NOTE: this is needed because if multiple people are in monitor mode, then the MQTT connection will fail
 def _default_vehicle_id() -> str:
     # pull the host name
     host = (socket.gethostname() or "").strip().lower()
@@ -215,7 +210,6 @@ def _default_vehicle_id() -> str:
     host = re.sub(r"[^a-z0-9-]+", "-", host).strip("-")
 
     # derive a stable 4-char hex suffix from the MAC address so two machines
-    # with the same hostname (or no hostname) still get distinct MQTT client IDs
     mac_suffix = format(uuid.getnode() & 0xFFFF, "04x")
 
     # if the host name is empty, use "device"
@@ -282,7 +276,6 @@ def _warn_missing_files() -> None:
     dialogs render correctly.  Warnings are non-fatal — the app continues in a
     degraded state so the user can at least see what is wrong.
     """
-    # ── Map tiles ──────────────────────────────────────────────────────────────
     tiles_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "tiles", "storm.mbtiles")
     )
@@ -295,8 +288,6 @@ def _warn_missing_files() -> None:
             "Ensure 'tiles/storm.mbtiles' is present in the application directory.",
         )
 
-    # ── AWS / MQTT certificates ────────────────────────────────────────────────
-    # Skip entirely if MQTT was disabled via a flag or debug-run profile.
     if runtime_flags.FLAGS.disable_mqtt:
         return
 
@@ -404,8 +395,6 @@ def main() -> None:
     # set application quit behavior
     app.setQuitOnLastWindowClosed(False)
 
-    # ── Single-instance guard ──────────────────────────────────────────────────
-    # Must happen after QApplication exists so the warning dialog can be shown.
     if not _acquire_instance_lock():
         QMessageBox.warning(
             None,
@@ -444,23 +433,16 @@ def main() -> None:
     archive_time = dialog.archive_start_time()   # None unless archive mode
 
     # apply radar render resolution from the launch dialog
-    # (overrides any --render-grid-size CLI arg if the user picked a fixed value)
     _dlg_res = dialog.radar_resolution()
     if _dlg_res > 0:
         set_render_grid_size(_dlg_res)
         set_adaptive_render_grid(False)
 
-    from ui.main_window import MainWindow  # noqa: PLC0415
+    from ui.app.main_window import MainWindow  # noqa: PLC0415
 
-    # ── File presence checks ───────────────────────────────────────────────────
-    # Warn about missing tiles / certificates before the window is built so the
-    # user understands why certain features may be broken.
     _warn_missing_files()
 
-    # ── Loading screen ─────────────────────────────────────────────────────────
-    # Show a loading dialog while the map initializes to prevent users from
-    # clicking the app icon again or thinking the app has frozen.
-    from ui.loading_dialog import LoadingDialog  # noqa: PLC0415
+    from ui.dialogs.loading_dialog import LoadingDialog  # noqa: PLC0415
     loading_dialog = LoadingDialog()
     loading_dialog.show()
     app.processEvents()  # Force the dialog to render immediately
@@ -473,7 +455,7 @@ def main() -> None:
         archive_time=archive_time,
     )
 
-    # Close loading dialog once main window is ready
+    # close loading dialog once main window is ready
     loading_dialog.close()
     loading_dialog = None
 

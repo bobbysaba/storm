@@ -1,7 +1,3 @@
-# data/update_checker.py
-# Background git update checker — shared between the launch dialog and the
-# in-ops status bar indicator.  All git I/O runs on daemon threads; results
-# are delivered via Qt signals so callers never need to poll.
 
 from __future__ import annotations
 
@@ -49,7 +45,6 @@ class UpdateWorker(QObject):
         if proc and proc.poll() is None:
             proc.kill()
 
-    # ── internals ─────────────────────────────────────────────────────────────
 
     def _do_check(self):
         git_dir = os.path.join(self._root, ".git")
@@ -109,7 +104,7 @@ class UpdateWorker(QObject):
 
     def _find_conda(self) -> str | None:
         """Locate the conda executable."""
-        # Try common conda locations
+        # try common conda locations
         candidates = ["conda", "mamba"]
         for cmd in candidates:
             try:

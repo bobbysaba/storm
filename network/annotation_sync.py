@@ -1,16 +1,3 @@
-# network/annotation_sync.py
-# Syncs annotations over MQTT.
-#
-# Outbound (local → broker): call publish_create/update/delete when the
-#   local user places, edits, or removes an annotation.
-#
-# Inbound  (broker → local): annotation_received / annotation_deleted signals
-#   fire when a *remote* client publishes.  Wire these in main_window to a
-#   handler that updates the map WITHOUT calling back into publish, or you
-#   will create a publish loop.
-#
-# Topic layout:  storm/annotations/{annotation_id}
-# Delete payload: {"id": "...", "deleted": true}
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -51,13 +38,11 @@ class AnnotationSync(QObject):
         self._mqtt.connected.connect(self._on_mqtt_connected)
         self._mqtt.message_received.connect(self._on_message)
 
-    # ── Subscription ──────────────────────────────────────────────────────────
 
     def _on_mqtt_connected(self):
         self._mqtt.subscribe(f"{_TOPIC_PREFIX}/+")
         log.info("AnnotationSync: subscribed to %s/+", _TOPIC_PREFIX)
 
-    # ── Publish (local → broker) ───────────────────────────────────────────────
 
     def publish_create(self, annotation: Annotation):
         self._publish(annotation.id, annotation.to_dict())
@@ -82,7 +67,6 @@ class AnnotationSync(QObject):
         except Exception as e:
             log.warning("AnnotationSync: publish failed: %s", e)
 
-    # ── Receive (broker → local) ───────────────────────────────────────────────
 
     def _on_message(self, topic: str, raw: bytes):
         if not topic.startswith(_TOPIC_PREFIX + "/"):

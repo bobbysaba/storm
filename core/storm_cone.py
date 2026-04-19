@@ -1,7 +1,4 @@
-# core/storm_cone.py
-# storm cone geometry helpers and geojson builder.
 
-# import required packages
 import math
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -141,7 +138,6 @@ class StormCone:
     def build_geojson(self):
         # pull the origin
         lat0, lon0 = self.lat, self.lon
-        # storm travels opposite of the direction it comes from
         travel_az = (self.heading + 180) % 360
 
         # precompute right/left edge points at each time step

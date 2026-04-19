@@ -23,7 +23,6 @@ ENV_YML = os.path.join(PROJECT_DIR, "envs", "storm.yml")
 SYSTEM = platform.system()  # "Darwin", "Linux", "Windows"
 
 
-# ── Conda discovery ──────────────────────────────────────────────────────────
 
 def _conda_search_dirs():
     """Return platform-appropriate directories to search for conda."""
@@ -120,7 +119,6 @@ def install_miniforge():
     return conda
 
 
-# ── Environment creation ─────────────────────────────────────────────────────
 
 def env_exists(conda):
     """Check if the 'storm' conda environment already exists."""
@@ -144,7 +142,6 @@ def create_env(conda):
     print("storm environment created.")
 
 
-# ── Linux system dependencies ────────────────────────────────────────────────
 
 def install_linux_deps():
     """Install Qt6 WebEngine system dependencies on Linux."""
@@ -181,7 +178,6 @@ def install_linux_deps():
         print("You may need to manually install Qt6 WebEngine system libraries.")
 
 
-# ── Shortcut / launcher creation ─────────────────────────────────────────────
 
 def create_shortcuts_mac():
     """Build STORM.app and place a Desktop symlink."""
@@ -199,7 +195,7 @@ def create_shortcuts_mac():
 
 def create_shortcuts_linux(conda):
     """Create a launcher script and .desktop entry."""
-    # Launcher script
+    # launcher script
     launcher = os.path.join(PROJECT_DIR, "storm_launcher.sh")
     conda_base = subprocess.check_output(
         [conda, "info", "--base"], text=True,
@@ -235,7 +231,7 @@ def create_shortcuts_linux(conda):
 
     print(f".desktop entry written to {desktop_file}")
 
-    # Desktop shortcut
+    # desktop shortcut
     user_desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     if os.path.isdir(user_desktop):
         dest = os.path.join(user_desktop, "storm.desktop")
@@ -257,17 +253,16 @@ def create_shortcuts_windows():
         subprocess.check_call([create_app], shell=True)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     print(f"STORM setup — {SYSTEM} ({platform.machine()})")
     print()
 
-    # 0. Linux system deps
+    # 0. linux system deps
     if SYSTEM == "Linux":
         install_linux_deps()
 
-    # 1. Find or install conda
+    # 1. find or install conda
     conda = find_conda()
     if not conda:
         print("Conda not found.")
@@ -282,11 +277,11 @@ def main():
     print(f"Using conda: {conda}")
     print()
 
-    # 2. Create environment
+    # 2. create environment
     create_env(conda)
     print()
 
-    # 3. Shortcuts
+    # 3. shortcuts
     if SYSTEM == "Darwin":
         create_shortcuts_mac()
     elif SYSTEM == "Linux":

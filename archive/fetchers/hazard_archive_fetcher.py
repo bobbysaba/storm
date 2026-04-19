@@ -1,30 +1,3 @@
-# archive/fetchers/hazard_archive_fetcher.py
-# ArchiveHazardFetcher — retrieves historical NWS warnings, SPC watches, SPC MDs,
-# and SPC outlooks from IEM's archive APIs and SPC's direct archive.
-#
-# Data sources
-# ------------
-# NWS Storm-Based Warnings:
-#   https://mesonet.agron.iastate.edu/geojson/sbw.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
-#   Returns all warnings valid at the given timestamp (with polygon geometry).
-#
-# SPC Mesoscale Watches:
-#   https://mesonet.agron.iastate.edu/geojson/spc_watch.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
-#   Returns watch box polygons valid at the given timestamp.
-#
-# SPC Mesoscale Discussions:
-#   https://mesonet.agron.iastate.edu/geojson/spc_mcd.geojson?ts=YYYY-MM-DDTHH:MM:SSZ
-#   Returns MD polygons valid at the given timestamp.
-#
-# SPC Day-1 Outlook:
-#   https://www.spc.noaa.gov/products/outlook/archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{product}.lyr.geojson
-#   Files exist only at actual SPC issuance times; cycle is snapped via _OUTLOOK_CYCLES.
-#
-# Strategy
-# --------
-# All IEM endpoints are queried on each time tick with a 5-minute resolution cache
-# (avoid redundant fetches within the same cache window).  Outlook is fetched once
-# per cycle change (SPC issues ~4-6 outlooks per day).
 
 import io
 import json
@@ -37,26 +10,22 @@ from typing import Optional
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
-from data.hazard_fetcher import _spc_cat_key, _spc_prob_label, _nws_color_for_phenom
+from data.fetchers.hazard_fetcher import _spc_cat_key, _spc_prob_label, _nws_color_for_phenom
 
 log = logging.getLogger(__name__)
 
 _IEM_SBW_URL   = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson"
-# These endpoints require a 12-digit YYYYMMDDHHmm timestamp via ?ts=
+# these endpoints require a 12-digit YYYYMMDDHHmm timestamp via ?ts=
 _IEM_WATCH_URL = "https://mesonet.agron.iastate.edu/json/spcwatch.py"
-# IEM GIS shapefile endpoint for MCDs — returns a zip with .shp/.dbf/.prj
+# iem GIS shapefile endpoint for MCDs — returns a zip with .shp/.dbf/.prj
 _IEM_MCD_GIS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/spc_mcd.py"
 
-# SPC direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
-# URL: .../archive/{YYYY}/day1otlk_{YYYYMMDD}_{HHMM}_{product}.lyr.geojson
-# Products: cat, wind, hail, torn.  Available from ~2019-10-17 onward.
+# spc direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
 _SPC_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/outlook/archive"
 
-# Cache resolution for time-varying fetches.
+# cache resolution for time-varying fetches.
 _CACHE_MINUTES = 5
 
-# SPC Day-1 outlook issuance times (UTC).  A new cycle is triggered when the
-# archive time crosses one of these thresholds.
 _OUTLOOK_CYCLES = [
     (1, 0),   # 01:00Z — Day 1 initial
     (6, 0),   # 06:00Z
@@ -97,12 +66,12 @@ class ArchiveHazardFetcher(QObject):
         super().__init__(parent)
         self._date = session_date
 
-        # Per-type caches: {rounded_time → geojson_str}
+        # per-type caches: {rounded_time → geojson_str}
         self._sbw_cache:   dict[datetime, str] = {}
         self._watch_cache: dict[datetime, str] = {}
         self._mcd_cache:   dict[datetime, str] = {}
 
-        # Per-type in-flight sets + locks
+        # per-type in-flight sets + locks
         self._sbw_pending:   set[datetime] = set()
         self._watch_pending: set[datetime] = set()
         self._mcd_pending:   set[datetime] = set()
@@ -110,16 +79,15 @@ class ArchiveHazardFetcher(QObject):
         self._watch_lock = threading.Lock()
         self._mcd_lock   = threading.Lock()
 
-        # Outlook cache: {cycle_time → (cat, wind, hail, tor)}
+        # outlook cache: {cycle_time → (cat, wind, hail, tor)}
         self._outlook_cache: dict[datetime, tuple] = {}
         self._current_cycle: Optional[datetime] = None
         self._outlook_pending: set[datetime] = set()
         self._current_archive_time: Optional[datetime] = None
 
-        # Immediately ready — no pre-fetch step required.
+        # immediately ready — no pre-fetch step required.
         self._watches_loaded = True
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def load_day_data(self) -> None:
         """No-op: all data is now fetched on demand. _watches_loaded stays True."""
@@ -139,7 +107,6 @@ class ArchiveHazardFetcher(QObject):
             return
         self.on_time_changed(self._current_archive_time)
 
-    # ── NWS Warnings (SBW) ───────────────────────────────────────────────────
 
     def _update_warnings(self, t: datetime) -> None:
         rounded = _round_to_minutes(t, _CACHE_MINUTES)
@@ -167,7 +134,6 @@ class ArchiveHazardFetcher(QObject):
             with self._sbw_lock:
                 self._sbw_pending.discard(rounded_time)
 
-    # ── SPC Watches ───────────────────────────────────────────────────────────
 
     def _update_watches(self, t: datetime) -> None:
         rounded = _round_to_minutes(t, _CACHE_MINUTES)
@@ -195,7 +161,6 @@ class ArchiveHazardFetcher(QObject):
             with self._watch_lock:
                 self._watch_pending.discard(rounded_time)
 
-    # ── SPC Mesoscale Discussions ─────────────────────────────────────────────
 
     def _update_mds(self, t: datetime) -> None:
         rounded = _round_to_minutes(t, _CACHE_MINUTES)
@@ -211,8 +176,7 @@ class ArchiveHazardFetcher(QObject):
 
     def _fetch_mds(self, rounded_time: datetime) -> None:
         try:
-            # Use a ±2-hour window to catch MCDs that started before rounded_time
-            # but are still valid, or expire shortly after.
+            # use a ±2-hour window to catch MCDs that started before rounded_time
             t_start = rounded_time - timedelta(hours=2)
             t_end   = rounded_time + timedelta(hours=2)
             params = {
@@ -242,7 +206,6 @@ class ArchiveHazardFetcher(QObject):
             with self._mcd_lock:
                 self._mcd_pending.discard(rounded_time)
 
-    # ── SPC Outlooks ──────────────────────────────────────────────────────────
 
     def _update_outlook(self, t: datetime) -> None:
         """Fetch the Day-1 outlook cycle valid at time t."""
@@ -272,9 +235,6 @@ class ArchiveHazardFetcher(QObject):
                 "tornado":     "torn",
             }
 
-            # SPC doesn't issue every cycle every day.  Build a fallback list of
-            # cycle times to try in reverse order (most-recent first) for the
-            # same UTC day as the requested cycle.
             midnight = cycle.replace(hour=0, minute=0, second=0, microsecond=0)
             candidates = [cycle] + sorted(
                 (midnight.replace(hour=h, minute=m) for h, m in _OUTLOOK_CYCLES
@@ -319,7 +279,6 @@ class ArchiveHazardFetcher(QObject):
             self._outlook_pending.discard(cycle)
 
 
-# ── Shapefile parser (no GIS libs required) ───────────────────────────────────
 
 def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
     """
@@ -335,7 +294,7 @@ def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
         log.warning("MCD shapefile: bad zip: %s", exc)
         return []
 
-    # Find .shp and .dbf members (case-insensitive).
+    # find .shp and .dbf members (case-insensitive).
     names = zf.namelist()
     shp_name = next((n for n in names if n.lower().endswith(".shp")), None)
     dbf_name = next((n for n in names if n.lower().endswith(".dbf")), None)
@@ -354,7 +313,7 @@ def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
             "MCD shapefile: geometry count %d != record count %d",
             len(geometries), len(records)
         )
-        # Still proceed with min(len) pairs.
+        # still proceed with min(len) pairs.
 
     features = []
     for geom, rec in zip(geometries, records):
@@ -370,7 +329,7 @@ def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
         if not num:
             continue
 
-        # Parse ISSUE/EXPIRE (YYYYMMDDHHmm, 12 chars).
+        # parse ISSUE/EXPIRE (YYYYMMDDHHmm, 12 chars).
         issue  = _parse_yyyymmddHHMM(issue_str)
         expire = _parse_yyyymmddHHMM(expire_str)
         if issue is None or expire is None:
@@ -402,7 +361,7 @@ def _parse_shp(data: bytes) -> list:
     while pos < len(data):
         if pos + 12 > len(data):
             break
-        # Record header: record number (big-endian int32), content length (big-endian int32, in 16-bit words).
+        # record header: record number (big-endian int32), content length (big-endian int32, in 16-bit words).
         _rec_num, content_words = struct.unpack_from(">ii", data, pos)
         pos += 8
         content_bytes = content_words * 2
@@ -410,18 +369,17 @@ def _parse_shp(data: bytes) -> list:
             break
         shape_type = struct.unpack_from("<i", data, pos)[0]
         if shape_type == 0:
-            # Null shape.
+            # null shape.
             geometries.append(None)
             pos += content_bytes
             continue
         if shape_type != 5:
-            # Non-polygon; skip.
+            # non-polygon; skip.
             geometries.append(None)
             pos += content_bytes
             continue
 
-        # Polygon: bounding box (4 doubles), num_parts (int32), num_points (int32),
-        # parts array (num_parts int32s), points array (num_points pairs of doubles).
+        # polygon: bounding box (4 doubles), num_parts (int32), num_points (int32),
         offset = pos + 4  # skip shape_type field
         if offset + 32 + 8 > len(data):
             geometries.append(None)
@@ -439,7 +397,7 @@ def _parse_shp(data: bytes) -> list:
         pts_raw = struct.unpack_from(f"<{num_points * 2}d", data, offset)
         points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
 
-        # Split points into rings using part_starts.
+        # split points into rings using part_starts.
         rings = []
         for idx_r, start in enumerate(part_starts):
             end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
@@ -460,12 +418,12 @@ def _parse_dbf(data: bytes) -> list:
     if len(data) < 32:
         return []
 
-    # Header: version(1), date(3), num_records(4LE), header_bytes(2LE), record_bytes(2LE).
+    # header: version(1), date(3), num_records(4LE), header_bytes(2LE), record_bytes(2LE).
     num_records  = struct.unpack_from("<I", data, 4)[0]
     header_bytes = struct.unpack_from("<H", data, 8)[0]
     record_bytes = struct.unpack_from("<H", data, 10)[0]
 
-    # Field descriptors start at byte 32, each 32 bytes, terminated by 0x0D.
+    # field descriptors start at byte 32, each 32 bytes, terminated by 0x0D.
     fields = []
     pos = 32
     while pos < header_bytes - 1 and data[pos] != 0x0D:
@@ -519,7 +477,6 @@ def _parse_yyyymmddHHMM(s: str) -> Optional[datetime]:
         return None
 
 
-# ── Normalizers ───────────────────────────────────────────────────────────────
 
 def _normalize_sbw_geojson(raw_text: str) -> str:
     """Normalize IEM SBW GeoJSON to match the live WWA MapServer property schema."""
@@ -533,7 +490,7 @@ def _normalize_sbw_geojson(raw_text: str) -> str:
         geom  = feature.get("geometry")
         if not geom:
             continue
-        # IEM uses 'phenomena' or 'phenomenon'; live mode uses 'phenom'
+        # iem uses 'phenomena' or 'phenomenon'; live mode uses 'phenom'
         phenom = str(
             props.get("phenomena") or props.get("phenomenon") or props.get("phenom", "")
         ).upper()
@@ -561,7 +518,7 @@ def _normalize_watch_geojson(raw_text: str) -> str:
         geom  = feature.get("geometry")
         if not geom:
             continue
-        # IEM spc_watch: 'type' is TOR/SVR, 'num' is the watch number
+        # iem spc_watch: 'type' is TOR/SVR, 'num' is the watch number
         watch_type = str(props.get("type") or props.get("phenomena") or "").upper()
         num_raw    = props.get("num") or props.get("number") or props.get("event", "")
         try:
@@ -588,7 +545,7 @@ def _normalize_mcd_geojson(raw_text: str) -> str:
         geom  = feature.get("geometry")
         if not geom:
             continue
-        # IEM spc_mcd: 'num' is the MD number
+        # iem spc_mcd: 'num' is the MD number
         num_raw = props.get("num") or props.get("number", "")
         try:
             name = f"MD {int(num_raw):04d}"
@@ -632,7 +589,6 @@ def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
     return json.dumps({"type": "FeatureCollection", "features": features})
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _round_to_minutes(dt: datetime, minutes: int) -> datetime:
     """Round dt down to the nearest N-minute boundary."""

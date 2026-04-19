@@ -1,7 +1,4 @@
-# core/radar_scan.py
-# record representing a single decoded nexrad level 3 radar scan.
 
-# import required packages
 from datetime import datetime
 
 
@@ -62,7 +59,6 @@ class RadarScan:
         return f"{self.site} {name} {self.scan_time.strftime('%H:%M')}Z"
 
 
-# ── Product Metadata ──────────────────────────────────────────────────────────
 
 PRODUCT_META = {
     "N0B": {

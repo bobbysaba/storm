@@ -1,7 +1,4 @@
-# core/observation.py
-# one meteorological observation record from a vehicle.
 
-# import required packages
 from datetime import datetime, timezone
 
 

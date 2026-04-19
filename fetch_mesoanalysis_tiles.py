@@ -34,8 +34,6 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-# Fill this in once the THREDDS/fileServer URL is known. It should point to the
-# directory containing latest.json, not to a specific variable.
 DEFAULT_BASE_URL = ""
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "tiles" / "mesoanalysis"
 
@@ -58,8 +56,7 @@ RETRIES = 3
 MAX_WORKERS = 16
 USER_AGENT = "STORM/mesoanalysis-tile-receiver"
 
-# Same behavior as the existing current.json / NSSL THREDDS fetches. Some NSSL
-# THREDDS cert chains have historically failed Python's default verification.
+# same behavior as the existing current.json / NSSL THREDDS fetches. Some NSSL
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE

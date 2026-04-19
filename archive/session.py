@@ -1,5 +1,3 @@
-# archive/session.py
-# ArchiveSession — holds the configuration for a single archive replay session.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,7 +22,7 @@ class ArchiveSession:
     radar_station: Optional[str] = None
 
     def __post_init__(self):
-        # Normalise to UTC so callers don't have to worry about tz.
+        # normalise to UTC so callers don't have to worry about tz.
         if self.start_time.tzinfo is None:
             self.start_time = self.start_time.replace(tzinfo=timezone.utc)
         else:

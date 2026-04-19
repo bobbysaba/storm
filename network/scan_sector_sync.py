@@ -1,8 +1,3 @@
-# network/scan_sector_sync.py
-# Syncs active vehicle scan sectors over MQTT.
-#
-# Topic layout: storm/scan_sectors/{vehicle_id}
-# Deactivation payload: {"vehicle_id": "...", "active": false, ...}
 
 import json
 import logging

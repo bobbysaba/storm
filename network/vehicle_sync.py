@@ -1,18 +1,3 @@
-# network/vehicle_sync.py
-# Syncs vehicle observations over MQTT.
-#
-# Outbound (local -> broker): publish_obs()
-# Inbound  (broker -> local): vehicle_received signal
-#
-# Topic layout: storm/vehicles/{vehicle_id}
-#
-# Payload fields (JSON):
-#   vehicle_id, lat, lon,
-#   gps_date (DDMMYY), gps_time (HHMMSS),
-#   wspd (m/s), wdir (deg), t_fast (°C), dewpoint (°C), pressure (mb)
-#
-# Fields are omitted from the payload when None (GPS-only vehicles will
-# have no met fields).
 
 import json
 import logging
@@ -82,8 +67,6 @@ def _build_payload(obs: Observation) -> dict:
         "vehicle_id": obs.vehicle_id,
         "lat":        obs.lat,
         "lon":        obs.lon,
-        # Re-derive gps_date / gps_time from the parsed timestamp so the
-        # raw logger strings are preserved in the wire format.
         "gps_date":   obs.timestamp.strftime("%d%m%y"),   # DDMMYY
         "gps_time":   obs.timestamp.strftime("%H%M%S"),   # HHMMSS
     }

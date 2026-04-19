@@ -1,19 +1,3 @@
-# archive/fetchers/sounding_archive_fetcher.py
-# ArchiveSoundingFetcher — retrieves atmospheric soundings for archive mode.
-#
-# Three sources
-# -------------
-# 1. RUC/RAP model analysis (rucsoundings.noaa.gov)
-#    Lightweight text-format soundings at any lat/lon for any historical time.
-#    No GRIB2 download needed.
-#
-# 2. Observed radiosondes (IEM RAOB archive)
-#    Same API as the live ObsSoundingFetcher; query by station + timestamp.
-#
-# 3. NSSL CLAMPS / mobile soundings
-#    Same directory-based access as real-time mode.  The directory grows
-#    through the season; we scan it and pick the sounding whose issue_time
-#    is nearest to the current archive time.
 
 import logging
 import ssl
@@ -28,7 +12,7 @@ import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.sounding import Sounding, SoundingSet, PRESSURE_LEVELS
-from data.obs_sounding_fetcher import (
+from data.fetchers.obs_sounding_fetcher import (
     _fetch_profiles_for_timestamp,
     _format_label,
     _parse_profile,
@@ -69,7 +53,6 @@ class ArchiveSoundingFetcher(QObject):
         super().__init__(parent)
         self._current_archive_time: Optional[datetime] = None
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def on_time_changed(self, archive_time: datetime) -> None:
         self._current_archive_time = archive_time
@@ -110,7 +93,6 @@ class ArchiveSoundingFetcher(QObject):
             daemon=True,
         ).start()
 
-# ── Model sounding (archive-capable HRRR via Open-Meteo historical forecast) ──
 
     def _do_fetch_model(self, lat: float, lon: float, t: datetime) -> None:
         try:
@@ -141,7 +123,6 @@ class ArchiveSoundingFetcher(QObject):
             log.error("ArchiveSoundingFetcher: model sounding failed: %s", exc)
             self.fetch_error.emit(f"Model sounding error: {exc}")
 
-    # ── Observed sounding (IEM RAOB) ──────────────────────────────────────────
 
     def _do_fetch_obs(
         self, station_id: str, lat: float, lon: float, elev: float, t: datetime
@@ -207,12 +188,11 @@ class ArchiveSoundingFetcher(QObject):
             log.error("ArchiveSoundingFetcher: obs sounding failed: %s", exc)
             self.fetch_error.emit(f"Observed sounding error: {exc}")
 
-    # ── NSSL sounding ─────────────────────────────────────────────────────────
 
     def _do_fetch_nssl(self, t: datetime) -> None:
         """Fetch all NSSL soundings from the same UTC day as t, up to and including t."""
         try:
-            from data.clamps_sounding_fetcher import (
+            from data.fetchers.clamps_sounding_fetcher import (
                 _CATALOG_XML, _FILENAME_RE,
                 _HEADERS, _REQUEST_TIMEOUT, _SSL_CTX, _fetch_and_parse, _format_label,
             )
@@ -272,7 +252,6 @@ class ArchiveSoundingFetcher(QObject):
             self.fetch_error.emit(f"NSSL sounding error: {exc}")
 
 
-# ── Archive model sounding parser ─────────────────────────────────────────────
 
 def _build_hourly_params() -> str:
     parts = []
@@ -348,7 +327,6 @@ def _parse_open_meteo_archive(
     return sounding, site_elevation
 
 
-# ── IEM RAOB parser ──────────────────────────────────────────────────────────
 
 def _parse_iem_raob(data: dict, station_id: str, lat: float, lon: float, elev: float) -> list:
     """Parse IEM RAOB JSON response into a list of Sounding objects."""
@@ -418,7 +396,6 @@ def _parse_iem_raob(data: dict, station_id: str, lat: float, lon: float, elev: f
     return soundings
 
 
-# ── Time utilities ────────────────────────────────────────────────────────────
 
 def _nearest_synoptic_time(t: datetime) -> datetime:
     """Return the most recent synoptic time (00Z, 06Z, 12Z, 18Z) at or before t."""

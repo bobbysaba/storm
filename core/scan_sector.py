@@ -1,5 +1,3 @@
-# core/scan_sector.py
-# current data-collection footprint for a vehicle-mounted or stationary sensor.
 
 import math
 from datetime import datetime, timezone

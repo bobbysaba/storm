@@ -1,5 +1,3 @@
-# core/sounding.py
-# Data classes representing a vertical atmospheric sounding profile.
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -7,16 +5,13 @@ from datetime import datetime
 import numpy as np
 
 
-# Pressure levels requested from the API (hPa), surface → tropopause.
-# Chosen to give good vertical resolution in the lower troposphere while
-# still covering the jet stream / upper-level flow important for severe wx.
+# pressure levels requested from the API (hPa), surface → tropopause.
 PRESSURE_LEVELS = [
     1000, 975, 950, 925, 900, 875, 850, 825, 800, 775, 750, 725,
     700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100,
 ]
 
-# Time slots: current run F0 (analysis) through F3.
-# (hour_offset, short_label, tab_label)
+# time slots: current run F0 (analysis) through F3.
 SOUNDING_SLOTS = [
     (0, "F0", "Analysis (F0)"),
     (1, "F1", "F+1h"),
@@ -38,7 +33,7 @@ class Sounding:
     slot_offset: int        # hour offset from analysis (−2 … +3)
     label:       str        # human-readable tab label, e.g. "Analysis −2h"
 
-    # Vertical profile arrays — all shape (N,)
+    # vertical profile arrays — all shape (N,)
     pressure:    np.ndarray  # hPa
     temperature: np.ndarray  # °C
     dewpoint:    np.ndarray  # °C
@@ -73,7 +68,7 @@ class SoundingSet:
     fetch_time: datetime
     soundings: list       # list[Sounding], chronological order
 
-    # Populated only for observed / NSSL soundings:
+    # populated only for observed / NSSL soundings:
     station_id:   str = ""      # e.g. "OUN" or "CLAMPS"
     station_name: str = ""      # e.g. "Norman, OK"
     source:       str = "hrrr"  # "hrrr" | "obs" | "nssl"

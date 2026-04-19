@@ -1,10 +1,4 @@
 #!/bin/bash
-# scripts/create_app.sh — builds STORM.app in the project root.
-# Called by setup.py, or run manually from the project root:
-#   bash scripts/create_app.sh
-#
-# The resulting STORM.app can be double-clicked from Finder or dragged
-# to the Dock.  It activates the "storm" conda environment automatically.
 
 set -e
 
@@ -17,23 +11,17 @@ RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 
 echo "Building $APP_BUNDLE ..."
 
-# ── Clean and create bundle structure ─────────────────────────────────────────
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-# ── Launcher shell script ─────────────────────────────────────────────────────
-# Placed alongside the main executable as storm_launcher.sh.
-# Searches common conda installation paths and launches main.py using the
-# storm environment's python directly — avoids "conda activate" which requires
-# an interactive shell and silently fails when launched by Finder.
+# placed alongside the main executable as storm_launcher.sh.
 
 cat > "$MACOS_DIR/storm_launcher.sh" << 'LAUNCHER'
 #!/bin/bash
 
-# Project root baked in at build time — app can be moved or symlinked freely.
+# project root baked in at build time — app can be moved or symlinked freely.
 PROJECT_DIR="__PROJECT_DIR__"
 
-# ── Find conda base ───────────────────────────────────────────────────────────
 CONDA_BASE=""
 for DIR in \
     "$HOME/miniforge3" \
@@ -57,9 +45,7 @@ if [ -z "$CONDA_BASE" ]; then
     exit 1
 fi
 
-# ── Locate the storm environment python directly ──────────────────────────────
-# Bypass "conda activate" — it requires an interactive shell and silently fails
-# when the app is launched by Finder rather than from a terminal.
+# bypass "conda activate" — it requires an interactive shell and silently fails
 PYTHON=""
 ENV_PREFIX=""
 for ENV_NAME in storm storm311; do
@@ -76,11 +62,11 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
-# Set PATH so any subprocesses (Flask, etc.) find the right binaries
+# set PATH so any subprocesses (Flask, etc.) find the right binaries
 export PATH="$ENV_PREFIX/bin:$CONDA_BASE/bin:$CONDA_BASE/condabin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export CONDA_PREFIX="$ENV_PREFIX"
 
-# Use certifi's CA bundle — macOS app bundles don't inherit the system SSL certs
+# use certifi's CA bundle — macOS app bundles don't inherit the system SSL certs
 CERTIFI_CERTS="$(ls "$ENV_PREFIX"/lib/python3.*/site-packages/certifi/cacert.pem 2>/dev/null | head -1)"
 if [ -f "$CERTIFI_CERTS" ]; then
     export SSL_CERT_FILE="$CERTIFI_CERTS"
@@ -91,21 +77,15 @@ cd "$PROJECT_DIR"
 exec "$PYTHON" main.py
 LAUNCHER
 
-# Bake in the project directory path
+# bake in the project directory path
 sed -i '' "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$MACOS_DIR/storm_launcher.sh"
 
 chmod +x "$MACOS_DIR/storm_launcher.sh"
 
-# ── Compiled Mach-O launcher ──────────────────────────────────────────────────
 # macOS Finder (Sequoia+) silently refuses to launch shell-script app bundles.
-# We compile a tiny C binary as the main executable; it just exec's bash with
-# storm_launcher.sh alongside it.
 
 cat > /tmp/storm_wrapper.c << 'CWRAPPER'
 #include <stdint.h>
-#include <string.h>
-#include <unistd.h>
-#include <mach-o/dyld.h>
 
 int main(void) {
     char self[4096];
@@ -125,7 +105,6 @@ CWRAPPER
 cc -o "$MACOS_DIR/$APP_NAME" /tmp/storm_wrapper.c
 rm -f /tmp/storm_wrapper.c
 
-# ── Info.plist ────────────────────────────────────────────────────────────────
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -156,8 +135,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# ── Icon (optional) ───────────────────────────────────────────────────────────
-# If storm.icns exists in the project root, copy it into the bundle.
 if [ -f "$PROJECT_DIR/storm.icns" ]; then
     cp "$PROJECT_DIR/storm.icns" "$RESOURCES_DIR/storm.icns"
     echo "  Icon: storm.icns copied."

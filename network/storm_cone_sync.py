@@ -1,8 +1,3 @@
-# network/storm_cone_sync.py
-# Syncs storm motion cones over MQTT.
-#
-# Topic layout:  storm/cones/{cone_id}
-# Delete payload: {"id": "...", "deleted": true}
 
 import json
 import logging
@@ -34,13 +29,11 @@ class StormConeSync(QObject):
         self._mqtt.connected.connect(self._on_mqtt_connected)
         self._mqtt.message_received.connect(self._on_message)
 
-    # ── Subscription ──────────────────────────────────────────────────────────
 
     def _on_mqtt_connected(self):
         self._mqtt.subscribe(f"{_TOPIC_PREFIX}/+")
         log.info("StormConeSync: subscribed to %s/+", _TOPIC_PREFIX)
 
-    # ── Publish (local → broker) ───────────────────────────────────────────────
 
     def publish_create(self, cone: StormCone):
         self._publish(cone.id, cone.to_dict())
@@ -65,7 +58,6 @@ class StormConeSync(QObject):
         except Exception as e:
             log.warning("StormConeSync: publish failed: %s", e)
 
-    # ── Receive (broker → local) ───────────────────────────────────────────────
 
     def _on_message(self, topic: str, raw: bytes):
         if not topic.startswith(_TOPIC_PREFIX + "/"):

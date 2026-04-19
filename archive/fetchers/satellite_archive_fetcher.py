@@ -1,6 +1,3 @@
-# archive/fetchers/satellite_archive_fetcher.py
-# ArchiveSatelliteFetcher — retrieves historical GOES-East visible imagery from
-# NOAA's public AWS archive for CONUS and mesoscale sectors.
 
 import base64
 import io
@@ -100,10 +97,9 @@ class ArchiveSatelliteFetcher(QObject):
         self._current_archive_time: Optional[datetime] = None
         self._meso_bboxes: dict[int, Optional[dict]] = {1: None, 2: None}
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def load_capabilities(self) -> None:
-        # Index all modes at startup so meso buttons are responsive immediately.
+        # index all modes at startup so meso buttons are responsive immediately.
         for mode in _MODE_CONFIG:
             self._ensure_mode_index(mode)
 
@@ -129,7 +125,6 @@ class ArchiveSatelliteFetcher(QObject):
             return
         self._ensure_fetched(ref)
 
-    # ── Indexing ──────────────────────────────────────────────────────────────
 
     def _ensure_mode_index(self, mode: str) -> None:
         if mode in self._indexed_modes or mode in self._indexing_modes:
@@ -146,9 +141,7 @@ class ArchiveSatelliteFetcher(QObject):
             self._indexes_ready = bool(self._indexed_modes)
 
             if refs and mode in ("meso1", "meso2"):
-                # Emit now (bbox still None) so the UI immediately enables the buttons.
-                # Then fetch the bbox in a separate background thread so the map hover
-                # preview becomes available once the lightweight metadata download finishes.
+                # emit now (bbox still None) so the UI immediately enables the buttons.
                 self.meso_sectors_updated.emit(dict(self._meso_bboxes))
                 threading.Thread(
                     target=self._fetch_mode_bbox,
@@ -240,7 +233,6 @@ class ArchiveSatelliteFetcher(QObject):
                 hi = mid - 1
         return result or refs[0]
 
-    # ── Fetching ──────────────────────────────────────────────────────────────
 
     def _ensure_fetched(self, ref: _FrameRef) -> None:
         cache_key = (self._mode, ref.timestamp)
@@ -372,9 +364,7 @@ def _render_goes_png(
             data[data == fill] = np.nan
         data[~np.isfinite(data)] = np.nan
         data = np.clip(data, 0.0, 1.0)
-        # Apply gamma correction to match the visual brightness of live WMS tiles.
-        # nowCOAST applies a sqrt-like stretch; replicating it here keeps archive
-        # imagery consistent with live display.
+        # apply gamma correction to match the visual brightness of live WMS tiles.
         data = np.where(np.isfinite(data), np.power(data, 0.5), np.nan)
 
         proj_var = ds["goes_imager_projection"]
@@ -459,8 +449,7 @@ def _dataset_bbox(ds, fallback_bbox: Optional[list[float]]) -> list[float]:
     if fallback_bbox:
         return list(fallback_bbox)
 
-    # Meso sector files don't carry geospatial_* attributes — derive the bbox
-    # by projecting the x/y coordinate array corners through the geostationary CRS.
+    # meso sector files don't carry geospatial_* attributes — derive the bbox
     try:
         import cartopy.crs as ccrs
         import numpy as np

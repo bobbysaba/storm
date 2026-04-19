@@ -1,6 +1,3 @@
-# network/mqtt_client.py
-# paho-mqtt v2 wrapper.  Runs paho's threaded loop in the background and
-# re-emits events as Qt signals so the rest of the app never touches threads.
 
 import logging
 import os
@@ -37,7 +34,6 @@ class MQTTClient(QObject):
         self._client: mqtt.Client | None = None
         self._lock = threading.Lock()
 
-    # ── Public API ─────────────────────────────────────────────────────────────
 
     def connect_to_broker(self, host: str, port: int = 8883,
                           use_tls: bool = False,
@@ -73,8 +69,7 @@ class MQTTClient(QObject):
                 log.info("MQTT: begin connect pipeline (host=%s port=%d tls=%s)", host, port, use_tls)
                 if use_tls:
                     if ca_cert or cert_file or key_file:
-                        # mTLS required for AWS IoT Core. Pre-validate files first
-                        # so bad cert/key inputs fail cleanly instead of crashing later.
+                        # mtls required for AWS IoT Core. Pre-validate files first
                         for label, path in (
                             ("ca_cert", ca_cert),
                             ("cert_file", cert_file),
@@ -92,12 +87,11 @@ class MQTTClient(QObject):
                         c.tls_insecure_set(False)
                         log.info("MQTT: TLS context initialized")
                     else:
-                        # Standard server-side TLS only (no client cert/key).
+                        # standard server-side TLS only (no client cert/key).
                         c.tls_set()
                         log.info("MQTT: basic TLS initialized")
 
                 # paho will automatically retry after disconnect with exponential
-                # back-off between _RECONNECT_MIN and _RECONNECT_MAX seconds
                 c.reconnect_delay_set(_RECONNECT_MIN, _RECONNECT_MAX)
                 log.info("MQTT: calling connect_async")
                 c.connect_async(host, port, keepalive=60)
@@ -146,7 +140,6 @@ class MQTTClient(QObject):
             self._client = None
         log.info("MQTT: disconnected")
 
-    # ── paho callbacks (called from paho's internal thread) ────────────────────
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties):
         if reason_code.is_failure:

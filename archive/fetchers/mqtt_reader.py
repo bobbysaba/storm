@@ -1,14 +1,3 @@
-# archive/fetchers/mqtt_reader.py
-# ArchiveMQTTReader — fetches and replays STORM archive files from NSSL THREDDS.
-#
-# File layout (NSSL THREDDS fileServer):
-#   {base_url}/storm.vehicles.{YYYYMMDD}     — append-only position log
-#   {base_url}/storm.annotations.{YYYYMMDD}  — keyed by id; deletes have deleted_at
-#   {base_url}/storm.cones.{YYYYMMDD}        — same schema as annotations
-#   {base_url}/storm.drawings.{YYYYMMDD}     — same schema as annotations
-#
-# Each line is a JSON object.  Vehicles use gps_date/gps_time for timestamps;
-# annotations/cones/drawings use created_at (creates) or deleted_at (deletes).
 
 import json
 import logging
@@ -54,7 +43,7 @@ def _fetch_text(url: str) -> Optional[str]:
 
 def _parse_timestamp(obj: dict) -> Optional[datetime]:
     """Extract a UTC datetime from a JSONL record using created_at or gps_date/gps_time."""
-    # Annotations / cones / drawings
+    # annotations / cones / drawings
     ts_str = obj.get("created_at") or obj.get("deleted_at")
     if ts_str:
         try:
@@ -63,7 +52,7 @@ def _parse_timestamp(obj: dict) -> Optional[datetime]:
             ).astimezone(timezone.utc)
         except (ValueError, TypeError):
             pass
-    # Vehicles
+    # vehicles
     gps_date = obj.get("gps_date")
     gps_time = obj.get("gps_time")
     if gps_date and gps_time:
@@ -134,17 +123,13 @@ class ArchiveMQTTReader(QObject):
         self._loaded = False
         self._pending_time: Optional[datetime] = None
         self._last_emit_time: Optional[datetime] = None
-        # Track which annotation/cone/drawing ids have been emitted so we can
-        # detect backward jumps and re-emit from scratch.
+        # track which annotation/cone/drawing ids have been emitted so we can
         self._emitted_ids: dict[str, set[str]] = {
             "annotations": set(), "cones": set(), "drawings": set()
         }
         # _load_complete is queued automatically by Qt (bg thread → main thread)
-        # so on_time_changed is only ever called after data is fully loaded
-        # and always on the main thread.
         self._load_complete.connect(self._on_load_complete)
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def load(self) -> None:
         """Fetch all archive files for the session date (background thread)."""
@@ -155,10 +140,10 @@ class ArchiveMQTTReader(QObject):
             self._pending_time = archive_time
             return
 
-        # Backward jump — remove anything placed after the new time, then re-emit from scratch.
+        # backward jump — remove anything placed after the new time, then re-emit from scratch.
         if self._last_emit_time is not None and archive_time < self._last_emit_time:
             self.vehicles_cleared.emit()
-            # Explicitly delete annotations/cones/drawings that are now in the future.
+            # explicitly delete annotations/cones/drawings that are now in the future.
             for ann_id in list(self._emitted_ids["annotations"]):
                 self.annotation_deleted.emit(ann_id, "")
             for cone_id in list(self._emitted_ids["cones"]):
@@ -197,7 +182,6 @@ class ArchiveMQTTReader(QObject):
             self.on_time_changed(self._pending_time)
             self._pending_time = None
 
-    # ── Fetching ──────────────────────────────────────────────────────────────
 
     def _fetch_all(self) -> None:
         errors = []
@@ -222,7 +206,6 @@ class ArchiveMQTTReader(QObject):
             self.error.emit(f"Archive MQTT load errors: {'; '.join(errors)}")
         self._load_complete.emit()
 
-    # ── Emission helpers ──────────────────────────────────────────────────────
 
     def _emit_vehicles(self, t: datetime) -> None:
         """Emit the most recent position for each vehicle at or before t."""

@@ -1,17 +1,6 @@
-# Bobby Saba - functions to configure runtime flags
 
-# import required packages
 from dataclasses import dataclass
 
-# TABLE OF FLAGS AND WHAT THEY CORRESPOND TO
-# ---------------------------------------- # 
-# 0: normal
-# 1: map-safe only
-# 2: runtime-safe (also safe-map)
-# 3: disable radar path
-# 4: disable MQTT path
-# 5: minimal/offline core shell
-# 6: MQTT diagnostics (no TLS)
 
 # dataclass for runtime flags
 @dataclass
@@ -89,7 +78,7 @@ def apply_overrides(**kwargs: bool | int | None) -> None:
 
 # function to finalize flags
 def finalize_flags() -> None:
-    # Any explicit component disable implies toggle mode is enabled.
+    # any explicit component disable implies toggle mode is enabled.
     if any((
         FLAGS.disable_radar,
         FLAGS.disable_mqtt,
@@ -99,7 +88,7 @@ def finalize_flags() -> None:
     )):
         FLAGS.enable_startup_toggles = True
 
-    # MQTT-off implies dependent systems off.
+    # mqtt-off implies dependent systems off.
     if FLAGS.disable_mqtt:
         FLAGS.disable_annotations = True
         FLAGS.disable_data_inputs = True

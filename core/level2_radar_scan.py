@@ -1,17 +1,7 @@
-# core/level2_radar_scan.py
-# Level2RadarScan — extends RadarScan with NEXRAD Level-2 specific metadata.
-#
-# Level-2 files contain multiple elevation tilts and more dual-pol products
-# than Level-3.  This class carries the extra fields needed to drive the
-# tilt/product selectors in archive mode; the base RadarScan fields
-# (data, lats, lons, vmin, vmax, colormap) are fully compatible with the
-# existing RadarOverlay renderer.
 
 from core.radar_scan import RadarScan
 
 
-# ── Level-2 product catalogue ─────────────────────────────────────────────────
-# Maps pyart field names to display metadata.
 
 L2_PRODUCTS: dict[str, dict] = {
     "reflectivity": {
@@ -72,7 +62,7 @@ L2_PRODUCTS: dict[str, dict] = {
     },
 }
 
-# Default product shown when the archive session opens.
+# default product shown when the archive session opens.
 DEFAULT_L2_PRODUCT = "reflectivity"
 
 

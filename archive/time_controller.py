@@ -1,11 +1,3 @@
-# archive/time_controller.py
-# TimeController — the central archive clock.
-#
-# Provides:
-#   • step forward / backward by a configurable interval
-#   • play / pause with selectable playback speed multipliers
-#   • scrubber position (seconds since midnight UTC of the session date)
-#   • time_changed(datetime) signal emitted on every clock advance
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -14,13 +6,13 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 log = logging.getLogger(__name__)
 
-# How often the internal timer fires (wall-clock milliseconds).
+# how often the internal timer fires (wall-clock milliseconds).
 _TICK_MS = 500
 
-# Available playback speed multipliers.
+# available playback speed multipliers.
 SPEED_OPTIONS = [1, 5, 10, 30, 60, 120, 300]
 
-# Step size used by the ← / → buttons (seconds of archive time).
+# step size used by the ← / → buttons (seconds of archive time).
 STEP_SECONDS = 30    # match vehicle position update interval
 
 
@@ -43,7 +35,7 @@ class TimeController(QObject):
     def __init__(self, start_time: datetime, parent=None):
         super().__init__(parent)
 
-        # Normalise to UTC.
+        # normalise to UTC.
         if start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)
         else:
@@ -53,15 +45,13 @@ class TimeController(QObject):
         self._speed_idx: int = 2          # default 10×
         self._playing: bool = False
 
-        # Accumulator: wall-clock ms that have elapsed toward the next archive
-        # tick.  Once it reaches _ms_per_archive_tick() it drains and we advance.
+        # accumulator: wall-clock ms that have elapsed toward the next archive
         self._accum_ms: float = 0.0
 
         self._timer = QTimer(self)
         self._timer.setInterval(_TICK_MS)
         self._timer.timeout.connect(self._on_tick)
 
-    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def current_time(self) -> datetime:
@@ -75,7 +65,6 @@ class TimeController(QObject):
     def is_playing(self) -> bool:
         return self._playing
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def set_time(self, dt: datetime) -> None:
         """Jump to an arbitrary archive time."""
@@ -124,7 +113,7 @@ class TimeController(QObject):
         if multiplier in SPEED_OPTIONS:
             self._speed_idx = SPEED_OPTIONS.index(multiplier)
         else:
-            # Clamp to nearest.
+            # clamp to nearest.
             self._speed_idx = min(
                 range(len(SPEED_OPTIONS)),
                 key=lambda i: abs(SPEED_OPTIONS[i] - multiplier),
@@ -134,7 +123,6 @@ class TimeController(QObject):
     def set_speed_by_index(self, idx: int) -> None:
         self._speed_idx = max(0, min(len(SPEED_OPTIONS) - 1, idx))
 
-    # ── Scrubber helpers ───────────────────────────────────────────────────────
 
     def seconds_since_midnight(self) -> int:
         """Current archive time expressed as seconds since 00:00:00 UTC."""
@@ -147,7 +135,6 @@ class TimeController(QObject):
         midnight = self._current_time.replace(hour=0, minute=0, second=0, microsecond=0)
         self.set_time(midnight + timedelta(seconds=max(0, min(86399, secs))))
 
-    # ── Internal ──────────────────────────────────────────────────────────────
 
     def _ms_per_archive_second(self) -> float:
         """Wall-clock ms required to advance one archive second at current speed."""
@@ -155,13 +142,13 @@ class TimeController(QObject):
 
     def _on_tick(self) -> None:
         """Called every _TICK_MS wall-clock ms while playing."""
-        # Each wall-clock tick represents `speed` archive-seconds worth of time.
+        # each wall-clock tick represents `speed` archive-seconds worth of time.
         archive_seconds = _TICK_MS / 1000.0 * self.speed
         self._advance(archive_seconds)
 
     def _advance(self, archive_seconds: float) -> None:
         new_time = self._current_time + timedelta(seconds=archive_seconds)
-        # Clamp to same UTC day.
+        # clamp to same UTC day.
         midnight_next = self._current_time.replace(
             hour=0, minute=0, second=0, microsecond=0
         ) + timedelta(days=1)

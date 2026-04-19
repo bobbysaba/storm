@@ -68,7 +68,7 @@ class TestStormCone:
         gj = cone.build_geojson()
         cone_feat = [f for f in gj["features"] if f["properties"]["ft"] == "cone"][0]
         ring = cone_feat["geometry"]["coordinates"][0]  # outer ring is nested
-        # GeoJSON polygon ring: first == last
+        # geoJSON polygon ring: first == last
         assert ring[0] == ring[-1]
 
     def test_zero_speed_cone(self):

@@ -1,18 +1,3 @@
-# archive/fetchers/radar_archive_fetcher.py
-# ArchiveRadarFetcher — downloads NEXRAD Level-2 files from the AWS public S3
-# bucket and decodes them with MetPy (no pyart dependency required).
-#
-# AWS bucket:  s3://unidata-nexrad-level2 (public, no auth required)
-#   NOTE: the legacy noaa-nexrad-level2 bucket was deprecated Sep 2025 and
-#   now returns 403 for all requests.  Use unidata-nexrad-level2 instead.
-# HTTP listing: https://unidata-nexrad-level2.s3.amazonaws.com/?prefix=YYYY/MM/DD/KXXX/
-# File URL:     https://unidata-nexrad-level2.s3.amazonaws.com/YYYY/MM/DD/KXXX/<filename>
-#
-# Buffer strategy
-# ---------------
-# Maintains a sliding window of BUFFER_BEFORE scans before and BUFFER_AFTER
-# scans after the current archive time.  Pre-fetches missing slots in a
-# background thread so the UI stays responsive during playback.
 
 import atexit
 import io
@@ -36,9 +21,7 @@ log = logging.getLogger(__name__)
 _S3_BASE = "https://unidata-nexrad-level2.s3.amazonaws.com"
 _S3_NS   = "http://s3.amazonaws.com/doc/2006-03-01/"
 
-# Maps L2_PRODUCTS keys → MetPy Level2File moment name (plain ASCII string).
-# MetPy stores MSG31 moment keys as stripped bytes (b'REF'), MSG1 as str ('REF').
-# We normalise by trying both encoded and plain forms in _decode.
+# maps L2_PRODUCTS keys → MetPy Level2File moment name (plain ASCII string).
 _MOMENT_MAP: dict[str, str] = {
     "reflectivity":              "REF",
     "velocity":                  "VEL",
@@ -50,9 +33,7 @@ _MOMENT_MAP: dict[str, str] = {
     "clutter_filter_power_removed": "CFP",
 }
 
-# Stations not archived in the Unidata/NOAA Level-2 S3 bucket.
-# Primarily research radars that are valid NEXRAD sites for live mode (THREDDS)
-# but have no data in the public archive.
+# stations not archived in the Unidata/NOAA Level-2 S3 bucket.
 ARCHIVE_UNAVAILABLE_STATIONS: frozenset[str] = frozenset({
     "KOUN",   # NSSL research WSR-88D, Norman OK — not in public archive
 })
@@ -99,16 +80,14 @@ class ArchiveRadarFetcher(QObject):
         self._product     = DEFAULT_L2_PRODUCT
         self._tilt_idx    = 0          # index into available tilts list
 
-        # Raw Level-2 files are written to a per-session tmp directory (~30 MB
-        # each) so they don't bloat process memory across a long session.  The
-        # directory is deleted automatically on process exit.
+        # raw Level-2 files are written to a per-session tmp directory (~30 MB
         self._tmpdir = tempfile.mkdtemp(prefix="storm_radar_")
         atexit.register(shutil.rmtree, self._tmpdir, True)
 
-        # Maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
+        # maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
         self._raw_cache: dict[datetime, Optional[str]] = {}
         self._decoded_cache: dict[tuple[datetime, str, int], Level2RadarScan] = {}
-        # Sorted list of all known scan times for the date.
+        # sorted list of all known scan times for the date.
         self._index: list[datetime] = []
         self._index_lock = threading.Lock()
 
@@ -118,7 +97,6 @@ class ArchiveRadarFetcher(QObject):
         self._pending_fetches: set[datetime] = set()
         self._pending_decodes: set[tuple[datetime, str, int]] = set()
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
     @property
     def station(self) -> str:
@@ -181,10 +159,9 @@ class ArchiveRadarFetcher(QObject):
         else:
             self._ensure_fetched(scan_time)
 
-        # Maintain buffer: pre-fetch neighbouring scans.
+        # maintain buffer: pre-fetch neighbouring scans.
         self._maintain_buffer(scan_time)
 
-    # ── Index loading ─────────────────────────────────────────────────────────
 
     def _fetch_index(self) -> None:
         """List all files for the station/date from the AWS S3 bucket."""
@@ -212,7 +189,7 @@ class ArchiveRadarFetcher(QObject):
             self.index_loaded.emit(
                 [t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in self._index]
             )
-            # Pre-fetch the scan nearest to the current archive time.
+            # pre-fetch the scan nearest to the current archive time.
             if self._current_archive_time and self._index:
                 self.on_time_changed(self._current_archive_time)
         except Exception as exc:
@@ -227,7 +204,7 @@ class ArchiveRadarFetcher(QObject):
             ns = _S3_NS
             for content in root.findall(f"{{{ns}}}Contents"):
                 key = content.findtext(f"{{{ns}}}Key", "")
-                # Filename pattern: KXXX20230515_201500_V06 (and variants)
+                # filename pattern: KXXX20230515_201500_V06 (and variants)
                 fname = key.split("/")[-1]
                 if not fname or "MDM" in fname:
                     continue
@@ -238,7 +215,6 @@ class ArchiveRadarFetcher(QObject):
             log.warning("ArchiveRadarFetcher: S3 parse error: %s", exc)
         return times
 
-    # ── Scan fetching ─────────────────────────────────────────────────────────
 
     def _nearest_scan_before(self, t: datetime) -> Optional[datetime]:
         """Return the latest scan_time <= t from the index."""
@@ -246,7 +222,7 @@ class ArchiveRadarFetcher(QObject):
             idx = self._index
         if not idx:
             return None
-        # Binary search for the last element <= t.
+        # binary search for the last element <= t.
         lo, hi = 0, len(idx) - 1
         result = None
         while lo <= hi:
@@ -290,7 +266,7 @@ class ArchiveRadarFetcher(QObject):
             file_bytes = self._download_scan(scan_time)
             if file_bytes is None:
                 return
-            # Write raw bytes to tmp file to keep memory footprint low.
+            # write raw bytes to tmp file to keep memory footprint low.
             path = os.path.join(
                 self._tmpdir,
                 f"{self._station}_{scan_time.strftime('%Y%m%d_%H%M%S')}.dat",
@@ -342,13 +318,12 @@ class ArchiveRadarFetcher(QObject):
         """Fetch the raw Level-2 file bytes from AWS S3."""
         with self._index_lock:
             idx = self._index
-        # Find a matching filename in the index for this exact scan time.
-        # We look for the file whose parsed time matches scan_time.
+        # find a matching filename in the index for this exact scan time.
         prefix = (
             f"{scan_time.strftime('%Y/%m/%d')}/{self._station}/"
             f"{self._station}{scan_time.strftime('%Y%m%d_%H%M%S')}"
         )
-        # Try V06 first, then V03.
+        # try V06 first, then V03.
         for suffix in ("_V06", "_V03", ""):
             url = f"{_S3_BASE}/{prefix}{suffix}"
             try:
@@ -375,12 +350,11 @@ class ArchiveRadarFetcher(QObject):
         if not f.sweeps:
             raise RuntimeError("No sweeps found in Level-2 file")
 
-        # ── Elevation angles per sweep ────────────────────────────────────────
         available_tilts = []
         for sweep in f.sweeps:
             if sweep:
                 rad0 = sweep[0]
-                # MSG31: Radial namedtuple with .header; MSG1: plain (hdr, data) tuple
+                # msg31: Radial namedtuple with .header; MSG1: plain (hdr, data) tuple
                 hdr = rad0.header if hasattr(rad0, "header") else rad0[0]
                 available_tilts.append(round(float(hdr.el_angle), 1))
 
@@ -407,11 +381,9 @@ class ArchiveRadarFetcher(QObject):
                 f"No recognised moments in sweep {tilt_idx} (found: {sorted(present)})"
             )
 
-        # ── Pick product and tilt ─────────────────────────────────────────────
         product  = self._product if self._product in available_products else available_products[0]
         moment   = _MOMENT_MAP[product]
 
-        # ── Radar lat/lon from vol_consts block (MSG31 only) ──────────────────
         radar_lat = radar_lon = None
         for rad in sweep:
             vc = getattr(rad, "vol_consts", None)
@@ -420,8 +392,8 @@ class ArchiveRadarFetcher(QObject):
                 radar_lon = float(vc.lon)
                 break
         if radar_lat is None:
-            # MSG1 files don't carry lat/lon — fall back to NEXRAD_SITES table.
-            from ui.radar_controls import NEXRAD_SITES
+            # msg1 files don't carry lat/lon — fall back to NEXRAD_SITES table.
+            from ui.controls.radar_controls import NEXRAD_SITES
             for sid, _name, lat, lon in NEXRAD_SITES:
                 if sid == self._station:
                     radar_lat, radar_lon = lat, lon
@@ -429,7 +401,6 @@ class ArchiveRadarFetcher(QObject):
         if radar_lat is None:
             raise RuntimeError(f"Cannot determine radar location for {self._station}")
 
-        # ── Extract azimuths and gate data ────────────────────────────────────
         azimuths  = []
         gate_rows = []
         first_gate_km = gate_width_km = None
@@ -438,7 +409,7 @@ class ArchiveRadarFetcher(QObject):
             hdr     = rad.header if is_msg31 else rad[0]
             moments = rad.moments if is_msg31 else rad[1]
 
-            # MetPy MSG31 keys are bytes (b'REF'), MSG1 keys are str ('REF').
+            # metPy MSG31 keys are bytes (b'REF'), MSG1 keys are str ('REF').
             entry = moments.get(moment.encode(), moments.get(moment))
             if entry is None:
                 continue
@@ -454,14 +425,11 @@ class ArchiveRadarFetcher(QObject):
         if not azimuths:
             raise RuntimeError(f"No {moment} data found in sweep {tilt_idx}")
 
-        # ── Sort radials by azimuth so row 0 ≈ 0° ───────────────────────────
-        # MetPy returns radials in transmission order (first az often ~180-200°).
-        # render_scan_to_png expects row 0 = azimuth 0°, row N = azimuth ~360°.
+        # metPy returns radials in transmission order (first az often ~180-200°).
         sort_idx = np.argsort(azimuths)
         azimuths  = [azimuths[i] for i in sort_idx]
         gate_rows = [gate_rows[i] for i in sort_idx]
 
-        # ── Build 2-D data array [n_rays × n_gates] ───────────────────────────
         n_rays  = len(azimuths)
         n_gates = max(len(r) for r in gate_rows)
         data = np.full((n_rays, n_gates), np.nan, dtype=np.float32)
@@ -469,11 +437,10 @@ class ArchiveRadarFetcher(QObject):
             ng = len(row)
             data[i, :ng] = row  # already NaN for MISSING/RANGE_FOLD
 
-        # Velocity is in m/s from MetPy — convert to knots.
+        # velocity is in m/s from MetPy — convert to knots.
         if product == "velocity":
             data *= 1.94384
 
-        # ── Polar → lat/lon via pyproj AEQD projection ────────────────────────
         az_rad   = np.deg2rad(np.array(azimuths, dtype=np.float64))
         ranges   = first_gate_km + np.arange(n_gates, dtype=np.float64) * gate_width_km
         # [n_rays, n_gates] east/north offsets in km
@@ -502,7 +469,6 @@ class ArchiveRadarFetcher(QObject):
             pyart_field=product,
         )
 
-    # ── Buffer maintenance ────────────────────────────────────────────────────
 
     def _maintain_buffer(self, current_scan_time: datetime) -> None:
         """Pre-fetch BUFFER_BEFORE + BUFFER_AFTER scans around current_scan_time."""
@@ -518,7 +484,7 @@ class ArchiveRadarFetcher(QObject):
             if self._raw_cache.get(t) is None and t not in self._pending_fetches:
                 self._ensure_fetched(t)
 
-        # Evict scans far outside the buffer to keep memory manageable.
+        # evict scans far outside the buffer to keep memory manageable.
         evict_lo = max(0, pos - BUFFER_BEFORE - 4)
         evict_hi = min(len(idx) - 1, pos + BUFFER_AFTER + 4)
         for t in list(self._raw_cache.keys()):
@@ -534,7 +500,6 @@ class ArchiveRadarFetcher(QObject):
                     del self._decoded_cache[key]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_l2_filename_time(fname: str, station: str) -> Optional[datetime]:
     """
@@ -542,7 +507,7 @@ def _parse_l2_filename_time(fname: str, station: str) -> Optional[datetime]:
     Expected pattern: KXXX20230515_201500_V06
     """
     try:
-        # Strip station prefix (4 chars).
+        # strip station prefix (4 chars).
         rest = fname[4:]
         # rest = "20230515_201500_V06"
         date_part, rest2 = rest.split("_", 1)

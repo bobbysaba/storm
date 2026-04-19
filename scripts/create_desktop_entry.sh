@@ -1,7 +1,4 @@
 #!/bin/bash
-# scripts/create_desktop_entry.sh — creates a STORM desktop launcher on Linux.
-# Run from the project root:
-#   bash scripts/create_desktop_entry.sh
 
 set -e
 
@@ -13,7 +10,6 @@ ICON_DEST="$HOME/.local/share/icons/storm.png"
 DESKTOP_FILE="$HOME/.local/share/applications/storm.desktop"
 DESKTOP_SHORTCUT="$HOME/Desktop/storm.desktop"
 
-# ── Find conda base ────────────────────────────────────────────────────────────
 CONDA_BASE=""
 for DIR in \
     "$HOME/miniforge3" \
@@ -39,7 +35,6 @@ if [ -z "$CONDA_BASE" ]; then
     exit 1
 fi
 
-# ── Find the storm environment python ─────────────────────────────────────────
 PYTHON=""
 ENV_PREFIX=""
 for ENV_NAME in storm storm311; do
@@ -59,7 +54,6 @@ fi
 
 echo "Found python: $PYTHON"
 
-# ── Write launcher script ──────────────────────────────────────────────────────
 LAUNCHER="$PROJECT_DIR/scripts/launch_storm_linux.sh"
 
 cat > "$LAUNCHER" << LAUNCHER_SCRIPT
@@ -73,7 +67,6 @@ LAUNCHER_SCRIPT
 chmod +x "$LAUNCHER"
 echo "Launcher script: $LAUNCHER"
 
-# ── Install icon ───────────────────────────────────────────────────────────────
 mkdir -p "$(dirname "$ICON_DEST")"
 if [ -f "$ICON_SRC" ]; then
     cp "$ICON_SRC" "$ICON_DEST"
@@ -83,7 +76,6 @@ else
     ICON_DEST="utilities-terminal"
 fi
 
-# ── Write .desktop file ────────────────────────────────────────────────────────
 mkdir -p "$(dirname "$DESKTOP_FILE")"
 
 cat > "$DESKTOP_FILE" << DESKTOP
@@ -102,11 +94,10 @@ DESKTOP
 chmod +x "$DESKTOP_FILE"
 echo "Application entry: $DESKTOP_FILE"
 
-# ── Desktop shortcut ───────────────────────────────────────────────────────────
 if [ -d "$HOME/Desktop" ]; then
     cp "$DESKTOP_FILE" "$DESKTOP_SHORTCUT"
     chmod +x "$DESKTOP_SHORTCUT"
-    # GNOME requires marking the file as trusted
+    # gnome requires marking the file as trusted
     if command -v gio &>/dev/null; then
         gio set "$DESKTOP_SHORTCUT" metadata::trusted true 2>/dev/null || true
     fi

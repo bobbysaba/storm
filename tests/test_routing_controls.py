@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 
-from ui.routing_controls import RoutingControls
+from ui.controls.routing_controls import RoutingControls
 
 
 class _FakeButton:

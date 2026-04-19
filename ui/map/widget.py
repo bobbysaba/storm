@@ -1,0 +1,698 @@
+
+import json
+import logging
+import sys
+import runtime_flags
+
+from PyQt6.QtCore import QUrl, QTimer, pyqtSignal, Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
+
+from config import ACCENT_COLOR
+from ui.map.bridge import MapBridge
+from ui.map.html import STATIC_PATH, TILES_PATH, build_map_html
+
+# optional Windows fallback: disable WebGL map rendering only when explicitly
+SAFE_MAP_MODE = (
+    sys.platform == "win32"
+    and runtime_flags.FLAGS.safe_map_mode
+)
+
+if not SAFE_MAP_MODE:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEngineSettings
+    from PyQt6.QtWebChannel import QWebChannel
+
+log = logging.getLogger(__name__)
+
+
+class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
+    map_ready             = pyqtSignal()
+    map_clicked           = pyqtSignal(float, float)
+    map_moved             = pyqtSignal(float, float, float)
+    feature_clicked       = pyqtSignal(str)
+    annotation_clicked    = pyqtSignal(str)
+    annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    drawing_drag_ended    = pyqtSignal(str, str)           # id, coords json
+    storm_cone_clicked    = pyqtSignal(str)
+    storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
+    storm_cone_place_drag_ended = pyqtSignal(float, float)
+    map_double_clicked    = pyqtSignal(float, float)
+    drawing_clicked       = pyqtSignal(str)
+    radar_station_clicked = pyqtSignal(str)
+    sounding_clicked             = pyqtSignal(float, float)
+    obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
+    asos_bbox_selected    = pyqtSignal(float, float, float, float)  # west, south, east, north
+    user_dragged          = pyqtSignal()
+    map_pick_for_route    = pyqtSignal(float, float)
+    cwa_loaded            = pyqtSignal()
+    _cwa_parsed           = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        if SAFE_MAP_MODE:
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(24, 24, 24, 24)
+            msg = QLabel(
+                "Safe Map Mode: WebEngine disabled on this Windows device to avoid GPU crashes."
+            )
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color: #B5BDCC; font-size: 13px;")
+            layout.addWidget(msg)
+            self._map_ready = True
+            self._js_queue = []
+            QTimer.singleShot(0, self.map_ready.emit)
+            return
+
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+        from ui.map.tile_scheme_handler import StormSchemeHandler
+        self._scheme_handler = StormSchemeHandler(
+            TILES_PATH, STATIC_PATH, build_map_html()
+        )
+        QWebEngineProfile.defaultProfile().installUrlSchemeHandler(
+            b"storm", self._scheme_handler
+        )
+        # public accessor so RadarOverlay can push PNG bytes for URL-based serving
+        self.scheme_handler = self._scheme_handler
+
+        settings = self.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, not SAFE_MAP_MODE)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, not SAFE_MAP_MODE)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
+
+        self.bridge = MapBridge()
+        self.channel = QWebChannel()
+        self.channel.registerObject("bridge", self.bridge)
+        self.page().setWebChannel(self.channel)
+
+        self.bridge.map_clicked.connect(self.map_clicked)
+        self.bridge.map_moved.connect(self.map_moved)
+        self.bridge.feature_clicked.connect(self.feature_clicked)
+        self.bridge.annotation_clicked.connect(self.annotation_clicked)
+        self.bridge.annotation_drag_ended.connect(self.annotation_drag_ended)
+        self.bridge.drawing_drag_ended.connect(self.drawing_drag_ended)
+        self.bridge.storm_cone_clicked.connect(self.storm_cone_clicked)
+        self.bridge.storm_cone_drag_ended.connect(self.storm_cone_drag_ended)
+        self.bridge.storm_cone_place_drag_ended.connect(self.storm_cone_place_drag_ended)
+        self.bridge.map_double_clicked.connect(self.map_double_clicked)
+        self.bridge.drawing_clicked.connect(self.drawing_clicked)
+        self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
+        self.bridge.sounding_clicked.connect(self.sounding_clicked)
+        self.bridge.obs_sounding_station_clicked.connect(self.obs_sounding_station_clicked)
+        self.bridge.asos_bbox_selected.connect(self.asos_bbox_selected)
+        self.bridge.user_dragged.connect(self.user_dragged)
+        self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
+
+        # queue for JS calls that arrive before MapLibre has fully loaded.
+        self._map_ready = False
+        self._js_queue: list[str] = []
+        self._cwa_parsed.connect(self._on_cwa_parsed)
+        self.bridge.map_loaded.connect(self._on_map_loaded_from_js)
+        self.loadFinished.connect(self._on_page_load_finished)
+
+        QTimer.singleShot(0, self._load_map)
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        # emit all JS console messages to stdout for debugging (includes errors/warnings/info)
+        try:
+            lvl_name = getattr(level, 'name', str(level))
+        except Exception:
+            lvl_name = str(level)
+        print(f"JS [{lvl_name}] {message} ({source}:{line})", flush=True)
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        if level in (QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel,
+                     QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel):
+            log.warning("JS %s [%s:%s]: %s", lvl_name, source, line, message)
+
+    def _load_map(self):
+        self.load(QUrl("storm://app/"))
+
+    def _on_page_load_finished(self, ok: bool):
+        if not ok or self._map_ready:
+            return
+        QTimer.singleShot(8000, self._mark_map_ready_if_bridge_stalled)
+
+    def _on_map_loaded_from_js(self):
+        if self._map_ready:
+            return
+        self._map_ready = True
+        for script in self._js_queue:
+            self.page().runJavaScript(script)
+        self._js_queue.clear()
+        self.map_ready.emit()
+
+    def _mark_map_ready_if_bridge_stalled(self):
+        """Allow Python startup to continue if the JS map-ready callback stalls."""
+        if self._map_ready:
+            return
+        log.warning("Map page loaded but JS map-ready callback did not fire; continuing startup")
+        self._map_ready = True
+        self._js_queue.clear()
+        self.map_ready.emit()
+
+    def run_js(self, script: str):
+        if SAFE_MAP_MODE:
+            return
+        if self._map_ready:
+            self.page().runJavaScript(script)
+        else:
+            self._js_queue.append(script)
+
+    def add_vehicle(self, vehicle_id: str, lat: float, lon: float,
+                    color: str = ACCENT_COLOR, icon_type: str = "car"):
+        self.run_js(
+            f"stormAddVehicle('{vehicle_id}', {lat}, {lon}, '{color}', '{icon_type}');"
+        )
+
+    def remove_vehicle(self, vehicle_id: str):
+        self.run_js(f"stormRemoveVehicle('{vehicle_id}');")
+
+    def set_satellite_frame(self, b64: str, west: float, south: float,
+                            east: float, north: float):
+        self.run_js(
+            f"if(window.stormSetSatelliteFrame) "
+            f"stormSetSatelliteFrame({repr(b64)},{west},{south},{east},{north});"
+        )
+
+    def set_satellite_time(self, time_iso: str):
+        self.run_js(f"if(window.stormSetSatelliteTime) stormSetSatelliteTime('{time_iso}');")
+
+    def set_satellite_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(f"if(window.stormSetSatelliteVisible) stormSetSatelliteVisible({flag});")
+
+    def set_satellite_mode(self, mode: str):
+        self.run_js(f"if(window.stormSetSatelliteMode) stormSetSatelliteMode('{mode}');")
+
+    def set_satellite_opacity(self, opacity: float):
+        self.run_js(f"if(window.stormSetSatelliteOpacity) stormSetSatelliteOpacity({opacity:.3f});")
+
+    def clear_satellite_frame(self) -> None:
+        self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
+
+    def set_meso_sectors(self, sectors: dict):
+        features = []
+        for idx, bbox in sectors.items():
+            if bbox:
+                features.append({
+                    "label": f"MESO-{idx}",
+                    "west":  bbox["west"],
+                    "south": bbox["south"],
+                    "east":  bbox["east"],
+                    "north": bbox["north"],
+                })
+        self.run_js(
+            f"if(window.stormSetMesoSectors) stormSetMesoSectors({json.dumps(json.dumps(features))});"
+        )
+
+    def set_radar_stations(self, stations: list[dict]):
+        features = []
+        for station in stations:
+            features.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [station["lon"], station["lat"]],
+                },
+                "properties": {
+                    "site_id": station["site_id"],
+                    "name": station.get("name", ""),
+                },
+            })
+        geojson = {"type": "FeatureCollection", "features": features}
+        self.run_js(
+            f"if(window.stormSetRadarStations) stormSetRadarStations({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_radar_stations_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(
+            f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
+        )
+
+    def set_cwa_geojson(self, geojson: dict):
+        """Set the CWA GeoJSON on the map (expects a FeatureCollection dict)."""
+        self.run_js(
+            f"if(window.stormSetCwaGeoJSON) stormSetCwaGeoJSON({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_cwa_visible(self, visible: bool):
+        """Toggle CWA overlay visibility."""
+        flag = "true" if visible else "false"
+        self.run_js(
+            f"if(window.stormSetCwaVisible) stormSetCwaVisible({flag});"
+        )
+
+    def load_cwa_shapefile(self, shp_base: str | None = None):
+        """Load a local CWA shapefile (shp + dbf) and push it to the map as GeoJSON.
+
+        shp_base may be a basename (without extension) or a full .shp path. If
+        omitted, defaults to the bundled cwa_shp/w_16ap26 shapefile.
+
+        Parsing runs on a background thread; cwa_loaded is emitted on the main
+        thread when the data is visible on the map.
+        """
+        import os, struct, threading as _threading
+
+        if shp_base is None:
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'cwa_shp', 'w_16ap26'))
+        else:
+            base = shp_base
+        shp_path = base if base.lower().endswith('.shp') else base + '.shp'
+        dbf_path = shp_path[:-4] + '.dbf'
+
+        def _worker():
+            try:
+                with open(shp_path, 'rb') as f:
+                    shp_data = f.read()
+                with open(dbf_path, 'rb') as f:
+                    dbf_data = f.read()
+            except Exception:
+                return
+
+            # minimal SHP parser (Polygon type 5) — adapted from archive fetcher.
+            def _parse_shp(data: bytes):
+                if len(data) < 100:
+                    return []
+                pos = 100
+                geometries = []
+                while pos < len(data):
+                    if pos + 12 > len(data):
+                        break
+                    _rec_num, content_words = struct.unpack_from('>ii', data, pos)
+                    pos += 8
+                    content_bytes = content_words * 2
+                    if content_bytes < 4 or pos + content_bytes > len(data):
+                        break
+                    shape_type = struct.unpack_from('<i', data, pos)[0]
+                    if shape_type == 0:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    if shape_type != 5:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    offset = pos + 4
+                    if offset + 32 + 8 > len(data):
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    offset += 32
+                    num_parts, num_points = struct.unpack_from('<ii', data, offset)
+                    offset += 8
+                    if num_parts <= 0 or num_points <= 0:
+                        geometries.append(None)
+                        pos += content_bytes
+                        continue
+                    part_starts = list(struct.unpack_from(f'<{num_parts}i', data, offset))
+                    offset += num_parts * 4
+                    pts_raw = struct.unpack_from(f'<{num_points * 2}d', data, offset)
+                    points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+                    rings = []
+                    for idx_r, start in enumerate(part_starts):
+                        end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
+                        ring = [list(pt) for pt in points[start:end]]
+                        rings.append(ring)
+                    geometries.append({'type': 'Polygon', 'coordinates': rings})
+                    pos += content_bytes
+                return geometries
+
+            # minimal DBF parser — adapted from archive fetcher.
+            def _parse_dbf(data: bytes):
+                if len(data) < 32:
+                    return []
+                num_records = struct.unpack_from('<I', data, 4)[0]
+                header_bytes = struct.unpack_from('<H', data, 8)[0]
+                record_bytes = struct.unpack_from('<H', data, 10)[0]
+                fields = []
+                pos = 32
+                while pos < header_bytes - 1 and data[pos] != 0x0D:
+                    raw_name = data[pos:pos + 11]
+                    name = raw_name.split(b"\x00")[0].decode('ascii', errors='replace').strip()
+                    ftype = chr(data[pos + 11])
+                    flen = data[pos + 16]
+                    fields.append((name, ftype, flen))
+                    pos += 32
+                records = []
+                rec_pos = header_bytes
+                for _ in range(num_records):
+                    if rec_pos + record_bytes > len(data):
+                        break
+                    deletion_flag = data[rec_pos]
+                    if deletion_flag == 0x2A:  # '*' = deleted
+                        rec_pos += record_bytes
+                        continue
+                    field_pos = rec_pos + 1
+                    rec = {}
+                    for name, ftype, flen in fields:
+                        raw = data[field_pos:field_pos + flen].decode('ascii', errors='replace').strip()
+                        if ftype == 'N':
+                            try:
+                                rec[name] = float(raw) if raw else None
+                            except ValueError:
+                                rec[name] = None
+                        else:
+                            rec[name] = raw
+                        field_pos += flen
+                    records.append(rec)
+                    rec_pos += record_bytes
+                return records
+
+            geoms = _parse_shp(shp_data)
+            recs = _parse_dbf(dbf_data)
+            features = []
+            for geom, rec in zip(geoms, recs):
+                if geom is None:
+                    continue
+                features.append({'type': 'Feature', 'geometry': geom, 'properties': rec})
+            geojson = {'type': 'FeatureCollection', 'features': features}
+            self._cwa_parsed.emit(geojson)
+
+        _threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_cwa_parsed(self, geojson: dict):
+        self.set_cwa_geojson(geojson)
+        self.cwa_loaded.emit()
+
+    def set_route(self, geojson_str: str, dest_lon: float, dest_lat: float):
+        """Draw a route polyline on the map and place a destination marker."""
+        self.run_js(
+            f"if(window.stormSetRoute) stormSetRoute({json.dumps(geojson_str)});"
+        )
+        self.run_js(
+            f"if(window.stormSetDestinationMarker) "
+            f"stormSetDestinationMarker({dest_lon}, {dest_lat});"
+        )
+
+    def clear_route(self):
+        """Remove the route line and destination marker."""
+        self.run_js("if(window.stormClearRoute) stormClearRoute();")
+
+    def set_route_pick_mode(self, active: bool):
+        """Toggle crosshair pick mode for destination selection."""
+        flag = "true" if active else "false"
+        self.run_js(
+            f"if(window.stormSetRoutePickMode) stormSetRoutePickMode({flag});"
+        )
+
+    def set_sounding_mode(self, active: bool):
+        """Toggle HRRR sounding-click mode: map clicks emit lat/lon instead of normal actions."""
+        flag = "true" if active else "false"
+        self.run_js(f"window._soundingModeActive = {flag};")
+        cursor = Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor
+        self.setCursor(cursor)
+
+    def set_obs_sounding_mode(self, active: bool):
+        """Toggle OBS sounding mode: station dots become clickable."""
+        flag = "true" if active else "false"
+        self.run_js(f"window._soundingObsModeActive = {flag};")
+        if not active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+
+    def set_sounding_stations(self, geojson_str: str):
+        """Inject sounding station GeoJSON and make the layer visible."""
+        escaped = geojson_str.replace("\\", "\\\\").replace("`", "\\`")
+        self.run_js(f"if(window.stormSetSoundingStations) stormSetSoundingStations(`{escaped}`);")
+
+    def clear_sounding_stations(self):
+        """Hide and clear the sounding station layer."""
+        self.run_js("if(window.stormClearSoundingStations) stormClearSoundingStations();")
+
+    def preview_meso_sector(self, idx: int | None):
+        if idx in (1, 2):
+            self.run_js(
+                f"if(window.stormPreviewMesoSector) stormPreviewMesoSector('MESO-{idx}');"
+            )
+        else:
+            self.run_js("if(window.stormClearMesoPreview) stormClearMesoPreview();")
+
+    def fly_to(self, lat: float, lon: float, zoom: float = None):
+        zoom_str = str(zoom) if zoom is not None else "undefined"
+        self.run_js(f"stormFlyTo({lat}, {lon}, {zoom_str});")
+
+    def set_follow(self, enabled: bool):
+        self.run_js(f"stormSetFollow({'true' if enabled else 'false'});")
+
+    def follow_move(self, lat: float, lon: float):
+        self.run_js(f"stormFollowMove({lat}, {lon});")
+
+    def set_annotation_mode(self, active: bool):
+        if active:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.add('annotating');el.classList.remove('drawing','measuring');}})();"
+            )
+        else:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.remove('annotating');}})();"
+            )
+
+    def set_measure_mode(self, active: bool):
+        if active:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.add('measuring');el.classList.remove('annotating','drawing');}})();"
+                "if(window.stormMeasureActivate) stormMeasureActivate(true);"
+            )
+        else:
+            self.run_js(
+                "(function(){var el=document.getElementById('map');"
+                " if(el){el.classList.remove('measuring');}})();"
+                "if(window.stormMeasureActivate) stormMeasureActivate(false);"
+            )
+
+    def measure_click(self, lat: float, lon: float):
+        self.run_js(f"if(window.stormMeasureClick) stormMeasureClick({lat},{lon});")
+
+    def clear_measure(self):
+        self.run_js("if(window.stormMeasureClear) stormMeasureClear();")
+
+    def set_drawing_mode(self, active: bool, type_key: str = "") -> None:
+        flag = "true" if active else "false"
+        self.run_js(
+            f"if(window.stormDrawingModeSet) stormDrawingModeSet({flag}, '{type_key}');"
+        )
+
+    def set_drawing_draggable(self, drawing_id: str, on: bool) -> None:
+        self.run_js(f"if(window.stormSetDrawingDraggable) stormSetDrawingDraggable('{drawing_id}', {'true' if on else 'false'});")
+
+    def drawing_update_preview(self, points: list) -> None:
+        import json
+        self.run_js(
+            f"if(window.stormDrawingUpdatePreview) stormDrawingUpdatePreview({json.dumps(json.dumps(points))});"
+        )
+
+    def add_drawing(self, drawing) -> None:
+        import json
+        payload = json.dumps(drawing.to_dict())
+        self.run_js(f"if(window.stormAddDrawing) stormAddDrawing('{drawing.id}', {json.dumps(payload)});")
+
+    def remove_drawing(self, drawing_id: str) -> None:
+        self.run_js(f"if(window.stormRemoveDrawing) stormRemoveDrawing('{drawing_id}');")
+
+    def add_annotation(self, annotation) -> None:
+        if getattr(annotation, "type_key", "") == "storm_motion":
+            return
+        label = annotation.label.replace("'", "\\'")
+        self.run_js(
+            f"stormAddAnnotation('{annotation.id}', {annotation.lat}, "
+            f"{annotation.lon}, '{annotation.type_key}', '{label}');"
+        )
+
+    def remove_annotation(self, annotation_id: str) -> None:
+        self.run_js(f"stormRemoveAnnotation('{annotation_id}');")
+
+    def set_annotation_draggable(self, annotation_id: str, on: bool) -> None:
+        self.run_js(f"stormSetAnnotationDraggable('{annotation_id}', {'true' if on else 'false'});")
+
+    def move_annotation(self, annotation_id: str, lat: float, lon: float) -> None:
+        self.run_js(f"stormMoveAnnotation('{annotation_id}', {lat}, {lon});")
+
+    def add_storm_cone(self, cone) -> None:
+        import json
+        geojson_str = json.dumps(cone.build_geojson())
+        self.run_js(f"stormAddStormCone('{cone.id}', {json.dumps(geojson_str)}, {cone.lat}, {cone.lon});")
+
+    def remove_storm_cone(self, cone_id: str) -> None:
+        self.run_js(f"stormRemoveStormCone('{cone_id}');")
+
+    def set_storm_cone_draggable(self, cone_id: str, on: bool) -> None:
+        self.run_js(f"if(window.stormSetStormConeDraggable) stormSetStormConeDraggable('{cone_id}', {'true' if on else 'false'});")
+
+    def set_storm_cone_placement_mode(self, active: bool) -> None:
+        self.run_js(f"if(window.stormSetStormConePlacementMode) stormSetStormConePlacementMode({'true' if active else 'false'});")
+
+    def set_asos_bbox_mode(self, active: bool) -> None:
+        """Toggle JS rectangle-selection mode for ASOS bbox selection."""
+        flag = 'true' if active else 'false'
+        self.run_js(f"if(window.stormSetAsosBoxMode) stormSetAsosBoxMode({flag});")
+
+    def fit_bounds(self, west: float, south: float, east: float, north: float, padding: int = 40) -> None:
+        """Fly the map to fit the given bounding box with optional padding (px)."""
+        self.run_js(
+            f"map.fitBounds([[{west},{south}],[{east},{north}]], {{padding:{padding}}});"
+        )
+
+    def add_station_plot(self, vehicle_id: str, lat: float, lon: float, png_bytes: bytes) -> None:
+        import base64
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        self.run_js(f"stormAddStationPlot('{vehicle_id}', {lat}, {lon}, '{b64}');")
+
+    def remove_station_plot(self, vehicle_id: str) -> None:
+        self.run_js(f"stormRemoveStationPlot('{vehicle_id}');")
+
+    def set_station_plots_visible(self, visible: bool) -> None:
+        v = "true" if visible else "false"
+        self.run_js(f"stormSetStationPlotsVisible({v});")
+
+    def add_surface_station_plot(self, station_id: str, lat: float, lon: float, png_bytes: bytes, name: str = "") -> None:
+        """Single-station add (used by SurfacePlotLayer directly)."""
+        import json as _json
+        self.scheme_handler.set_station_plots({station_id: png_bytes})
+        self.run_js(
+            f"stormAddSurfaceStationPlot({_json.dumps(station_id)}, {lat}, {lon}, {_json.dumps(name)});"
+        )
+
+    def add_surface_station_plots_batch(self, items: list) -> None:
+        """Batch-add stations. items: list of (id, lat, lon, png_bytes, name).
+        PNGs are stored in the scheme handler; JS payload contains only metadata."""
+        import json as _json
+        plots = {sid: png for sid, _, _, png, _ in items}
+        self.scheme_handler.set_station_plots(plots)
+        data = [{"id": sid, "lat": lat, "lon": lon, "name": name}
+                for sid, lat, lon, _png, name in items]
+        self.run_js(f"stormAddSurfaceStationPlotBatch({_json.dumps(data)});")
+
+    def remove_surface_station_plot(self, station_id: str) -> None:
+        self.scheme_handler.remove_station_plots([station_id])
+        self.run_js(f"stormRemoveSurfaceStationPlot('{station_id}');")
+
+    def remove_surface_station_plots_batch(self, station_ids) -> None:
+        """Single JS call to remove many stations at once."""
+        import json as _json
+        ids = list(station_ids)
+        self.scheme_handler.remove_station_plots(ids)
+        self.run_js(f"stormRemoveSurfaceStationPlotBatch({_json.dumps(ids)});")
+
+    def set_surface_station_plots_visible(self, visible: bool) -> None:
+        v = "true" if visible else "false"
+        self.run_js(f"stormSetSurfaceStationPlotsVisible({v});")
+
+    def load_deploy_locs(self, points: list) -> None:
+        import json
+        fc = {"type": "FeatureCollection", "features": [
+            {"type": "Feature",
+             "geometry": {"type": "Point", "coordinates": [p["lon"], p["lat"]]},
+             "properties": {
+                 "rank_abi": p.get("rank_abi"),
+                 "rank_aoi": p.get("rank_aoi"),
+                 "rqi":      p.get("rqi"),
+             }}
+            for p in points
+        ]}
+        self.run_js(f"stormLoadDeployLocs({json.dumps(json.dumps(fc))});")
+
+    def set_deploy_locs_visible(self, visible: bool) -> None:
+        self.run_js(f"stormSetDeployLocsVisible({'true' if visible else 'false'});")
+
+    def set_deploy_locs_metric(self, metric: str) -> None:
+        import json
+        self.run_js(f"stormSetDeployLocsMetric({json.dumps(metric)});")
+
+    def set_deploy_locs_filter(self, metric: str, threshold: float) -> None:
+        import json
+        self.run_js(f"stormSetDeployLocsFilter({json.dumps(metric)}, {threshold});")
+
+    def set_deploy_locs_size(self, radius: int) -> None:
+        self.run_js(f"stormSetDeployLocsSize({radius});")
+
+    def set_scan_sectors_geojson(self, geojson: dict) -> None:
+        import json
+        self.run_js(
+            f"if(window.stormSetScanSectors) stormSetScanSectors({json.dumps(json.dumps(geojson))});"
+        )
+
+    def set_scan_sectors_visible(self, visible: bool) -> None:
+        self.run_js(f"if(window.stormSetScanSectorsVisible) stormSetScanSectorsVisible({'true' if visible else 'false'});")
+
+    def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcGeoJSON) stormSetSpcGeoJSON("
+            f"{json.dumps(cat_str)}, "
+            f"{json.dumps(wind_str)}, "
+            f"{json.dumps(hail_str)}, "
+            f"{json.dumps(tor_str)}"
+            ");"
+        )
+
+    def set_spc_category_visible(self, key: str, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcCategoryVisible) stormSetSpcCategoryVisible('{key}', {'true' if visible else 'false'});"
+        )
+
+    def set_spc_product_visible(self, key: str, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcProductVisible) stormSetSpcProductVisible('{key}', {'true' if visible else 'false'});"
+        )
+
+    def set_nws_warnings_geojson(self, fc_str: str) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetNwsWarningsGeoJSON) stormSetNwsWarningsGeoJSON("
+            f"{json.dumps(fc_str)}"
+            ");"
+        )
+
+    def set_nws_warnings_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetNwsWarningsVisible) stormSetNwsWarningsVisible({'true' if visible else 'false'});"
+        )
+
+    def set_spc_watches_geojson(self, fc_str: str) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcWatchesGeoJSON) stormSetSpcWatchesGeoJSON("
+            f"{json.dumps(fc_str)}"
+            ");"
+        )
+
+    def set_spc_watches_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcWatchesVisible) stormSetSpcWatchesVisible({'true' if visible else 'false'});"
+        )
+
+    def set_spc_mds_geojson(self, fc_str: str) -> None:
+        import json
+        self.run_js(
+            "if(window.stormSetSpcMdsGeoJSON) stormSetSpcMdsGeoJSON("
+            f"{json.dumps(fc_str)}"
+            ");"
+        )
+
+    def set_spc_mds_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSpcMdsVisible) stormSetSpcMdsVisible({'true' if visible else 'false'});"
+        )
+
+    def move_layer_before(self, layer_id: str, before_layer_id: str | None) -> None:
+        """Move a MapLibre layer before another layer (or to the top if before_layer_id is None)."""
+        import json
+        if before_layer_id is None:
+            self.run_js(
+                f"(function(){{ var lid={json.dumps(layer_id)}; "
+                "function go(){ try { if(map.isStyleLoaded && !map.isStyleLoaded()) { setTimeout(go, 100); return; } "
+                "if(map.getLayer(lid)) map.moveLayer(lid); } catch(e) { setTimeout(go, 100); } } go(); })();"
+            )
+        else:
+            self.run_js(
+                f"(function(){{ var lid={json.dumps(layer_id)}, before={json.dumps(before_layer_id)}; "
+                "function go(){ try { if(map.isStyleLoaded && !map.isStyleLoaded()) { setTimeout(go, 100); return; } "
+                "if(map.getLayer(lid) && map.getLayer(before)) map.moveLayer(lid, before); } "
+                "catch(e) { setTimeout(go, 100); } } go(); })();"
+            )

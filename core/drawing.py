@@ -1,6 +1,4 @@
-# bobby saba - script that handles custom drawn annotations
 
-# import required packages
 import uuid
 from datetime import datetime, timezone
 

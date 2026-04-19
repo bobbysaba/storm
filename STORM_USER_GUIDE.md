@@ -757,7 +757,7 @@ An additional slider controls the displayed circle radius for each location mark
 
 #### Data Source
 
-- **File:** `data/deployment_locations.json`
+- **File:** `locs/deployment_locations.csv`
 - Markers are pre-loaded at startup; toggling visibility or threshold is instant.
 
 #### Disabled If

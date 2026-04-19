@@ -1,8 +1,5 @@
-# core/vehicle.py
-# current state of a tracked vehicle, including its latest observation.
 
 
-# vehicle state container
 class Vehicle:
     # create a new vehicle object
     def __init__(self, id, lat, lon, latest_obs=None, icon_type="car"):

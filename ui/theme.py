@@ -1,5 +1,3 @@
-# ui/theme.py
-# STORM application theme — full dark, minimal chrome
 
 from config import ACCENT_COLOR
 
@@ -58,18 +56,10 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar[wide="true"] QComboBox#radarSiteCombo,
-#floatingToolbar[wide="true"] QComboBox#radarProductCombo,
-#floatingToolbar[wide="true"] QToolButton#radarStationsButton {
     min-height: 24px;
 }
 
 #floatingToolbar QWidget#radarDrawer,
-#floatingToolbar QWidget#hazardDrawer,
-#floatingToolbar QWidget#satelliteDrawer,
-#floatingToolbar QWidget#deployLocsDrawer,
-#floatingToolbar QWidget#routingDrawer,
-#floatingToolbar QWidget#soundingDrawer,
-#floatingToolbar QWidget#surfaceDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -77,25 +67,15 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#radarDrawer > QWidget,
-#floatingToolbar QWidget#hazardDrawer > QWidget,
-#floatingToolbar QWidget#satelliteDrawer > QWidget,
-#floatingToolbar QWidget#deployLocsDrawer > QWidget,
-#floatingToolbar QWidget#routingDrawer > QWidget,
-#floatingToolbar QWidget#soundingDrawer > QWidget,
-#floatingToolbar QWidget#surfaceDrawer > QWidget {
     background: transparent;
 }
 
 #floatingToolbar QComboBox#radarSiteCombo,
-#floatingToolbar QComboBox#radarProductCombo,
-#floatingToolbar QToolButton#radarStationsButton {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
 }
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
-#floatingToolbar QComboBox#radarProductCombo:hover,
-#floatingToolbar QToolButton#radarStationsButton:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
 
@@ -326,7 +306,6 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton:checked,
-#floatingToolbar QWidget#routingDrawer QToolButton:pressed {
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #4A9EFF;
@@ -335,7 +314,6 @@ QMainWindow, QWidget {
 
 /* Small fixed-size buttons in origin / dest rows (⊕ pick, nav-arrow loc) */
 #floatingToolbar QWidget#routingDrawer QToolButton[text="⊕"],
-#floatingToolbar QWidget#routingDrawer QToolButton#locBtn {
     padding: 1px 2px;
     font-size: 13px;
     border-radius: 4px;
@@ -666,12 +644,10 @@ QSlider::sub-page:horizontal {
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider,
-#floatingToolbar QWidget#satelliteDrawer QSlider {
     background: transparent;
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
-#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;
@@ -721,12 +697,6 @@ QToolTip {
 }
 
 #floatingToolbar QWidget#radarDrawer QCheckBox,
-#floatingToolbar QWidget#hazardDrawer QCheckBox,
-#floatingToolbar QWidget#satelliteDrawer QCheckBox,
-#floatingToolbar QWidget#deployLocsDrawer QCheckBox,
-#floatingToolbar QWidget#routingDrawer QCheckBox,
-#floatingToolbar QWidget#soundingDrawer QCheckBox,
-#floatingToolbar QWidget#surfaceDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {
@@ -852,17 +822,9 @@ QDialog#annotationDialog QLineEdit:focus {
 }
 """.replace("#FF6B35", ACCENT_COLOR)
 
-# Accent color for use in Python code — reads from config.toml [ui] accent_color
+# accent color for use in Python code — reads from config.toml [ui] accent_color
 ACCENT = ACCENT_COLOR
-ACCENT_ORANGE = ACCENT  # backwards-compat alias
-ACCENT_BLUE   = "#4A9EFF"
-ACCENT_GREEN  = "#39D98A"
-ACCENT_RED    = "#E53935"
-ACCENT_YELLOW = "#FFD166"
 
 BG_BASE       = "#0A0A0F"
-BG_PANEL      = "#0F0F1A"
 BG_ELEVATED   = "#1A1A2E"
-BORDER_COLOR  = "#1E1E2E"
-TEXT_PRIMARY  = "#E8EAF0"
 TEXT_MUTED    = "#6E7A8F"

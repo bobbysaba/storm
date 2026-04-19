@@ -1,8 +1,3 @@
-# network/drawing_sync.py
-# Syncs DrawingAnnotation objects (fronts, polylines, polygons) over MQTT.
-#
-# Topic layout:  storm/drawings/{drawing_id}
-# Delete payload: {"id": "...", "deleted": true}
 
 import json
 import logging

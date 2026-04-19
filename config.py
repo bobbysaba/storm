@@ -1,6 +1,4 @@
-# Bobby Saba - config file to store application constants
 
-# import required packages
 import os
 from pathlib import Path
 
@@ -43,18 +41,13 @@ OBS_FILE_COL_WSPD = "sfc_wspd"
 OBS_FILE_COL_WDIR = "sfc_wdir"
 OBS_FILE_COL_PRES = "pressure"
 
-# GPS baud rate
+# gps baud rate
 GPS_BAUD = 4800
 
 # path to previous deployment locations
 DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
-# ── Mode passphrases ──────────────────────────────────────────────────────────
-# PBKDF2-HMAC-SHA256 hashes (600 000 iterations) of the passphrases required
-# to launch in vehicle, monitor, or archive mode.  Format: base64(salt):base64(dk)
-#
-# To update a passphrase:
-#   python set_password.py vehicle <new_password>
+# pbkdf2-HMAC-SHA256 hashes (600 000 iterations) of the passphrases required
 VEHICLE_PASSPHRASE_HASH = "CeNUNJ5o6dIu9Jgi3CKTIw==:E70QJVtj0v5u91wuOJEQJPDG+CJML30lCW+2BqzcLhM="
 MONITOR_PASSPHRASE_HASH = "AYxyUvyUW9hzxWA7UMtNfA==:Bi6XDsi3+E52eLhEP7sT80Effgm3l6mAeKCEpNGNdqY="
 ARCHIVE_PASSPHRASE_HASH = "O3uHJWRbpiJXzOOqTNrGLA==:LecEzsMFUFlijFzJpTlz8PaWGtxuTVx+l0ShiguqoVE="
@@ -62,14 +55,7 @@ ARCHIVE_PASSPHRASE_HASH = "O3uHJWRbpiJXzOOqTNrGLA==:LecEzsMFUFlijFzJpTlz8PaWGtxu
 # accent color
 ACCENT_COLOR = "#00CFFF"
 
-# ── Archive mode ───────────────────────────────────────────────────────────────
-# Base URL for the server hosting MQTT archive JSONL files.
-# Files are expected at: {ARCHIVE_MQTT_BASE_URL}/{YYYY-MM-DD}/{topic}.jsonl
-# Leave blank to disable MQTT replay in archive mode.
-ARCHIVE_MQTT_BASE_URL = ""
-
-# OpenRouteService API key (used by routing_fetcher.py)
-# Override via ORS_API_KEY env var if desired.
+# openRouteService API key (used by routing_fetcher.py)
 ORS_API_KEY = os.environ.get(
     "ORS_API_KEY",
     "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0=",

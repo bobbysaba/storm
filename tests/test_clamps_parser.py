@@ -1,12 +1,12 @@
-"""Tests for the CLAMPS .skewT parser (data.clamps_sounding_fetcher._parse_skewt)."""
+"""Tests for the CLAMPS .skewT parser."""
 
 import math
 from datetime import datetime, timezone
 
-from data.clamps_sounding_fetcher import _parse_skewt, _FILENAME_RE, _format_label
+from data.fetchers.clamps_sounding_fetcher import _parse_skewt, _FILENAME_RE, _format_label
 
 
-# Minimal valid .skewT content
+# minimal valid .skewT content
 SAMPLE_SKEWT = """\
 %TITLE%
  NSSL_LIDAR 260406/1800
