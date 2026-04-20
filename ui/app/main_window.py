@@ -26,6 +26,7 @@ from ui.controls.routing_controls import RoutingControls, _make_loc_icon
 from ui.widgets.nav_pill import NavPill
 from ui.controls.deploy_locs_controls import DeployLocsControls
 from ui.controls.satellite_controls import SatelliteControls
+from ui.controls.hrrr_controls import HrrrControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
@@ -51,6 +52,7 @@ from data.stations.sounding_stations import build_stations_geojson
 from data.fetchers.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
 from data.fetchers.satellite_fetcher import SatelliteFetcher
+from data.fetchers.hrrr_overlay_fetcher import HrrrOverlayFetcher
 from data.fetchers.surface_fetcher import SurfaceFetcher
 from data.radar.radar_decoder import decode_nexrad_l3
 import config
@@ -822,6 +824,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._init_hazards()
 
         self._init_satellite()
+        self._init_hrrr()
         self._init_surface_obs()
         self._apply_launch_prefs()
 
@@ -941,6 +944,17 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
         self.btn_satellite.toggled.connect(self._start_layout_pulse)
         self.btn_satellite.toggled.connect(self._on_satellite_toggled)
+
+        self._add_separator(tb)
+
+        self.btn_hrrr = self._toolbar_toggle(
+            "HRRR", "Show/hide server-rendered HRRR model overlays", tb
+        )
+        self.hrrr_controls = HrrrControls(self._map_container)
+        self.hrrr_controls.setObjectName("floatingToolbar")
+        self.btn_hrrr.toggled.connect(self.hrrr_controls.toggle_drawer)
+        self.btn_hrrr.toggled.connect(self._start_layout_pulse)
+        self.btn_hrrr.toggled.connect(self._on_hrrr_drawer_toggled)
 
         self._add_separator(tb)
 
@@ -1314,6 +1328,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 _stack(self.hazard_controls)
             if hasattr(self, "satellite_controls") and self.btn_satellite.isChecked():
                 _stack(self.satellite_controls)
+            if hasattr(self, "hrrr_controls") and self.btn_hrrr.isChecked():
+                _stack(self.hrrr_controls)
             if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
                 _stack(self.surface_controls)
             if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
@@ -1894,6 +1910,42 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 lambda on, o=other: o.setChecked(False) if on else None
             )
 
+    def _init_hrrr(self):
+        self._hrrr_fetcher = HrrrOverlayFetcher(config.HRRR_BASE_URL, parent=self)
+        self._hrrr_current_metadata: dict | None = None
+        self._hrrr_visible = False
+
+        self.hrrr_controls.field_changed.connect(self._on_hrrr_field_changed)
+        self.hrrr_controls.hour_changed.connect(self._on_hrrr_hour_changed)
+        self.hrrr_controls.opacity_changed.connect(self.map_widget.set_hrrr_opacity)
+        self.hrrr_controls.refresh_requested.connect(self._on_hrrr_refresh_requested)
+        self.hrrr_controls.visible_toggled.connect(self._on_hrrr_visible_toggled)
+
+        self._hrrr_fetcher.catalog_ready.connect(self._on_hrrr_catalog_ready)
+        self._hrrr_fetcher.field_ready.connect(self._on_hrrr_field_ready)
+        self._hrrr_fetcher.overlay_ready.connect(self._on_hrrr_overlay_ready)
+        self._hrrr_fetcher.fetch_error.connect(self._on_hrrr_error)
+
+        # drawer mutually exclusive with the other data-control drawers
+        for btn, other in [
+            (self.btn_hrrr,      self.btn_satellite),
+            (self.btn_hrrr,      self.btn_radar),
+            (self.btn_hrrr,      self.btn_hazards),
+            (self.btn_hrrr,      self.btn_surface),
+            (self.btn_hrrr,      self.btn_annotate),
+            (self.btn_satellite, self.btn_hrrr),
+            (self.btn_radar,     self.btn_hrrr),
+            (self.btn_hazards,   self.btn_hrrr),
+            (self.btn_surface,   self.btn_hrrr),
+            (self.btn_annotate,  self.btn_hrrr),
+        ]:
+            btn.toggled.connect(
+                lambda on, o=other: o.setChecked(False) if on else None
+            )
+
+        self._hrrr_fetcher.refresh_catalog()
+        self.hrrr_controls.set_status(f"HRRR: {self._hrrr_fetcher.base_url}")
+
     def _init_surface_obs(self):
         self._surface_fetcher = SurfaceFetcher(parent=self)
         self._surface_layer = SurfacePlotLayer(self.map_widget)
@@ -2053,6 +2105,76 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if frames:
                 self._render_satellite_frame(frames[-1])
                 self.map_widget.set_satellite_visible(True)
+
+    def _on_hrrr_drawer_toggled(self, checked: bool):
+        if checked and not self._hrrr_current_metadata:
+            self._hrrr_fetcher.refresh_catalog()
+
+    def _on_hrrr_catalog_ready(self, fields):
+        self.hrrr_controls.set_fields(fields)
+        self.hrrr_controls.set_status(f"HRRR: {len(fields)} fields")
+
+    def _on_hrrr_field_changed(self, field_id: str):
+        if not field_id:
+            return
+        self.hrrr_controls.set_status(f"HRRR: loading {field_id}")
+        self._hrrr_fetcher.fetch_field(field_id)
+
+    def _on_hrrr_field_ready(self, field_id: str, payload: dict):
+        hours = [
+            int(item.get("forecast_hour"))
+            for item in payload.get("items", [])
+            if item.get("forecast_hour") is not None
+        ]
+        self.hrrr_controls.set_hours(hours)
+        cycle = payload.get("cycle", "--")
+        self.hrrr_controls.set_status(f"HRRR {cycle}Z: {field_id}")
+        if hours:
+            self._hrrr_fetcher.fetch_overlay(field_id, self.hrrr_controls.current_hour())
+
+    def _on_hrrr_hour_changed(self, hour: int):
+        field_id = self.hrrr_controls.current_field()
+        if not field_id:
+            return
+        self.hrrr_controls.set_status(f"HRRR: loading {field_id} F{hour:02d}")
+        self._hrrr_fetcher.fetch_overlay(field_id, hour)
+
+    def _on_hrrr_refresh_requested(self):
+        self.hrrr_controls.set_status("HRRR: refreshing")
+        self._hrrr_fetcher.refresh_catalog()
+
+    def _on_hrrr_visible_toggled(self, visible: bool):
+        self._hrrr_visible = bool(visible)
+        self._set_layer_active("hrrr", self._hrrr_visible)
+        if self._hrrr_visible and self._hrrr_current_metadata:
+            self._display_hrrr_metadata(self._hrrr_current_metadata)
+        self.map_widget.set_hrrr_visible(self._hrrr_visible and self._hrrr_current_metadata is not None)
+
+    def _on_hrrr_overlay_ready(self, metadata: dict):
+        self._hrrr_current_metadata = metadata
+        label = metadata.get("label", metadata.get("field", "HRRR"))
+        valid = str(metadata.get("valid_time", "")).replace("T", " ").replace(":00Z", "Z")
+        hour = int(metadata.get("forecast_hour", 0))
+        self.hrrr_controls.set_status(f"{label} F{hour:02d} {valid}")
+        if self._hrrr_visible:
+            self._display_hrrr_metadata(metadata)
+
+    def _display_hrrr_metadata(self, metadata: dict):
+        bbox = metadata.get("bbox") or []
+        if len(bbox) != 4:
+            self._on_hrrr_error("metadata missing bbox")
+            return
+        image_url = metadata.get("image_webp_url") or metadata.get("image_png_url")
+        if not image_url:
+            self._on_hrrr_error("metadata missing image URL")
+            return
+        west, south, east, north = [float(v) for v in bbox]
+        self.map_widget.set_hrrr_overlay(image_url, west, south, east, north)
+        self.map_widget.set_hrrr_visible(True)
+
+    def _on_hrrr_error(self, msg: str):
+        self.hrrr_controls.set_status(str(msg))
+        self.status_msg_label.setText(str(msg))
 
     def _on_satellite_mode_changed(self, mode: str):
         if self._archive:

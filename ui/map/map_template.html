@@ -321,6 +321,10 @@
     window.stormSetSatelliteVisible = _stormNoop;
     window.stormSetSatelliteMode = _stormNoop;
     window.stormSetSatelliteOpacity = _stormNoop;
+    window.stormSetHrrrOverlay = _stormNoop;
+    window.stormSetHrrrVisible = _stormNoop;
+    window.stormSetHrrrOpacity = _stormNoop;
+    window.stormClearHrrrOverlay = _stormNoop;
     window.stormSetMesoSectors = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
@@ -3173,6 +3177,81 @@
       _satOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
       if (map.getLayer(SAT_LYR))     map.setPaintProperty(SAT_LYR,     'raster-opacity', _satOpacity);
       if (map.getLayer(SAT_WMS_LYR)) map.setPaintProperty(SAT_WMS_LYR, 'raster-opacity', _satOpacity);
+    };
+
+    var _hrrrVisible = false;
+    var _hrrrOpacity = 0.65;
+    var _hrrrLastUrl = '';
+    var HRRR_SRC = 'hrrr-image';
+    var HRRR_LYR = 'hrrr-layer';
+
+    function _updateHrrrSource(imageUrl, coords) {
+      if (map.getSource(HRRR_SRC)) {
+        map.getSource(HRRR_SRC).updateImage({ url: imageUrl, coordinates: coords });
+      } else {
+        map.addSource(HRRR_SRC, { type: 'image', url: imageUrl, coordinates: coords });
+        try {
+          map.addLayer({
+            id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
+            paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
+          }, 'sat-layer');
+        } catch(_) {
+          try {
+            map.addLayer({
+              id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
+              paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
+            }, 'road-unpaved');
+          } catch(__) {
+            map.addLayer({
+              id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
+              paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
+            });
+          }
+        }
+      }
+      if (map.getLayer(HRRR_LYR)) {
+        map.setLayoutProperty(HRRR_LYR, 'visibility', _hrrrVisible ? 'visible' : 'none');
+      }
+    }
+
+    window.stormSetHrrrOverlay = function(imageUrl, west, south, east, north) {
+      var coords = [[west, north], [east, north], [east, south], [west, south]];
+      try {
+        if (imageUrl === _hrrrLastUrl) {
+          _updateHrrrSource(imageUrl, coords);
+          return;
+        }
+        _hrrrLastUrl = imageUrl;
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function() { _updateHrrrSource(imageUrl, coords); };
+        img.onerror = function() { _updateHrrrSource(imageUrl, coords); };
+        img.src = imageUrl;
+      } catch(e) {
+        console.error('[STORM] HRRR overlay inject error:', e.message || e);
+      }
+    };
+
+    window.stormSetHrrrVisible = function(visible) {
+      _hrrrVisible = !!visible;
+      if (map.getLayer(HRRR_LYR)) {
+        map.setLayoutProperty(HRRR_LYR, 'visibility', _hrrrVisible ? 'visible' : 'none');
+      }
+    };
+
+    window.stormSetHrrrOpacity = function(opacity) {
+      _hrrrOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      if (map.getLayer(HRRR_LYR)) {
+        map.setPaintProperty(HRRR_LYR, 'raster-opacity', _hrrrOpacity);
+      }
+    };
+
+    window.stormClearHrrrOverlay = function() {
+      try {
+        if (map.getLayer(HRRR_LYR)) map.removeLayer(HRRR_LYR);
+        if (map.getSource(HRRR_SRC)) map.removeSource(HRRR_SRC);
+      } catch(_) {}
+      _hrrrLastUrl = '';
     };
 
     window.stormSetMesoSectors = function(sectorsJson) {

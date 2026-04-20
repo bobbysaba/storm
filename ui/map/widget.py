@@ -192,6 +192,24 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def clear_satellite_frame(self) -> None:
         self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
 
+    def set_hrrr_overlay(self, image_url: str, west: float, south: float,
+                         east: float, north: float):
+        self.run_js(
+            f"if(window.stormSetHrrrOverlay) "
+            f"stormSetHrrrOverlay({json.dumps(image_url)},"
+            f"{west},{south},{east},{north});"
+        )
+
+    def set_hrrr_visible(self, visible: bool):
+        flag = "true" if visible else "false"
+        self.run_js(f"if(window.stormSetHrrrVisible) stormSetHrrrVisible({flag});")
+
+    def set_hrrr_opacity(self, opacity: float):
+        self.run_js(f"if(window.stormSetHrrrOpacity) stormSetHrrrOpacity({opacity:.3f});")
+
+    def clear_hrrr_overlay(self) -> None:
+        self.run_js("if(window.stormClearHrrrOverlay) stormClearHrrrOverlay();")
+
     def set_meso_sectors(self, sectors: dict):
         features = []
         for idx, bbox in sectors.items():

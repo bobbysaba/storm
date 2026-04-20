@@ -61,6 +61,10 @@ ORS_API_KEY = os.environ.get(
     "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0=",
 )
 
+# HRRR overlay fileServer/THREDDS base URL. For local testing:
+#   python -m http.server 8080 --directory /Users/bobbysaba/Documents/hrrr_test
+HRRR_BASE_URL = os.environ.get("HRRR_BASE_URL", "http://localhost:8080")
+
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 

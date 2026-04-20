@@ -653,6 +653,72 @@ QSlider::sub-page:horizontal {
     border-radius: 1px;
 }
 
+/* ── HRRR drawer ─────────────────────────────────────── */
+#floatingToolbar QWidget#hrrrDrawer,
+#floatingToolbar QWidget#hrrrControlRow,
+#floatingToolbar QWidget#hrrrStatusRow {
+    background: transparent;
+    border: none;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QToolButton {
+    background-color: transparent;
+    border: 1px solid rgba(74, 83, 108, 0.42);
+    border-radius: 6px;
+    color: #C8D0DE;
+    padding: 3px 8px;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QToolButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: rgba(74, 158, 255, 0.55);
+}
+
+#floatingToolbar QWidget#hrrrDrawer QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QComboBox {
+    background-color: rgba(32, 37, 58, 0.62);
+    border: 1px solid rgba(74, 83, 108, 0.48);
+    border-radius: 6px;
+    color: #D9E0EC;
+    min-height: 24px;
+    padding: 2px 7px;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QComboBox:hover {
+    border-color: rgba(120, 138, 178, 0.72);
+}
+
+#floatingToolbar QWidget#hrrrDrawer QPushButton {
+    background: transparent;
+    border: 1px solid rgba(74, 83, 108, 0.48);
+    border-radius: 6px;
+    color: #C8D0DE;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QPushButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: rgba(74, 158, 255, 0.55);
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QSlider {
+    background: transparent;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal {
+    background-color: rgba(184, 191, 205, 0.28);
+    height: 2px;
+    border-radius: 1px;
+}
+
 /* ── Radar / Satellite playback rows (small icon buttons, minimal padding) ── */
 QWidget#radarPlaybackRow QToolButton,
 QWidget#satPlaybackRow QToolButton {

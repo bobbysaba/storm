@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 
 DEFAULT_LAYERS: list[str] = [
     "satellite",
+    "hrrr",
     "radar",
     "cwa",
     "spc_outlook",
@@ -27,6 +28,7 @@ DEFAULT_LAYERS: list[str] = [
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
+    "hrrr":         "HRRR",
     "radar":        "Radar",
     "cwa":          "CWA",
     "spc_outlook":  "SPC Outlook",
@@ -47,6 +49,7 @@ LAYER_LABELS: dict[str, str] = {
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
+    "hrrr":         ["hrrr-layer"],
     "radar":        ["radar-overlay"],
     "cwa":          ["cwa-fill", "cwa-line", "cwa-label"],
     "spc_outlook":  ["spc-cat-fill", "spc-cat-line"],
