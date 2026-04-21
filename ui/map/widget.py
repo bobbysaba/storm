@@ -204,11 +204,55 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         flag = "true" if visible else "false"
         self.run_js(f"if(window.stormSetHrrrVisible) stormSetHrrrVisible({flag});")
 
+    def set_hrrr_readout(self, text: str):
+        self.run_js(
+            f"if(window.stormSetHrrrReadout) "
+            f"stormSetHrrrReadout({json.dumps(str(text or ''))});"
+        )
+
     def set_hrrr_opacity(self, opacity: float):
         self.run_js(f"if(window.stormSetHrrrOpacity) stormSetHrrrOpacity({opacity:.3f});")
 
     def clear_hrrr_overlay(self) -> None:
         self.run_js("if(window.stormClearHrrrOverlay) stormClearHrrrOverlay();")
+
+    def set_mesoanalysis_overlay(
+        self,
+        product_id: str,
+        tile_url: str,
+        source_layer: str,
+        west: float,
+        south: float,
+        east: float,
+        north: float,
+        minzoom: int = 0,
+        maxzoom: int = 8,
+    ) -> None:
+        self.run_js(
+            "if(window.stormSetMesoanalysisOverlay) "
+            f"stormSetMesoanalysisOverlay({json.dumps(product_id)},"
+            f"{json.dumps(tile_url)},"
+            f"{json.dumps(source_layer)},{west},{south},{east},{north},"
+            f"{int(minzoom)},{int(maxzoom)});"
+        )
+
+    def set_mesoanalysis_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetMesoanalysisVisible) "
+            f"stormSetMesoanalysisVisible({'true' if visible else 'false'});"
+        )
+
+    def set_mesoanalysis_opacity(self, opacity: float) -> None:
+        self.run_js(
+            f"if(window.stormSetMesoanalysisOpacity) "
+            f"stormSetMesoanalysisOpacity({opacity:.3f});"
+        )
+
+    def clear_mesoanalysis_overlay(self, product_id: str = "") -> None:
+        self.run_js(
+            f"if(window.stormClearMesoanalysisOverlay) "
+            f"stormClearMesoanalysisOverlay({json.dumps(str(product_id or ''))});"
+        )
 
     def set_meso_sectors(self, sectors: dict):
         features = []

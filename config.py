@@ -51,6 +51,7 @@ DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 VEHICLE_PASSPHRASE_HASH = "CeNUNJ5o6dIu9Jgi3CKTIw==:E70QJVtj0v5u91wuOJEQJPDG+CJML30lCW+2BqzcLhM="
 MONITOR_PASSPHRASE_HASH = "AYxyUvyUW9hzxWA7UMtNfA==:Bi6XDsi3+E52eLhEP7sT80Effgm3l6mAeKCEpNGNdqY="
 ARCHIVE_PASSPHRASE_HASH = "O3uHJWRbpiJXzOOqTNrGLA==:LecEzsMFUFlijFzJpTlz8PaWGtxuTVx+l0ShiguqoVE="
+ADMIN_PASSPHRASE_HASH = "N44K/AWhoT+O08E33gdLvg==:EbVnqJ4r5oRxSR2BjtxlRwpUjJOJoUe0oiIfFJQNUbM="
 
 # accent color
 ACCENT_COLOR = "#00CFFF"
@@ -63,7 +64,10 @@ ORS_API_KEY = os.environ.get(
 
 # HRRR overlay fileServer/THREDDS base URL. For local testing:
 #   python -m http.server 8080 --directory /Users/bobbysaba/Documents/hrrr_test
-HRRR_BASE_URL = os.environ.get("HRRR_BASE_URL", "http://localhost:8080")
+HRRR_BASE_URL = os.environ.get(
+    "HRRR_BASE_URL",
+    "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/hrrr",
+)
 
 # home location fallback
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK

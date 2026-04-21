@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass
 class RuntimeFlags:
     debug_run: int = 0
+    admin_mode: bool = False
     runtime_safe: bool = False
     safe_map_mode: bool = False
     enable_startup_toggles: bool = False

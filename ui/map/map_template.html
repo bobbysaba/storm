@@ -9,19 +9,24 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #0A0A0F; overflow: hidden; }
-    #map { width: 100%; height: 100%; }
+    #map {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+    #front-canvas {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
       pointer-events: none;
-      z-index: 5;
+      z-index: 3;
     }
     #surface-canvas {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
       pointer-events: none;
-      z-index: 4;
+      z-index: 1;
     }
     .maplibregl-ctrl-attrib { opacity: 0.4; font-size: 9px; }
     .maplibregl-ctrl-group {
@@ -1671,6 +1676,10 @@
           if (_stLabel) {
             _showHoverTip(_htip, _stLabel, e);
           } else {
+            if (window._hrrrReadoutText) {
+              _showHoverTip(_htip, window._hrrrReadoutText, e);
+              return;
+            }
             var _roadLabel = _roadHoverLabel(e);
             if (_roadLabel) {
               _showHoverTip(_htip, _roadLabel, e);
@@ -3182,6 +3191,7 @@
     var _hrrrVisible = false;
     var _hrrrOpacity = 0.65;
     var _hrrrLastUrl = '';
+    window._hrrrReadoutText = '';
     var HRRR_SRC = 'hrrr-image';
     var HRRR_LYR = 'hrrr-layer';
 
@@ -3194,19 +3204,12 @@
           map.addLayer({
             id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
             paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
-          }, 'sat-layer');
+          }, 'road-unpaved');
         } catch(_) {
-          try {
-            map.addLayer({
-              id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
-              paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
-            }, 'road-unpaved');
-          } catch(__) {
-            map.addLayer({
-              id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
-              paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
-            });
-          }
+          map.addLayer({
+            id: HRRR_LYR, type: 'raster', source: HRRR_SRC,
+            paint: { 'raster-opacity': _hrrrOpacity, 'raster-fade-duration': 0 }
+          });
         }
       }
       if (map.getLayer(HRRR_LYR)) {
@@ -3222,6 +3225,10 @@
           return;
         }
         _hrrrLastUrl = imageUrl;
+        if (imageUrl.indexOf('storm://') === 0 || imageUrl.indexOf('data:') === 0) {
+          _updateHrrrSource(imageUrl, coords);
+          return;
+        }
         var img = new Image();
         img.crossOrigin = 'anonymous';
         img.onload = function() { _updateHrrrSource(imageUrl, coords); };
@@ -3234,9 +3241,18 @@
 
     window.stormSetHrrrVisible = function(visible) {
       _hrrrVisible = !!visible;
+      if (!_hrrrVisible) {
+        window._hrrrReadoutText = '';
+        var tip = document.getElementById('hazard-tooltip');
+        if (tip) tip.style.display = 'none';
+      }
       if (map.getLayer(HRRR_LYR)) {
         map.setLayoutProperty(HRRR_LYR, 'visibility', _hrrrVisible ? 'visible' : 'none');
       }
+    };
+
+    window.stormSetHrrrReadout = function(text) {
+      window._hrrrReadoutText = String(text || '');
     };
 
     window.stormSetHrrrOpacity = function(opacity) {
@@ -3252,6 +3268,132 @@
         if (map.getSource(HRRR_SRC)) map.removeSource(HRRR_SRC);
       } catch(_) {}
       _hrrrLastUrl = '';
+    };
+
+    var _mesoanalysisVisible = false;
+    var _mesoanalysisOpacity = 1.0;
+    var _mesoanalysisProducts = {};
+
+    function _mesoanalysisId(productId, suffix) {
+      return 'mesoanalysis-' + String(productId || 'overlay').replace(/[^A-Za-z0-9_-]/g, '-') + '-' + suffix;
+    }
+
+    function _removeMesoanalysisLayers(productId) {
+      try {
+        var ids = productId ? [productId] : Object.keys(_mesoanalysisProducts);
+        ids.forEach(function(pid) {
+          var entry = _mesoanalysisProducts[pid] || {
+            line: _mesoanalysisId(pid, 'line'),
+            label: _mesoanalysisId(pid, 'label'),
+            source: _mesoanalysisId(pid, 'src')
+          };
+          if (map.getLayer(entry.label)) map.removeLayer(entry.label);
+          if (map.getLayer(entry.line)) map.removeLayer(entry.line);
+          if (map.getSource(entry.source)) map.removeSource(entry.source);
+          delete _mesoanalysisProducts[pid];
+        });
+      } catch(e) {
+        console.warn('[STORM] mesoanalysis clear warning:', e.message || e);
+      }
+    }
+
+    function _addMesoanalysisLayer(layerDef, beforeId) {
+      try {
+        if (beforeId && map.getLayer(beforeId)) {
+          map.addLayer(layerDef, beforeId);
+        } else {
+          map.addLayer(layerDef);
+        }
+      } catch(_) {
+        try { map.addLayer(layerDef); } catch(e) {
+          console.error('[STORM] mesoanalysis layer add error:', e.message || e);
+        }
+      }
+    }
+
+    window.stormSetMesoanalysisOverlay = function(productId, tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom) {
+      try {
+        productId = String(productId || 'overlay');
+        _removeMesoanalysisLayers(productId);
+        var sourceId = _mesoanalysisId(productId, 'src');
+        var lineId = _mesoanalysisId(productId, 'line');
+        var labelId = _mesoanalysisId(productId, 'label');
+        _mesoanalysisProducts[productId] = { source: sourceId, line: lineId, label: labelId };
+        map.addSource(sourceId, {
+          type: 'vector',
+          tiles: [tileUrl],
+          minzoom: minzoom || 0,
+          maxzoom: maxzoom || 8,
+          bounds: [west, south, east, north]
+        });
+        _addMesoanalysisLayer({
+          id: lineId,
+          type: 'line',
+          source: sourceId,
+          'source-layer': sourceLayer,
+          paint: {
+            'line-color': ['coalesce', ['get', 'stroke'], '#F2D45C'],
+            'line-width': ['coalesce', ['get', 'stroke-width'], 1],
+            'line-opacity': _mesoanalysisOpacity
+          }
+        }, 'road-unpaved');
+        _addMesoanalysisLayer({
+          id: labelId,
+          type: 'symbol',
+          source: sourceId,
+          'source-layer': sourceLayer,
+          minzoom: 5,
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': ['coalesce', ['get', 'title'], ''],
+            'text-size': 10,
+            'text-font': ['Noto Sans Regular'],
+            'text-allow-overlap': false,
+            'text-ignore-placement': false,
+            'symbol-spacing': 320
+          },
+          paint: {
+            'text-color': '#EFF3FF',
+            'text-halo-color': '#0A0A0F',
+            'text-halo-width': 1.2,
+            'text-opacity': _mesoanalysisOpacity
+          }
+        }, 'road-unpaved');
+        window.stormSetMesoanalysisVisible(_mesoanalysisVisible);
+      } catch(e) {
+        console.error('[STORM] mesoanalysis overlay inject error:', e.message || e);
+      }
+    };
+
+    window.stormSetMesoanalysisVisible = function(visible) {
+      _mesoanalysisVisible = !!visible;
+      var state = _mesoanalysisVisible ? 'visible' : 'none';
+      try {
+        Object.keys(_mesoanalysisProducts).forEach(function(pid) {
+          var entry = _mesoanalysisProducts[pid];
+          if (map.getLayer(entry.line)) map.setLayoutProperty(entry.line, 'visibility', state);
+          if (map.getLayer(entry.label)) map.setLayoutProperty(entry.label, 'visibility', state);
+        });
+      } catch(e) {
+        console.warn('[STORM] mesoanalysis visibility warning:', e.message || e);
+      }
+    };
+
+    window.stormSetMesoanalysisOpacity = function(opacity) {
+      _mesoanalysisOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      try {
+        Object.keys(_mesoanalysisProducts).forEach(function(pid) {
+          var entry = _mesoanalysisProducts[pid];
+          if (map.getLayer(entry.line)) map.setPaintProperty(entry.line, 'line-opacity', _mesoanalysisOpacity);
+          if (map.getLayer(entry.label)) map.setPaintProperty(entry.label, 'text-opacity', _mesoanalysisOpacity);
+        });
+      } catch(e) {
+        console.warn('[STORM] mesoanalysis opacity warning:', e.message || e);
+      }
+    };
+
+    window.stormClearMesoanalysisOverlay = function(productId) {
+      _removeMesoanalysisLayers(productId || '');
     };
 
     window.stormSetMesoSectors = function(sectorsJson) {

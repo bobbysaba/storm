@@ -21,6 +21,7 @@ _MIME_MAP = {
     ".html":  b"text/html; charset=utf-8",
     ".pbf":   b"application/x-protobuf",
     ".png":   b"image/png",
+    ".webp":  b"image/webp",
     ".json":  b"application/json",
     ".svg":   b"image/svg+xml",
     ".woff":  b"font/woff",
@@ -49,6 +50,9 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         # thread-safe buffer for the latest radar overlay PNG.
         self._radar_png_lock  = threading.Lock()
         self._radar_png_bytes = b""
+        self._hrrr_image_lock = threading.Lock()
+        self._hrrr_image_bytes = b""
+        self._hrrr_image_mime = b"image/webp"
         # in-memory store for station plot PNGs — keyed by station id.
         self._plots_lock = threading.Lock()
         self._plots: dict[str, bytes] = {}
@@ -57,6 +61,12 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
         with self._radar_png_lock:
             self._radar_png_bytes = data
+
+    def set_hrrr_image(self, data: bytes, mime: str = "image/webp") -> None:
+        """Store the latest HRRR overlay image. Thread-safe; called from any thread."""
+        with self._hrrr_image_lock:
+            self._hrrr_image_bytes = data
+            self._hrrr_image_mime = str(mime or "image/webp").encode("ascii", errors="ignore")
 
     def set_station_plots(self, plots: dict[str, bytes]) -> None:
         """Bulk-update the station plot store.  Thread-safe; called from any thread."""
@@ -83,6 +93,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_tile(job, path)
         elif path.startswith("/radar/overlay.png"):
             self._serve_radar_png(job)
+        elif path.startswith("/hrrr/overlay."):
+            self._serve_hrrr_image(job)
         elif path.startswith("/plots/"):
             self._serve_station_plot(job, path[len("/plots/"):])
         else:
@@ -162,6 +174,16 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
             return
         self._reply(job, b"image/png", data)
+
+
+    def _serve_hrrr_image(self, job: QWebEngineUrlRequestJob):
+        with self._hrrr_image_lock:
+            data = self._hrrr_image_bytes
+            mime = self._hrrr_image_mime
+        if not data:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, mime, data)
 
 
     def _serve_station_plot(self, job: QWebEngineUrlRequestJob, filename: str):

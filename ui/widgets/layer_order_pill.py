@@ -7,7 +7,9 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 
 DEFAULT_LAYERS: list[str] = [
     "satellite",
-    "hrrr",
+    # HRRR frontend disabled for now; backend/fetcher code remains available.
+    # "hrrr",
+    "mesoanalysis",
     "radar",
     "cwa",
     "spc_outlook",
@@ -28,7 +30,8 @@ DEFAULT_LAYERS: list[str] = [
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
-    "hrrr":         "HRRR",
+    # "hrrr":         "HRRR",
+    "mesoanalysis": "Mesoanalysis",
     "radar":        "Radar",
     "cwa":          "CWA",
     "spc_outlook":  "SPC Outlook",
@@ -49,7 +52,8 @@ LAYER_LABELS: dict[str, str] = {
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
-    "hrrr":         ["hrrr-layer"],
+    # "hrrr":         ["hrrr-layer"],
+    "mesoanalysis": ["mesoanalysis-line", "mesoanalysis-label"],
     "radar":        ["radar-overlay"],
     "cwa":          ["cwa-fill", "cwa-line", "cwa-label"],
     "spc_outlook":  ["spc-cat-fill", "spc-cat-line"],

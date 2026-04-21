@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+import feature_flags
 import runtime_flags
 from collections import deque
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from ui.widgets.nav_pill import NavPill
 from ui.controls.deploy_locs_controls import DeployLocsControls
 from ui.controls.satellite_controls import SatelliteControls
 from ui.controls.hrrr_controls import HrrrControls
+from ui.controls.mesoanalysis_controls import MesoanalysisControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
@@ -53,6 +55,7 @@ from data.fetchers.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
 from data.fetchers.satellite_fetcher import SatelliteFetcher
 from data.fetchers.hrrr_overlay_fetcher import HrrrOverlayFetcher
+from data.fetchers.mesoanalysis_fetcher import MesoanalysisFetcher
 from data.fetchers.surface_fetcher import SurfaceFetcher
 from data.radar.radar_decoder import decode_nexrad_l3
 import config
@@ -81,6 +84,47 @@ log = logging.getLogger(__name__)
 SCAN_MOVE_THRESHOLD_KM = 0.1
 SCAN_MOVE_FIXES_TO_STOP = 3
 VEHICLE_PANEL_WIDTH = 340
+
+
+def _hrrr_numpy_dtype(dtype_name: str):
+    import numpy as np
+    name = dtype_name.lower().strip()
+    if name in ("float32", "f4"):
+        return np.dtype("<f4")
+    if name in ("float64", "f8"):
+        return np.dtype("<f8")
+    if name in ("int16", "i2"):
+        return np.dtype("<i2")
+    if name in ("uint16", "u2"):
+        return np.dtype("<u2")
+    if name in ("int32", "i4"):
+        return np.dtype("<i4")
+    if name in ("uint32", "u4"):
+        return np.dtype("<u4")
+    return None
+
+
+def _format_hrrr_value(value: float, units: str) -> str:
+    unit = _format_hrrr_units(units)
+    if abs(value) >= 100:
+        text = f"{value:.0f}"
+    elif abs(value) >= 10:
+        text = f"{value:.1f}"
+    else:
+        text = f"{value:.2f}"
+    return f"{text} {unit}".rstrip()
+
+
+def _format_hrrr_units(units: str) -> str:
+    unit = str(units or "").strip()
+    return (
+        unit.replace("degF", "°F")
+            .replace("degC", "°C")
+            .replace("degrees F", "°F")
+            .replace("degrees C", "°C")
+            .replace("degree F", "°F")
+            .replace("degree C", "°C")
+    )
 
 
 def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
@@ -157,6 +201,21 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive = archive_time is not None
         self._current_radar_scan = None
         self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
+        self._hrrr_fetcher = None
+        self._hrrr_current_metadata: dict | None = None
+        self._hrrr_visible = False
+        self._hrrr_grid = None
+        self._hrrr_grid_meta: dict | None = None
+        self._hrrr_readout_text = ""
+        self._hrrr_overlay_cache: dict[tuple[str, str, int], dict] = {}
+        self._hrrr_loop_pending_idx: int | None = None
+        self._mesoanalysis_fetcher = None
+        self._mesoanalysis_current_metadata: dict | None = None
+        self._mesoanalysis_visible = False
+        self._mesoanalysis_active_products: set[str] = set()
+        self._mesoanalysis_times_by_product: dict[str, list] = {}
+        self._mesoanalysis_times = []
+        self._mesoanalysis_overlay_cache: dict[tuple[str, str], dict] = {}
 
         self.setWindowTitle(
             f"STORM  v{config.VERSION}"
@@ -233,11 +292,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 self._init_deploy_locs()
 
         # wire map mousemove → status bar coordinate and zoom display
-        self.map_widget.map_moved.connect(
-            lambda lat, lon, zoom: (
-                self.update_coordinates(lat, lon),
-            )
-        )
+        self.map_widget.map_moved.connect(self._on_map_moved)
 
         # clock ticks every second
         self._clock_timer = QTimer()
@@ -824,7 +879,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._init_hazards()
 
         self._init_satellite()
-        self._init_hrrr()
+        # HRRR frontend disabled for now; backend/fetcher code is intentionally
+        # kept in place so this can be re-enabled without rebuilding it.
+        # self._init_hrrr()
         self._init_surface_obs()
         self._apply_launch_prefs()
 
@@ -945,18 +1002,30 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_satellite.toggled.connect(self._start_layout_pulse)
         self.btn_satellite.toggled.connect(self._on_satellite_toggled)
 
-        self._add_separator(tb)
+        if feature_flags.is_enabled("hrrr") or feature_flags.is_enabled("mesoanalysis"):
+            self._add_separator(tb)
 
-        self.btn_hrrr = self._toolbar_toggle(
-            "HRRR", "Show/hide server-rendered HRRR model overlays", tb
-        )
-        self.hrrr_controls = HrrrControls(self._map_container)
-        self.hrrr_controls.setObjectName("floatingToolbar")
-        self.btn_hrrr.toggled.connect(self.hrrr_controls.toggle_drawer)
-        self.btn_hrrr.toggled.connect(self._start_layout_pulse)
-        self.btn_hrrr.toggled.connect(self._on_hrrr_drawer_toggled)
+        if feature_flags.is_enabled("hrrr"):
+            self.btn_hrrr = self._toolbar_toggle(
+                "HRRR", "Show/hide server-rendered HRRR model overlays", tb
+            )
+            self.hrrr_controls = HrrrControls(self._map_container)
+            self.hrrr_controls.setObjectName("floatingToolbar")
+            self.btn_hrrr.toggled.connect(self.hrrr_controls.toggle_drawer)
+            self.btn_hrrr.toggled.connect(self._start_layout_pulse)
+            self.btn_hrrr.toggled.connect(self._on_hrrr_drawer_toggled)
 
-        self._add_separator(tb)
+        if feature_flags.is_enabled("mesoanalysis"):
+            self.btn_mesoanalysis = self._toolbar_toggle(
+                "MESO", "Show/hide Satsquatch mesoanalysis contours", tb
+            )
+            self.mesoanalysis_controls = MesoanalysisControls(self._map_container)
+            self.mesoanalysis_controls.setObjectName("floatingToolbar")
+            self.btn_mesoanalysis.toggled.connect(self.mesoanalysis_controls.toggle_drawer)
+            self.btn_mesoanalysis.toggled.connect(self._start_layout_pulse)
+            self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
+
+            self._add_separator(tb)
 
         self.btn_surface = self._toolbar_toggle(
             "SURFACE", "Show/hide surface observation controls", tb
@@ -1164,6 +1233,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             mode_badge.setStyleSheet(
                 "color: #9B8FFF; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
             )
+        elif runtime_flags.FLAGS.admin_mode:
+            mode_badge = QLabel("● ADMIN")
+            mode_badge.setStyleSheet(
+                "color: #00CFFF; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
+            )
         else:
             mode_badge = QLabel("● VEHICLE")
             mode_badge.setStyleSheet(
@@ -1330,6 +1404,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 _stack(self.satellite_controls)
             if hasattr(self, "hrrr_controls") and self.btn_hrrr.isChecked():
                 _stack(self.hrrr_controls)
+            if hasattr(self, "mesoanalysis_controls") and self.btn_mesoanalysis.isChecked():
+                _stack(self.mesoanalysis_controls)
             if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
                 _stack(self.surface_controls)
             if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
@@ -1463,6 +1539,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def update_coordinates(self, lat: float, lon: float):
         self.coord_label.setText(f"LAT: {lat:>9.4f}  LON: {lon:>10.4f}")
+
+    def _on_map_moved(self, lat: float, lon: float, _zoom: float):
+        self.update_coordinates(lat, lon)
+        self._update_hrrr_readout(lat, lon)
 
     def update_vehicle_count(self, count: int):
         self.vehicle_count_label.setText(f"VEHICLES: {count}")
@@ -1911,16 +1991,23 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             )
 
     def _init_hrrr(self):
+        if self._hrrr_fetcher is not None:
+            return
         self._hrrr_fetcher = HrrrOverlayFetcher(config.HRRR_BASE_URL, parent=self)
-        self._hrrr_current_metadata: dict | None = None
-        self._hrrr_visible = False
+        self._hrrr_loop_timer = QTimer(self)
+        self._hrrr_loop_timer.setInterval(600)
+        self._hrrr_loop_timer.timeout.connect(self._hrrr_loop_tick)
 
         self.hrrr_controls.field_changed.connect(self._on_hrrr_field_changed)
-        self.hrrr_controls.hour_changed.connect(self._on_hrrr_hour_changed)
+        self.hrrr_controls.run_changed.connect(self._on_hrrr_run_changed)
+        self.hrrr_controls.frame_requested.connect(self._on_hrrr_frame_requested)
+        self.hrrr_controls.loop_toggled.connect(self._on_hrrr_loop_toggled)
+        self.hrrr_controls.speed_changed.connect(self._on_hrrr_speed_changed)
         self.hrrr_controls.opacity_changed.connect(self.map_widget.set_hrrr_opacity)
         self.hrrr_controls.refresh_requested.connect(self._on_hrrr_refresh_requested)
         self.hrrr_controls.visible_toggled.connect(self._on_hrrr_visible_toggled)
 
+        self._hrrr_fetcher.runs_ready.connect(self._on_hrrr_runs_ready)
         self._hrrr_fetcher.catalog_ready.connect(self._on_hrrr_catalog_ready)
         self._hrrr_fetcher.field_ready.connect(self._on_hrrr_field_ready)
         self._hrrr_fetcher.overlay_ready.connect(self._on_hrrr_overlay_ready)
@@ -1945,6 +2032,40 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self._hrrr_fetcher.refresh_catalog()
         self.hrrr_controls.set_status(f"HRRR: {self._hrrr_fetcher.base_url}")
+
+    def _init_mesoanalysis(self):
+        if self._mesoanalysis_fetcher is not None:
+            return
+        self._mesoanalysis_fetcher = MesoanalysisFetcher(parent=self)
+
+        self.mesoanalysis_controls.product_toggled.connect(self._on_mesoanalysis_product_toggled)
+        self.mesoanalysis_controls.frame_requested.connect(self._on_mesoanalysis_frame_requested)
+        self.mesoanalysis_controls.refresh_requested.connect(self._on_mesoanalysis_refresh_requested)
+        self.mesoanalysis_controls.visible_toggled.connect(self._on_mesoanalysis_visible_toggled)
+
+        self._mesoanalysis_fetcher.products_ready.connect(self._on_mesoanalysis_products_ready)
+        self._mesoanalysis_fetcher.times_ready.connect(self._on_mesoanalysis_times_ready)
+        self._mesoanalysis_fetcher.overlay_ready.connect(self._on_mesoanalysis_overlay_ready)
+        self._mesoanalysis_fetcher.fetch_error.connect(self._on_mesoanalysis_error)
+
+        for btn, other in [
+            (self.btn_mesoanalysis, self.btn_satellite),
+            (self.btn_mesoanalysis, self.btn_radar),
+            (self.btn_mesoanalysis, self.btn_hazards),
+            (self.btn_mesoanalysis, self.btn_surface),
+            (self.btn_mesoanalysis, self.btn_annotate),
+            (self.btn_satellite,    self.btn_mesoanalysis),
+            (self.btn_radar,        self.btn_mesoanalysis),
+            (self.btn_hazards,      self.btn_mesoanalysis),
+            (self.btn_surface,      self.btn_mesoanalysis),
+            (self.btn_annotate,     self.btn_mesoanalysis),
+        ]:
+            btn.toggled.connect(
+                lambda on, o=other: o.setChecked(False) if on else None
+            )
+
+        self._mesoanalysis_fetcher.refresh_products()
+        self.mesoanalysis_controls.set_status("Meso: products")
 
     def _init_surface_obs(self):
         self._surface_fetcher = SurfaceFetcher(parent=self)
@@ -2107,16 +2228,48 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 self.map_widget.set_satellite_visible(True)
 
     def _on_hrrr_drawer_toggled(self, checked: bool):
+        if checked and self._hrrr_fetcher is None:
+            self._init_hrrr()
+            return
         if checked and not self._hrrr_current_metadata:
             self._hrrr_fetcher.refresh_catalog()
+
+    def _on_mesoanalysis_drawer_toggled(self, checked: bool):
+        if checked and self._mesoanalysis_fetcher is None:
+            self._init_mesoanalysis()
+            return
+        if checked and not self._mesoanalysis_current_metadata:
+            self._mesoanalysis_fetcher.refresh_products()
+
+    def _on_hrrr_runs_ready(self, runs):
+        self.hrrr_controls.set_runs(runs)
 
     def _on_hrrr_catalog_ready(self, fields):
         self.hrrr_controls.set_fields(fields)
         self.hrrr_controls.set_status(f"HRRR: {len(fields)} fields")
 
+    def _on_hrrr_run_changed(self, run_id: str):
+        self._hrrr_loop_timer.stop()
+        self.hrrr_controls.stop_loop()
+        self._hrrr_loop_pending_idx = None
+        self._hrrr_fetcher.set_run(run_id)
+        self._hrrr_overlay_cache.clear()
+        field_id = self.hrrr_controls.current_field()
+        if field_id:
+            self.hrrr_controls.set_status(f"HRRR: loading {run_id} {field_id}")
+            self._hrrr_fetcher.fetch_field(field_id)
+
     def _on_hrrr_field_changed(self, field_id: str):
         if not field_id:
             return
+        self._hrrr_loop_timer.stop()
+        self.hrrr_controls.stop_loop()
+        self._hrrr_loop_pending_idx = None
+        self._hrrr_overlay_cache = {
+            key: value
+            for key, value in self._hrrr_overlay_cache.items()
+            if key[1] == field_id
+        }
         self.hrrr_controls.set_status(f"HRRR: loading {field_id}")
         self._hrrr_fetcher.fetch_field(field_id)
 
@@ -2132,12 +2285,48 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if hours:
             self._hrrr_fetcher.fetch_overlay(field_id, self.hrrr_controls.current_hour())
 
-    def _on_hrrr_hour_changed(self, hour: int):
+    def _on_hrrr_frame_requested(self, idx: int):
+        self.hrrr_controls.set_frame(idx)
+        hour = self.hrrr_controls.current_hour()
         field_id = self.hrrr_controls.current_field()
         if not field_id:
             return
+        cache_key = (self.hrrr_controls.current_run(), field_id, int(hour))
+        cached = self._hrrr_overlay_cache.get(cache_key)
+        if cached is not None:
+            self._on_hrrr_overlay_ready(cached)
+            return
         self.hrrr_controls.set_status(f"HRRR: loading {field_id} F{hour:02d}")
         self._hrrr_fetcher.fetch_overlay(field_id, hour)
+
+    def _on_hrrr_speed_changed(self, ms: int):
+        self._hrrr_loop_timer.setInterval(ms)
+
+    def _on_hrrr_loop_toggled(self, looping: bool):
+        if looping:
+            self._hrrr_loop_timer.start()
+        else:
+            self._hrrr_loop_timer.stop()
+
+    def _hrrr_loop_tick(self):
+        field_id = self.hrrr_controls.current_field()
+        if not field_id:
+            return
+        count = len(getattr(self.hrrr_controls, "_hours", []))
+        if count <= 0:
+            return
+        idx = (self.hrrr_controls.current_frame() + 1) % count
+        hour = getattr(self.hrrr_controls, "_hours", [])[idx]
+        cache_key = (self.hrrr_controls.current_run(), field_id, int(hour))
+        if cache_key in self._hrrr_overlay_cache:
+            self._hrrr_loop_pending_idx = None
+            self._on_hrrr_frame_requested(idx)
+            return
+        if self._hrrr_loop_pending_idx == idx:
+            return
+        self._hrrr_loop_pending_idx = idx
+        self.hrrr_controls.set_status(f"HRRR: caching {field_id} F{int(hour):02d}")
+        self._hrrr_fetcher.fetch_overlay(field_id, int(hour))
 
     def _on_hrrr_refresh_requested(self):
         self.hrrr_controls.set_status("HRRR: refreshing")
@@ -2148,10 +2337,32 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._set_layer_active("hrrr", self._hrrr_visible)
         if self._hrrr_visible and self._hrrr_current_metadata:
             self._display_hrrr_metadata(self._hrrr_current_metadata)
+        if not self._hrrr_visible:
+            self._set_hrrr_cursor_readout("")
         self.map_widget.set_hrrr_visible(self._hrrr_visible and self._hrrr_current_metadata is not None)
 
     def _on_hrrr_overlay_ready(self, metadata: dict):
         self._hrrr_current_metadata = metadata
+        try:
+            key = (
+                self.hrrr_controls.current_run(),
+                str(metadata.get("field") or self.hrrr_controls.current_field()),
+                int(metadata.get("forecast_hour", self.hrrr_controls.current_hour())),
+            )
+            self._hrrr_overlay_cache[key] = metadata
+            if self._hrrr_loop_pending_idx is not None:
+                pending_hour = getattr(self.hrrr_controls, "_hours", [])[self._hrrr_loop_pending_idx]
+                pending_key = (
+                    self.hrrr_controls.current_run(),
+                    str(metadata.get("field") or self.hrrr_controls.current_field()),
+                    int(pending_hour),
+                )
+                if key == pending_key:
+                    self.hrrr_controls.set_frame(self._hrrr_loop_pending_idx)
+                    self._hrrr_loop_pending_idx = None
+        except Exception:
+            pass
+        self._set_hrrr_grid(metadata)
         label = metadata.get("label", metadata.get("field", "HRRR"))
         valid = str(metadata.get("valid_time", "")).replace("T", " ").replace(":00Z", "Z")
         hour = int(metadata.get("forecast_hour", 0))
@@ -2164,7 +2375,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if len(bbox) != 4:
             self._on_hrrr_error("metadata missing bbox")
             return
-        image_url = metadata.get("image_webp_url") or metadata.get("image_png_url")
+        image_url = self._hrrr_image_url(metadata)
         if not image_url:
             self._on_hrrr_error("metadata missing image URL")
             return
@@ -2172,8 +2383,217 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.set_hrrr_overlay(image_url, west, south, east, north)
         self.map_widget.set_hrrr_visible(True)
 
+    def _hrrr_image_url(self, metadata: dict) -> str:
+        image_bytes = metadata.get("image_bytes")
+        if image_bytes:
+            import time
+            scheme_handler = getattr(self.map_widget, "scheme_handler", None)
+            if scheme_handler is not None:
+                mime = str(metadata.get("image_mime") or "image/webp")
+                scheme_handler.set_hrrr_image(image_bytes, mime)
+                ext = "png" if mime == "image/png" else "webp"
+                token = int(time.monotonic() * 1000) & 0xFFFFFF
+                return f"storm://app/hrrr/overlay.{ext}?t={token}"
+        return metadata.get("image_webp_url") or metadata.get("image_png_url") or ""
+
+    def _set_hrrr_grid(self, metadata: dict):
+        self._hrrr_grid = None
+        self._hrrr_grid_meta = None
+        self._set_hrrr_cursor_readout("")
+        raw = metadata.get("grid_bytes")
+        if not raw:
+            return
+
+        try:
+            import numpy as np
+            dtype = _hrrr_numpy_dtype(str(metadata.get("grid_dtype") or ""))
+            shape = metadata.get("grid_shape") or []
+            if dtype is None or len(shape) != 2:
+                return
+            rows, cols = int(shape[0]), int(shape[1])
+            grid = np.frombuffer(raw, dtype=dtype, count=rows * cols)
+            if grid.size != rows * cols:
+                return
+            self._hrrr_grid = grid.reshape((rows, cols))
+            self._hrrr_grid_meta = {
+                "bbox": [float(v) for v in metadata.get("bbox", [])],
+                "label": str(metadata.get("label") or metadata.get("field") or "HRRR"),
+                "units": str(metadata.get("units") or ""),
+            }
+        except Exception as exc:
+            log.warning("HRRR grid decode failed: %s", exc)
+            self._set_hrrr_cursor_readout("")
+
+    def _update_hrrr_readout(self, lat: float, lon: float):
+        grid = self._hrrr_grid
+        meta = self._hrrr_grid_meta
+        if not self._hrrr_visible or grid is None or not meta:
+            self._set_hrrr_cursor_readout("")
+            return
+        bbox = meta.get("bbox") or []
+        if len(bbox) != 4:
+            self._set_hrrr_cursor_readout("")
+            return
+        west, south, east, north = bbox
+        if lon < west or lon > east or lat < south or lat > north:
+            self._set_hrrr_cursor_readout("")
+            return
+
+        rows, cols = grid.shape
+        col = round((lon - west) / (east - west) * (cols - 1))
+        row = round((north - lat) / (north - south) * (rows - 1))
+        col = max(0, min(cols - 1, int(col)))
+        row = max(0, min(rows - 1, int(row)))
+        value = grid[row, col]
+
+        try:
+            import math
+            v = float(value)
+            if math.isnan(v):
+                text = "--"
+            else:
+                text = _format_hrrr_value(v, meta.get("units", ""))
+        except Exception:
+            text = str(value)
+
+        self._set_hrrr_cursor_readout(text)
+
+    def _set_hrrr_cursor_readout(self, text: str):
+        text = str(text or "")
+        if text == self._hrrr_readout_text:
+            return
+        self._hrrr_readout_text = text
+        self.map_widget.set_hrrr_readout(text)
+
     def _on_hrrr_error(self, msg: str):
         self.hrrr_controls.set_status(str(msg))
+        self.status_msg_label.setText(str(msg))
+
+    def _on_mesoanalysis_products_ready(self, products):
+        self.mesoanalysis_controls.set_products(products)
+        self.mesoanalysis_controls.set_status(f"Meso: {len(products)} products")
+
+    def _on_mesoanalysis_product_toggled(self, product_id: str, enabled: bool):
+        if not product_id or self._mesoanalysis_fetcher is None:
+            return
+        self.mesoanalysis_controls.stop_loop()
+        if enabled:
+            self._mesoanalysis_active_products.add(product_id)
+            self._mesoanalysis_visible = True
+            self._set_layer_active("mesoanalysis", True)
+            self.map_widget.set_mesoanalysis_opacity(1.0)
+            self.mesoanalysis_controls.set_status(f"Meso: loading {product_id}")
+            self._mesoanalysis_fetcher.fetch_times(product_id)
+        else:
+            self._mesoanalysis_active_products.discard(product_id)
+            self.map_widget.clear_mesoanalysis_overlay(product_id)
+            if not self._mesoanalysis_active_products:
+                self._mesoanalysis_visible = False
+                self._set_layer_active("mesoanalysis", False)
+                self.map_widget.set_mesoanalysis_visible(False)
+
+    def _on_mesoanalysis_times_ready(self, product_id: str, times):
+        if product_id not in self._mesoanalysis_active_products:
+            return
+        self._mesoanalysis_times_by_product[product_id] = list(times)
+        if len(times) > len(self._mesoanalysis_times):
+            self._mesoanalysis_times = list(times)
+        self.mesoanalysis_controls.set_times(self._mesoanalysis_times or times)
+        self.mesoanalysis_controls.set_status(f"Meso: {len(self._mesoanalysis_active_products)} products")
+        self._fetch_mesoanalysis_product_frame(product_id, self.mesoanalysis_controls.current_frame())
+
+    def _on_mesoanalysis_frame_requested(self, idx: int):
+        self.mesoanalysis_controls.set_frame(idx)
+        self._fetch_current_mesoanalysis_frame()
+
+    def _fetch_current_mesoanalysis_frame(self):
+        for product_id in sorted(self._mesoanalysis_active_products):
+            self._fetch_mesoanalysis_product_frame(product_id, self.mesoanalysis_controls.current_frame())
+
+    def _fetch_mesoanalysis_product_frame(self, product_id: str, idx: int):
+        if not product_id or self._mesoanalysis_fetcher is None:
+            return
+        times = self._mesoanalysis_times_by_product.get(product_id) or self._mesoanalysis_times
+        if not times:
+            return
+        idx = max(0, min(len(times) - 1, int(idx)))
+        time_id = times[idx].time_id
+        cached = self._mesoanalysis_overlay_cache.get((product_id, time_id))
+        if cached is not None:
+            self._on_mesoanalysis_overlay_ready(cached)
+            return
+        self.mesoanalysis_controls.set_status(f"Meso: loading {product_id} {time_id[-6:-4]}Z")
+        self._mesoanalysis_fetcher.fetch_overlay(product_id, time_id)
+
+    def _on_mesoanalysis_refresh_requested(self):
+        if self._mesoanalysis_fetcher is None:
+            return
+        self.mesoanalysis_controls.set_status("Meso: refreshing")
+        if self._mesoanalysis_active_products:
+            for product_id in sorted(self._mesoanalysis_active_products):
+                self._mesoanalysis_fetcher.fetch_times(product_id)
+        else:
+            self._mesoanalysis_fetcher.refresh_products()
+
+    def _on_mesoanalysis_visible_toggled(self, visible: bool):
+        self._mesoanalysis_visible = bool(visible)
+        self._set_layer_active("mesoanalysis", self._mesoanalysis_visible)
+        if self._mesoanalysis_visible:
+            self.map_widget.set_mesoanalysis_opacity(1.0)
+        self.map_widget.set_mesoanalysis_visible(
+            self._mesoanalysis_visible and bool(self._mesoanalysis_active_products)
+        )
+
+    def _on_mesoanalysis_overlay_ready(self, metadata: dict):
+        self._mesoanalysis_current_metadata = metadata
+        product_id = str(metadata.get("product") or self.mesoanalysis_controls.current_product())
+        time_id = str(metadata.get("time") or self.mesoanalysis_controls.current_time())
+        if product_id and time_id:
+            self._mesoanalysis_overlay_cache[(product_id, time_id)] = metadata
+        self.mesoanalysis_controls.set_status(f"Meso: {len(self._mesoanalysis_active_products)} products")
+        if self._mesoanalysis_visible:
+            self._display_mesoanalysis_metadata(metadata)
+
+    def _display_mesoanalysis_metadata(self, metadata: dict):
+        bounds = metadata.get("bounds") or []
+        if len(bounds) != 4:
+            self._on_mesoanalysis_error("Mesoanalysis metadata missing bounds")
+            return
+        tile_url = metadata.get("tile_url") or ""
+        source_layer = metadata.get("source_layer") or ""
+        if not tile_url or not source_layer:
+            self._on_mesoanalysis_error("Mesoanalysis metadata missing tile source")
+            return
+        west, south, east, north = self._mesoanalysis_display_bounds(
+            [float(v) for v in bounds]
+        )
+        self.map_widget.set_mesoanalysis_overlay(
+            str(metadata.get("product") or ""),
+            tile_url,
+            source_layer,
+            west,
+            south,
+            east,
+            north,
+            int(metadata.get("minzoom") or 0),
+            int(metadata.get("maxzoom") or 8),
+        )
+        self.map_widget.set_mesoanalysis_visible(True)
+
+    def _mesoanalysis_display_bounds(self, source_bounds: list[float]) -> list[float]:
+        mbtiles_bounds = self._load_mbtiles_bounds()
+        if not mbtiles_bounds or len(source_bounds) != 4:
+            return source_bounds
+        west = max(source_bounds[0], mbtiles_bounds[0])
+        south = max(source_bounds[1], mbtiles_bounds[1])
+        east = min(source_bounds[2], mbtiles_bounds[2])
+        north = min(source_bounds[3], mbtiles_bounds[3])
+        if west >= east or south >= north:
+            return source_bounds
+        return [west, south, east, north]
+
+    def _on_mesoanalysis_error(self, msg: str):
+        self.mesoanalysis_controls.set_status(str(msg))
         self.status_msg_label.setText(str(msg))
 
     def _on_satellite_mode_changed(self, mode: str):

@@ -45,6 +45,28 @@ QMainWindow, QWidget {
     color: #0A0A0F;
 }
 
+/* Reusable transparent outlined buttons for product palettes. */
+#floatingToolbar QToolButton[paletteButton="true"] {
+    background: transparent;
+    background-color: transparent;
+    border: 1px solid rgba(74, 83, 108, 0.62);
+    border-radius: 6px;
+    color: #C8D0DE;
+}
+
+#floatingToolbar QToolButton[paletteButton="true"]:hover {
+    background: rgba(74, 158, 255, 0.08);
+    border-color: rgba(74, 158, 255, 0.55);
+    color: #EFF3FF;
+}
+
+#floatingToolbar QToolButton[paletteButton="true"]:checked,
+#floatingToolbar QToolButton[paletteButton="true"]:pressed {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
 /* Slightly upscale controls when the window is wide enough. */
 #floatingToolbar[wide="true"] QToolButton {
     padding: 4px 10px;
@@ -56,10 +78,20 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar[wide="true"] QComboBox#radarSiteCombo,
+#floatingToolbar[wide="true"] QComboBox#radarProductCombo,
+#floatingToolbar[wide="true"] QToolButton#radarStationsButton {
     min-height: 24px;
 }
 
 #floatingToolbar QWidget#radarDrawer,
+#floatingToolbar QWidget#hazardDrawer,
+#floatingToolbar QWidget#satelliteDrawer,
+#floatingToolbar QWidget#mesoanalysisDrawer,
+#floatingToolbar QWidget#deployLocsDrawer,
+#floatingToolbar QWidget#routingDrawer,
+#floatingToolbar QWidget#soundingDrawer,
+#floatingToolbar QWidget#surfaceDrawer,
+#floatingToolbar QWidget#hrrrDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -67,15 +99,27 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#radarDrawer > QWidget,
+#floatingToolbar QWidget#hazardDrawer > QWidget,
+#floatingToolbar QWidget#satelliteDrawer > QWidget,
+#floatingToolbar QWidget#mesoanalysisDrawer > QWidget,
+#floatingToolbar QWidget#deployLocsDrawer > QWidget,
+#floatingToolbar QWidget#routingDrawer > QWidget,
+#floatingToolbar QWidget#soundingDrawer > QWidget,
+#floatingToolbar QWidget#surfaceDrawer > QWidget,
+#floatingToolbar QWidget#hrrrDrawer > QWidget {
     background: transparent;
 }
 
 #floatingToolbar QComboBox#radarSiteCombo,
+#floatingToolbar QComboBox#radarProductCombo,
+#floatingToolbar QToolButton#radarStationsButton {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
 }
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
+#floatingToolbar QComboBox#radarProductCombo:hover,
+#floatingToolbar QToolButton#radarStationsButton:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
 
@@ -306,6 +350,7 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton:checked,
+#floatingToolbar QWidget#routingDrawer QToolButton:pressed {
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #4A9EFF;
@@ -314,6 +359,7 @@ QMainWindow, QWidget {
 
 /* Small fixed-size buttons in origin / dest rows (⊕ pick, nav-arrow loc) */
 #floatingToolbar QWidget#routingDrawer QToolButton[text="⊕"],
+#floatingToolbar QWidget#routingDrawer QToolButton#locBtn {
     padding: 1px 2px;
     font-size: 13px;
     border-radius: 4px;
@@ -644,24 +690,32 @@ QSlider::sub-page:horizontal {
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider,
+#floatingToolbar QWidget#satelliteDrawer QSlider,
+#floatingToolbar QWidget#hrrrDrawer QSlider {
     background: transparent;
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
+#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal,
+#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;
 }
 
-/* ── HRRR drawer ─────────────────────────────────────── */
+/* ── HRRR / Mesoanalysis drawers ─────────────────────── */
 #floatingToolbar QWidget#hrrrDrawer,
+#floatingToolbar QWidget#mesoanalysisDrawer,
 #floatingToolbar QWidget#hrrrControlRow,
-#floatingToolbar QWidget#hrrrStatusRow {
+#floatingToolbar QWidget#mesoanalysisControlRow,
+#floatingToolbar QWidget#hrrrStatusRow,
+#floatingToolbar QWidget#mesoanalysisStatusRow {
     background: transparent;
     border: none;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QToolButton {
+#floatingToolbar QWidget#hrrrDrawer QToolButton,
+#floatingToolbar QWidget#mesoanalysisDrawer QToolButton {
     background-color: transparent;
     border: 1px solid rgba(74, 83, 108, 0.42);
     border-radius: 6px;
@@ -669,18 +723,59 @@ QSlider::sub-page:horizontal {
     padding: 3px 8px;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QToolButton:hover {
+#floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisGroupLabel {
+    color: #6E7A8F;
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 72px;
+}
+
+#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton {
+    background-color: transparent;
+    background: transparent;
+    min-width: 62px;
+    padding: 2px 6px;
+    font-size: 10px;
+}
+
+#floatingToolbar QWidget#mesoanalysisProductGrid,
+#floatingToolbar QWidget#mesoanalysisProductGrid QWidget,
+#floatingToolbar QWidget#mesoanalysisPlaybackCell {
+    background: transparent;
+    background-color: transparent;
+}
+
+#floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisTimeLabel {
+    color: #C8D0DE;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:hover {
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: rgba(74, 158, 255, 0.35);
+}
+
+#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+}
+
+#floatingToolbar QWidget#hrrrDrawer QToolButton:hover,
+#floatingToolbar QWidget#mesoanalysisDrawer QToolButton:hover {
     background-color: rgba(74, 158, 255, 0.08);
     border-color: rgba(74, 158, 255, 0.55);
 }
 
-#floatingToolbar QWidget#hrrrDrawer QToolButton:checked {
+#floatingToolbar QWidget#hrrrDrawer QToolButton:checked,
+#floatingToolbar QWidget#mesoanalysisDrawer QToolButton:checked {
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #EFF3FF;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QComboBox {
+#floatingToolbar QWidget#hrrrDrawer QComboBox,
+#floatingToolbar QWidget#mesoanalysisDrawer QComboBox {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
     border-radius: 6px;
@@ -689,11 +784,13 @@ QSlider::sub-page:horizontal {
     padding: 2px 7px;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QComboBox:hover {
+#floatingToolbar QWidget#hrrrDrawer QComboBox:hover,
+#floatingToolbar QWidget#mesoanalysisDrawer QComboBox:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
 
-#floatingToolbar QWidget#hrrrDrawer QPushButton {
+#floatingToolbar QWidget#hrrrDrawer QPushButton,
+#floatingToolbar QWidget#mesoanalysisDrawer QPushButton {
     background: transparent;
     border: 1px solid rgba(74, 83, 108, 0.48);
     border-radius: 6px;
@@ -703,17 +800,20 @@ QSlider::sub-page:horizontal {
     padding: 2px 8px;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QPushButton:hover {
+#floatingToolbar QWidget#hrrrDrawer QPushButton:hover,
+#floatingToolbar QWidget#mesoanalysisDrawer QPushButton:hover {
     background-color: rgba(74, 158, 255, 0.08);
     border-color: rgba(74, 158, 255, 0.55);
     color: #EFF3FF;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QSlider {
+#floatingToolbar QWidget#hrrrDrawer QSlider,
+#floatingToolbar QWidget#mesoanalysisDrawer QSlider {
     background: transparent;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal {
+#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal,
+#floatingToolbar QWidget#mesoanalysisDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;
@@ -763,6 +863,13 @@ QToolTip {
 }
 
 #floatingToolbar QWidget#radarDrawer QCheckBox,
+#floatingToolbar QWidget#hazardDrawer QCheckBox,
+#floatingToolbar QWidget#satelliteDrawer QCheckBox,
+#floatingToolbar QWidget#deployLocsDrawer QCheckBox,
+#floatingToolbar QWidget#routingDrawer QCheckBox,
+#floatingToolbar QWidget#soundingDrawer QCheckBox,
+#floatingToolbar QWidget#surfaceDrawer QCheckBox,
+#floatingToolbar QWidget#hrrrDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {

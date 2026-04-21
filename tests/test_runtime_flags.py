@@ -9,6 +9,7 @@ class TestDebugProfiles:
 
     def test_default_flags(self):
         assert rf.FLAGS.debug_run == 0
+        assert rf.FLAGS.admin_mode is False
         assert rf.FLAGS.runtime_safe is False
         assert rf.FLAGS.safe_map_mode is False
         assert rf.FLAGS.disable_radar is False

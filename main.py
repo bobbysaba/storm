@@ -431,6 +431,7 @@ def main() -> None:
     monitor      = dialog.monitor()
     viewer       = dialog.viewer()
     archive_time = dialog.archive_start_time()   # None unless archive mode
+    runtime_flags.FLAGS.admin_mode = dialog.admin_mode()
 
     # apply radar render resolution from the launch dialog
     _dlg_res = dialog.radar_resolution()

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QApplication, QMessageBox, QSizePolicy, QWidget,
-    QDateTimeEdit, QAbstractButton, QSpinBox, QComboBox,
+    QDateTimeEdit, QAbstractButton, QSpinBox, QComboBox, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, QSize, QDateTime, QPointF
 from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF
@@ -151,7 +151,6 @@ class LaunchDialog(QDialog):
         vs.addSpacing(8)
 
         # gps data file checkbox
-        from PyQt6.QtWidgets import QCheckBox  # noqa: PLC0415
         self._gps_mode_check = QCheckBox("GPS data file (no met obs)")
         self._gps_mode_check.setChecked(saved.get("gps_file_mode", False))
         self._gps_mode_check.setStyleSheet(
@@ -215,6 +214,33 @@ class LaunchDialog(QDialog):
             self._mode_btns[key] = btn
         root.addLayout(mode_row)
         root.addSpacing(12)
+
+        self._admin_check = QCheckBox("Admin/Labs mode")
+        self._admin_check.setChecked(False)
+        self._admin_check.setStyleSheet(
+            "QCheckBox { color: #C8D0DE; font-size: 11px; font-weight: 600; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #1E1E2E;"
+            " border-radius: 3px; background: #1A1A2E; }"
+            "QCheckBox::indicator:checked { background: #00CFFF; border-color: #00CFFF; }"
+        )
+        self._admin_check.toggled.connect(self._on_admin_toggled)
+        root.addWidget(self._admin_check)
+        root.addSpacing(8)
+
+        self._admin_passphrase_row = QWidget()
+        admin_pw_layout = QVBoxLayout(self._admin_passphrase_row)
+        admin_pw_layout.setContentsMargins(0, 0, 0, 0)
+        admin_pw_layout.setSpacing(6)
+        admin_label = QLabel("ADMIN PASSPHRASE")
+        admin_label.setObjectName("fieldLabel")
+        admin_pw_layout.addWidget(admin_label)
+        self._admin_passphrase_input = QLineEdit()
+        self._admin_passphrase_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._admin_passphrase_input.setPlaceholderText("Enter admin passphrase")
+        admin_pw_layout.addWidget(self._admin_passphrase_input)
+        self._admin_passphrase_row.setVisible(False)
+        root.addWidget(self._admin_passphrase_row)
+        root.addSpacing(4)
 
         # passphrase row (hidden in viewer mode; shown for archive mode)
         self._passphrase_row = QWidget()
@@ -523,6 +549,13 @@ class LaunchDialog(QDialog):
         if self.isVisible():
             self._post_layout_adjust()
 
+    def _on_admin_toggled(self, checked: bool):
+        self._admin_passphrase_row.setVisible(checked)
+        if not checked:
+            self._admin_passphrase_input.clear()
+        if self.isVisible():
+            self._post_layout_adjust()
+
     def _toggle_data_section(self):
         visible = not self._data_section.isVisible()
         self._data_section.setVisible(visible)
@@ -713,6 +746,28 @@ class LaunchDialog(QDialog):
                 self._passphrase_input.setFocus()
                 return
 
+        if self._admin_check.isChecked():
+            if not _config.ADMIN_PASSPHRASE_HASH:
+                QMessageBox.warning(
+                    self,
+                    "Admin Passphrase Not Configured",
+                    "Admin/Labs mode is not configured for this build.",
+                )
+                self._admin_check.setFocus()
+                return
+            if not _verify_pbkdf2(
+                self._admin_passphrase_input.text(),
+                _config.ADMIN_PASSPHRASE_HASH,
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Incorrect Admin Passphrase",
+                    "The admin passphrase you entered is incorrect.",
+                )
+                self._admin_passphrase_input.clear()
+                self._admin_passphrase_input.setFocus()
+                return
+
         # vehicle ID is required in vehicle mode
         if mode == "vehicle":
             vid = self._vid_input.text().strip()
@@ -771,6 +826,9 @@ class LaunchDialog(QDialog):
 
     def archive(self) -> bool:
         return getattr(self, "_selected_mode", "vehicle") == "archive"
+
+    def admin_mode(self) -> bool:
+        return self._admin_check.isChecked()
 
     def archive_start_time(self) -> "datetime | None":
         """UTC start time chosen in the archive date/time picker, or None."""
