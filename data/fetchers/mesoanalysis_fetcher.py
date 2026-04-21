@@ -41,6 +41,29 @@ MESOANALYSIS_PRODUCTS: tuple[tuple[str, str], ...] = (
     ("cape03", "0-3 km CAPE"),
 )
 
+MESOANALYSIS_PRODUCT_UNITS: dict[str, str] = {
+    "temp": "degF",
+    "dwpt": "degF",
+    "stpc": "",
+    "scp": "",
+    "srh01": "m2/s2",
+    "srh03": "m2/s2",
+    "sfccape": "J/kg",
+    "mucape": "J/kg",
+    "mlcape": "J/kg",
+    "cape03": "J/kg",
+    "sfccinh": "J/kg",
+    "mucinh": "J/kg",
+    "mlcinh": "J/kg",
+    "sfclcl": "m",
+    "sfclfc": "m",
+    "mulcl": "m",
+    "mulfc": "m",
+    "mllcl": "m",
+    "mllfc": "m",
+    "mslp": "mb",
+}
+
 
 @dataclass(frozen=True)
 class MesoanalysisProduct:
@@ -132,6 +155,7 @@ class MesoanalysisFetcher(QObject):
                 "tile_url": tile_url,
                 "source_layer": source_layer,
                 "bounds": bounds,
+                "label_units": _product_units(product_id),
                 "minzoom": int(metadata.get("minzoom") or 0),
                 "maxzoom": int(metadata.get("maxzoom") or 8),
             })
@@ -147,6 +171,10 @@ def _is_known_product(product_id: str) -> bool:
 
 def _product_label(product_id: str) -> str:
     return dict(MESOANALYSIS_PRODUCTS).get(product_id, product_id.upper())
+
+
+def _product_units(product_id: str) -> str:
+    return MESOANALYSIS_PRODUCT_UNITS.get(product_id, "")
 
 
 def _fetch_json(url: str) -> dict:

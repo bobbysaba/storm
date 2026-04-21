@@ -86,45 +86,32 @@ SCAN_MOVE_FIXES_TO_STOP = 3
 VEHICLE_PANEL_WIDTH = 340
 
 
-def _hrrr_numpy_dtype(dtype_name: str):
-    import numpy as np
-    name = dtype_name.lower().strip()
-    if name in ("float32", "f4"):
-        return np.dtype("<f4")
-    if name in ("float64", "f8"):
-        return np.dtype("<f8")
-    if name in ("int16", "i2"):
-        return np.dtype("<i2")
-    if name in ("uint16", "u2"):
-        return np.dtype("<u2")
-    if name in ("int32", "i4"):
-        return np.dtype("<i4")
-    if name in ("uint32", "u4"):
-        return np.dtype("<u4")
-    return None
+def _hrrr_hour_label(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).strftime("%H")
+    except ValueError:
+        if "T" in text:
+            return text.split("T", 1)[1][:2]
+    return ""
 
 
-def _format_hrrr_value(value: float, units: str) -> str:
-    unit = _format_hrrr_units(units)
-    if abs(value) >= 100:
-        text = f"{value:.0f}"
-    elif abs(value) >= 10:
-        text = f"{value:.1f}"
-    else:
-        text = f"{value:.2f}"
-    return f"{text} {unit}".rstrip()
-
-
-def _format_hrrr_units(units: str) -> str:
-    unit = str(units or "").strip()
-    return (
-        unit.replace("degF", "°F")
-            .replace("degC", "°C")
-            .replace("degrees F", "°F")
-            .replace("degrees C", "°C")
-            .replace("degree F", "°F")
-            .replace("degree C", "°C")
-    )
+def _hrrr_time_label(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).strftime("%H:%MZ")
+    except ValueError:
+        if "T" in text:
+            return text.split("T", 1)[1].replace(":00Z", "Z")[:6]
+    return text
 
 
 def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
@@ -204,11 +191,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._hrrr_fetcher = None
         self._hrrr_current_metadata: dict | None = None
         self._hrrr_visible = False
-        self._hrrr_grid = None
-        self._hrrr_grid_meta: dict | None = None
-        self._hrrr_readout_text = ""
         self._hrrr_overlay_cache: dict[tuple[str, str, int], dict] = {}
         self._hrrr_loop_pending_idx: int | None = None
+        self._hrrr_status_text = ""
+        self._hrrr_toolbar_text = ""
         self._mesoanalysis_fetcher = None
         self._mesoanalysis_current_metadata: dict | None = None
         self._mesoanalysis_visible = False
@@ -1543,7 +1529,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_map_moved(self, lat: float, lon: float, _zoom: float):
         self.update_coordinates(lat, lon)
-        self._update_hrrr_readout(lat, lon)
 
     def update_vehicle_count(self, count: int):
         self.vehicle_count_label.setText(f"VEHICLES: {count}")
@@ -2234,8 +2219,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._set_layer_active("hrrr", checked)
         if checked and self._hrrr_current_metadata:
             self._display_hrrr_metadata(self._hrrr_current_metadata)
-        if not checked:
-            self._set_hrrr_cursor_readout("")
         self.map_widget.set_hrrr_visible(checked and self._hrrr_current_metadata is not None)
 
     def _on_mesoanalysis_drawer_toggled(self, checked: bool):
@@ -2354,112 +2337,76 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                     self._hrrr_loop_pending_idx = None
         except Exception:
             pass
-        self._set_hrrr_grid(metadata)
-        label = metadata.get("label", metadata.get("field", "HRRR"))
-        valid = str(metadata.get("valid_time", "")).replace("T", " ").replace(":00Z", "Z")
-        hour = int(metadata.get("forecast_hour", 0))
-        self.hrrr_controls.set_status(f"{label} F{hour:02d} {valid}")
+        summary = self._hrrr_status_summary(metadata)
+        toolbar_summary = self._hrrr_toolbar_summary(metadata)
+        self._hrrr_status_text = summary
+        self._hrrr_toolbar_text = toolbar_summary
+        self.hrrr_controls.set_status(toolbar_summary)
+        self.status_msg_label.setText(summary)
         if self._hrrr_visible:
             self._display_hrrr_metadata(metadata)
 
+    def _hrrr_status_summary(self, metadata: dict) -> str:
+        label = str(metadata.get("label") or metadata.get("field") or "HRRR")
+        hour = int(metadata.get("forecast_hour", 0))
+        cycle = _hrrr_hour_label(metadata.get("cycle_time"))
+        valid = _hrrr_time_label(metadata.get("valid_time"))
+        parts = ["HRRR"]
+        if cycle:
+            parts.append(f"{cycle}Z")
+        parts.append(label)
+        parts.append(f"F{hour:02d}")
+        if valid:
+            parts.append(f"valid {valid}")
+        return " ".join(parts)
+
+    def _hrrr_toolbar_summary(self, metadata: dict) -> str:
+        field = str(metadata.get("field") or "").upper()
+        label = field or str(metadata.get("label") or "HRRR")
+        hour = int(metadata.get("forecast_hour", 0))
+        valid = _hrrr_time_label(metadata.get("valid_time"))
+        if valid:
+            return f"{label} F{hour:02d} {valid}"
+        return f"{label} F{hour:02d}"
+
     def _display_hrrr_metadata(self, metadata: dict):
-        bbox = metadata.get("bbox") or []
-        if len(bbox) != 4:
-            self._on_hrrr_error("metadata missing bbox")
+        bounds = metadata.get("bounds") or metadata.get("bbox") or []
+        if len(bounds) != 4:
+            self._on_hrrr_error("metadata missing bounds")
             return
-        image_url = self._hrrr_image_url(metadata)
-        if not image_url:
-            self._on_hrrr_error("metadata missing image URL")
+        tile_url = str(metadata.get("tile_url") or "")
+        source_layer = str(metadata.get("source_layer") or "")
+        if not tile_url or not source_layer:
+            self._on_hrrr_error("metadata missing tile source")
             return
-        west, south, east, north = [float(v) for v in bbox]
-        self.map_widget.set_hrrr_overlay(image_url, west, south, east, north)
+        west, south, east, north = self._mesoanalysis_display_bounds(
+            [float(v) for v in bounds]
+        )
+        self.map_widget.set_hrrr_overlay(
+            tile_url,
+            source_layer,
+            west,
+            south,
+            east,
+            north,
+            int(metadata.get("minzoom") or 0),
+            min(int(metadata.get("maxzoom") or 8), 6),
+            str(metadata.get("label_units") or metadata.get("units") or ""),
+        )
         self.map_widget.set_hrrr_visible(True)
 
-    def _hrrr_image_url(self, metadata: dict) -> str:
-        image_bytes = metadata.get("image_bytes")
-        if image_bytes:
-            import time
-            scheme_handler = getattr(self.map_widget, "scheme_handler", None)
-            if scheme_handler is not None:
-                mime = str(metadata.get("image_mime") or "image/webp")
-                scheme_handler.set_hrrr_image(image_bytes, mime)
-                ext = "png" if mime == "image/png" else "webp"
-                token = int(time.monotonic() * 1000) & 0xFFFFFF
-                return f"storm://app/hrrr/overlay.{ext}?t={token}"
-        return metadata.get("image_webp_url") or metadata.get("image_png_url") or ""
-
-    def _set_hrrr_grid(self, metadata: dict):
-        self._hrrr_grid = None
-        self._hrrr_grid_meta = None
-        self._set_hrrr_cursor_readout("")
-        raw = metadata.get("grid_bytes")
-        if not raw:
-            return
-
-        try:
-            import numpy as np
-            dtype = _hrrr_numpy_dtype(str(metadata.get("grid_dtype") or ""))
-            shape = metadata.get("grid_shape") or []
-            if dtype is None or len(shape) != 2:
-                return
-            rows, cols = int(shape[0]), int(shape[1])
-            grid = np.frombuffer(raw, dtype=dtype, count=rows * cols)
-            if grid.size != rows * cols:
-                return
-            self._hrrr_grid = grid.reshape((rows, cols))
-            self._hrrr_grid_meta = {
-                "bbox": [float(v) for v in metadata.get("bbox", [])],
-                "label": str(metadata.get("label") or metadata.get("field") or "HRRR"),
-                "units": str(metadata.get("units") or ""),
-            }
-        except Exception as exc:
-            log.warning("HRRR grid decode failed: %s", exc)
-            self._set_hrrr_cursor_readout("")
-
-    def _update_hrrr_readout(self, lat: float, lon: float):
-        grid = self._hrrr_grid
-        meta = self._hrrr_grid_meta
-        if not self._hrrr_visible or grid is None or not meta:
-            self._set_hrrr_cursor_readout("")
-            return
-        bbox = meta.get("bbox") or []
-        if len(bbox) != 4:
-            self._set_hrrr_cursor_readout("")
-            return
-        west, south, east, north = bbox
-        if lon < west or lon > east or lat < south or lat > north:
-            self._set_hrrr_cursor_readout("")
-            return
-
-        rows, cols = grid.shape
-        col = round((lon - west) / (east - west) * (cols - 1))
-        row = round((north - lat) / (north - south) * (rows - 1))
-        col = max(0, min(cols - 1, int(col)))
-        row = max(0, min(rows - 1, int(row)))
-        value = grid[row, col]
-
-        try:
-            import math
-            v = float(value)
-            if math.isnan(v):
-                text = "--"
-            else:
-                text = _format_hrrr_value(v, meta.get("units", ""))
-        except Exception:
-            text = str(value)
-
-        self._set_hrrr_cursor_readout(text)
-
-    def _set_hrrr_cursor_readout(self, text: str):
-        text = str(text or "")
-        if text == self._hrrr_readout_text:
-            return
-        self._hrrr_readout_text = text
-        self.map_widget.set_hrrr_readout(text)
-
     def _on_hrrr_error(self, msg: str):
-        self.hrrr_controls.set_status(str(msg))
-        self.status_msg_label.setText(str(msg))
+        text = f"HRRR: {msg}"
+        self.hrrr_controls.set_status(text)
+        self.status_msg_label.setText(text)
+
+        def _clear_hrrr_error():
+            if self.status_msg_label.text() == text:
+                self.status_msg_label.setText(self._hrrr_status_text)
+            if hasattr(self, "hrrr_controls"):
+                self.hrrr_controls.set_status(self._hrrr_toolbar_text)
+
+        QTimer.singleShot(4000, _clear_hrrr_error)
 
     def _on_mesoanalysis_products_ready(self, products):
         self.mesoanalysis_controls.set_products(products)
@@ -2569,6 +2516,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             north,
             int(metadata.get("minzoom") or 0),
             int(metadata.get("maxzoom") or 8),
+            str(metadata.get("label_units") or ""),
         )
         self.map_widget.set_mesoanalysis_visible(True)
 

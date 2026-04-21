@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QComboBox,
     QLabel, QListView, QToolButton, QPushButton, QSizePolicy, QFrame,
@@ -12,6 +12,7 @@ _PLAYBACK_BUTTON_SIZE = 32
 _REFRESH_BUTTON_WIDTH = 72
 _RUN_COMBO_WIDTH = 96
 _RUN_POPUP_WIDTH = 132
+_STATUS_LABEL_WIDTH = 186
 
 _GROUP_ORDER = ("thermo", "sfc", "parcel", "uh", "srh", "other")
 _GROUP_LABELS = {
@@ -37,6 +38,7 @@ class HrrrControls(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._animation = None
+        self._drawer_open_requested = False
         self._updating = False
         self._hours: list[int] = []
         self._current_frame = 0
@@ -105,6 +107,12 @@ class HrrrControls(QWidget):
             btn.setEnabled(False)
             r1.addWidget(btn)
 
+        self._status_label = QLabel("")
+        self._status_label.setObjectName("hrrrTimeLabel")
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        self._status_label.setFixedSize(_STATUS_LABEL_WIDTH, 22)
+        r1.addWidget(self._status_label)
+
         col.addWidget(row1)
 
         # ── row 2: dynamic product button grid ───────────────────────────
@@ -121,27 +129,54 @@ class HrrrControls(QWidget):
     # ── drawer animation ──────────────────────────────────────────────────
 
     def toggle_drawer(self, checked: bool):
+        if self._animation:
+            self._animation.stop()
+            self._animation = None
+
         if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
+            self._drawer_open_requested = True
             self.setMaximumHeight(0)
-            current = 0
+            QTimer.singleShot(0, self._animate_open)
+            return
         else:
+            self._drawer_open_requested = False
             current = self.height()
             self.setMaximumHeight(current)
             target = 0
 
-        if self._animation:
-            self._animation.stop()
         anim = QPropertyAnimation(self, b"maximumHeight")
         anim.setDuration(180)
         anim.setStartValue(current)
         anim.setEndValue(target)
         anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
         anim.start()
         self._animation = anim
+
+    def _animate_open(self) -> None:
+        if not self._drawer_open_requested:
+            return
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self._drawer.layout().activate()
+        self.updateGeometry()
+        target = max(1, self.sizeHint().height())
+
+        if self._animation:
+            self._animation.stop()
+        anim = QPropertyAnimation(self, b"maximumHeight")
+        anim.setDuration(180)
+        anim.setStartValue(0)
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim.finished.connect(self._finish_open_animation)
+        anim.start()
+        self._animation = anim
+
+    def _finish_open_animation(self) -> None:
+        if self._drawer_open_requested:
+            self.setMaximumHeight(16777215)
 
     # ── public setters ────────────────────────────────────────────────────
 
@@ -189,13 +224,9 @@ class HrrrControls(QWidget):
             self._field_buttons[previous].blockSignals(True)
             self._field_buttons[previous].setChecked(True)
             self._field_buttons[previous].blockSignals(False)
-        elif self._field_buttons:
-            first_id = next(iter(self._field_buttons))
-            self._field_buttons[first_id].blockSignals(True)
-            self._field_buttons[first_id].setChecked(True)
-            self._field_buttons[first_id].blockSignals(False)
-            self._selected_field = first_id
-
+            self._selected_field = previous
+        elif previous:
+            self._selected_field = ""
         new = self._selected_field
         if new and new != previous:
             self.field_changed.emit(new)
@@ -239,8 +270,10 @@ class HrrrControls(QWidget):
         self.set_frame(idx)
         self._notify_content_resized()
 
-    def set_status(self, text: str) -> None:  # noqa: ARG002
-        pass
+    def set_status(self, text: str) -> None:
+        text = str(text or "")
+        self._status_label.setText(text)
+        self._status_label.setToolTip(text)
 
     # ── public accessors ──────────────────────────────────────────────────
 
@@ -349,7 +382,27 @@ class HrrrControls(QWidget):
         if layout is not None:
             layout.invalidate()
             layout.activate()
+        if self._drawer_open_requested:
+            if self._animation:
+                self._animation.stop()
+                self._animation = None
+            self.setMaximumHeight(16777215)
+        elif self.maximumHeight() > 0:
+            self.setMaximumHeight(16777215)
         self.updateGeometry()
+        QTimer.singleShot(0, self._emit_content_resized)
+
+    def _emit_content_resized(self) -> None:
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        if self._drawer_open_requested:
+            self.setMaximumHeight(16777215)
+        elif self.maximumHeight() > 0:
+            self.setMaximumHeight(16777215)
+        self.updateGeometry()
+        self.adjustSize()
         self.content_resized.emit()
 
 

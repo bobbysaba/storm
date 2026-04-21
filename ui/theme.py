@@ -772,6 +772,12 @@ QSlider::sub-page:horizontal {
     font-weight: 600;
 }
 
+#floatingToolbar QWidget#hrrrDrawer QLabel#hrrrTimeLabel {
+    color: #C8D0DE;
+    font-size: 10px;
+    font-weight: 600;
+}
+
 #floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:hover {
     background-color: rgba(74, 158, 255, 0.08);
     border-color: rgba(74, 158, 255, 0.35);

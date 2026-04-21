@@ -26,6 +26,7 @@ from data.fetchers.mesoanalysis_fetcher import (
     MESOANALYSIS_PRODUCTS,
     MesoanalysisTime,
     _parse_bounds,
+    _product_units,
     _source_layer,
     _time_label,
 )
@@ -90,3 +91,10 @@ def test_recent_times_are_latest_four_when_sliced_like_fetcher():
         "20260420_160000",
         "20260420_170000",
     ]
+
+
+def test_product_units_cover_label_formatting_groups():
+    assert _product_units("temp") == "degF"
+    assert _product_units("mlcape") == "J/kg"
+    assert _product_units("srh03") == "m2/s2"
+    assert _product_units("stpc") == ""

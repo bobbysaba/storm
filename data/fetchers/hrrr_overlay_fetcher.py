@@ -143,46 +143,52 @@ class HrrrOverlayFetcher(QObject):
             if not selected_item or not selected_item.get("metadata"):
                 raise RuntimeError(f"forecast hour f{forecast_hour:02d} not found")
 
-            metadata_url = _abs_url(self._base_url, str(selected_item["metadata"]))
-            metadata = _fetch_json(metadata_url)
-            metadata["metadata_url"] = metadata_url
+            forecast_metadata_url = _abs_url(self._base_url, str(selected_item["metadata"]))
+            forecast_metadata = _fetch_json(forecast_metadata_url)
 
-            field_meta = (metadata.get("fields") or {}).get(field_id) or {}
-            if isinstance(field_meta, dict):
-                metadata.update({
-                    "field": field_id,
-                    "label": _short_label(field_meta.get("label", metadata.get("label", field_id))),
-                    "units": field_meta.get("units", metadata.get("units")),
-                    "level": field_meta.get("level", metadata.get("level")),
-                    "legend": field_meta.get("legend", metadata.get("legend")),
-                    "vmin": field_meta.get("vmin", metadata.get("vmin")),
-                    "vmax": field_meta.get("vmax", metadata.get("vmax")),
-                    "grid_dtype": field_meta.get("grid_dtype", metadata.get("grid_dtype")),
-                    "grid_shape": field_meta.get("grid_shape", metadata.get("grid_shape")),
-                })
+            tile_metadata_url = _abs_url(self._base_url, str(selected_item["tile_metadata"]))
+            tile_metadata = _fetch_json(tile_metadata_url)
 
-            image_png = selected_item.get("image_png") or metadata.get("image_png")
-            image_webp = selected_item.get("image_webp") or metadata.get("image_webp")
-            grid_bin = selected_item.get("grid_bin") or metadata.get("grid_bin")
-            image_url = None
-            image_mime = None
-            if image_png:
-                metadata["image_png_url"] = _abs_url(self._base_url, image_png)
-            if image_webp:
-                metadata["image_webp_url"] = _abs_url(self._base_url, image_webp)
-            if grid_bin:
-                metadata["grid_bin_url"] = _abs_url(self._base_url, grid_bin)
-            if image_png:
-                image_url = metadata["image_png_url"]
-                image_mime = "image/png"
-            elif image_webp:
-                image_url = metadata["image_webp_url"]
-                image_mime = "image/webp"
-            if image_url:
-                metadata["image_bytes"] = _fetch_bytes(image_url)
-                metadata["image_mime"] = image_mime
-            if metadata.get("grid_bin_url"):
-                metadata["grid_bytes"] = _fetch_bytes(metadata["grid_bin_url"])
+            field_meta = (forecast_metadata.get("fields") or {}).get(field_id) or {}
+            if not isinstance(field_meta, dict):
+                field_meta = {}
+
+            source_layer = _source_layer(
+                tile_metadata,
+                field_id,
+                str(field_payload.get("run") or self._selected_run or ""),
+                int(forecast_hour),
+            )
+            bounds = _parse_bounds(
+                tile_metadata.get("antimeridian_adjusted_bounds")
+                or tile_metadata.get("bounds")
+                or forecast_metadata.get("bbox")
+            )
+            if len(bounds) != 4 or not source_layer:
+                raise RuntimeError("metadata missing bounds or vector layer")
+
+            metadata = dict(tile_metadata)
+            metadata.update({
+                "forecast_metadata_url": forecast_metadata_url,
+                "metadata_url": tile_metadata_url,
+                "field": field_id,
+                "label": _short_label(field_meta.get("label", metadata.get("label", field_id))),
+                "units": field_meta.get("units", metadata.get("units")),
+                "level": field_meta.get("level", metadata.get("level")),
+                "legend": field_meta.get("legend", metadata.get("legend")),
+                "vmin": field_meta.get("vmin", metadata.get("vmin")),
+                "vmax": field_meta.get("vmax", metadata.get("vmax")),
+                "run": field_payload.get("run") or self._selected_run,
+                "cycle_time": forecast_metadata.get("cycle_time") or field_payload.get("cycle_time"),
+                "forecast_hour": int(forecast_metadata.get("forecast_hour", forecast_hour)),
+                "valid_time": forecast_metadata.get("valid_time"),
+                "tile_url": _abs_url(self._base_url, str(selected_item["tile_url"])),
+                "source_layer": source_layer,
+                "bounds": bounds,
+                "bbox": _parse_bounds(forecast_metadata.get("bbox")) or bounds,
+                "minzoom": int(metadata.get("minzoom") or 0),
+                "maxzoom": int(metadata.get("maxzoom") or 8),
+            })
             self.overlay_ready.emit(metadata)
         except Exception as exc:
             log.warning("HRRR overlay fetch failed: %s", exc)
@@ -247,9 +253,8 @@ def _payload_from_catalog(
         items.append({
             "forecast_hour": hour_int,
             "metadata": f"{hour_dir}/metadata.json",
-            "image_png": f"{hour_dir}/{field_id}.png",
-            "image_webp": f"{hour_dir}/{field_id}.webp",
-            "grid_bin": f"{hour_dir}/{field_id}.bin",
+            "tile_metadata": f"{hour_dir}/{field_id}/metadata.json",
+            "tile_url": f"{hour_dir}/{field_id}/{{z}}/{{x}}/{{y}}.pbf",
         })
 
     return {
@@ -359,16 +364,30 @@ def _short_label(label: object) -> str:
     return str(label or "").replace("Updraft Helicity", "UH").replace("updraft helicity", "UH")
 
 
+def _parse_bounds(bounds_value: object) -> list[float]:
+    if isinstance(bounds_value, (list, tuple)) and len(bounds_value) == 4:
+        return [float(v) for v in bounds_value]
+    parts = str(bounds_value or "").split(",")
+    if len(parts) != 4:
+        return []
+    return [float(part.strip()) for part in parts]
+
+
+def _source_layer(metadata: dict, field_id: str, run_id: str, forecast_hour: int) -> str:
+    try:
+        tile_json = json.loads(str(metadata.get("json") or "{}"))
+        layers = tile_json.get("vector_layers") or []
+        if layers and layers[0].get("id"):
+            return str(layers[0]["id"])
+    except Exception:
+        pass
+    return f"{field_id}_{run_id}_f{int(forecast_hour):02d}"
+
+
 def _fetch_text(url: str) -> str:
     req = Request(url, headers={"User-Agent": USER_AGENT})
     with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=_SSL_CTX) as resp:
         return resp.read().decode("utf-8", errors="replace")
-
-
-def _fetch_bytes(url: str) -> bytes:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=_SSL_CTX) as resp:
-        return resp.read()
 
 
 def _fetch_json(url: str) -> dict:

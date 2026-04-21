@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel, QToolButton, QPushButton
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QGridLayout, QLabel, QToolButton, QPushButton,
+)
+
+_PRODUCT_BUTTON_WIDTH = 72
+_PRODUCT_COLUMN_WIDTH = 118
+_PLAYBACK_BUTTON_SIZE = 17
+_TIME_LABEL_WIDTH = 36
+_CONTROL_HEIGHT = 22
 
 
 MESO_PRODUCT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -78,11 +86,14 @@ class MesoanalysisControls(QWidget):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(3)
+        for col_idx in range(len(MESO_PRODUCT_GROUPS)):
+            grid.setColumnMinimumWidth(col_idx, _PRODUCT_COLUMN_WIDTH)
 
         for col_idx, (group_name, products) in enumerate(MESO_PRODUCT_GROUPS):
             label = QLabel(group_name.upper())
             label.setObjectName("mesoanalysisGroupLabel")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setFixedWidth(_PRODUCT_COLUMN_WIDTH)
             grid.addWidget(label, 0, col_idx)
 
             for row_idx, (product_id, text) in enumerate(products, start=1):
@@ -90,6 +101,7 @@ class MesoanalysisControls(QWidget):
                 btn.setText(text)
                 btn.setCheckable(True)
                 btn.setToolTip(text)
+                btn.setFixedWidth(_PRODUCT_BUTTON_WIDTH)
                 btn.setProperty("paletteButton", True)
                 btn.clicked.connect(
                     lambda checked=False, pid=product_id: self._toggle_product(pid, checked)
@@ -114,17 +126,16 @@ class MesoanalysisControls(QWidget):
         self._time_label = QLabel("--:--Z")
         self._time_label.setObjectName("mesoanalysisTimeLabel")
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._time_label.setFixedSize(42, 22)
+        self._time_label.setFixedSize(_TIME_LABEL_WIDTH, _CONTROL_HEIGHT)
         time_grid.addWidget(self._time_label, 0, 1)
         time_grid.addWidget(self._btn_fwd, 0, 2)
-        grid.addWidget(time_wrap, 3, 4, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(time_wrap, 4, 4, Qt.AlignmentFlag.AlignHCenter)
 
-        self._clear_btn = QPushButton("CLEAR")
-        self._clear_btn.setFixedHeight(22)
-        self._clear_btn.setMinimumWidth(52)
-        self._clear_btn.setToolTip("Hide mesoanalysis overlay")
-        self._clear_btn.clicked.connect(self.clear_selection)
-        grid.addWidget(self._clear_btn, 3, 5, Qt.AlignmentFlag.AlignHCenter)
+        self._refresh_btn = QPushButton("REFRESH")
+        self._refresh_btn.setFixedSize(_PRODUCT_BUTTON_WIDTH, _CONTROL_HEIGHT)
+        self._refresh_btn.setToolTip("Clear and refresh mesoanalysis products")
+        self._refresh_btn.clicked.connect(self._on_refresh_clicked)
+        grid.addWidget(self._refresh_btn, 4, 5, Qt.AlignmentFlag.AlignHCenter)
 
         col.addWidget(groups)
         outer.addWidget(self._drawer)
@@ -195,6 +206,10 @@ class MesoanalysisControls(QWidget):
         self.visible_toggled.emit(False)
         self.set_status("Meso hidden")
 
+    def _on_refresh_clicked(self) -> None:
+        self.clear_selection()
+        self.refresh_requested.emit()
+
     def set_cache_size(self, n: int) -> None:
         n = max(0, int(n))
         if n == 0:
@@ -248,7 +263,7 @@ class MesoanalysisControls(QWidget):
     def _pbtn(self, text: str, tip: str, checkable: bool = False) -> QToolButton:
         btn = QToolButton()
         btn.setText(text)
-        btn.setFixedSize(22, 22)
+        btn.setFixedSize(_PLAYBACK_BUTTON_SIZE, _CONTROL_HEIGHT)
         btn.setToolTip(tip)
         btn.setCheckable(checkable)
         return btn
