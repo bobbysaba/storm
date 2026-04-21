@@ -215,7 +215,7 @@ class LaunchDialog(QDialog):
         root.addLayout(mode_row)
         root.addSpacing(12)
 
-        self._admin_check = QCheckBox("Admin/Labs mode")
+        self._admin_check = QCheckBox("admin mode")
         self._admin_check.setChecked(False)
         self._admin_check.setStyleSheet(
             "QCheckBox { color: #C8D0DE; font-size: 11px; font-weight: 600; }"

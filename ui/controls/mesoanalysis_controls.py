@@ -97,8 +97,8 @@ class MesoanalysisControls(QWidget):
                 self._product_buttons[product_id] = btn
                 grid.addWidget(btn, row_idx, col_idx, Qt.AlignmentFlag.AlignHCenter)
 
-        self._btn_back = self._pbtn("‹", "Previous analysis")
-        self._btn_fwd = self._pbtn("›", "Next analysis")
+        self._btn_back = self._pbtn("◀", "Previous analysis time")
+        self._btn_fwd = self._pbtn("▶", "Next analysis time")
         self._btn_back.clicked.connect(self._on_step_back)
         self._btn_fwd.clicked.connect(self._on_step_forward)
         for btn in (self._btn_back, self._btn_fwd):
@@ -120,7 +120,8 @@ class MesoanalysisControls(QWidget):
         grid.addWidget(time_wrap, 3, 4, Qt.AlignmentFlag.AlignHCenter)
 
         self._clear_btn = QPushButton("CLEAR")
-        self._clear_btn.setFixedSize(40, 22)
+        self._clear_btn.setFixedHeight(22)
+        self._clear_btn.setMinimumWidth(52)
         self._clear_btn.setToolTip("Hide mesoanalysis overlay")
         self._clear_btn.clicked.connect(self.clear_selection)
         grid.addWidget(self._clear_btn, 3, 5, Qt.AlignmentFlag.AlignHCenter)

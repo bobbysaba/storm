@@ -1014,6 +1014,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.btn_hrrr.toggled.connect(self.hrrr_controls.toggle_drawer)
             self.btn_hrrr.toggled.connect(self._start_layout_pulse)
             self.btn_hrrr.toggled.connect(self._on_hrrr_drawer_toggled)
+            self.hrrr_controls.content_resized.connect(self._start_layout_pulse)
 
         if feature_flags.is_enabled("mesoanalysis"):
             self.btn_mesoanalysis = self._toolbar_toggle(
@@ -2002,10 +2003,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.hrrr_controls.run_changed.connect(self._on_hrrr_run_changed)
         self.hrrr_controls.frame_requested.connect(self._on_hrrr_frame_requested)
         self.hrrr_controls.loop_toggled.connect(self._on_hrrr_loop_toggled)
-        self.hrrr_controls.speed_changed.connect(self._on_hrrr_speed_changed)
-        self.hrrr_controls.opacity_changed.connect(self.map_widget.set_hrrr_opacity)
         self.hrrr_controls.refresh_requested.connect(self._on_hrrr_refresh_requested)
-        self.hrrr_controls.visible_toggled.connect(self._on_hrrr_visible_toggled)
 
         self._hrrr_fetcher.runs_ready.connect(self._on_hrrr_runs_ready)
         self._hrrr_fetcher.catalog_ready.connect(self._on_hrrr_catalog_ready)
@@ -2230,9 +2228,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_hrrr_drawer_toggled(self, checked: bool):
         if checked and self._hrrr_fetcher is None:
             self._init_hrrr()
-            return
-        if checked and not self._hrrr_current_metadata:
+        if checked and not self._hrrr_current_metadata and self._hrrr_fetcher:
             self._hrrr_fetcher.refresh_catalog()
+        self._hrrr_visible = checked
+        self._set_layer_active("hrrr", checked)
+        if checked and self._hrrr_current_metadata:
+            self._display_hrrr_metadata(self._hrrr_current_metadata)
+        if not checked:
+            self._set_hrrr_cursor_readout("")
+        self.map_widget.set_hrrr_visible(checked and self._hrrr_current_metadata is not None)
 
     def _on_mesoanalysis_drawer_toggled(self, checked: bool):
         if checked and self._mesoanalysis_fetcher is None:
@@ -2299,9 +2303,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.hrrr_controls.set_status(f"HRRR: loading {field_id} F{hour:02d}")
         self._hrrr_fetcher.fetch_overlay(field_id, hour)
 
-    def _on_hrrr_speed_changed(self, ms: int):
-        self._hrrr_loop_timer.setInterval(ms)
-
     def _on_hrrr_loop_toggled(self, looping: bool):
         if looping:
             self._hrrr_loop_timer.start()
@@ -2331,15 +2332,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_hrrr_refresh_requested(self):
         self.hrrr_controls.set_status("HRRR: refreshing")
         self._hrrr_fetcher.refresh_catalog()
-
-    def _on_hrrr_visible_toggled(self, visible: bool):
-        self._hrrr_visible = bool(visible)
-        self._set_layer_active("hrrr", self._hrrr_visible)
-        if self._hrrr_visible and self._hrrr_current_metadata:
-            self._display_hrrr_metadata(self._hrrr_current_metadata)
-        if not self._hrrr_visible:
-            self._set_hrrr_cursor_readout("")
-        self.map_widget.set_hrrr_visible(self._hrrr_visible and self._hrrr_current_metadata is not None)
 
     def _on_hrrr_overlay_ready(self, metadata: dict):
         self._hrrr_current_metadata = metadata

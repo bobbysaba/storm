@@ -112,6 +112,7 @@ QMainWindow, QWidget {
 
 #floatingToolbar QComboBox#radarSiteCombo,
 #floatingToolbar QComboBox#radarProductCombo,
+#floatingToolbar QComboBox#hrrrRunCombo,
 #floatingToolbar QToolButton#radarStationsButton {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
@@ -119,6 +120,7 @@ QMainWindow, QWidget {
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
 #floatingToolbar QComboBox#radarProductCombo:hover,
+#floatingToolbar QComboBox#hrrrRunCombo:hover,
 #floatingToolbar QToolButton#radarStationsButton:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
@@ -690,14 +692,12 @@ QSlider::sub-page:horizontal {
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider,
-#floatingToolbar QWidget#satelliteDrawer QSlider,
-#floatingToolbar QWidget#hrrrDrawer QSlider {
+#floatingToolbar QWidget#satelliteDrawer QSlider {
     background: transparent;
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
-#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal,
-#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal {
+#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;
@@ -708,7 +708,8 @@ QSlider::sub-page:horizontal {
 #floatingToolbar QWidget#mesoanalysisDrawer,
 #floatingToolbar QWidget#hrrrControlRow,
 #floatingToolbar QWidget#mesoanalysisControlRow,
-#floatingToolbar QWidget#hrrrStatusRow,
+#floatingToolbar QWidget#hrrrPlaybackRow,
+#floatingToolbar QWidget#hrrrFieldGrid,
 #floatingToolbar QWidget#mesoanalysisStatusRow {
     background: transparent;
     border: none;
@@ -723,11 +724,23 @@ QSlider::sub-page:horizontal {
     padding: 3px 8px;
 }
 
+#floatingToolbar QWidget#hrrrControlRow QToolButton {
+    padding: 1px 3px;
+    font-size: 13px;
+}
+
 #floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisGroupLabel {
     color: #6E7A8F;
     font-size: 9px;
     font-weight: 700;
     min-width: 72px;
+}
+
+#floatingToolbar QWidget#hrrrFieldGrid QLabel#hrrrFieldGroupLabel {
+    color: #6E7A8F;
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 62px;
 }
 
 #floatingToolbar QWidget#mesoanalysisProductGrid QToolButton {
@@ -738,9 +751,17 @@ QSlider::sub-page:horizontal {
     font-size: 10px;
 }
 
+#floatingToolbar QWidget#hrrrFieldGrid QToolButton {
+    min-width: 62px;
+    padding: 2px 6px;
+    font-size: 10px;
+}
+
 #floatingToolbar QWidget#mesoanalysisProductGrid,
 #floatingToolbar QWidget#mesoanalysisProductGrid QWidget,
-#floatingToolbar QWidget#mesoanalysisPlaybackCell {
+#floatingToolbar QWidget#mesoanalysisPlaybackCell,
+#floatingToolbar QWidget#hrrrFieldGrid,
+#floatingToolbar QWidget#hrrrFieldGrid QWidget {
     background: transparent;
     background-color: transparent;
 }
@@ -780,8 +801,8 @@ QSlider::sub-page:horizontal {
     border: 1px solid rgba(74, 83, 108, 0.48);
     border-radius: 6px;
     color: #D9E0EC;
-    min-height: 24px;
     padding: 2px 7px;
+    min-width: 0;
 }
 
 #floatingToolbar QWidget#hrrrDrawer QComboBox:hover,
@@ -807,12 +828,10 @@ QSlider::sub-page:horizontal {
     color: #EFF3FF;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QSlider,
 #floatingToolbar QWidget#mesoanalysisDrawer QSlider {
     background: transparent;
 }
 
-#floatingToolbar QWidget#hrrrDrawer QSlider::groove:horizontal,
 #floatingToolbar QWidget#mesoanalysisDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
