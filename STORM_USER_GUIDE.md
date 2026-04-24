@@ -16,15 +16,16 @@
    - 6.3 [Satellite](#63-satellite)
    - 6.4 [Soundings](#64-soundings)
    - 6.5 [Surface Obs](#65-surface-obs)
-   - 6.6 [Routing](#66-routing)
-   - 6.7 [Annotations](#67-annotations)
-   - 6.8 [Drawings](#68-drawings)
-   - 6.9 [Storm Motion Cone](#69-storm-motion-cone)
-   - 6.10 [Measurement Tool](#610-measurement-tool)
-   - 6.11 [Station Plots](#611-station-plots)
-   - 6.12 [Deployment Locations](#612-deployment-locations)
-   - 6.13 [Vehicle Panel](#613-vehicle-panel)
-   - 6.14 [Vehicle Timeseries](#614-vehicle-timeseries)
+   - 6.6 [SFCOA Mesoanalysis](#66-sfcoa-mesoanalysis)
+   - 6.7 [Routing](#67-routing)
+   - 6.8 [Annotations](#68-annotations)
+   - 6.9 [Drawings](#69-drawings)
+   - 6.10 [Storm Motion Cone](#610-storm-motion-cone)
+   - 6.11 [Measurement Tool](#611-measurement-tool)
+   - 6.12 [Station Plots](#612-station-plots)
+   - 6.13 [Deployment Locations](#613-deployment-locations)
+   - 6.14 [Vehicle Panel](#614-vehicle-panel)
+   - 6.15 [Vehicle Timeseries](#615-vehicle-timeseries)
 7. [Status Bar](#7-status-bar)
 8. [Archive Mode](#8-archive-mode)
 9. [Outlook Text Panel](#9-outlook-text-panel)
@@ -55,6 +56,7 @@ STORM is a standalone desktop application purpose-built for severe weather storm
 | Vector Tiles | Offline MBTiles served via custom `storm://` URL scheme |
 | Radar Decoding | MetPy + matplotlib (Level 3, Unidata THREDDS) |
 | Satellite Imagery | IEM WMS (GOES-East, GOES-West) |
+| SFCOA Mesoanalysis | NSSL SFCOA vector tiles |
 | Hazard Data | SPC GeoJSON MapServer + NWS API |
 | Vehicle/Annotation Sync | MQTT over AWS IoT (TLS) |
 | Python-to-JS Bridge | QWebChannel (`bridge` object) |
@@ -216,15 +218,16 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 6. NWS warnings (storm-polygon fills, phenom-specific colors)
 7. GOES satellite imagery (optional, opacity-controlled)
 8. NEXRAD radar overlay (semi-transparent PNG raster)
-9. Surface obs station models (OK Mesonet, WTM, ASOS)
-10. Station plot icons (MetPy-style, at vehicle positions)
-11. Vehicle markers (colored dots + info popups)
-12. Annotations (road closure / construction / flooding / downed-lines / debris markers)
-13. Drawings (fronts, polylines, polygons)
-14. Storm motion cones
-15. Routing line (active route geometry)
-16. Measurement tool geometry
-17. Deployment location markers
+9. SFCOA mesoanalysis contours
+10. Surface obs station models (OK Mesonet, WTM, ASOS)
+11. Station plot icons (MetPy-style, at vehicle positions)
+12. Vehicle markers (colored dots + info popups)
+13. Annotations (road closure / construction / flooding / downed-lines / debris markers)
+14. Drawings (fronts, polylines, polygons)
+15. Storm motion cones
+16. Routing line (active route geometry)
+17. Measurement tool geometry
+18. Deployment location markers
 
 ---
 
@@ -513,7 +516,50 @@ The ASOS timestamp comes from IEM's `valid` observation time.
 
 ---
 
-### 6.6 Routing
+### 6.6 SFCOA Mesoanalysis
+
+**Button:** `SFCOA` (checkable toggle, expands drawer)
+
+Displays NSSL SFCOA mesoanalysis contour products as labeled vector-tile overlays. SFCOA is available in normal user sessions and does not require admin mode.
+
+#### Product Groups
+
+SFCOA variables are grouped into compact columns so related fields are easy to scan:
+
+| Group | Examples |
+|-------|----------|
+| **SURFACE** | Near-surface thermodynamic fields |
+| **PARCEL** | Parcel diagnostics |
+| **LAPSE RATES** | Low- and mid-level lapse-rate fields |
+| **SHEAR** | Bulk shear fields |
+| **SRH** | Storm-relative helicity fields |
+| **COMPOSITE** | Composite severe-weather parameters |
+| **UPPER AIR** | Upper-air diagnostics |
+| **WINDS** | Kinematic wind products |
+
+Click one or more product buttons to add those contours to the map. Clicking a selected product removes it. Active products remain selected when stepping between valid times if that variable is available at the new time.
+
+#### Valid-Time Controls
+
+| Button | Action |
+|--------|--------|
+| **REFRESH** | Reload the SFCOA catalog and product list |
+| ⏮ | Jump to the oldest available valid time |
+| ⏪ | Step back one valid time |
+| ⏩ | Step forward one valid time |
+| ⏭ | Jump to the latest available valid time |
+| Status label | Shows the selected valid time, product count, or current loading state |
+
+#### How SFCOA Data Works
+
+- **Source:** NSSL SFCOA catalog via `SFCOA_BASE_URL`
+- **Render format:** MapLibre vector tiles with contour lines and labels
+- **Layer behavior:** SFCOA is mutually exclusive with other large overlay drawers so the toolbar stays readable
+- **Caching:** Selected product/time combinations are cached during the session for faster stepping back to recently viewed fields
+
+---
+
+### 6.7 Routing
 
 **Button:** `ROUTING` (checkable toggle, expands drawer)
 
@@ -543,7 +589,7 @@ When the vehicle is within 30 m of the destination, STORM shows an arrival notif
 
 ---
 
-### 6.7 Annotations
+### 6.8 Annotations
 
 **Button:** `ANNOTATIONS` (checkable toggle, expands drawer)
 
@@ -589,7 +635,7 @@ Changes, moves, and deletions are published to all connected vehicles.
 
 ---
 
-### 6.8 Drawings
+### 6.9 Drawings
 
 **Button:** `DRAWINGS` (collapsible drawer)
 
@@ -639,7 +685,7 @@ All changes are synced via MQTT.
 
 ---
 
-### 6.9 Storm Motion Cone
+### 6.10 Storm Motion Cone
 
 **Button:** `CONE`
 
@@ -677,7 +723,7 @@ Cones are synced via MQTT (`storm/cones/{id}` topic).
 
 ---
 
-### 6.10 Measurement Tool
+### 6.11 Measurement Tool
 
 **Button:** `MEASURE` (checkable toggle)
 
@@ -699,7 +745,7 @@ Measures great-circle distances on the map.
 
 ---
 
-### 6.11 Station Plots
+### 6.12 Station Plots
 
 **Button:** `STATION PLOTS` (checkable toggle)
 
@@ -733,7 +779,7 @@ Station plots are generated as PNG images (135×135 px, transparent background) 
 
 ---
 
-### 6.12 Deployment Locations
+### 6.13 Deployment Locations
 
 **Button:** `DEPLOY LOCS` (checkable toggle, expands drawer)
 
@@ -766,7 +812,7 @@ An additional slider controls the displayed circle radius for each location mark
 
 ---
 
-### 6.13 Vehicle Panel
+### 6.14 Vehicle Panel
 
 **Button:** `VEHICLES` (toggles the right-side dock panel)
 
@@ -799,11 +845,11 @@ When a vehicle is selected, the detail section shows:
 | **Pressure** | Atmospheric pressure in mb (purple text) |
 | **TIMESERIES Button** | Opens the vehicle timeseries dialog (only shown for vehicles with observation history) |
 
-The TIMESERIES button appears only for non-local vehicles that have published meteorological observations. See [Section 6.14](#614-vehicle-timeseries) for full timeseries documentation.
+The TIMESERIES button appears only for non-local vehicles that have published meteorological observations. See [Section 6.15](#615-vehicle-timeseries) for full timeseries documentation.
 
 ---
 
-### 6.14 Vehicle Timeseries
+### 6.15 Vehicle Timeseries
 
 **Access:** Click the **TIMESERIES** button in the vehicle detail section of the Vehicle Panel.
 
@@ -1242,6 +1288,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | NWS Warnings | Every 2 minutes | All active VTEC phenomenons |
 | GOES Satellite (CONUS) | Every 5 minutes | Full CONUS, up to 10 frames |
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
+| SFCOA Mesoanalysis | On demand | Catalog refresh plus selected vector-tile products |
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
 | NSSL CLAMPS DL Truck | On demand | Fetched from NSSL THREDDS on click |
@@ -1480,6 +1527,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | Observed Radiosonde Soundings | ✅ Enabled | n/a |
 | NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
 | Surface Obs (OK / WTM / ASOS) | ✅ Enabled (when toggled on) | n/a |
+| SFCOA Mesoanalysis | ✅ Enabled | n/a |
 | Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |
 | Drawings (fronts, polylines, polygons) | ✅ Enabled | `--disable-annotations` |

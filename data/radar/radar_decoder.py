@@ -42,9 +42,20 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
         azimuths = start_az + 0.5 * beam_width
         ranges_m = _extract_ranges_m(pdata, raw.shape[-1], f)
 
+        meta = PRODUCT_META.get(product, {
+            "units":    "unknown",
+            "vmin":     -32,
+            "vmax":     90,
+            "colormap": "nws_ref",
+        })
+
         # apply scale/offset from MetPy (requires integer input)
         if hasattr(f, "map_data"):
             data = np.array(f.map_data(raw), dtype=float)
+            # MetPy's DigitalVelMapper returns m/s; convert to knots to match
+            # the kt-based vmin/vmax and colormap stops (mirrors L2 archive path).
+            if getattr(f.map_data, "units", None) == "m/s" and meta.get("units") == "kt":
+                data *= 1.94384
         else:
             data = raw.astype(float)
 
@@ -62,13 +73,6 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
 
         # scan time
         scan_time = _parse_scan_time(f)
-
-        meta = PRODUCT_META.get(product, {
-            "units":    "unknown",
-            "vmin":     -32,
-            "vmax":     90,
-            "colormap": "nws_ref",
-        })
 
         return RadarScan(
             site=site,

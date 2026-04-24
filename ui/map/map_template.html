@@ -3443,6 +3443,132 @@
       _removeMesoanalysisLayers(productId || '');
     };
 
+    var _sfcoaVisible = false;
+    var _sfcoaOpacity = 1.0;
+    var _sfcoaProducts = {};
+
+    function _sfcoaId(productId, suffix) {
+      return 'sfcoa-' + String(productId || 'overlay').replace(/[^A-Za-z0-9_-]/g, '-') + '-' + suffix;
+    }
+
+    function _removeSfcoaLayers(productId) {
+      try {
+        var ids = productId ? [productId] : Object.keys(_sfcoaProducts);
+        ids.forEach(function(pid) {
+          var entry = _sfcoaProducts[pid] || {
+            line: _sfcoaId(pid, 'line'),
+            label: _sfcoaId(pid, 'label'),
+            source: _sfcoaId(pid, 'src')
+          };
+          if (map.getLayer(entry.label)) map.removeLayer(entry.label);
+          if (map.getLayer(entry.line)) map.removeLayer(entry.line);
+          if (map.getSource(entry.source)) map.removeSource(entry.source);
+          delete _sfcoaProducts[pid];
+        });
+      } catch(e) {
+        console.warn('[STORM] SFCOA clear warning:', e.message || e);
+      }
+    }
+
+    function _addSfcoaLayer(layerDef, beforeId) {
+      try {
+        if (beforeId && map.getLayer(beforeId)) {
+          map.addLayer(layerDef, beforeId);
+        } else {
+          map.addLayer(layerDef);
+        }
+      } catch(_) {
+        try { map.addLayer(layerDef); } catch(e) {
+          console.error('[STORM] SFCOA layer add error:', e.message || e);
+        }
+      }
+    }
+
+    window.stormSetSfcoaOverlay = function(productId, tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom, labelUnits) {
+      try {
+        productId = String(productId || 'overlay');
+        _removeSfcoaLayers(productId);
+        var sourceId = _sfcoaId(productId, 'src');
+        var lineId = _sfcoaId(productId, 'line');
+        var labelId = _sfcoaId(productId, 'label');
+        _sfcoaProducts[productId] = { source: sourceId, line: lineId, label: labelId };
+        map.addSource(sourceId, {
+          type: 'vector',
+          tiles: [tileUrl],
+          minzoom: minzoom || 0,
+          maxzoom: maxzoom || 8,
+          bounds: [west, south, east, north]
+        });
+        _addSfcoaLayer({
+          id: lineId,
+          type: 'line',
+          source: sourceId,
+          'source-layer': sourceLayer,
+          paint: {
+            'line-color': ['coalesce', ['get', 'stroke'], '#F2D45C'],
+            'line-width': ['coalesce', ['get', 'stroke-width'], 1],
+            'line-opacity': _sfcoaOpacity
+          }
+        }, 'road-unpaved');
+        _addSfcoaLayer({
+          id: labelId,
+          type: 'symbol',
+          source: sourceId,
+          'source-layer': sourceLayer,
+          minzoom: 0,
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': _contourTextField(labelUnits),
+            'text-size': 10,
+            'text-font': ['Noto Sans Regular'],
+            'text-allow-overlap': false,
+            'text-ignore-placement': false,
+            'symbol-spacing': 320
+          },
+          paint: {
+            'text-color': '#EFF3FF',
+            'text-halo-color': '#0A0A0F',
+            'text-halo-width': 1.2,
+            'text-opacity': _sfcoaOpacity
+          }
+        }, 'road-unpaved');
+        window.stormSetSfcoaVisible(_sfcoaVisible);
+      } catch(e) {
+        console.error('[STORM] SFCOA overlay inject error:', e.message || e);
+      }
+    };
+
+    window.stormSetSfcoaVisible = function(visible) {
+      _sfcoaVisible = !!visible;
+      var state = _sfcoaVisible ? 'visible' : 'none';
+      try {
+        Object.keys(_sfcoaProducts).forEach(function(pid) {
+          var entry = _sfcoaProducts[pid];
+          if (map.getLayer(entry.line)) map.setLayoutProperty(entry.line, 'visibility', state);
+          if (map.getLayer(entry.label)) map.setLayoutProperty(entry.label, 'visibility', state);
+        });
+      } catch(e) {
+        console.warn('[STORM] SFCOA visibility warning:', e.message || e);
+      }
+    };
+
+    window.stormSetSfcoaOpacity = function(opacity) {
+      _sfcoaOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      try {
+        Object.keys(_sfcoaProducts).forEach(function(pid) {
+          var entry = _sfcoaProducts[pid];
+          if (map.getLayer(entry.line)) map.setPaintProperty(entry.line, 'line-opacity', _sfcoaOpacity);
+          if (map.getLayer(entry.label)) map.setPaintProperty(entry.label, 'text-opacity', _sfcoaOpacity);
+        });
+      } catch(e) {
+        console.warn('[STORM] SFCOA opacity warning:', e.message || e);
+      }
+    };
+
+    window.stormClearSfcoaOverlay = function(productId) {
+      _removeSfcoaLayers(productId || '');
+    };
+
     window.stormSetMesoSectors = function(sectorsJson) {
       var sectors = JSON.parse(sectorsJson);
       var features = sectors.map(function(s) {

@@ -72,3 +72,107 @@ def test_fetch_iem_batch_uses_utc_valid_timestamp():
     obs = rows[0]["obs"]
     assert rows[0]["id"] == "surface:asos:OKC"
     assert obs.timestamp == datetime(2026, 4, 18, 23, 52, tzinfo=timezone.utc)
+
+
+def test_fetch_ok_mesonet_uses_configured_api_headers():
+    original = sf.config.USE_NSSL_API_FOR_SURFACE
+    sf.config.USE_NSSL_API_FOR_SURFACE = True
+    fetcher = SurfaceFetcher()
+    fetcher._ok_meta = {
+        "acme": {"lat": 34.80833, "lon": -98.02325, "name": "Acme"},
+    }
+    captured: dict[str, object] = {}
+
+    def _http_get(url, ssl_ctx=None, headers=None):
+        captured["url"] = url
+        captured["ssl_ctx"] = ssl_ctx
+        captured["headers"] = headers
+        return b"""{
+          "time": "2026-04-23T19:25:00+00:00",
+          "data": {
+            "tair": {"acme": 26.55},
+            "tdew": {"acme": 20.11},
+            "wspd": {"acme": 11.17},
+            "wdir": {"acme": 183.7},
+            "pres": {"acme": 958.08}
+          }
+        }"""
+
+    try:
+        fetcher._http_get = _http_get
+        rows = fetcher._fetch_ok_mesonet()
+
+        assert captured["url"] == sf.OK_API_URL
+        assert captured["ssl_ctx"] is None
+        assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+        assert len(rows) == 1
+        assert rows[0]["id"] == "surface:ok:acme"
+        assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+    finally:
+        sf.config.USE_NSSL_API_FOR_SURFACE = original
+
+
+def test_fetch_wtm_uses_configured_api_headers():
+    original = sf.config.USE_NSSL_API_FOR_SURFACE
+    sf.config.USE_NSSL_API_FOR_SURFACE = True
+    fetcher = SurfaceFetcher()
+    fetcher._wtm_meta = {
+        "test": {"lat": 32.0, "lon": -101.0, "name": "Test WTM"},
+    }
+    captured: dict[str, object] = {}
+
+    def _http_get(url, ssl_ctx=None, headers=None):
+        captured["url"] = url
+        captured["ssl_ctx"] = ssl_ctx
+        captured["headers"] = headers
+        return b"""{
+          "results": [{
+            "mid": "test",
+            "utc": "2026-04-23T19:25:00+00:00",
+            "temp1p5m": 22.1,
+            "dp1p5m": 10.2,
+            "wspd10m": 8.3,
+            "wdir10m": 190.0,
+            "pres": 905.2
+          }]
+        }"""
+
+    try:
+        fetcher._http_get = _http_get
+        rows = fetcher._fetch_wtm()
+
+        assert captured["url"] == sf.WTM_API_URL
+        assert captured["ssl_ctx"] is None
+        assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+        assert len(rows) == 1
+        assert rows[0]["id"] == "surface:wtm:test"
+        assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+    finally:
+        sf.config.USE_NSSL_API_FOR_SURFACE = original
+
+
+def test_diagnostics_snapshot_tracks_valid_and_fetch_times():
+    fetcher = SurfaceFetcher()
+    attempt = datetime(2026, 4, 23, 19, 30, tzinfo=timezone.utc)
+    valid = datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+
+    class _Obs:
+        timestamp = valid
+
+    fetcher._ok_enabled = True
+    fetcher._update_source_diag(
+        "ok",
+        "OK",
+        attempt,
+        [{"obs": _Obs()}],
+        False,
+        None,
+    )
+
+    snap = fetcher._diagnostics_snapshot()
+    assert snap["ok"]["label"] == "OK"
+    assert snap["ok"]["last_attempt"] == attempt
+    assert snap["ok"]["last_success"] == attempt
+    assert snap["ok"]["valid_time"] == valid
+    assert snap["ok"]["count"] == 1
+    assert snap["ok"]["stale"] is False

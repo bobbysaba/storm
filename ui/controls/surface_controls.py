@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+from html import escape
+
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QCheckBox
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
 
@@ -44,16 +47,37 @@ class SurfaceControls(QWidget):
         self._btn_ok.toggled.connect(self.ok_toggled.emit)
         self._btn_wtm.toggled.connect(self.wtm_toggled.emit)
         self._btn_asos.toggled.connect(self.asos_toggled.emit)
+        self._btn_asos.toggled.connect(self._on_asos_button_toggled)
         r1.addWidget(self._btn_ok)
         r1.addWidget(self._btn_wtm)
         r1.addWidget(self._btn_asos)
 
         r1.addWidget(self._vdiv())
 
+        controls_col = QVBoxLayout()
+        controls_col.setContentsMargins(0, 0, 0, 0)
+        controls_col.setSpacing(2)
+
         self._chk_show_plots = QCheckBox("show plots")
         self._chk_show_plots.setChecked(True)
         self._chk_show_plots.toggled.connect(self.plots_toggled.emit)
-        r1.addWidget(self._chk_show_plots)
+        controls_col.addWidget(self._chk_show_plots, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._asos_bbox_link = QLabel(
+            f'<a href="new-asos-bbox" style="color:{ACCENT_COLOR}; text-decoration:none;">new ASOS bbox</a>'
+        )
+        self._asos_bbox_link.setVisible(False)
+        self._asos_bbox_link.setTextFormat(Qt.TextFormat.RichText)
+        self._asos_bbox_link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._asos_bbox_link.setOpenExternalLinks(False)
+        self._asos_bbox_link.setStyleSheet(
+            "font-size: 9px; font-weight: 500; letter-spacing: 0.2px; padding: 0;"
+        )
+        self._asos_bbox_link.linkActivated.connect(
+            lambda link: self.asos_bbox_requested.emit() if link == "new-asos-bbox" else None
+        )
+        controls_col.addWidget(self._asos_bbox_link, alignment=Qt.AlignmentFlag.AlignHCenter)
+        r1.addLayout(controls_col)
 
         r1.addStretch(1)
         col.addWidget(row1)
@@ -63,12 +87,42 @@ class SurfaceControls(QWidget):
             "color: #B5BDCC; font-size: 10px; letter-spacing: 0.4px; padding: 1px 4px 2px 4px;"
         )
         self._status.setTextFormat(Qt.TextFormat.RichText)
-        self._status.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        self._status.setOpenExternalLinks(False)
-        self._status.linkActivated.connect(
-            lambda link: self.asos_bbox_requested.emit() if link == "asos-new-box" else None
-        )
+        self._status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         col.addWidget(self._status)
+
+        self._status_div = QFrame()
+        self._status_div.setFrameShape(QFrame.Shape.NoFrame)
+        self._status_div.setFixedHeight(1)
+        self._status_div.setStyleSheet("background-color: #8E97AB; margin: 2px 4px 2px 4px;")
+        self._status_div.setVisible(False)
+        col.addWidget(self._status_div)
+
+        self._detail = QLabel("")
+        self._detail.setStyleSheet(
+            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 1px 4px;"
+        )
+        self._detail.setTextFormat(Qt.TextFormat.RichText)
+        self._detail.setWordWrap(True)
+        self._detail.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._detail.setVisible(False)
+        col.addWidget(self._detail)
+
+        self._legend_div = QFrame()
+        self._legend_div.setFrameShape(QFrame.Shape.NoFrame)
+        self._legend_div.setFixedHeight(1)
+        self._legend_div.setStyleSheet("background-color: #8E97AB; margin: 2px 4px 2px 4px;")
+        self._legend_div.setVisible(False)
+        col.addWidget(self._legend_div)
+
+        self._legend = QLabel(self._legend_html())
+        self._legend.setStyleSheet(
+            "color: #7E879A; font-size: 9px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 2px 4px;"
+        )
+        self._legend.setTextFormat(Qt.TextFormat.RichText)
+        self._legend.setWordWrap(True)
+        self._legend.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._legend.setVisible(False)
+        col.addWidget(self._legend)
 
         outer.addWidget(self._drawer)
 
@@ -109,16 +163,61 @@ class SurfaceControls(QWidget):
         self._animation = anim
 
     def set_status(self, text: str):
-        self._status.setText(self._with_asos_bbox_link(text))
+        self._status.setText(self._status_html(text))
         if self.maximumHeight() > 0:
             self.content_resized.emit()
 
-    def _with_asos_bbox_link(self, text: str) -> str:
-        link = (
-            f' <a href="asos-new-box" style="color:{ACCENT_COLOR}; '
-            'text-decoration:none; font-weight:700;">new box</a>'
+    def set_diagnostics(self, diagnostics: dict) -> None:
+        detail = self._diagnostics_html(diagnostics or {})
+        active = bool(diagnostics)
+        self._status_div.setVisible(active)
+        self._detail.setVisible(active)
+        self._legend_div.setVisible(active)
+        self._legend.setVisible(active)
+        self._detail.setText(detail)
+        if self.maximumHeight() > 0:
+            self.content_resized.emit()
+
+    def _diagnostics_html(self, diagnostics: dict) -> str:
+        parts = []
+        for key in ("ok", "wtm", "asos"):
+            info = diagnostics.get(key)
+            if not info:
+                continue
+            label = info.get("label", key.upper())
+            valid = self._fmt_dt(info.get("valid_time"))
+            attempted = self._fmt_dt(info.get("last_attempt"))
+            state = "stale" if info.get("stale") else (info.get("note") or "live")
+            parts.append(
+                f"<b>{label}</b> valid {valid} · fetched {attempted} · {state}"
+            )
+        return "<br/>".join(parts)
+
+    def _legend_html(self) -> str:
+        green = '<span style="color:#39D98A;">●</span>'
+        yellow = '<span style="color:#FFD166;">●</span>'
+        red = '<span style="color:#E53935;">●</span>'
+        return (
+            f"Mesonet age: {green} ≤ 5 min  {yellow} ≤ 10 min  {red} > 10 min<br/>"
+            f"ASOS age: {green} ≤ 70 min  {yellow} ≤ 90 min  {red} > 90 min"
         )
-        return f"{text}{link}" if "ASOS" in text else text
+
+    @staticmethod
+    def _status_html(text: str) -> str:
+        if not text:
+            return ""
+        parts = [escape(part.strip()) for part in text.split("  |  ") if part.strip()]
+        return " <span style=\"color:#8E97AB;\">|</span> ".join(parts)
+
+    @staticmethod
+    def _fmt_dt(value) -> str:
+        if not isinstance(value, datetime):
+            return "--"
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.strftime("%H:%M:%SZ")
 
     def plots_visible(self) -> bool:
         return self._chk_show_plots.isChecked()
@@ -128,3 +227,7 @@ class SurfaceControls(QWidget):
 
     def set_asos_enabled(self, enabled: bool) -> None:
         self._btn_asos.setChecked(enabled)
+        self._asos_bbox_link.setVisible(enabled)
+
+    def _on_asos_button_toggled(self, enabled: bool) -> None:
+        self._asos_bbox_link.setVisible(enabled)

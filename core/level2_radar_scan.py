@@ -14,8 +14,8 @@ L2_PRODUCTS: dict[str, dict] = {
     "velocity": {
         "label":    "Velocity (VEL)",
         "units":    "kt",
-        "vmin":     -100.0,
-        "vmax":      100.0,
+        "vmin":     -75.0,
+        "vmax":      75.0,
         "colormap": "nws_vel",
     },
     "cross_correlation_ratio": {

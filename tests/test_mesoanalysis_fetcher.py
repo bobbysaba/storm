@@ -25,6 +25,7 @@ if "PyQt6.QtCore" not in sys.modules:
 from data.fetchers.mesoanalysis_fetcher import (
     MESOANALYSIS_PRODUCTS,
     MesoanalysisTime,
+    _clip_to_mbtiles_bounds,
     _parse_bounds,
     _product_units,
     _source_layer,
@@ -90,6 +91,20 @@ def test_recent_times_are_latest_four_when_sliced_like_fetcher():
         "20260420_150000",
         "20260420_160000",
         "20260420_170000",
+    ]
+
+
+def test_bounds_are_clipped_to_mbtiles_domain(monkeypatch):
+    monkeypatch.setattr(
+        "data.fetchers.mesoanalysis_fetcher._load_mbtiles_bounds",
+        lambda: (-104.0, 28.0, -88.0, 39.0),
+    )
+
+    assert _clip_to_mbtiles_bounds([-128.9484, 21.3019, -68.8479, 42.1204]) == [
+        -104.0,
+        28.0,
+        -88.0,
+        39.0,
     ]
 
 

@@ -78,8 +78,24 @@ PRODUCT_META = {
     "N0U": {
         "name":     "Base Velocity",
         "units":    "kt",
-        "vmin":     -100.0,
-        "vmax":     100.0,
+        "vmin":     -75.0,
+        "vmax":      75.0,
+        "colormap": "nws_vel",
+    },
+    # Super-res base velocity (alternate THREDDS product code — same format as N0U)
+    "NBU": {
+        "name":     "Base Velocity",
+        "units":    "kt",
+        "vmin":     -75.0,
+        "vmax":      75.0,
+        "colormap": "nws_vel",
+    },
+    # Legacy 16-level storm-relative velocity fallback (kt, ±64 kt range)
+    "N0S": {
+        "name":     "Storm Relative Velocity",
+        "units":    "kt",
+        "vmin":     -75.0,
+        "vmax":      75.0,
         "colormap": "nws_vel",
     },
     "N0C": {

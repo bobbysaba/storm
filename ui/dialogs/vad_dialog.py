@@ -438,6 +438,11 @@ class VADDialog(QDialog):
         u = profile.u_component()
         v = profile.v_component()
         heights_km = profile.heights_m / 1000.0
+        bound_kt = (
+            self.vad_set.hodograph_bound_kt()
+            if self.vad_set is not None
+            else 60.0
+        )
 
         # plot hodograph in layer-colored segments
         for color, z_lo, z_hi in _HODO_LAYERS:
@@ -478,7 +483,8 @@ class VADDialog(QDialog):
 
         # range rings
         import matplotlib.pyplot as plt
-        for ring_kt in [20, 40, 60, 80, 100]:
+        max_ring = int(np.ceil(bound_kt / 20.0) * 20.0)
+        for ring_kt in range(20, max_ring + 1, 20):
             circle = plt.Circle((0, 0), ring_kt, fill=False,
                                 color="#556080", linewidth=0.9, linestyle="--")
             ax.add_patch(circle)
@@ -490,9 +496,8 @@ class VADDialog(QDialog):
                                     zorder=10, alpha=0)
 
         # axis styling
-        max_wind = max(60, np.max(np.sqrt(u**2 + v**2)) + 15)
-        ax.set_xlim(-max_wind, max_wind)
-        ax.set_ylim(-max_wind, max_wind)
+        ax.set_xlim(-bound_kt, bound_kt)
+        ax.set_ylim(-bound_kt, bound_kt)
         ax.set_aspect("equal")
         ax.spines["left"].set_color(_BORDER)
         ax.spines["bottom"].set_color(_BORDER)

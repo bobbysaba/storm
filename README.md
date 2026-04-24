@@ -33,18 +33,19 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Drawing tools** — create fronts, custom-styled polylines, and custom-styled polygons on the map; synced over MQTT via DrawingSync
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
 - **Surface obs** — live station models from OK Mesonet, West Texas Mesonet, and user-selected ASOS/AWOS bounding boxes; OK/WTM poll every 5 minutes, ASOS reuses or redraws a selected bbox
+- **SFCOA mesoanalysis overlays** — NSSL SFCOA vector-tile contours with grouped thermodynamic, parcel, lapse-rate, shear, helicity, composite, upper-air, and wind products; step through recent valid times and overlay one or more variables on the map
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters (including 0–3 km CAPE), kinematics table, surface T/Td labels, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
 - **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — all modes selected exclusively through the launch dialog with passphrase authentication
 - **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD Level 2/3 radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
 - **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
-### What's New in 1.1.0
+### What's New in 1.2.0
 
-- ASOS/AWOS surface observations via user-drawn map bounding boxes
-- Clickable **new box** link in the surface status text to replace the saved ASOS bbox
-- Custom polyline/polygon drawing color and line style
-- Surface station freshness coloring based on observation valid time
+- SFCOA mesoanalysis overlays are available to all users without admin mode
+- SFCOA product buttons are grouped by meteorological category for quick scanning
+- Recent SFCOA valid times can be stepped with first/back/forward/latest controls
+- Multiple SFCOA variables can be displayed together as labeled vector contours
 
 ---
 
@@ -235,6 +236,7 @@ storm/
 │   │   ├── obs_sounding_fetcher.py  # Observed radiosonde soundings via IEM RAOB
 │   │   ├── clamps_sounding_fetcher.py  # NSSL CLAMPS DL truck soundings via THREDDS
 │   │   ├── surface_fetcher.py   # OK Mesonet / WTM / ASOS surface obs
+│   │   ├── sfcoa_overlay_fetcher.py # SFCOA mesoanalysis vector-tile overlays
 │   │   ├── routing_fetcher.py   # OSRM turn-by-turn routing + Nominatim geocoding
 │   │   └── vad_fetcher.py       # NEXRAD VAD fetch helpers
 │   ├── ingest/              # Local field-data ingest
@@ -281,6 +283,7 @@ storm/
 │   │   ├── radar_controls.py    # Radar site/product/playback drawer
 │   │   ├── routing_controls.py  # Turn-by-turn routing input / directions drawer
 │   │   ├── satellite_controls.py # Satellite mode/playback drawer
+│   │   ├── sfcoa_controls.py    # SFCOA mesoanalysis product drawer
 │   │   └── surface_controls.py  # Surface obs toggle drawer
 │   ├── dialogs/             # Modal and floating dialogs
 │   │   ├── annotation_dialog.py # Place / edit annotation dialogs
@@ -352,6 +355,7 @@ storm/
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
 - **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback. Archive mode supports Level 2 radar with full dual-pol products.
 - **Surface obs** — `SurfaceFetcher` (`data/fetchers/surface_fetcher.py`) polls OK Mesonet and West Texas Mesonet (WTM) every 5 minutes and fetches ASOS/AWOS observations from IEM for a user-drawn bounding box. Station model PNGs are rendered via MetPy/matplotlib, served through the in-process `storm://` scheme, and displayed as map markers via `SurfacePlotLayer` (`ui/layers/surface_plot_layer.py`).
+- **SFCOA overlays** — `SfcoaOverlayFetcher` (`data/fetchers/sfcoa_overlay_fetcher.py`) reads the NSSL SFCOA catalog, exposes grouped variables through `SfcoaControls`, and renders selected vector-tile contour products through the MapLibre bridge.
 - **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via NSSL THREDDS (`ClampsSoundingFetcher`) in `data/fetchers/`. Sounding UI lives in `ui/sounding/`.
 - **Routing** — `RoutingFetcher` (`data/fetchers/routing_fetcher.py`) geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.
 

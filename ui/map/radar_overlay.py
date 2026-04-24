@@ -96,83 +96,37 @@ def _make_nws_ref_cmap():
 
 
 def _make_nws_vel_cmap():
-    """GR2Analyst velocity colormap with very smooth interpolation.
-    
-    Based on GR2Analyst BV color table with densely interpolated stops
-    for ultra-smooth gradients while preserving exact colors at key breakpoints.
-    - Units: MPH, scale: 2.237, step: 10
-    - Range: -120 to +120 MPH (approximately -54 to +54 m/s or -105 to +105 kt)
-    """
-    # gr2analyst color table with densely interpolated intermediate values
+    """RadarScope-like base velocity palette with a neutral zero center."""
     stops = [
-        (-120.0, (0.000, 0.000, 1.000, 1.00)),  # blue (strong inbound) - GR2 key
-        (-105.0, (0.070, 0.235, 0.985, 1.00)),  # interpolated
-        (-90.0,  (0.139, 0.471, 0.971, 1.00)),  # interpolated
-        (-75.0,  (0.209, 0.706, 0.956, 1.00)),  # interpolated
-        (-65.0,  (0.244, 0.824, 0.949, 1.00)),  # interpolated
-        (-58.0,  (0.278, 0.941, 0.941, 1.00)),  # cyan - GR2 key
-        (-56.0,  (0.289, 0.948, 0.793, 1.00)),  # interpolated
-        (-54.0,  (0.300, 0.955, 0.645, 1.00)),  # interpolated
-        (-52.0,  (0.311, 0.962, 0.497, 1.00)),  # interpolated
-        (-50.0,  (0.322, 0.969, 0.349, 1.00)),  # light green - GR2 key
-        (-47.5,  (0.241, 0.977, 0.262, 1.00)),  # interpolated
-        (-45.0,  (0.161, 0.985, 0.175, 1.00)),  # interpolated
-        (-42.5,  (0.080, 0.992, 0.087, 1.00)),  # interpolated
-        (-40.0,  (0.000, 1.000, 0.000, 1.00)),  # green - GR2 key
-        (-35.0,  (0.021, 0.900, 0.021, 1.00)),  # interpolated
-        (-30.0,  (0.032, 0.800, 0.032, 1.00)),  # interpolated
-        (-25.0,  (0.042, 0.688, 0.042, 1.00)),  # interpolated
-        (-20.0,  (0.047, 0.588, 0.047, 1.00)),  # interpolated
-        (-15.0,  (0.055, 0.482, 0.055, 1.00)),  # interpolated
-        (-10.0,  (0.063, 0.376, 0.063, 1.00)),  # dark green - GR2 key
-        (-7.5,   (0.157, 0.408, 0.157, 1.00)),  # interpolated
-        (-5.0,   (0.251, 0.439, 0.251, 1.00)),  # interpolated
-        (-2.5,   (0.345, 0.471, 0.345, 1.00)),  # interpolated
-        (-0.01,  (0.439, 0.502, 0.439, 1.00)),  # gray-green - GR2 key
-        (0.0,    (0.565, 0.502, 0.565, 1.00)),  # gray near zero - GR2 key
-        (2.5,    (0.533, 0.376, 0.423, 1.00)),  # interpolated
-        (5.0,    (0.502, 0.251, 0.282, 1.00)),  # interpolated
-        (7.5,    (0.471, 0.125, 0.141, 1.00)),  # interpolated
-        (10.0,   (0.439, 0.000, 0.000, 1.00)),  # dark red - GR2 key
-        (15.0,   (0.549, 0.000, 0.000, 1.00)),  # interpolated
-        (20.0,   (0.659, 0.000, 0.000, 1.00)),  # interpolated
-        (25.0,   (0.769, 0.000, 0.000, 1.00)),  # interpolated
-        (30.0,   (0.878, 0.000, 0.000, 1.00)),  # interpolated
-        (35.0,   (0.939, 0.000, 0.000, 1.00)),  # interpolated
-        (40.0,   (1.000, 0.000, 0.000, 1.00)),  # red - GR2 key
-        (42.5,   (1.000, 0.054, 0.026, 1.00)),  # interpolated
-        (45.0,   (1.000, 0.108, 0.051, 1.00)),  # interpolated
-        (47.5,   (1.000, 0.162, 0.077, 1.00)),  # interpolated
-        (50.0,   (1.000, 0.216, 0.102, 1.00)),  # red-orange - GR2 key
-        (52.0,   (0.999, 0.313, 0.115, 1.00)),  # interpolated
-        (54.0,   (0.998, 0.410, 0.128, 1.00)),  # interpolated
-        (56.0,   (0.997, 0.507, 0.141, 1.00)),  # interpolated
-        (58.0,   (0.996, 0.604, 0.153, 1.00)),  # orange - GR2 key
-        (61.0,   (0.997, 0.703, 0.115, 1.00)),  # interpolated
-        (64.0,   (0.998, 0.802, 0.077, 1.00)),  # interpolated
-        (67.0,   (0.999, 0.901, 0.038, 1.00)),  # interpolated
-        (70.0,   (1.000, 1.000, 0.000, 1.00)),  # yellow - GR2 key
-        (77.5,   (0.950, 0.922, 0.046, 1.00)),  # interpolated
-        (85.0,   (0.900, 0.843, 0.092, 1.00)),  # interpolated
-        (92.5,   (0.850, 0.765, 0.137, 1.00)),  # interpolated
-        (100.0,  (0.800, 0.686, 0.183, 1.00)),  # interpolated
-        (107.5,  (0.753, 0.608, 0.206, 1.00)),  # interpolated
-        (110.0,  (0.722, 0.549, 0.225, 1.00)),  # interpolated
-        (115.0,  (0.682, 0.408, 0.246, 1.00)),  # interpolated
-        (120.0,  (0.643, 0.267, 0.267, 1.00)),  # brown (strong outbound) - GR2 key
+        (-75.0, (0.020, 0.078, 0.820, 1.00)),  # deep blue
+        (-60.0, (0.090, 0.365, 0.980, 1.00)),  # royal blue
+        (-45.0, (0.145, 0.765, 0.980, 1.00)),  # cyan
+        (-32.0, (0.000, 0.930, 0.780, 1.00)),  # aqua
+        (-22.0, (0.000, 0.820, 0.220, 1.00)),  # green
+        (-12.0, (0.000, 0.540, 0.000, 1.00)),  # dark green
+        (-6.0,  (0.220, 0.420, 0.220, 1.00)),  # muted green
+        (-2.0,  (0.420, 0.480, 0.420, 1.00)),  # near-zero inbound tint
+        (0.0,   (0.600, 0.600, 0.600, 1.00)),  # neutral gray
+        (2.0,   (0.480, 0.380, 0.380, 1.00)),  # near-zero outbound tint
+        (6.0,   (0.520, 0.140, 0.140, 1.00)),  # dark red
+        (12.0,  (0.730, 0.000, 0.000, 1.00)),  # red
+        (22.0,  (0.950, 0.000, 0.000, 1.00)),  # bright red
+        (32.0,  (1.000, 0.310, 0.000, 1.00)),  # orange-red
+        (45.0,  (1.000, 0.620, 0.000, 1.00)),  # orange
+        (60.0,  (1.000, 0.950, 0.000, 1.00)),  # yellow
+        (75.0,  (1.000, 0.980, 0.820, 1.00)),  # pale yellow
     ]
-    
-    # normalize to 0-1 range for colormap
-    vmin, vmax = -120.0, 120.0
+
+    vmin, vmax = -75.0, 75.0
     colors = [
         ((value - vmin) / (vmax - vmin), rgba)
         for value, rgba in stops
     ]
-    
+
     cmap = mcolors.LinearSegmentedColormap.from_list(
         "nws_vel",
         colors,
-        N=1024  # very high resolution for ultra-smooth gradients
+        N=1024
     )
     cmap.set_under(alpha=0)
     cmap.set_over(alpha=0)

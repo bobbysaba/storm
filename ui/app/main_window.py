@@ -29,6 +29,7 @@ from ui.controls.deploy_locs_controls import DeployLocsControls
 from ui.controls.satellite_controls import SatelliteControls
 from ui.controls.hrrr_controls import HrrrControls
 from ui.controls.mesoanalysis_controls import MesoanalysisControls
+from ui.controls.sfcoa_controls import SfcoaControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
@@ -56,6 +57,7 @@ from data.update_checker import UpdateWorker
 from data.fetchers.satellite_fetcher import SatelliteFetcher
 from data.fetchers.hrrr_overlay_fetcher import HrrrOverlayFetcher
 from data.fetchers.mesoanalysis_fetcher import MesoanalysisFetcher
+from data.fetchers.sfcoa_overlay_fetcher import SfcoaOverlayFetcher
 from data.fetchers.surface_fetcher import SurfaceFetcher
 from data.radar.radar_decoder import decode_nexrad_l3
 import config
@@ -202,6 +204,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._mesoanalysis_times_by_product: dict[str, list] = {}
         self._mesoanalysis_times = []
         self._mesoanalysis_overlay_cache: dict[tuple[str, str], dict] = {}
+        self._sfcoa_fetcher = None
+        self._sfcoa_current_metadata: dict | None = None
+        self._sfcoa_visible = False
+        self._sfcoa_active_products: set[str] = set()
+        self._sfcoa_times = []
+        self._sfcoa_variables_by_time: dict[str, list] = {}
+        self._sfcoa_overlay_cache: dict[tuple[str, str], dict] = {}
+        self._sfcoa_status_text = ""
 
         self.setWindowTitle(
             f"STORM  v{config.VERSION}"
@@ -988,7 +998,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_satellite.toggled.connect(self._start_layout_pulse)
         self.btn_satellite.toggled.connect(self._on_satellite_toggled)
 
-        if feature_flags.is_enabled("hrrr") or feature_flags.is_enabled("mesoanalysis"):
+        if (
+            feature_flags.is_enabled("hrrr")
+            or feature_flags.is_enabled("mesoanalysis")
+            or feature_flags.is_enabled("sfcoa")
+        ):
             self._add_separator(tb)
 
         if feature_flags.is_enabled("hrrr"):
@@ -1012,6 +1026,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.btn_mesoanalysis.toggled.connect(self._start_layout_pulse)
             self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
 
+        if feature_flags.is_enabled("sfcoa"):
+            self.btn_sfcoa = self._toolbar_toggle(
+                "SFCOA", "Show/hide SFCOA mesoanalysis contours", tb
+            )
+            self.sfcoa_controls = SfcoaControls(self._map_container)
+            self.sfcoa_controls.setObjectName("floatingToolbar")
+            self.btn_sfcoa.toggled.connect(self.sfcoa_controls.toggle_drawer)
+            self.btn_sfcoa.toggled.connect(self._start_layout_pulse)
+            self.btn_sfcoa.toggled.connect(self._on_sfcoa_drawer_toggled)
+            self.sfcoa_controls.content_resized.connect(self._start_layout_pulse)
+
+        if feature_flags.is_enabled("mesoanalysis") or feature_flags.is_enabled("sfcoa"):
             self._add_separator(tb)
 
         self.btn_surface = self._toolbar_toggle(
@@ -1393,6 +1419,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 _stack(self.hrrr_controls)
             if hasattr(self, "mesoanalysis_controls") and self.btn_mesoanalysis.isChecked():
                 _stack(self.mesoanalysis_controls)
+            if hasattr(self, "sfcoa_controls") and self.btn_sfcoa.isChecked():
+                _stack(self.sfcoa_controls)
             if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
                 _stack(self.surface_controls)
             if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
@@ -2050,27 +2078,68 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._mesoanalysis_fetcher.refresh_products()
         self.mesoanalysis_controls.set_status("Meso: products")
 
+    def _init_sfcoa(self):
+        if self._sfcoa_fetcher is not None:
+            return
+        self._sfcoa_fetcher = SfcoaOverlayFetcher(config.SFCOA_BASE_URL, parent=self)
+
+        self.sfcoa_controls.product_toggled.connect(self._on_sfcoa_product_toggled)
+        self.sfcoa_controls.frame_requested.connect(self._on_sfcoa_frame_requested)
+        self.sfcoa_controls.refresh_requested.connect(self._on_sfcoa_refresh_requested)
+        self.sfcoa_controls.visible_toggled.connect(self._on_sfcoa_visible_toggled)
+
+        self._sfcoa_fetcher.times_ready.connect(self._on_sfcoa_times_ready)
+        self._sfcoa_fetcher.variables_ready.connect(self._on_sfcoa_variables_ready)
+        self._sfcoa_fetcher.overlay_ready.connect(self._on_sfcoa_overlay_ready)
+        self._sfcoa_fetcher.fetch_error.connect(self._on_sfcoa_error)
+
+        pairs = [
+            (self.btn_sfcoa, self.btn_satellite),
+            (self.btn_sfcoa, self.btn_radar),
+            (self.btn_sfcoa, self.btn_hazards),
+            (self.btn_sfcoa, self.btn_surface),
+            (self.btn_sfcoa, self.btn_annotate),
+            (self.btn_satellite, self.btn_sfcoa),
+            (self.btn_radar, self.btn_sfcoa),
+            (self.btn_hazards, self.btn_sfcoa),
+            (self.btn_surface, self.btn_sfcoa),
+            (self.btn_annotate, self.btn_sfcoa),
+        ]
+        if hasattr(self, "btn_hrrr"):
+            pairs.extend([(self.btn_sfcoa, self.btn_hrrr), (self.btn_hrrr, self.btn_sfcoa)])
+        if hasattr(self, "btn_mesoanalysis"):
+            pairs.extend([
+                (self.btn_sfcoa, self.btn_mesoanalysis),
+                (self.btn_mesoanalysis, self.btn_sfcoa),
+            ])
+        for btn, other in pairs:
+            btn.toggled.connect(
+                lambda on, o=other: o.setChecked(False) if on else None
+            )
+
+        self._sfcoa_fetcher.refresh_catalog()
+        self.sfcoa_controls.set_status("SFCOA: times")
+
     def _init_surface_obs(self):
         self._surface_fetcher = SurfaceFetcher(parent=self)
         self._surface_layer = SurfacePlotLayer(self.map_widget)
         self._surface_station_ids: set[str] = set()
         self._surface_render_generation = 0
 
-        self.surface_controls.ok_toggled.connect(self._surface_fetcher.set_ok_enabled)
-        self.surface_controls.wtm_toggled.connect(self._surface_fetcher.set_wtm_enabled)
+        self.surface_controls.ok_toggled.connect(
+            lambda v: self._on_surface_source_toggled("ok", v)
+        )
+        self.surface_controls.wtm_toggled.connect(
+            lambda v: self._on_surface_source_toggled("wtm", v)
+        )
         self.surface_controls.asos_toggled.connect(self._on_asos_toggled)
         self.surface_controls.asos_bbox_requested.connect(self._start_new_asos_bbox)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
-        self.surface_controls.ok_toggled.connect(
-            lambda v: self._set_layer_active("ok_mesonet", v)
-        )
-        self.surface_controls.wtm_toggled.connect(
-            lambda v: self._set_layer_active("wtm", v)
-        )
         self.map_widget.asos_bbox_selected.connect(self._on_asos_bbox_selected)
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
+        self._surface_fetcher.diagnostics_updated.connect(self.surface_controls.set_diagnostics)
         self._surface_fetcher.status_updated.connect(self.status_msg_label.setText)
         self._surface_fetcher.error.connect(self._on_surface_error)
 
@@ -2080,6 +2149,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         ))
 
     def _on_surface_observations_updated(self, items: list[dict]):
+        items = [
+            item for item in items
+            if self._surface_source_enabled(item.get("source", ""))
+        ]
         self._surface_render_generation += 1
         render_generation = self._surface_render_generation
         incoming: set[str] = {item["id"] for item in items}
@@ -2116,7 +2189,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # critical: Ensure the signal is routed to the main thread
         signals.ready.connect(_push, Qt.ConnectionType.QueuedConnection)
-        signals.status.connect(self.surface_controls.set_status, Qt.ConnectionType.QueuedConnection)
         signals.status.connect(self.status_msg_label.setText, Qt.ConnectionType.QueuedConnection)
 
         def _render_worker():
@@ -2180,6 +2252,49 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         threading.Thread(target=_render_worker, daemon=True).start()
 
+    def _on_surface_source_toggled(self, source: str, enabled: bool) -> None:
+        if source == "ok":
+            self._surface_fetcher.set_ok_enabled(enabled)
+            self._set_layer_active("ok_mesonet", enabled)
+        elif source == "wtm":
+            self._surface_fetcher.set_wtm_enabled(enabled)
+            self._set_layer_active("wtm", enabled)
+        else:
+            return
+
+        if not enabled:
+            self._remove_surface_source_plots(source)
+
+    def _surface_source_enabled(self, source: str) -> bool:
+        if source == "ok":
+            return bool(getattr(self._surface_fetcher, "_ok_enabled", False))
+        if source == "wtm":
+            return bool(getattr(self._surface_fetcher, "_wtm_enabled", False))
+        if source == "asos":
+            return bool(
+                getattr(self._surface_fetcher, "_asos_enabled", False)
+                and getattr(self._surface_fetcher, "_asos_bbox", None) is not None
+            )
+        return False
+
+    def _remove_surface_source_plots(self, source: str) -> None:
+        self._surface_render_generation += 1
+        prefix = f"surface:{source}:"
+        ids = [
+            sid for sid in self._surface_station_ids
+            if sid.startswith(prefix)
+        ]
+        if not ids:
+            return
+
+        self._surface_station_ids = {
+            sid for sid in self._surface_station_ids
+            if not sid.startswith(prefix)
+        }
+        for sid in ids:
+            self._surface_layer._cache.pop(sid, None)
+        self.map_widget.remove_surface_station_plots_batch(ids)
+
     def _on_surface_error(self, msg: str):
         self.status_msg_label.setText(f"Surface: {msg}")
         if str(msg).startswith("ASOS:"):
@@ -2227,6 +2342,19 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         if checked and not self._mesoanalysis_current_metadata:
             self._mesoanalysis_fetcher.refresh_products()
+
+    def _on_sfcoa_drawer_toggled(self, checked: bool):
+        if checked and self._sfcoa_fetcher is None:
+            self._init_sfcoa()
+            return
+        if checked and not self._sfcoa_times and self._sfcoa_fetcher:
+            self._sfcoa_fetcher.refresh_catalog()
+        if checked:
+            self._sfcoa_visible = bool(self._sfcoa_active_products)
+            self._set_layer_active("sfcoa", self._sfcoa_visible)
+            if self._sfcoa_current_metadata and self._sfcoa_visible:
+                self._display_sfcoa_metadata(self._sfcoa_current_metadata)
+            self.map_widget.set_sfcoa_visible(self._sfcoa_visible)
 
     def _on_hrrr_runs_ready(self, runs):
         self.hrrr_controls.set_runs(runs)
@@ -2535,6 +2663,151 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_mesoanalysis_error(self, msg: str):
         self.mesoanalysis_controls.set_status(str(msg))
         self.status_msg_label.setText(str(msg))
+
+    def _on_sfcoa_times_ready(self, times):
+        self._sfcoa_times = list(times)
+        self.sfcoa_controls.set_times(self._sfcoa_times)
+        self.sfcoa_controls.set_status(f"SFCOA: {len(self._sfcoa_times)} times")
+        if self._sfcoa_times and self._sfcoa_fetcher:
+            self._sfcoa_fetcher.fetch_variables(self.sfcoa_controls.current_time())
+
+    def _on_sfcoa_variables_ready(self, time_id: str, variables):
+        self._sfcoa_variables_by_time[time_id] = list(variables)
+        if time_id != self.sfcoa_controls.current_time():
+            return
+        self.sfcoa_controls.set_products(variables)
+        self.sfcoa_controls.set_status(f"SFCOA {time_id[-2:]}Z: {len(variables)} vars")
+        if self._sfcoa_active_products:
+            self._fetch_current_sfcoa_frame()
+
+    def _on_sfcoa_product_toggled(self, product_id: str, enabled: bool):
+        if not product_id or self._sfcoa_fetcher is None:
+            return
+        time_id = self.sfcoa_controls.current_time()
+        if enabled:
+            self._sfcoa_active_products.add(product_id)
+            self._sfcoa_visible = True
+            self._set_layer_active("sfcoa", True)
+            self.map_widget.set_sfcoa_opacity(1.0)
+            if time_id:
+                self.sfcoa_controls.set_status(f"SFCOA: loading {product_id}")
+                self._fetch_sfcoa_product_time(product_id, time_id)
+        else:
+            self._sfcoa_active_products.discard(product_id)
+            self.map_widget.clear_sfcoa_overlay(product_id)
+            if not self._sfcoa_active_products:
+                self._sfcoa_visible = False
+                self._set_layer_active("sfcoa", False)
+                self.map_widget.set_sfcoa_visible(False)
+
+    def _on_sfcoa_frame_requested(self, idx: int):
+        self.sfcoa_controls.set_frame(idx)
+        time_id = self.sfcoa_controls.current_time()
+        if not time_id:
+            return
+        if time_id not in self._sfcoa_variables_by_time and self._sfcoa_fetcher:
+            self.sfcoa_controls.set_status(f"SFCOA: loading {time_id[-2:]}Z")
+            self._sfcoa_fetcher.fetch_variables(time_id)
+            return
+        variables = self._sfcoa_variables_by_time.get(time_id, [])
+        self.sfcoa_controls.set_products(variables)
+        self._fetch_current_sfcoa_frame()
+
+    def _fetch_current_sfcoa_frame(self):
+        time_id = self.sfcoa_controls.current_time()
+        if not time_id:
+            return
+        available = {
+            getattr(var, "variable_id", "")
+            for var in self._sfcoa_variables_by_time.get(time_id, [])
+        }
+        for product_id in sorted(self._sfcoa_active_products):
+            if available and product_id not in available:
+                continue
+            self._fetch_sfcoa_product_time(product_id, time_id)
+
+    def _fetch_sfcoa_product_time(self, product_id: str, time_id: str):
+        cached = self._sfcoa_overlay_cache.get((product_id, time_id))
+        if cached is not None:
+            self._on_sfcoa_overlay_ready(cached)
+            return
+        self.sfcoa_controls.set_status(f"SFCOA: loading {product_id} {time_id[-2:]}Z")
+        self._sfcoa_fetcher.fetch_overlay(product_id, time_id)
+
+    def _on_sfcoa_refresh_requested(self):
+        if self._sfcoa_fetcher is None:
+            return
+        self.sfcoa_controls.set_status("SFCOA: refreshing")
+        self._sfcoa_variables_by_time.clear()
+        self._sfcoa_fetcher.refresh_catalog()
+
+    def _on_sfcoa_visible_toggled(self, visible: bool):
+        self._sfcoa_visible = bool(visible)
+        self._set_layer_active("sfcoa", self._sfcoa_visible)
+        if self._sfcoa_visible:
+            self.map_widget.set_sfcoa_opacity(1.0)
+        self.map_widget.set_sfcoa_visible(
+            self._sfcoa_visible and bool(self._sfcoa_active_products)
+        )
+
+    def _on_sfcoa_overlay_ready(self, metadata: dict):
+        self._sfcoa_current_metadata = metadata
+        product_id = str(metadata.get("product") or metadata.get("variable") or "")
+        time_id = str(metadata.get("time") or self.sfcoa_controls.current_time())
+        if product_id and time_id:
+            self._sfcoa_overlay_cache[(product_id, time_id)] = metadata
+        summary = self._sfcoa_status_summary(metadata)
+        self._sfcoa_status_text = summary
+        self.sfcoa_controls.set_status(summary.replace("SFCOA ", "", 1))
+        self.status_msg_label.setText(summary)
+        if self._sfcoa_visible:
+            self._display_sfcoa_metadata(metadata)
+
+    def _sfcoa_status_summary(self, metadata: dict) -> str:
+        label = str(metadata.get("label") or metadata.get("product") or "SFCOA")
+        valid = _hrrr_time_label(metadata.get("valid_time"))
+        if valid:
+            return f"SFCOA {label} valid {valid}"
+        time_id = str(metadata.get("time") or "")
+        if time_id:
+            return f"SFCOA {label} {time_id[-2:]}Z"
+        return f"SFCOA {label}"
+
+    def _display_sfcoa_metadata(self, metadata: dict):
+        bounds = metadata.get("bounds") or metadata.get("bbox") or []
+        if len(bounds) != 4:
+            self._on_sfcoa_error("SFCOA metadata missing bounds")
+            return
+        tile_url = str(metadata.get("tile_url") or "")
+        source_layer = str(metadata.get("source_layer") or "")
+        if not tile_url or not source_layer:
+            self._on_sfcoa_error("SFCOA metadata missing tile source")
+            return
+        tile_key = str(metadata.get("tile_key") or "")
+        mbtiles_path = str(metadata.get("mbtiles_path") or "")
+        if tile_key and mbtiles_path and hasattr(self.map_widget, "register_sfcoa_mbtiles"):
+            self.map_widget.register_sfcoa_mbtiles(tile_key, mbtiles_path)
+        west, south, east, north = self._mesoanalysis_display_bounds(
+            [float(v) for v in bounds]
+        )
+        self.map_widget.set_sfcoa_overlay(
+            str(metadata.get("product") or metadata.get("variable") or ""),
+            tile_url,
+            source_layer,
+            west,
+            south,
+            east,
+            north,
+            int(metadata.get("minzoom") or 0),
+            int(metadata.get("maxzoom") or 8),
+            str(metadata.get("label_units") or metadata.get("units") or ""),
+        )
+        self.map_widget.set_sfcoa_visible(True)
+
+    def _on_sfcoa_error(self, msg: str):
+        text = f"SFCOA: {msg}"
+        self.sfcoa_controls.set_status(text)
+        self.status_msg_label.setText(text)
 
     def _on_satellite_mode_changed(self, mode: str):
         if self._archive:
@@ -3258,6 +3531,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.map_widget.set_asos_bbox_mode(True)
         elif not enabled:
             self.map_widget.set_asos_bbox_mode(False)
+            self._remove_surface_source_plots("asos")
 
     def _start_new_asos_bbox(self):
         """Let the user replace the saved ASOS bbox with a freshly drawn one."""
@@ -3281,13 +3555,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._surface_fetcher.set_asos_enabled(True)
             self._set_layer_active("asos", True)
         self.status_msg_label.setText("ASOS: draw a new bounding box")
-        self.surface_controls.set_status("ASOS: draw a new bounding box")
         self.map_widget.set_asos_bbox_mode(True)
 
     def _on_asos_bbox_selected(self, west: float, south: float, east: float, north: float):
         """Triggered when user finishes an ASOS bbox selection on the map."""
         self.status_msg_label.setText("Fetching ASOS observations…")
-        self.surface_controls.set_status("ASOS: fetching observations…")
         # exit drawing mode but keep the ASOS button checked (auto-refresh stays active)
         self.map_widget.set_asos_bbox_mode(False)
         self.map_widget.run_js(

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -16,6 +19,9 @@ log = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 STORM/1.0"
 SATSQUATCH_BASE_URL = "https://tiledata.satsquatch.com/tilesdata"
+_MBTILES_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "storm.mbtiles")
+)
 
 
 MESOANALYSIS_PRODUCTS: tuple[tuple[str, str], ...] = (
@@ -141,7 +147,8 @@ class MesoanalysisFetcher(QObject):
         try:
             product_base = urljoin(self._base_url + "/", f"{product_id}/{time_id}/")
             metadata = _fetch_json(urljoin(product_base, "metadata.json"))
-            bounds = _parse_bounds(metadata.get("bounds", ""))
+            source_bounds = _parse_bounds(metadata.get("bounds", ""))
+            bounds = _clip_to_mbtiles_bounds(source_bounds)
             source_layer = _source_layer(metadata, product_id, time_id)
             if len(bounds) != 4 or not source_layer:
                 raise RuntimeError("metadata missing bounds or vector layer")
@@ -155,6 +162,7 @@ class MesoanalysisFetcher(QObject):
                 "tile_url": tile_url,
                 "source_layer": source_layer,
                 "bounds": bounds,
+                "source_bounds": source_bounds,
                 "label_units": _product_units(product_id),
                 "minzoom": int(metadata.get("minzoom") or 0),
                 "maxzoom": int(metadata.get("maxzoom") or 8),
@@ -201,6 +209,39 @@ def _source_layer(metadata: dict, product_id: str, time_id: str) -> str:
     except Exception:
         pass
     return f"{product_id}_{time_id}geojson"
+
+
+@lru_cache(maxsize=1)
+def _load_mbtiles_bounds() -> tuple[float, float, float, float] | None:
+    try:
+        conn = sqlite3.connect(_MBTILES_PATH)
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE name='bounds'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row or not row[0]:
+            return None
+        west, south, east, north = (float(value) for value in str(row[0]).split(","))
+        return west, south, east, north
+    except Exception:
+        return None
+
+
+def _clip_to_mbtiles_bounds(bounds: list[float]) -> list[float]:
+    if len(bounds) != 4:
+        return bounds
+    mbtiles_bounds = _load_mbtiles_bounds()
+    if not mbtiles_bounds:
+        return bounds
+    west = max(float(bounds[0]), mbtiles_bounds[0])
+    south = max(float(bounds[1]), mbtiles_bounds[1])
+    east = min(float(bounds[2]), mbtiles_bounds[2])
+    north = min(float(bounds[3]), mbtiles_bounds[3])
+    if west >= east or south >= north:
+        return bounds
+    return [west, south, east, north]
 
 
 def _parse_time_id(time_id: str) -> datetime | None:

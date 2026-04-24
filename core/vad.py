@@ -1,4 +1,5 @@
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
@@ -300,3 +301,19 @@ class VADSet:
     def timestamps(self) -> list[datetime]:
         """List of all profile timestamps."""
         return [p.timestamp for p in self.profiles]
+
+    def hodograph_bound_kt(self, *, min_bound: float = 60.0, padding: float = 15.0) -> float:
+        """Return a stable hodograph half-width for the whole fetched set."""
+        max_radius = 0.0
+        for profile in self.profiles:
+            u = profile.u_component()
+            v = profile.v_component()
+            if len(u):
+                max_radius = max(max_radius, float(np.max(np.hypot(u, v))))
+
+            params = calculate_vad_parameters(profile)
+            if params.bunkers_spd is not None and np.isfinite(params.bunkers_spd):
+                max_radius = max(max_radius, float(params.bunkers_spd))
+
+        bound = max(float(min_bound), max_radius + float(padding))
+        return float(math.ceil(bound / 10.0) * 10.0)

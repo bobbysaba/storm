@@ -24,6 +24,12 @@ FEATURES = {
         default_enabled=True,
         admin_only=True,
     ),
+    "sfcoa": Feature(
+        key="sfcoa",
+        label="SFCOA overlays",
+        default_enabled=True,
+        admin_only=False,
+    ),
 }
 
 

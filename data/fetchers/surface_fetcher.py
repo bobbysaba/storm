@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+import config
 from core.observation import Observation
 
 log = logging.getLogger(__name__)
@@ -23,8 +24,10 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode    = ssl.CERT_NONE
 
+OK_API_URL      = f"{config.NSSL_API_ROOT}/ok_mesonet.json"
 OK_THREDDS_URL  = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/ok_mesonet.json"
 OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
+WTM_API_URL     = f"{config.NSSL_API_ROOT}/wtx_mesonet.json"
 WTM_THREDDS_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/wtx_mesonet.json"
 WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 
@@ -44,6 +47,7 @@ class SurfaceFetchError(RuntimeError):
 class SurfaceFetcher(QObject):
     observations_updated = pyqtSignal(object)
     status_updated = pyqtSignal(str)
+    diagnostics_updated = pyqtSignal(object)
     error = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -62,6 +66,7 @@ class SurfaceFetcher(QObject):
         self._asos_stations: dict[str, dict] | None = None   # stid → {lat, lon, name}
         self._asos_bbox: tuple[float, float, float, float] | None = None
         self._last_good: dict[str, tuple[list[dict], datetime]] = {}
+        self._source_diag: dict[str, dict[str, Any]] = {}
         self._headers = {
             "User-Agent": "Mozilla/5.0 STORM/1.0",
             "Accept": "application/json, text/html, application/xml, text/xml",
@@ -103,24 +108,30 @@ class SurfaceFetcher(QObject):
             parts: list[str] = []
 
             if self._ok_enabled:
+                ok_attempt = datetime.now(timezone.utc)
                 ok_obs, ok_stale, ok_note = self._fetch_source("OK", "ok", self._fetch_ok_mesonet)
                 payload.extend(ok_obs)
                 ok_time = max((i["obs"].timestamp for i in ok_obs), default=None)
                 stamp = ok_time.strftime("%H:%MZ") if ok_time else "?"
+                self._update_source_diag("ok", "OK", ok_attempt, ok_obs, ok_stale, ok_note)
                 parts.append(self._format_status_part("OK", len(ok_obs), stamp, ok_stale, ok_note))
 
             if self._wtm_enabled:
+                wtm_attempt = datetime.now(timezone.utc)
                 wtm_obs, wtm_stale, wtm_note = self._fetch_source("WTM", "wtm", self._fetch_wtm)
                 payload.extend(wtm_obs)
                 wtm_time = max((i["obs"].timestamp for i in wtm_obs), default=None)
                 stamp = wtm_time.strftime("%H:%MZ") if wtm_time else "?"
+                self._update_source_diag("wtm", "WTM", wtm_attempt, wtm_obs, wtm_stale, wtm_note)
                 parts.append(self._format_status_part("WTM", len(wtm_obs), stamp, wtm_stale, wtm_note))
 
             if self._asos_enabled and self._asos_bbox is not None:
+                asos_attempt = datetime.now(timezone.utc)
                 asos_obs, asos_stale, asos_note = self._fetch_source("ASOS", "asos", self._fetch_asos)
                 payload.extend(asos_obs)
                 asos_time = max((i["obs"].timestamp for i in asos_obs), default=None)
                 stamp = asos_time.strftime("%H:%MZ") if asos_time else "?"
+                self._update_source_diag("asos", "ASOS", asos_attempt, asos_obs, asos_stale, asos_note)
                 parts.append(self._format_status_part("ASOS", len(asos_obs), stamp, asos_stale, asos_note))
 
             payload = [item for item in payload if self._source_enabled(item.get("source", ""))]
@@ -131,6 +142,7 @@ class SurfaceFetcher(QObject):
             else:
                 self.status_updated.emit("  |  ".join(parts))
                 self.observations_updated.emit(payload)
+            self.diagnostics_updated.emit(self._diagnostics_snapshot())
         except Exception as exc:
             log.error("surface fetch failed: %s", exc, exc_info=True)
             self.error.emit(str(exc))
@@ -149,8 +161,9 @@ class SurfaceFetcher(QObject):
         if self._ok_meta is None:
             self._ok_meta = self._fetch_ok_metadata()
 
-        raw  = self._http_get(OK_THREDDS_URL, ssl_ctx=_SSL_CTX)
-        data = self._json_from_bytes(raw, "OK Mesonet data", OK_THREDDS_URL)
+        url, ssl_ctx, headers = self._ok_source_request()
+        raw  = self._http_get(url, ssl_ctx=ssl_ctx, headers=headers)
+        data = self._json_from_bytes(raw, "OK Mesonet data", url)
         obs_time = self._parse_iso_utc(data.get("time"))
         obs_data = data.get("data", {})
 
@@ -184,7 +197,7 @@ class SurfaceFetcher(QObject):
             })
 
         if not observations:
-            raise RuntimeError("OK Mesonet THREDDS data returned no station rows")
+            raise RuntimeError("OK Mesonet data returned no station rows")
 
         return observations
 
@@ -210,8 +223,9 @@ class SurfaceFetcher(QObject):
         if self._wtm_meta is None:
             self._wtm_meta = self._fetch_wtm_metadata()
 
-        raw  = self._http_get(WTM_THREDDS_URL, ssl_ctx=_SSL_CTX)
-        data = self._json_from_bytes(raw, "WTM data", WTM_THREDDS_URL)
+        url, ssl_ctx, headers = self._wtm_source_request()
+        raw  = self._http_get(url, ssl_ctx=ssl_ctx, headers=headers)
+        data = self._json_from_bytes(raw, "WTM data", url)
         observations: list[dict] = []
 
         for row in data.get("results", []):
@@ -263,8 +277,6 @@ class SurfaceFetcher(QObject):
                 # reuse the last drawn bbox immediately
                 self._update_timer()
                 self.fetch_now()
-            else:
-                self.status_updated.emit("ASOS: click and drag a box on the map to select domain")
         else:
             # disable fetching but KEEP the bbox so re-enabling reuses it
             self._update_timer()
@@ -421,8 +433,11 @@ class SurfaceFetcher(QObject):
         return observations
 
 
-    def _http_get(self, url: str, ssl_ctx=None) -> bytes:
-        req = Request(url, headers=self._headers)
+    def _http_get(self, url: str, ssl_ctx=None, headers: dict[str, str] | None = None) -> bytes:
+        req_headers = dict(self._headers)
+        if headers:
+            req_headers.update(headers)
+        req = Request(url, headers=req_headers)
         try:
             with urlopen(req, timeout=30, context=ssl_ctx) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
@@ -461,6 +476,56 @@ class SurfaceFetcher(QObject):
         if note == "error":
             return f"{label} error"
         return f"{label} {count} {stamp}"
+
+    def _update_source_diag(
+        self,
+        source_key: str,
+        label: str,
+        attempted_at: datetime,
+        observations: list[dict],
+        stale: bool,
+        note: str | None,
+    ) -> None:
+        valid_time = max((item["obs"].timestamp for item in observations), default=None)
+        diag = self._source_diag.get(source_key, {"label": label})
+        diag.update({
+            "label": label,
+            "last_attempt": attempted_at,
+            "valid_time": valid_time,
+            "count": len(observations),
+            "stale": stale,
+            "note": note,
+        })
+        if observations and not stale:
+            diag["last_success"] = attempted_at
+        self._source_diag[source_key] = diag
+
+    def _diagnostics_snapshot(self) -> dict[str, dict[str, Any]]:
+        active: dict[str, dict[str, Any]] = {}
+        for key, enabled in (
+            ("ok", self._ok_enabled),
+            ("wtm", self._wtm_enabled),
+            ("asos", self._asos_enabled and self._asos_bbox is not None),
+        ):
+            if enabled:
+                active[key] = dict(self._source_diag.get(key, {}))
+        return active
+
+    @staticmethod
+    def _nssl_api_headers() -> dict[str, str]:
+        return {"X-API-Key": config.NSSL_API_KEY} if config.NSSL_API_KEY else {}
+
+    @staticmethod
+    def _ok_source_request() -> tuple[str, ssl.SSLContext | None, dict[str, str] | None]:
+        if config.USE_NSSL_API_FOR_SURFACE:
+            return OK_API_URL, None, SurfaceFetcher._nssl_api_headers()
+        return OK_THREDDS_URL, _SSL_CTX, None
+
+    @staticmethod
+    def _wtm_source_request() -> tuple[str, ssl.SSLContext | None, dict[str, str] | None]:
+        if config.USE_NSSL_API_FOR_SURFACE:
+            return WTM_API_URL, None, SurfaceFetcher._nssl_api_headers()
+        return WTM_THREDDS_URL, _SSL_CTX, None
 
     def _json_from_bytes(self, raw: bytes, label: str, url: str) -> Any:
         text = raw.decode("utf-8", errors="replace").strip()

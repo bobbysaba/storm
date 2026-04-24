@@ -290,8 +290,8 @@ def _normalize_site(site: str) -> str:
 def _product_aliases(product: str) -> tuple[str, ...]:
     if product in ("N0Q", "N0B"):   # reflectivity family — try super-res first
         return ("N0B", "N0Q", "N0R")
-    if product == "N0U":   # velocity family
-        return ("N0U", "N0S")
+    if product == "N0U":   # velocity family — NBU is the super-res fallback when N0U is absent
+        return ("N0U", "NBU", "N0S")
     return (product,)
 
 

@@ -10,6 +10,7 @@ DEFAULT_LAYERS: list[str] = [
     # HRRR frontend disabled for now; backend/fetcher code remains available.
     # "hrrr",
     "mesoanalysis",
+    "sfcoa",
     "radar",
     "cwa",
     "spc_outlook",
@@ -32,6 +33,7 @@ LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
     # "hrrr":         "HRRR",
     "mesoanalysis": "Mesoanalysis",
+    "sfcoa":       "SFCOA",
     "radar":        "Radar",
     "cwa":          "CWA",
     "spc_outlook":  "SPC Outlook",
@@ -54,6 +56,7 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
     # "hrrr":         ["hrrr-layer"],
     "mesoanalysis": ["mesoanalysis-line", "mesoanalysis-label"],
+    "sfcoa":       ["sfcoa-fill", "sfcoa-line", "sfcoa-label"],
     "radar":        ["radar-overlay"],
     "cwa":          ["cwa-fill", "cwa-line", "cwa-label"],
     "spc_outlook":  ["spc-cat-fill", "spc-cat-line"],

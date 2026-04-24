@@ -7,6 +7,7 @@ import numpy as np
 from core.vad import (
     KNOT_TO_MS,
     VADProfile,
+    VADSet,
     _storm_relative_helicity,
     calculate_vad_parameters,
 )
@@ -59,3 +60,24 @@ def test_srh_uses_meters_per_second_components():
     srh = _storm_relative_helicity(prof, 0, 1000, 0.0, 0.0)
 
     np.testing.assert_allclose(srh, -(10 * KNOT_TO_MS) ** 2, rtol=1e-6)
+
+
+def test_hodograph_bound_uses_max_across_entire_vad_set():
+    early = VADProfile(
+        timestamp=datetime(2026, 4, 18, 17, 30, tzinfo=timezone.utc),
+        site="TLX",
+        heights_m=np.array([0, 1000, 3000, 6000], dtype=float),
+        wind_dir=np.array([270, 270, 270, 270], dtype=float),
+        wind_spd=np.array([20, 30, 40, 50], dtype=float),
+    )
+    late = VADProfile(
+        timestamp=datetime(2026, 4, 18, 18, 0, tzinfo=timezone.utc),
+        site="TLX",
+        heights_m=np.array([0, 1000, 3000, 6000], dtype=float),
+        wind_dir=np.array([270, 270, 270, 270], dtype=float),
+        wind_spd=np.array([30, 50, 70, 90], dtype=float),
+    )
+
+    vad_set = VADSet([late, early])
+
+    assert vad_set.hodograph_bound_kt() == 110.0

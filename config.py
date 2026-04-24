@@ -62,11 +62,32 @@ ORS_API_KEY = os.environ.get(
     "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0=",
 )
 
+# Shared NSSL API settings for authenticated replacements of legacy THREDDS
+# data endpoints.
+NSSL_API_ROOT = os.environ.get(
+    "NSSL_API_ROOT",
+    "http://varrock.winstorm.nssl",
+).rstrip("/")
+NSSL_API_KEY = os.environ.get(
+    "NSSL_API_KEY",
+    "bde39a474528766ea566fa21d7a0b89a8fb72a0391aa76a6bca6c26b88652aa0",
+)
+USE_NSSL_API_FOR_SURFACE = os.environ.get(
+    "USE_NSSL_API_FOR_SURFACE",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # HRRR overlay fileServer/THREDDS base URL. For local testing:
 #   python -m http.server 8080 --directory /Users/bobbysaba/Documents/hrrr_test
 HRRR_BASE_URL = os.environ.get(
     "HRRR_BASE_URL",
     "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/hrrr",
+)
+
+# SFCOA mesoanalysis vector-tile fileServer/THREDDS base URL.
+SFCOA_BASE_URL = os.environ.get(
+    "SFCOA_BASE_URL",
+    "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/sfcoa",
 )
 
 # home location fallback

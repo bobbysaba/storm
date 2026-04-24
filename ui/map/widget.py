@@ -24,14 +24,14 @@ if not SAFE_MAP_MODE:
 
 log = logging.getLogger(__name__)
 
-_HRRR_FILESERVER_PREFIX = "https://data.nssl.noaa.gov/thredds/fileServer/"
-_HRRR_TILE_PROXY_PREFIX = "storm://app/hrrrtiles/"
+_NSSL_FILESERVER_PREFIX = "https://data.nssl.noaa.gov/thredds/fileServer/"
+_NSSL_TILE_PROXY_PREFIX = "storm://app/hrrrtiles/"
 
 
-def _proxied_hrrr_tile_url(tile_url: str) -> str:
+def _proxied_nssl_tile_url(tile_url: str) -> str:
     url = str(tile_url or "")
-    if url.startswith(_HRRR_FILESERVER_PREFIX):
-        return _HRRR_TILE_PROXY_PREFIX + url[len(_HRRR_FILESERVER_PREFIX):]
+    if url.startswith(_NSSL_FILESERVER_PREFIX):
+        return _NSSL_TILE_PROXY_PREFIX + url[len(_NSSL_FILESERVER_PREFIX):]
     return url
 
 
@@ -214,7 +214,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         maxzoom: int = 8,
         label_units: str = "",
     ):
-        tile_url = _proxied_hrrr_tile_url(tile_url)
+        tile_url = _proxied_nssl_tile_url(tile_url)
         self.run_js(
             f"if(window.stormSetHrrrOverlay) "
             f"stormSetHrrrOverlay({json.dumps(tile_url)},"
@@ -253,6 +253,52 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"{json.dumps(source_layer)},{west},{south},{east},{north},"
             f"{int(minzoom)},{int(maxzoom)},"
             f"{json.dumps(str(label_units or ''))});"
+        )
+
+    def set_sfcoa_overlay(
+        self,
+        product_id: str,
+        tile_url: str,
+        source_layer: str,
+        west: float,
+        south: float,
+        east: float,
+        north: float,
+        minzoom: int = 0,
+        maxzoom: int = 8,
+        label_units: str = "",
+    ) -> None:
+        tile_url = _proxied_nssl_tile_url(tile_url)
+        self.run_js(
+            "if(window.stormSetSfcoaOverlay) "
+            f"stormSetSfcoaOverlay({json.dumps(product_id)},"
+            f"{json.dumps(tile_url)},"
+            f"{json.dumps(source_layer)},{west},{south},{east},{north},"
+            f"{int(minzoom)},{int(maxzoom)},"
+            f"{json.dumps(str(label_units or ''))});"
+        )
+
+    def register_sfcoa_mbtiles(self, tile_key: str, mbtiles_path: str) -> None:
+        handler = getattr(self, "_scheme_handler", None)
+        if handler is not None and hasattr(handler, "set_sfcoa_mbtiles"):
+            handler.set_sfcoa_mbtiles(tile_key, mbtiles_path)
+
+    def set_sfcoa_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSfcoaVisible) "
+            f"stormSetSfcoaVisible({'true' if visible else 'false'});"
+        )
+
+    def set_sfcoa_opacity(self, opacity: float) -> None:
+        self.run_js(
+            f"if(window.stormSetSfcoaOpacity) "
+            f"stormSetSfcoaOpacity({opacity:.3f});"
+        )
+
+    def clear_sfcoa_overlay(self, product_id: str = "") -> None:
+        self.run_js(
+            f"if(window.stormClearSfcoaOverlay) "
+            f"stormClearSfcoaOverlay({json.dumps(str(product_id or ''))});"
         )
 
     def set_mesoanalysis_visible(self, visible: bool) -> None:

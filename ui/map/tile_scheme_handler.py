@@ -67,6 +67,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         self._plots: dict[str, bytes] = {}
         self._hrrr_tile_cache_lock = threading.Lock()
         self._hrrr_tile_cache: OrderedDict[str, bytes] = OrderedDict()
+        self._sfcoa_mbtiles_lock = threading.Lock()
+        self._sfcoa_mbtiles: dict[str, str] = {}
 
     def set_radar_png(self, data: bytes) -> None:
         """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
@@ -84,6 +86,14 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             for sid in ids:
                 self._plots.pop(sid, None)
 
+    def set_sfcoa_mbtiles(self, key: str, path: str) -> None:
+        key = str(key or "").strip()
+        path = str(path or "").strip()
+        if not key or not path:
+            return
+        with self._sfcoa_mbtiles_lock:
+            self._sfcoa_mbtiles[key] = path
+
     def requestStarted(self, job: QWebEngineUrlRequestJob):
         path = job.requestUrl().path()
 
@@ -100,6 +110,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_radar_png(job)
         elif path.startswith("/hrrrtiles/"):
             self._serve_hrrr_tile(job, path[len("/hrrrtiles/"):])
+        elif path.startswith("/sfcoatiles/"):
+            self._serve_sfcoa_tile(job, path)
         elif path.startswith("/plots/"):
             self._serve_station_plot(job, path[len("/plots/"):])
         else:
@@ -169,6 +181,54 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         except Exception:
             pass   # not gzipped — use raw
 
+        self._reply(job, b"application/x-protobuf", tile_data)
+
+
+    def _serve_sfcoa_tile(self, job: QWebEngineUrlRequestJob, path: str):
+        # path: /sfcoatiles/key/z/x/y.pbf
+        parts = path.strip("/").split("/")
+        try:
+            key = unquote(parts[1])
+            z = int(parts[2])
+            x = int(parts[3])
+            y = int(parts[4].replace(".pbf", ""))
+        except (IndexError, ValueError):
+            job.fail(QWebEngineUrlRequestJob.Error.UrlInvalid)
+            return
+
+        with self._sfcoa_mbtiles_lock:
+            mbtiles_path = self._sfcoa_mbtiles.get(key)
+        if not mbtiles_path:
+            self._reply(job, b"application/x-protobuf", b"")
+            return
+
+        y_tms = (1 << z) - 1 - y
+        try:
+            conn = sqlite3.connect(mbtiles_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT tile_data FROM tiles "
+                    "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, y_tms),
+                )
+                row = cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("scheme handler: SFCOA tile DB error key=%s z=%d x=%d y=%d: %s", key, z, x, y, exc)
+            self._reply(job, b"application/x-protobuf", b"")
+            return
+
+        if row is None:
+            self._reply(job, b"application/x-protobuf", b"")
+            return
+
+        tile_data = bytes(row[0])
+        try:
+            tile_data = zlib.decompress(tile_data, 32 + zlib.MAX_WBITS)
+        except Exception:
+            pass
         self._reply(job, b"application/x-protobuf", tile_data)
 
 

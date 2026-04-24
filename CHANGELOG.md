@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.0] - 2026-04-24
+### Added
+- SFCOA mesoanalysis overlays are now available in normal user sessions, with valid-time stepping, refresh controls, grouped variable buttons, and MapLibre vector-tile rendering.
+
+### Changed
+- SFCOA no longer requires admin mode; the SFCOA toolbar drawer appears alongside the other standard map layers.
+
+---
+
 ## [1.1.0] - 2026-04-16
 ### Added
 - ASOS/AWOS surface observations — draw a map bounding box to fetch IEM ASOS current observations, then render them as full station plots alongside OK Mesonet and West Texas Mesonet data
