@@ -2707,7 +2707,7 @@
           img.onerror = function() {
             done();
           };
-          img.src = 'storm://app/plots/' + encodeURIComponent(d.id) + '.png';
+          img.src = 'storm://app/plots/' + encodeURIComponent(d.id) + '.png?v=' + d.generation;
         })(item);
       }
     }

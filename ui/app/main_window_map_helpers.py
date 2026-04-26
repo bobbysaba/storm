@@ -128,6 +128,20 @@ class MainWindowMapHelpersMixin:
             self._clock_layout_synced = True
 
 
+    # Symbol layers from the base map style (place names, road labels) that
+    # must always render above any user-reorderable data layer. Listed
+    # bottom→top in their original style order so the final z-order matches
+    # the static stylesheet after we promote them.
+    _ALWAYS_ON_TOP_LAYERS: tuple[str, ...] = (
+        "road-label-motorway",
+        "road-label-primary",
+        "road-label-tertiary",
+        "road-label-minor",
+        "state-label",
+        "place-city",
+        "place-village",
+    )
+
     def _apply_layer_order(self, order: list[str]) -> None:
         """Reorder MapLibre layers to match the confirmed layer stack (bottom → top)."""
         # walk bottom→top.  For each group, move every layer in the group
@@ -148,6 +162,12 @@ class MainWindowMapHelpersMixin:
                     break
             for lid in ml_ids:
                 self.map_widget.move_layer_before(lid, before)
+
+        # Promote place-name / road-label symbol layers to the very top so
+        # data layers (radar, satellite, etc.) can never bury them, regardless
+        # of the user's chosen order.
+        for lid in self._ALWAYS_ON_TOP_LAYERS:
+            self.map_widget.move_layer_before(lid, None)
 
     def _set_layer_active(self, key: str, active: bool) -> None:
         """Notify the layer pill that a layer's visibility changed."""

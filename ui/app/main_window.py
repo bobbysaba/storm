@@ -1406,7 +1406,21 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if hasattr(self, "radar_controls") and self.btn_radar.isChecked():
                 _stack(self.radar_controls)
             if hasattr(self, "vehicle_panel") and self.vehicle_panel.isVisible():
-                _stack(self.vehicle_panel)
+                # apply a session-scoped size watermark so the panel only ever
+                # grows while open — eliminates the constant resize churn when
+                # vehicles stream in/out. resets when the toolbar toggle hides it.
+                vp = self.vehicle_panel
+                if vp.layout() is not None:
+                    vp.layout().activate()
+                vp.adjustSize()
+                wm_w, wm_h = self._vehicle_panel_size_watermark
+                w = max(vp.width(), wm_w)
+                h = max(vp.height(), wm_h)
+                self._vehicle_panel_size_watermark = (w, h)
+                x = max(0, (r.width() - w) // 2)
+                vp.setGeometry(x, _stack_y, w, h)
+                vp.raise_()
+                _stack_y += h + 6
             if hasattr(self, "vehicle_detail_panel") and self.vehicle_detail_panel.isVisible():
                 _stack(self.vehicle_detail_panel)
             if hasattr(self, "deploy_locs_controls") and self.btn_prev_locs.isChecked():
@@ -1705,11 +1719,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _init_vehicle_panel(self):
         self.vehicle_panel = QWidget(self._map_container)
         self.vehicle_panel.setObjectName("vehiclePill")
-        self.vehicle_panel.setFixedWidth(VEHICLE_PANEL_WIDTH)
+        self.vehicle_panel.setMinimumWidth(VEHICLE_PANEL_WIDTH)
         self.vehicle_panel.setSizePolicy(
-            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
         )
+        # session-scoped size watermark — panel never shrinks while open;
+        # resets to (0, 0) when the toolbar toggle hides it.
+        self._vehicle_panel_size_watermark = (0, 0)
         layout = QVBoxLayout(self.vehicle_panel)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(6)
@@ -1746,9 +1763,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self._vehicle_rows_widget = QWidget()
         self._vehicle_rows_widget.setObjectName("vehicleRowsContainer")
-        self._vehicle_rows_layout = QVBoxLayout(self._vehicle_rows_widget)
+        # icon groups are columns laid out horizontally
+        self._vehicle_rows_layout = QHBoxLayout(self._vehicle_rows_widget)
         self._vehicle_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._vehicle_rows_layout.setSpacing(0)
+        self._vehicle_rows_layout.setSpacing(14)
+        self._vehicle_rows_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._vehicle_rows_widget.setVisible(False)
         layout.addWidget(self._vehicle_rows_widget)
 
@@ -1757,6 +1776,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # start hidden — opened via toolbar toggle
         self.vehicle_panel.hide()
         self.btn_vehicles.toggled.connect(self.vehicle_panel.setVisible)
+        self.btn_vehicles.toggled.connect(self._on_vehicle_panel_toggled)
         self.btn_vehicles.toggled.connect(self._start_layout_pulse)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
         self.btn_prev_locs.toggled.connect(self._apply_deploy_locs_filter_on_show)
@@ -5150,6 +5170,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return 2
         return 3
 
+    def _on_vehicle_panel_toggled(self, checked: bool) -> None:
+        """Reset the size watermark when the panel is hidden so the next
+        open starts fresh and re-grows from current content."""
+        if not checked:
+            self._vehicle_panel_size_watermark = (0, 0)
+
     def _refresh_vehicle_panel(self):
         if not hasattr(self, "_vehicle_rows_layout"):
             return
@@ -5164,9 +5190,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 self._vehicle_rows_widget.setVisible(False)
                 if hasattr(self, "_vehicle_placeholder"):
                     self._vehicle_placeholder.setVisible(True)
+                self._vehicle_rows_layout.invalidate()
+                self.vehicle_panel.layout().invalidate()
+                rebuilt_rows = True
                 return
 
             self._vehicle_rows_widget.setVisible(True)
+            if hasattr(self, "_vehicle_placeholder"):
+                self._vehicle_placeholder.setVisible(False)
 
             # 1. group vehicles by their icon_type
             grouped_vehicles = {}
@@ -5174,13 +5205,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 icon = v.icon_type if v.icon_type else "unknown"
                 grouped_vehicles.setdefault(icon, []).append(v)
 
-            # 2. sort vehicles within each group by ob status color (green → yellow → orange → red)
+            # 2. sort vehicles within each group by ob status color
             for icon in grouped_vehicles:
                 grouped_vehicles[icon].sort(key=self._obs_status_sort_key)
 
-            # 3. stack icon groups vertically so the pill width stays stable.
+            # 3. lay icon groups out as side-by-side columns
             for icon, vehicles in sorted(grouped_vehicles.items()):
                 col_widget = QWidget()
+                col_widget.setMinimumWidth(180)
                 col_layout = QVBoxLayout(col_widget)
                 col_layout.setContentsMargins(0, 0, 0, 0)
                 col_layout.setSpacing(0)
@@ -5195,14 +5227,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
                 self._vehicle_rows_layout.addWidget(col_widget)
 
-            # activate geometry so sizeHint is correct before re-enabling paint.
-            self.vehicle_panel.layout().activate()
-            self._vehicle_rows_layout.activate()
+            # invalidate cached size hints so the panel reflects the rebuild
+            self._vehicle_rows_layout.invalidate()
+            self.vehicle_panel.layout().invalidate()
+            self._vehicle_rows_widget.updateGeometry()
+            self.vehicle_panel.updateGeometry()
             rebuilt_rows = True
         finally:
+            # re-enable updates BEFORE _layout_overlays so adjustSize() reads
+            # fresh size hints, not the stale ones cached during the rebuild.
+            self.vehicle_panel.setUpdatesEnabled(True)
             if rebuilt_rows:
                 self._layout_overlays()
-            self.vehicle_panel.setUpdatesEnabled(True)
 
     def _make_vehicle_row(self, v) -> QWidget:
         obs = v.latest_obs
