@@ -1177,7 +1177,7 @@ Storm motion is displayed as `RM  dir°/spd kt` and `LM  dir°/spd kt` in the ho
 | LR 0–3 km | 0–3 km AGL lapse rate (°C/km) |
 | SFC θe | Surface equivalent potential temperature (K) |
 | PW | Precipitable water (mm) |
-| Conv Temp | Convective temperature — surface temperature required for convection initiation (°C) |
+| Conv Temp | Convective temperature — surface temperature required for convection initiation (°F) |
 | STP | Significant Tornado Parameter |
 | SCP | Supercell Composite Parameter |
 | EHI | Energy-Helicity Index |

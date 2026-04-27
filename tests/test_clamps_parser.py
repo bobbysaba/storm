@@ -3,7 +3,12 @@
 import math
 from datetime import datetime, timezone
 
-from data.fetchers.clamps_sounding_fetcher import _parse_skewt, _FILENAME_RE, _format_label
+from data.fetchers.clamps_sounding_fetcher import (
+    _FILENAME_RE,
+    _format_label,
+    _parse_raw_launch_location,
+    _parse_skewt,
+)
 
 
 # minimal valid .skewT content
@@ -103,3 +108,22 @@ class TestFormatLabel:
     def test_format(self):
         dt = datetime(2026, 4, 6, 18, 30, tzinfo=timezone.utc)
         assert _format_label(dt) == "1830Z Apr 6"
+
+
+class TestParseRawLaunchLocation:
+    def test_location_header(self):
+        text = """\
+%TITLE%
+NSSL_LIDAR 010101/0000
+%LOCATION%
+    Release point latitude                       \t35.857?N
+    Release point longitude                      \t97.892?W
+    Balloon release date and time                \t2026-04-26T20:03:58
+
+%RAW%
+963.50, 341.68, 29.61, 18.13, 217.00, 5.60
+"""
+        assert _parse_raw_launch_location(text) == (35.857, -97.892)
+
+    def test_missing_location(self):
+        assert _parse_raw_launch_location("%TITLE%\n%RAW%\n") is None

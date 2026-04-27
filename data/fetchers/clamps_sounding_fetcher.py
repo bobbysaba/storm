@@ -29,14 +29,24 @@ _CATALOG_HTML = (
     "https://data.nssl.noaa.gov/thredds/catalog/"
     "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.b1/catalog.html"
 )
+_RAW_CATALOG_XML = (
+    "https://data.nssl.noaa.gov/thredds/catalog/"
+    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.a1/catalog.xml"
+)
 _FILESERVER_BASE = "https://data.nssl.noaa.gov/thredds/fileServer/"
 _THREDDS_NS      = "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
 _REQUEST_TIMEOUT = 20
 _LOOKBACK_HOURS  = 12
+_RAW_HEADER_BYTES = 4096
 
 _TEST_FILE_URL = None
 
 _FILENAME_RE = re.compile(r"upperair\.NSSL_Lidar_sonde\.(\d{12})\.skewT", re.IGNORECASE)
+_RAW_FILENAME_RE = re.compile(r"sharppyv2_(\d{8})_(\d{4})\.text", re.IGNORECASE)
+_LOCATION_RE = re.compile(
+    r"Release point (latitude|longitude)\s+([-+]?\d+(?:\.\d+)?)[^NSEW]*([NSEW])?",
+    re.IGNORECASE,
+)
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
 
@@ -52,10 +62,21 @@ class ClampsSoundingFetcher(QObject):
     sounding_ready = pyqtSignal(object)   # SoundingSet
     fetch_error    = pyqtSignal(str)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._busy = False
+        self._busy_lock = threading.Lock()
+
     def fetch(self):
         """Start background fetch of last 12 hours of CLAMPS soundings."""
+        with self._busy_lock:
+            if self._busy:
+                log.debug("CLAMPS sounding fetch skipped; request already in progress")
+                return False
+            self._busy = True
         threading.Thread(target=self._bg_fetch, daemon=True).start()
         log.debug("CLAMPS sounding fetch started")
+        return True
 
 
     def _bg_fetch(self):
@@ -70,6 +91,9 @@ class ClampsSoundingFetcher(QObject):
             msg = f"CLAMPS fetch error: {e}"
             log.exception(msg)
             self.fetch_error.emit(msg)
+        finally:
+            with self._busy_lock:
+                self._busy = False
 
 
 
@@ -128,11 +152,13 @@ def _fetch_sounding_set() -> SoundingSet:
         raise ValueError("No CLAMPS soundings found in the last 12 hours")
 
     candidates.sort(key=lambda x: x[0])
+    raw_paths = _raw_paths_by_time()
 
     soundings: list[Sounding] = []
     for idx, (file_time, url_path) in enumerate(candidates):
         try:
-            snd = _fetch_and_parse(url_path, file_time, idx)
+            raw_url_path = raw_paths.get(file_time)
+            snd = _fetch_and_parse(url_path, file_time, idx, raw_url_path)
             if snd is not None:
                 soundings.append(snd)
         except Exception as e:
@@ -147,10 +173,11 @@ def _fetch_sounding_set() -> SoundingSet:
         snd.label       = _format_label(snd.valid_time)
 
     surface_elev = float(soundings[0].height[0]) if soundings[0].height.size > 0 else 0.0
+    set_lat, set_lon = _representative_location(soundings)
 
     return SoundingSet(
-        lat          = 0.0,
-        lon          = 0.0,
+        lat          = set_lat,
+        lon          = set_lon,
         elevation    = surface_elev,
         fetch_time   = now_utc,
         soundings    = soundings,
@@ -160,12 +187,92 @@ def _fetch_sounding_set() -> SoundingSet:
     )
 
 
-def _fetch_and_parse(url_path: str, file_time: datetime, idx: int) -> "Sounding | None":
+def _fetch_and_parse(
+    url_path: str,
+    file_time: datetime,
+    idx: int,
+    raw_url_path: str | None = None,
+) -> "Sounding | None":
     url = _FILESERVER_BASE + url_path
     req = Request(url, headers=_HEADERS)
     with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
         text = resp.read().decode("utf-8", errors="replace")
-    return _parse_skewt(text, file_time, idx)
+    snd = _parse_skewt(text, file_time, idx)
+    if snd is not None and raw_url_path:
+        location = _fetch_raw_launch_location(raw_url_path)
+        if location is not None:
+            snd.lat, snd.lon = location
+    return snd
+
+
+def _raw_paths_by_time() -> dict[datetime, str]:
+    try:
+        req = Request(_RAW_CATALOG_XML, headers=_HEADERS)
+        with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+            xml_bytes = resp.read()
+        root = ET.fromstring(xml_bytes)
+    except Exception as e:
+        log.warning("Failed to fetch CLAMPS raw catalog: %s", e)
+        return {}
+
+    paths: dict[datetime, str] = {}
+    for ds in root.iter(f"{{{_THREDDS_NS}}}dataset"):
+        name = ds.get("name", "")
+        m = _RAW_FILENAME_RE.search(name)
+        if not m:
+            continue
+        try:
+            file_time = datetime.strptime(
+                f"{m.group(1)}{m.group(2)}", "%Y%m%d%H%M"
+            ).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        url_path = ds.get("urlPath") or ds.get("ID")
+        if url_path:
+            paths[file_time] = url_path
+    return paths
+
+
+def _fetch_raw_launch_location(raw_url_path: str) -> "tuple[float, float] | None":
+    url = _FILESERVER_BASE + raw_url_path
+    headers = {**_HEADERS, "Range": f"bytes=0-{_RAW_HEADER_BYTES - 1}"}
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+        text = resp.read(_RAW_HEADER_BYTES).decode("utf-8", errors="replace")
+    return _parse_raw_launch_location(text)
+
+
+def _parse_raw_launch_location(text: str) -> "tuple[float, float] | None":
+    lat = None
+    lon = None
+    for line in text.splitlines():
+        if line.strip() == "%RAW%":
+            break
+        m = _LOCATION_RE.search(line)
+        if not m:
+            continue
+        value = float(m.group(2))
+        hemi = (m.group(3) or "").upper()
+        if hemi in ("S", "W"):
+            value = -abs(value)
+        elif hemi in ("N", "E"):
+            value = abs(value)
+
+        if m.group(1).lower() == "latitude":
+            lat = value
+        else:
+            lon = value
+
+    if lat is None or lon is None:
+        return None
+    return lat, lon
+
+
+def _representative_location(soundings: list[Sounding]) -> tuple[float, float]:
+    for snd in reversed(soundings):
+        if snd.lat != 0.0 or snd.lon != 0.0:
+            return float(snd.lat), float(snd.lon)
+    return 0.0, 0.0
 
 
 def _parse_skewt(text: str, file_time: datetime, idx: int) -> "Sounding | None":

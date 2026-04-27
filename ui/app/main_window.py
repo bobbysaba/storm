@@ -1892,6 +1892,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._obs_sounding_fetcher  = ObsSoundingFetcher(self)
         self._clamps_sounding_fetcher = ClampsSoundingFetcher(self)
         self._sounding_dialog       = SoundingDialog(self)
+        self._nssl_sounding_refresh_timer = QTimer(self)
+        self._nssl_sounding_refresh_timer.setInterval(5 * 60 * 1000)
+        self._nssl_sounding_refresh_timer.timeout.connect(
+            self._refresh_nssl_sounding_if_visible
+        )
 
         self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
@@ -3602,9 +3607,27 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_sounding_ready(self, sset):
         self.status_msg_label.setText("")
         self._sounding_dialog.load(sset)
+        if sset.is_nssl and not self._archive:
+            self._nssl_sounding_refresh_timer.start()
+        elif hasattr(self, "_nssl_sounding_refresh_timer"):
+            self._nssl_sounding_refresh_timer.stop()
 
     def _on_sounding_error(self, msg: str):
         self.status_msg_label.setText(f"Sounding error: {msg}")
+
+    def _refresh_nssl_sounding_if_visible(self):
+        if self._archive:
+            self._nssl_sounding_refresh_timer.stop()
+            return
+        sset = getattr(self._sounding_dialog, "_sset", None)
+        if (
+            not self._sounding_dialog.isVisible()
+            or sset is None
+            or not sset.is_nssl
+        ):
+            self._nssl_sounding_refresh_timer.stop()
+            return
+        self._clamps_sounding_fetcher.fetch()
 
     def _on_vad_requested(self):
         """Open VAD wind profile hodograph dialog for the current radar site."""

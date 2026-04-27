@@ -25,8 +25,8 @@ from ui.export_tools import copy_widget_png, save_widget_png
 log = logging.getLogger(__name__)
 
 from ui.sounding.params import (
-    _SCALAR_PARAMS, _finite_float, _p_at_t, _thin_to_mandatory, _threshold_color,
-    _vt_cape_cin,
+    _SCALAR_PARAMS, _convective_temperature_f, _finite_float, _p_at_t,
+    _thin_to_mandatory, _threshold_color, _vt_cape_cin,
 )
 from ui.sounding.theme import (
     _ACCENT, _AX_BG, _BARB_CLR, _BORDER, _DEWP_CLR, _EIL_CLR, _EXPORT_BTN_QSS,
@@ -343,9 +343,17 @@ class SoundingDialog(QDialog):
 
         if self._sset.is_nssl:
             valid_str = snd.valid_time.strftime("%H%MZ %d %b %Y")
+            lat = snd.lat if (snd.lat != 0.0 or snd.lon != 0.0) else self._sset.lat
+            lon = snd.lon if (snd.lat != 0.0 or snd.lon != 0.0) else self._sset.lon
             self._header_line1.setText("NSSL  ·  DL Truck")
+            location = ""
+            if lat != 0.0 or lon != 0.0:
+                location = (
+                    f"  ·  {abs(lat):.3f}°{'N' if lat >= 0 else 'S'}  "
+                    f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}"
+                )
             self._header_line2.setText(
-                f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL"
+                f"Valid {valid_str}{location}  ·  {self._sset.elevation:.0f} m MSL"
             )
         elif self._sset.is_observed:
             valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
@@ -592,7 +600,7 @@ class SoundingDialog(QDialog):
         h.add_grid(increment=20, color=_BORDER, alpha=0.7, linewidth=0.6)
 
         for spd in (20, 40, 60):
-            ax.text(spd * 0.72, spd * 0.72, f"{spd}", fontsize=5,
+            ax.text(spd * -0.72, spd * -0.72, f"{spd}", fontsize=5,
                     color=_MUTED, ha="center", va="center", alpha=0.7)
 
         # use only levels that have actual wind observations — skipping T/Td-only
@@ -624,7 +632,7 @@ class SoundingDialog(QDialog):
                 seg_colors.append(clr)
 
             ax.add_collection(
-                LineCollection(segs, colors=seg_colors, linewidth=2.0, zorder=4)
+                LineCollection(segs, colors=seg_colors, linewidth=2.7, zorder=4)
             )
 
             # eil highlight
@@ -931,12 +939,7 @@ class SoundingDialog(QDialog):
 
         # temperature the surface must reach for parcels to initiate convection.
         try:
-            ccl_p, ccl_t = mpcalc.convective_condensation_level(pres, temp, dewp)
-            # poisson's equation: T_conv = T_ccl * (p_sfc / p_ccl)^(Rd/cp)
-            conv_t_K = float(ccl_t.to("K").m) * (
-                float(pres[0].to("hPa").m) / float(ccl_p.to("hPa").m)
-            ) ** 0.2854
-            _set("conv_t", conv_t_K - 273.15, fmt="{:.1f}")
+            _set("conv_t", _convective_temperature_f(pres, temp, dewp, hgt), fmt="{:.1f}")
         except Exception as e:
             log.debug("convective temperature failed: %s", e)
             _set("conv_t", None)

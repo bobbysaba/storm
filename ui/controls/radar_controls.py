@@ -24,6 +24,7 @@ NEXRAD_SITES = [
     ("KTWX", "Topeka, KS", 38.996, -96.232),
     ("KEAX", "Kansas City, MO", 38.810, -94.264),
     ("KSGF", "Springfield, MO", 37.235, -93.401),
+    ("KLSX", "St. Louis, MO", 38.699, -90.683),
     ("KLZK", "Little Rock, AR", 34.836, -92.262),
     ("KAMA", "Amarillo, TX", 35.233, -101.709),
     ("KFWS", "Dallas/Ft. Worth, TX", 32.573, -97.303),

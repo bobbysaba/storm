@@ -57,12 +57,32 @@ def _finite_float(value) -> float | None:
         return None
     return out if np.isfinite(out) else None
 
+
+def _convective_temperature_f(pres, temp, dewp, hgt=None) -> float | None:
+    """Return convective temperature in degF for MetPy API variants."""
+    try:
+        if hasattr(mpcalc, "ccl"):
+            if hgt is None:
+                _, _, conv_t = mpcalc.ccl(pres, temp, dewp)
+            else:
+                _, _, conv_t = mpcalc.ccl(pres, temp, dewp, height=hgt)
+            return _finite_float(conv_t.to("degF").m)
+
+        ccl_p, ccl_t = mpcalc.convective_condensation_level(pres, temp, dewp)
+        conv_t_k = float(ccl_t.to("K").m) * (
+            float(pres[0].to("hPa").m) / float(ccl_p.to("hPa").m)
+        ) ** 0.2854
+        conv_t_c = conv_t_k - 273.15
+        return _finite_float(conv_t_c * 9.0 / 5.0 + 32.0)
+    except Exception:
+        return None
+
 _SCALAR_PARAMS = [
     ("lr75",    "LR 700-500", "°C/km", _MUTED),
     ("lr03",    "LR 0-3 km",  "°C/km", _MUTED),
     ("sfc_the", "SFC θe",     "K",     "#ff9f43"),
     ("pw",      "PW",         "mm",    "#4ecdc4"),
-    ("conv_t",  "Conv Temp",  "°C",    "#ff9f43"),
+    ("conv_t",  "Conv Temp",  "°F",    "#ff9f43"),
     ("stp",     "STP",        "",      "#fd79a8"),
     ("scp",     "SCP",        "",      "#b39ddb"),
     ("ehi",     "EHI",        "",      "#fd79a8"),

@@ -2185,6 +2185,9 @@
 
       if (d.drawing_type === 'polyline' || d.drawing_type === 'polygon') {
         var lineColor = d.color || '#E8EAF0';
+        var labelColor = ['#E8EAF0', '#FFFFFF', '#FFF'].indexOf(String(lineColor).toUpperCase()) >= 0
+          ? '#E8EAF0'
+          : lineColor;
         var linePaint = {'line-color': lineColor, 'line-width': 2, 'line-opacity': 0.9};
         if (d.line_style === 'dashed') { linePaint['line-dasharray'] = [4, 3]; }
         else if (d.line_style === 'dotted') { linePaint['line-dasharray'] = [1.5, 2.5]; }
@@ -2233,7 +2236,7 @@
               'text-ignore-placement': false
             },
             paint: {
-              'text-color': '#E8EAF0',
+              'text-color': labelColor,
               'text-halo-color': 'rgba(10,10,15,0.9)',
               'text-halo-width': 2
             }
