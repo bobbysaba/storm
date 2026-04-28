@@ -30,6 +30,18 @@ FEATURES = {
         default_enabled=True,
         admin_only=False,
     ),
+    "nlcd": Feature(
+        key="nlcd",
+        label="NLCD land cover",
+        default_enabled=True,
+        admin_only=False,
+    ),
+    "satellite_basemap": Feature(
+        key="satellite_basemap",
+        label="Satellite basemap",
+        default_enabled=True,
+        admin_only=False,
+    ),
 }
 
 

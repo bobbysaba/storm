@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 
 
 DEFAULT_LAYERS: list[str] = [
+    "nlcd",
     "satellite",
     # HRRR frontend disabled for now; backend/fetcher code remains available.
     # "hrrr",
@@ -31,6 +32,7 @@ DEFAULT_LAYERS: list[str] = [
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
+    "nlcd":         "NLCD",
     # "hrrr":         "HRRR",
     "mesoanalysis": "Mesoanalysis",
     "sfcoa":       "SFCOA",
@@ -54,6 +56,7 @@ LAYER_LABELS: dict[str, str] = {
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
+    "nlcd":         ["nlcd-landcover"],
     # "hrrr":         ["hrrr-layer"],
     "mesoanalysis": ["mesoanalysis-line", "mesoanalysis-label"],
     "sfcoa":       ["sfcoa-fill", "sfcoa-line", "sfcoa-label"],

@@ -330,6 +330,10 @@
     window.stormSetHrrrVisible = _stormNoop;
     window.stormSetHrrrOpacity = _stormNoop;
     window.stormClearHrrrOverlay = _stormNoop;
+    window.stormSetNlcdVisible = _stormNoop;
+    window.stormSetNlcdOpacity = _stormNoop;
+    window.stormSetSatelliteBasemapVisible = _stormNoop;
+    window.stormSetSatelliteBasemapOpacity = _stormNoop;
     window.stormSetMesoSectors = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
@@ -401,12 +405,35 @@
           tiles: ["__TILE_URL__"],
           minzoom: 0,
           maxzoom: 14
+        },
+        "nlcd-tiles": {
+          type: "raster",
+          tiles: ["__STORM_BASE__/nlcdtiles/{z}/{x}/{y}.png"],
+          minzoom: 3,
+          maxzoom: 10,
+          bounds: [-116, 28, -82, 49],
+          tileSize: 256
+        },
+        "satellite-tiles": {
+          type: "raster",
+          tiles: ["__STORM_BASE__/satellitetiles/{z}/{x}/{y}.jpg"],
+          minzoom: 0,
+          maxzoom: 12,
+          bounds: [-116, 28, -82, 49],
+          tileSize: 256
         }
       },
       layers: [
         {
           id: "background", type: "background",
           paint: { "background-color": "#0D0D14" }
+        },
+
+        {
+          id: "satellite-basemap", type: "raster",
+          source: "satellite-tiles",
+          layout: { "visibility": "none" },
+          paint: { "raster-opacity": 1.0, "raster-resampling": "linear" }
         },
 
         {
@@ -459,6 +486,16 @@
         },
 
         {
+          id: "nlcd-landcover", type: "raster",
+          source: "nlcd-tiles",
+          layout: { "visibility": "none" },
+          paint: {
+            "raster-opacity": 0.55,
+            "raster-resampling": "nearest"
+          }
+        },
+
+        {
           id: "boundary-country", type: "line",
           source: "storm-tiles", "source-layer": "boundary",
           filter: ["==", ["get", "admin_level"], 2],
@@ -488,10 +525,10 @@
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["in", ["get", "surface"], ["literal",
             ["unpaved","dirt","gravel","compacted","fine_gravel","grass","ground","sand","earth"]]],
-          minzoom: 10,
+          minzoom: 9,
           paint: {
             "line-color": "#3A2E1A",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1.5],
+            "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.5, 14, 1.5],
             "line-dasharray": [3, 2]
           }
         },
@@ -501,10 +538,10 @@
           id: "road-track", type: "line",
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["==", ["get", "class"], "track"],
-          minzoom: 11,
+          minzoom: 10,
           paint: {
             "line-color": "#2E2416",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.5, 14, 1.2],
+            "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1.2],
             "line-dasharray": [2, 3]
           }
         },
@@ -514,7 +551,7 @@
           id: "road-path", type: "line",
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["==", ["get", "class"], "path"],
-          minzoom: 13,
+          minzoom: 12,
           paint: {
             "line-color": "#252520",
             "line-width": 0.75,
@@ -527,10 +564,10 @@
           id: "road-minor", type: "line",
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["in", ["get", "class"], ["literal", ["minor","service","residential"]]],
-          minzoom: 8,
+          minzoom: 7,
           paint: {
             "line-color": "#252530",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.3, 14, 2]
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.3, 14, 2]
           }
         },
 
@@ -539,10 +576,10 @@
           id: "road-secondary", type: "line",
           source: "storm-tiles", "source-layer": "transportation",
           filter: ["in", ["get", "class"], ["literal", ["secondary","tertiary"]]],
-          minzoom: 8,
+          minzoom: 7,
           paint: {
             "line-color": "#35354A",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.75, 14, 3]
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.75, 14, 3]
           }
         },
 
@@ -595,11 +632,11 @@
         {
           id: "road-hover-hit", type: "line",
           source: "storm-tiles", "source-layer": "transportation_name",
-          minzoom: 8,
+          minzoom: 3,
           paint: {
             "line-color": "#000000",
             "line-opacity": 0.01,
-            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 14, 14, 22]
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 14, 14, 22]
           }
         },
         // motorway + trunk: orange, bold, ref number preferred
@@ -607,9 +644,9 @@
           id: "road-label-motorway", type: "symbol",
           source: "storm-tiles", "source-layer": "transportation_name",
           filter: ["in", ["get", "class"], ["literal", ["motorway", "trunk"]]],
-          minzoom: 6,
+          minzoom: 4,
           layout: {
-            "text-field": ["coalesce", ["get", "ref"], ["get", "name:latin"], ""],
+            "text-field": ["coalesce", ["get", "ref"], ["get", "name:latin"], ["get", "name"], ["get", "name_en"], ""],
             "text-font": ["Noto Sans Bold"],
             "text-size": ["interpolate", ["linear"], ["zoom"], 7, 11, 14, 14],
             "symbol-placement": "line",
@@ -628,11 +665,11 @@
           id: "road-label-primary", type: "symbol",
           source: "storm-tiles", "source-layer": "transportation_name",
           filter: ["in", ["get", "class"], ["literal", ["primary", "secondary"]]],
-          minzoom: 8,
+          minzoom: 5,
           layout: {
-            "text-field": ["coalesce", ["get", "name:latin"], ["get", "ref"], ""],
+            "text-field": ["coalesce", ["get", "ref"], ["get", "route_ref"], ["get", "network_ref"], ["get", "name:latin"], ["get", "name"], ["get", "name_en"], ""],
             "text-font": ["Noto Sans Regular"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 14, 13],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 7, 11, 14, 13],
             "symbol-placement": "line",
             "text-max-angle": 30,
             "text-padding": 8,
@@ -644,14 +681,14 @@
             "text-halo-width": 1.5
           }
         },
-        // tertiary: backed by road-secondary lines visible at zoom 8
+        // tertiary: backed by road-secondary lines visible at zoom 7
         {
           id: "road-label-tertiary", type: "symbol",
           source: "storm-tiles", "source-layer": "transportation_name",
           filter: ["==", ["get", "class"], "tertiary"],
-          minzoom: 8,
+          minzoom: 6,
           layout: {
-            "text-field": ["get", "name:latin"],
+            "text-field": ["coalesce", ["get", "ref"], ["get", "route_ref"], ["get", "network_ref"], ["get", "name:latin"], ["get", "name"], ["get", "name_en"], ""],
             "text-font": ["Noto Sans Regular"],
             "text-size": 12,
             "symbol-placement": "line",
@@ -665,14 +702,14 @@
             "text-halo-width": 1.5
           }
         },
-        // minor / local: only when zoomed in (lines not visible before zoom 8)
+        // minor / local: only when zoomed in (lines not visible before zoom 7)
         {
           id: "road-label-minor", type: "symbol",
           source: "storm-tiles", "source-layer": "transportation_name",
-          filter: ["in", ["get", "class"], ["literal", ["minor", "residential", "service"]]],
-          minzoom: 8,
+          filter: ["in", ["get", "class"], ["literal", ["minor", "residential", "service", "unclassified"]]],
+          minzoom: 7,
           layout: {
-            "text-field": ["get", "name:latin"],
+            "text-field": ["coalesce", ["get", "ref"], ["get", "route_ref"], ["get", "network_ref"], ["get", "name:latin"], ["get", "name"], ["get", "name_en"], ""],
             "text-font": ["Noto Sans Regular"],
             "text-size": 12,
             "symbol-placement": "line",
@@ -713,11 +750,11 @@
           id: "place-city", type: "symbol",
           source: "storm-tiles", "source-layer": "place",
           filter: ["in", ["get", "class"], ["literal", ["city", "town"]]],
-          minzoom: 4,
+          minzoom: 3,
           layout: {
             "text-field": ["get", "name:latin"],
             "text-font": ["Noto Sans Bold"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 4, 10, 12, 16],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 3, 10, 12, 16],
             "text-anchor": "center",
             "text-max-width": 8,
             "text-padding": 4,
@@ -735,11 +772,11 @@
           id: "place-village", type: "symbol",
           source: "storm-tiles", "source-layer": "place",
           filter: ["in", ["get", "class"], ["literal", ["village", "hamlet", "suburb"]]],
-          minzoom: 5,
+          minzoom: 4,
           layout: {
             "text-field": ["get", "name:latin"],
             "text-font": ["Noto Sans Regular"],
-            "text-size": ["interpolate", ["linear"], ["zoom"], 5, 8, 14, 13],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 4, 8, 14, 13],
             "text-anchor": "center",
             "text-padding": 4,
             "text-allow-overlap": false,
@@ -1461,8 +1498,9 @@
       return '';
     }
 
-    var _ROAD_HOVER_MIN_ZOOM = 8;
+    var _ROAD_HOVER_MIN_ZOOM = 3;
     var _ROAD_HOVER_LAYERS = [
+      'road-hover-hit',
       'road-motorway', 'road-trunk', 'road-primary', 'road-secondary',
       'road-minor', 'road-unpaved', 'road-track', 'road-path'
     ];
@@ -1509,41 +1547,78 @@
     }
 
     function _roadHoverName(props) {
-      return props['name:latin'] || props.name || props.name_en ||
-             props.ref || props.route_ref || props.network_ref || '';
+      return props.ref || props.route_ref || props.network_ref ||
+             props['name:latin'] || props.name || props.name_en || '';
     }
 
-    function _roadHoverLabel(e) {
-      if (map.getZoom() < _ROAD_HOVER_MIN_ZOOM || _hoverSuppressedByMode()) return '';
+    function _roadHoverClass(props) {
+      return String(props.class || props.subclass || '').toLowerCase();
+    }
+
+    function _roadHoverLineLayers() {
+      return _ROAD_HOVER_LAYERS.filter(function(l) { return map.getLayer(l); });
+    }
+
+    function _roadHoverLineHit(e, pad) {
+      var lineLayers = _roadHoverLineLayers();
+      if (!lineLayers.length) return null;
+      var lineHits = map.queryRenderedFeatures(
+        [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
+        {layers: lineLayers}
+      );
+      var fallback = null;
+      for (var i = 0; i < lineHits.length; i++) {
+        var props = lineHits[i].properties || {};
+        var roadName = _roadHoverName(props);
+        var surfaceLabel = _roadHoverSurfaceLabel(
+          props,
+          lineHits[i].layer && lineHits[i].layer.id
+        );
+        var hit = {
+          name: roadName,
+          surface: surfaceLabel,
+          cls: _roadHoverClass(props)
+        };
+        if (roadName) return hit;
+        if (!fallback) fallback = hit;
+      }
+      return fallback;
+    }
+
+    function _roadHoverNameHit(e, preferredClass) {
       var nameLayers = _ROAD_NAME_HOVER_LAYERS.filter(function(l) { return map.getLayer(l); });
-      if (!nameLayers.length) return '';
-      try {
-        var namePad = 4;
+      if (!nameLayers.length) return null;
+      var pads = [6, 12, 20, 32];
+      var fallback = null;
+      for (var p = 0; p < pads.length; p++) {
+        var pad = pads[p];
         var nameHits = map.queryRenderedFeatures(
-          [[e.point.x - namePad, e.point.y - namePad], [e.point.x + namePad, e.point.y + namePad]],
+          [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]],
           {layers: nameLayers}
         );
         for (var i = 0; i < nameHits.length; i++) {
           var props = nameHits[i].properties || {};
           var roadName = _roadHoverName(props);
           if (!roadName) continue;
-          var lineLayers = _ROAD_HOVER_LAYERS.filter(function(l) { return map.getLayer(l); });
-          var lineHits = lineLayers.length
-            ? map.queryRenderedFeatures(
-                [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]],
-                {layers: lineLayers}
-              )
-            : [];
-          var surfaceLabel = '';
-          for (var j = 0; j < lineHits.length; j++) {
-            surfaceLabel = _roadHoverSurfaceLabel(
-              lineHits[j].properties || {},
-              lineHits[j].layer && lineHits[j].layer.id
-            );
-            if (surfaceLabel) break;
-          }
-          return surfaceLabel ? roadName + ' | ' + surfaceLabel : roadName;
+          var nameClass = _roadHoverClass(props);
+          var hit = {name: roadName, cls: nameClass};
+          if (preferredClass && nameClass === preferredClass) return hit;
+          if (!fallback) fallback = hit;
         }
+        if (fallback && !preferredClass) return fallback;
+      }
+      return fallback;
+    }
+
+    function _roadHoverLabel(e) {
+      if (map.getZoom() < _ROAD_HOVER_MIN_ZOOM || _hoverSuppressedByMode()) return '';
+      try {
+        var lineHit = _roadHoverLineHit(e, 8);
+        if (!lineHit) return '';
+        if (lineHit.name) return lineHit.surface ? lineHit.name + ' | ' + lineHit.surface : lineHit.name;
+
+        var nameHit = _roadHoverNameHit(e, lineHit.cls);
+        if (nameHit) return lineHit.surface ? nameHit.name + ' | ' + lineHit.surface : nameHit.name;
       } catch(_) {}
       return '';
     }
@@ -1595,6 +1670,7 @@
 
       var _htip = document.getElementById('hazard-tooltip');
       if (_htip) {
+        _nlcdHoverSeq++;
         var _hazardLayers = [
           'spc-cat-fill',
           'spc-tor-fill','spc-tor-sig-base',
@@ -1680,7 +1756,13 @@
             if (_roadLabel) {
               _showHoverTip(_htip, _roadLabel, e);
             } else {
-              _htip.style.display = 'none';
+              _nlcdHoverLabelAsync(e, function(_nlcdLabel) {
+                if (_nlcdLabel) {
+                  _showHoverTip(_htip, _nlcdLabel, e);
+                } else {
+                  _htip.style.display = 'none';
+                }
+              });
             }
           }
         }
@@ -1965,6 +2047,8 @@
       flooded:      {symbol:'~',       color:'#4A9EFF'},
       downed_lines: {symbol:'\u26A1',  color:'#FFD166'},
       debris:       {symbol:'!',       color:'#FF6B35'},
+      high_pressure:{symbol:'H',       color:'#4A9EFF', pressure:true},
+      low_pressure: {symbol:'L',       color:'#E53935', pressure:true},
     };
 
     window._stormAnnotations = {};
@@ -2023,7 +2107,19 @@
       }
       const cfg = _ANNO_TYPES[typeKey] || {symbol:'?', color:'#FF6B35'};
       const el = document.createElement('div');
-      if (cfg.supercell) {
+      if (cfg.pressure) {
+        el.style.cssText = [
+          'width:40px', 'height:40px',
+          'display:flex', 'align-items:center', 'justify-content:center',
+          'font-size:32px', 'line-height:1',
+          'font-weight:900', 'font-family:Arial, Helvetica, sans-serif',
+          'color:' + cfg.color,
+          '-webkit-text-stroke:1px rgba(255,255,255,0.85)',
+          'text-shadow:0 1px 3px rgba(0,0,0,0.75), 0 0 10px ' + cfg.color + '77',
+          'cursor:pointer', 'user-select:none',
+        ].join(';');
+        el.textContent = cfg.symbol;
+      } else if (cfg.supercell) {
         el.style.cssText = [
           'width:34px', 'height:34px',
           'display:flex', 'align-items:center', 'justify-content:center',
@@ -3186,6 +3282,164 @@
       if (map.getLayer(SAT_LYR))     map.setPaintProperty(SAT_LYR,     'raster-opacity', _satOpacity);
       if (map.getLayer(SAT_WMS_LYR)) map.setPaintProperty(SAT_WMS_LYR, 'raster-opacity', _satOpacity);
     };
+
+    var _satBasemapVisible = false;
+    var _satBasemapOpacity = 1.0;
+    var SAT_BASEMAP_LYR = 'satellite-basemap';
+    // vector fill layers hidden while satellite basemap is active
+    var _SAT_HIDE_LYRS = ['landcover', 'landuse'];
+
+    window.stormSetSatelliteBasemapVisible = function(visible) {
+      _satBasemapVisible = !!visible;
+      try {
+        if (map.getLayer(SAT_BASEMAP_LYR)) {
+          map.setLayoutProperty(SAT_BASEMAP_LYR, 'visibility', _satBasemapVisible ? 'visible' : 'none');
+        }
+        _SAT_HIDE_LYRS.forEach(function(lyr) {
+          if (map.getLayer(lyr)) {
+            map.setLayoutProperty(lyr, 'visibility', _satBasemapVisible ? 'none' : 'visible');
+          }
+        });
+      } catch(e) {
+        console.warn('[STORM] satellite basemap visibility warning:', e.message || e);
+      }
+    };
+
+    window.stormSetSatelliteBasemapOpacity = function(opacity) {
+      _satBasemapOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 1.0));
+      try {
+        if (map.getLayer(SAT_BASEMAP_LYR)) {
+          map.setPaintProperty(SAT_BASEMAP_LYR, 'raster-opacity', _satBasemapOpacity);
+        }
+      } catch(e) {
+        console.warn('[STORM] satellite basemap opacity warning:', e.message || e);
+      }
+    };
+
+    var _nlcdVisible = false;
+    var _nlcdOpacity = 0.55;
+    var NLCD_LYR = 'nlcd-landcover';
+    var _nlcdTileCache = {};
+    var _nlcdHoverSeq = 0;
+    var _nlcdClasses = {
+      '70,107,159': 'Open Water',
+      '209,222,248': 'Perennial Ice/Snow',
+      '222,197,197': 'Developed, Open Space',
+      '217,146,130': 'Developed, Low Intensity',
+      '235,0,0': 'Developed, Medium Intensity',
+      '171,0,0': 'Developed, High Intensity',
+      '179,172,159': 'Barren Land',
+      '104,171,95': 'Deciduous Forest',
+      '28,95,44': 'Evergreen Forest',
+      '181,197,143': 'Mixed Forest',
+      '204,184,121': 'Shrub/Scrub',
+      '223,223,194': 'Grassland/Herbaceous',
+      '220,217,57': 'Pasture/Hay',
+      '171,108,40': 'Cultivated Crops',
+      '184,217,235': 'Woody Wetlands',
+      '108,159,184': 'Emergent Herbaceous Wetlands'
+    };
+
+    window.stormSetNlcdVisible = function(visible) {
+      _nlcdVisible = !!visible;
+      _nlcdHoverSeq++;
+      try {
+        if (map.getLayer(NLCD_LYR)) {
+          map.setLayoutProperty(NLCD_LYR, 'visibility', _nlcdVisible ? 'visible' : 'none');
+        }
+      } catch(e) {
+        console.warn('[STORM] NLCD visibility warning:', e.message || e);
+      }
+    };
+
+    window.stormSetNlcdOpacity = function(opacity) {
+      _nlcdOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+      try {
+        if (map.getLayer(NLCD_LYR)) {
+          map.setPaintProperty(NLCD_LYR, 'raster-opacity', _nlcdOpacity);
+        }
+      } catch(e) {
+        console.warn('[STORM] NLCD opacity warning:', e.message || e);
+      }
+    };
+
+    function _nlcdTileCoords(lng, lat, z) {
+      var n = Math.pow(2, z);
+      var clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+      var latRad = clampedLat * Math.PI / 180;
+      var xFloat = (lng + 180) / 360 * n;
+      var yFloat = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+      var x = Math.floor(xFloat);
+      var y = Math.floor(yFloat);
+      return {
+        x: x,
+        y: y,
+        px: Math.max(0, Math.min(255, Math.floor((xFloat - x) * 256))),
+        py: Math.max(0, Math.min(255, Math.floor((yFloat - y) * 256)))
+      };
+    }
+
+    function _nlcdClassForColor(r, g, b, a) {
+      if (a < 10) return '';
+      var exact = _nlcdClasses[[r, g, b].join(',')];
+      if (exact) return exact;
+      var best = '', bestDist = 999999;
+      Object.keys(_nlcdClasses).forEach(function(key) {
+        var parts = key.split(',').map(Number);
+        var dr = r - parts[0], dg = g - parts[1], db = b - parts[2];
+        var dist = dr * dr + dg * dg + db * db;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = _nlcdClasses[key];
+        }
+      });
+      return bestDist <= 900 ? best : '';
+    }
+
+    function _loadNlcdTile(z, x, y) {
+      var key = z + '/' + x + '/' + y;
+      if (_nlcdTileCache[key]) return _nlcdTileCache[key];
+      _nlcdTileCache[key] = new Promise(function(resolve) {
+        var img = new Image();
+        img.onload = function() {
+          try {
+            var canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 256;
+            var ctx = canvas.getContext('2d', {willReadFrequently: true});
+            ctx.drawImage(img, 0, 0);
+            resolve(ctx);
+          } catch(_) {
+            resolve(null);
+          }
+        };
+        img.onerror = function() { resolve(null); };
+        img.src = '__STORM_BASE__/nlcdtiles/' + z + '/' + x + '/' + y + '.png';
+      });
+      return _nlcdTileCache[key];
+    }
+
+    function _nlcdHoverLabelAsync(e, done) {
+      if (!_nlcdVisible || _hoverSuppressedByMode()) {
+        done('');
+        return;
+      }
+      var seq = ++_nlcdHoverSeq;
+      var z = Math.max(3, Math.min(10, Math.floor(map.getZoom())));
+      var tc = _nlcdTileCoords(e.lngLat.lng, e.lngLat.lat, z);
+      _loadNlcdTile(z, tc.x, tc.y).then(function(ctx) {
+        if (seq !== _nlcdHoverSeq || !_nlcdVisible || !ctx) {
+          done('');
+          return;
+        }
+        try {
+          var pixel = ctx.getImageData(tc.px, tc.py, 1, 1).data;
+          done(_nlcdClassForColor(pixel[0], pixel[1], pixel[2], pixel[3]));
+        } catch(_) {
+          done('');
+        }
+      });
+    }
 
     function _formatContourUnits(units) {
       var u = String(units || '').trim();

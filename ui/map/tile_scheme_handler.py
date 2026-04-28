@@ -57,6 +57,12 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
     def __init__(self, mbtiles_path: str, static_path: str, html: str, parent=None):
         super().__init__(parent)
         self._mbtiles_path = mbtiles_path
+        self._nlcd_mbtiles_path = os.path.join(
+            os.path.dirname(mbtiles_path), "storm_nlcd.mbtiles"
+        )
+        self._satellite_mbtiles_path = os.path.join(
+            os.path.dirname(mbtiles_path), "satellite.mbtiles"
+        )
         self._static_path  = static_path
         self._html         = html.encode("utf-8")
         # thread-safe buffer for the latest radar overlay PNG.
@@ -106,6 +112,10 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_file(job, "fonts/" + path[len("/fonts/"):])
         elif path.startswith("/tiles/"):
             self._serve_tile(job, path)
+        elif path.startswith("/nlcdtiles/"):
+            self._serve_nlcd_tile(job, path)
+        elif path.startswith("/satellitetiles/"):
+            self._serve_satellite_tile(job, path)
         elif path.startswith("/radar/overlay.png"):
             self._serve_radar_png(job)
         elif path.startswith("/hrrrtiles/"):
@@ -182,6 +192,86 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             pass   # not gzipped — use raw
 
         self._reply(job, b"application/x-protobuf", tile_data)
+
+
+    def _serve_nlcd_tile(self, job: QWebEngineUrlRequestJob, path: str):
+        # path: /nlcdtiles/z/x/y.png
+        parts = path.strip("/").split("/")
+        try:
+            z = int(parts[1])
+            x = int(parts[2])
+            y = int(parts[3].replace(".png", ""))
+        except (IndexError, ValueError):
+            job.fail(QWebEngineUrlRequestJob.Error.UrlInvalid)
+            return
+
+        if not os.path.isfile(self._nlcd_mbtiles_path):
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+
+        y_tms = (1 << z) - 1 - y
+        try:
+            conn = sqlite3.connect(self._nlcd_mbtiles_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT tile_data FROM tiles "
+                    "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, y_tms),
+                )
+                row = cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("scheme handler: NLCD tile DB error z=%d x=%d y=%d: %s", z, x, y, exc)
+            job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+            return
+
+        if row is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+
+        self._reply(job, b"image/png", bytes(row[0]))
+
+
+    def _serve_satellite_tile(self, job: QWebEngineUrlRequestJob, path: str):
+        # path: /satellitetiles/z/x/y.jpg
+        parts = path.strip("/").split("/")
+        try:
+            z = int(parts[1])
+            x = int(parts[2])
+            y = int(parts[3].replace(".jpg", ""))
+        except (IndexError, ValueError):
+            job.fail(QWebEngineUrlRequestJob.Error.UrlInvalid)
+            return
+
+        if not os.path.isfile(self._satellite_mbtiles_path):
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+
+        y_tms = (1 << z) - 1 - y
+        try:
+            conn = sqlite3.connect(self._satellite_mbtiles_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT tile_data FROM tiles "
+                    "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                    (z, x, y_tms),
+                )
+                row = cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("scheme handler: satellite tile DB error z=%d x=%d y=%d: %s", z, x, y, exc)
+            job.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+            return
+
+        if row is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+
+        self._reply(job, b"image/jpeg", bytes(row[0]))
 
 
     def _serve_sfcoa_tile(self, job: QWebEngineUrlRequestJob, path: str):

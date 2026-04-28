@@ -8,14 +8,18 @@ def setup_function():
     rf.reset_flags()
 
 
-def test_admin_features_disabled_by_default():
+def test_admin_only_features_disabled_by_default():
     assert feature_flags.is_enabled("hrrr") is False
     assert feature_flags.is_enabled("mesoanalysis") is False
+    assert feature_flags.is_enabled("nlcd") is True
+    assert feature_flags.is_enabled("satellite_basemap") is True
     assert feature_flags.is_enabled("sfcoa") is True
 
 
-def test_admin_features_enabled_in_admin_mode():
+def test_all_features_enabled_in_admin_mode():
     rf.FLAGS.admin_mode = True
     assert feature_flags.is_enabled("hrrr") is True
     assert feature_flags.is_enabled("mesoanalysis") is True
+    assert feature_flags.is_enabled("nlcd") is True
+    assert feature_flags.is_enabled("satellite_basemap") is True
     assert feature_flags.is_enabled("sfcoa") is True

@@ -26,6 +26,7 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 ## Current Features
 
 - **Offline vector map** — OpenStreetMap tiles served entirely in-process via a custom `storm://` URL scheme; no internet required for the base map
+- **Optional offline base layers** — user-accessible MAP drawer toggles for NLCD land cover and USGS satellite basemap imagery when the optional MBTiles caches are present
 - **NEXRAD radar overlay** — fetches Level 3 super‑res reflectivity (N0B fallback to N0Q/N0R) and velocity from Unidata THREDDS (~50–300 KB per scan); re-projects polar data to lat/lon and renders as a transparent PNG overlay on the map; adjustable playback speed (0.5×–3×)
 - **Satellite overlay** — GOES‑East CONUS and MESO imagery with time‑step playback (backfills up to 10 recent frames on selection); adjustable playback speed (0.5×–3×)
 - **SPC/NWS hazards** — Day 1 outlook polygons, SPC watches/MDs, and NWS warnings with map tooltips + click‑through discussion text
@@ -40,12 +41,13 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD Level 2/3 radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
 - **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
-### What's New in 1.2.0
+### What's New in 1.3.0
 
-- SFCOA mesoanalysis overlays are available to all users without admin mode
-- SFCOA product buttons are grouped by meteorological category for quick scanning
-- Recent SFCOA valid times can be stepped with first/back/forward/latest controls
-- Multiple SFCOA variables can be displayed together as labeled vector contours
+- NLCD land-cover and USGS satellite-basemap options are available to all users when their optional MBTiles files are installed
+- MAP drawer now groups routing, measuring, land cover, and satellite basemap controls in one place
+- Land-cover controls include opacity adjustment, a compact NLCD legend, and map hover labels
+- Optional satellite-basemap cache can be built with `scripts/make_satellite_mbtiles.py`
+- High/low pressure annotations and improved low-zoom road labels/hover readouts are included
 
 ---
 
@@ -129,9 +131,11 @@ The MBTiles file is too large for git and is hosted separately.
 
 **[Download tiles/ folder (Google Drive)](https://drive.google.com/drive/folders/1q4DJ-mg94tpDWHLEkQ_50oQ3uauQ77it?usp=sharing)**
 
-Download the file and place it in the `tiles/` folder so the structure is:
+Download the files and place them in the `tiles/` folder so the structure is, for example:
 ```
 tiles/storm.mbtiles
+tiles/storm_nlcd.mbtiles     # optional NLCD land-cover overlay
+tiles/satellite.mbtiles      # optional USGS satellite basemap
 ```
 
 ### 4. Run
@@ -201,7 +205,8 @@ storm/
 │   ├── create_desktop_entry.sh  # Creates Linux desktop entry and launcher
 │   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
 │   ├── launch_storm.bat     # Activates conda env and launches STORM (Windows)
-│   └── launch_storm.vbs     # Silent launcher for Windows (no console window)
+│   ├── launch_storm.vbs     # Silent launcher for Windows (no console window)
+│   └── make_satellite_mbtiles.py # Builds optional USGS satellite basemap cache
 │
 ├── archive/                 # Archive (replay) mode — session config, clock, fetchers
 │   ├── session.py           # ArchiveSession dataclass — holds start time, radar station
@@ -279,6 +284,8 @@ storm/
 │   │   ├── archive_controls.py  # Archive playback controls bar
 │   │   ├── deploy_locs_controls.py # Deployment location filter drawer
 │   │   ├── hazard_controls.py   # SPC/NWS hazard toggle drawer
+│   │   ├── landcover_controls.py # NLCD opacity + legend drawer
+│   │   ├── map_controls.py      # MAP drawer for route/measure/base layers
 │   │   ├── mesoanalysis_controls.py # SPC mesoanalysis controls
 │   │   ├── radar_controls.py    # Radar site/product/playback drawer
 │   │   ├── routing_controls.py  # Turn-by-turn routing input / directions drawer
@@ -334,7 +341,9 @@ storm/
 │   └── test_vad.py
 │
 ├── tiles/
-│   └── storm.mbtiles        # NOT in git — download separately
+│   ├── storm.mbtiles        # NOT in git — download separately
+│   ├── storm_nlcd.mbtiles   # optional NLCD land-cover raster cache
+│   └── satellite.mbtiles    # optional USGS satellite raster cache
 │
 └── aws/                    # AWS IoT TLS credentials — NOT in git
     ├── storm.pem
@@ -347,7 +356,7 @@ storm/
 
 ## Architecture Notes
 
-- **Tile/asset serving** — `StormSchemeHandler` (`ui/map/tile_scheme_handler.py`) registers a custom `storm://` URL scheme that serves the map HTML, MapLibre assets, fonts, and MBTiles vector tiles entirely in-process — no Flask server, no TCP port required.
+- **Tile/asset serving** — `StormSchemeHandler` (`ui/map/tile_scheme_handler.py`) registers a custom `storm://` URL scheme that serves the map HTML, MapLibre assets, fonts, vector tiles, optional NLCD raster tiles, and optional satellite-basemap tiles entirely in-process — no Flask server, no TCP port required.
 - **Radar pipeline** — `RadarFetcher` (`data/fetchers/radar_fetcher.py`) polls Unidata THREDDS every 2 minutes for NEXRAD Level 3 files. On first fetch it backfills the last 6 scans per product (12 total — reflectivity and velocity). Archive mode supports Level 2 radar via `Level2RadarScan` with multiple elevation tilts and dual-pol products. Data flows: `RadarFetcher` → `decode_nexrad_l3()` (`data/radar/radar_decoder.py`) → `RadarScan` → `RadarOverlay` (`ui/map/radar_overlay.py`) → base64 PNG → MapLibre raster source.
 - **Map bridge** — `QWebChannel` connects Python and the MapLibre JS context through `MapBridge` (`ui/map/bridge.py`). Mouse moves, clicks, and feature interactions emit Qt signals. Python calls JS functions (`stormAddVehicle`, `stormAddStormCone`, `stormAddAnnotation`, etc.) via `page().runJavaScript()`.
 - **Data paths** — Track A: `ObsFileWatcher` (`data/ingest/obs_file_watcher.py`) reads FOFS instrument logger CSV. Track B: `GPSReader` (`data/ingest/gps_reader.py`) reads NMEA from serial port. Both update the live vehicle state and publish via `VehicleSync`.

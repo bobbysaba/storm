@@ -23,6 +23,12 @@ class TestAnnotationTypes:
             assert "symbol" in t
             assert "color" in t
 
+    def test_pressure_types_present(self):
+        assert ANNOTATION_TYPE_MAP["high_pressure"]["symbol"] == "H"
+        assert ANNOTATION_TYPE_MAP["high_pressure"]["color"] == "#4A9EFF"
+        assert ANNOTATION_TYPE_MAP["low_pressure"]["symbol"] == "L"
+        assert ANNOTATION_TYPE_MAP["low_pressure"]["color"] == "#E53935"
+
 
 class TestAnnotation:
     def test_new_factory(self):

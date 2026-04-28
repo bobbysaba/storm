@@ -319,6 +319,30 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"stormClearMesoanalysisOverlay({json.dumps(str(product_id or ''))});"
         )
 
+    def set_nlcd_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetNlcdVisible) "
+            f"stormSetNlcdVisible({'true' if visible else 'false'});"
+        )
+
+    def set_nlcd_opacity(self, opacity: float) -> None:
+        self.run_js(
+            f"if(window.stormSetNlcdOpacity) "
+            f"stormSetNlcdOpacity({opacity:.3f});"
+        )
+
+    def set_satellite_basemap_visible(self, visible: bool) -> None:
+        self.run_js(
+            f"if(window.stormSetSatelliteBasemapVisible) "
+            f"stormSetSatelliteBasemapVisible({'true' if visible else 'false'});"
+        )
+
+    def set_satellite_basemap_opacity(self, opacity: float) -> None:
+        self.run_js(
+            f"if(window.stormSetSatelliteBasemapOpacity) "
+            f"stormSetSatelliteBasemapOpacity({opacity:.3f});"
+        )
+
     def set_meso_sectors(self, sectors: dict):
         features = []
         for idx, bbox in sectors.items():

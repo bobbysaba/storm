@@ -86,6 +86,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#radarDrawer,
 #floatingToolbar QWidget#hazardDrawer,
 #floatingToolbar QWidget#satelliteDrawer,
+#floatingToolbar QWidget#mapDrawer,
+#floatingToolbar QWidget#landcoverDrawer,
 #floatingToolbar QWidget#mesoanalysisDrawer,
 #floatingToolbar QWidget#deployLocsDrawer,
 #floatingToolbar QWidget#routingDrawer,
@@ -101,6 +103,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#radarDrawer > QWidget,
 #floatingToolbar QWidget#hazardDrawer > QWidget,
 #floatingToolbar QWidget#satelliteDrawer > QWidget,
+#floatingToolbar QWidget#mapDrawer > QWidget,
+#floatingToolbar QWidget#landcoverDrawer > QWidget,
 #floatingToolbar QWidget#mesoanalysisDrawer > QWidget,
 #floatingToolbar QWidget#deployLocsDrawer > QWidget,
 #floatingToolbar QWidget#routingDrawer > QWidget,
@@ -220,6 +224,43 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#hazardDrawer QToolButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    border-color: #4A9EFF;
+    color: #4A9EFF;
+    font-weight: 600;
+}
+
+/* ── Map Drawer ───────────────────────────────────────── */
+#floatingToolbar QWidget#mapDrawer QToolButton,
+#floatingToolbar QToolButton[mapSubButton="true"],
+#floatingToolbar QWidget#satelliteDrawer QToolButton {
+    background: transparent;
+    background-color: transparent;
+    border: 1px solid #2E2E4E;
+    border-radius: 6px;
+    color: #B8BFCD;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    padding: 3px 8px;
+}
+
+#floatingToolbar QWidget#mapDrawer QToolButton:hover,
+#floatingToolbar QToolButton[mapSubButton="true"]:hover,
+#floatingToolbar QWidget#satelliteDrawer QToolButton:hover {
+    background: rgba(74, 158, 255, 0.08);
+    background-color: rgba(74, 158, 255, 0.08);
+    border-color: #4A9EFF;
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#mapDrawer QToolButton:checked,
+#floatingToolbar QWidget#mapDrawer QToolButton:pressed,
+#floatingToolbar QToolButton[mapSubButton="true"]:checked,
+#floatingToolbar QToolButton[mapSubButton="true"]:pressed,
+#floatingToolbar QWidget#satelliteDrawer QToolButton:checked,
+#floatingToolbar QWidget#satelliteDrawer QToolButton:pressed {
+    background: rgba(74, 158, 255, 0.18);
     background-color: rgba(74, 158, 255, 0.18);
     border-color: #4A9EFF;
     color: #4A9EFF;
@@ -692,12 +733,14 @@ QSlider::sub-page:horizontal {
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider,
-#floatingToolbar QWidget#satelliteDrawer QSlider {
+#floatingToolbar QWidget#satelliteDrawer QSlider,
+#floatingToolbar QWidget#landcoverDrawer QSlider {
     background: transparent;
 }
 
 #floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
-#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal {
+#floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal,
+#floatingToolbar QWidget#landcoverDrawer QSlider::groove:horizontal {
     background-color: rgba(184, 191, 205, 0.28);
     height: 2px;
     border-radius: 1px;

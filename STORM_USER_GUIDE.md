@@ -17,15 +17,16 @@
    - 6.4 [Soundings](#64-soundings)
    - 6.5 [Surface Obs](#65-surface-obs)
    - 6.6 [SFCOA Mesoanalysis](#66-sfcoa-mesoanalysis)
-   - 6.7 [Routing](#67-routing)
-   - 6.8 [Annotations](#68-annotations)
-   - 6.9 [Drawings](#69-drawings)
-   - 6.10 [Storm Motion Cone](#610-storm-motion-cone)
-   - 6.11 [Measurement Tool](#611-measurement-tool)
-   - 6.12 [Station Plots](#612-station-plots)
-   - 6.13 [Deployment Locations](#613-deployment-locations)
-   - 6.14 [Vehicle Panel](#614-vehicle-panel)
-   - 6.15 [Vehicle Timeseries](#615-vehicle-timeseries)
+   - 6.7 [Map Tools & Base Layers](#67-map-tools--base-layers)
+   - 6.8 [Routing](#68-routing)
+   - 6.9 [Annotations](#69-annotations)
+   - 6.10 [Drawings](#610-drawings)
+   - 6.11 [Storm Motion Cone](#611-storm-motion-cone)
+   - 6.12 [Measurement Tool](#612-measurement-tool)
+   - 6.13 [Station Plots](#613-station-plots)
+   - 6.14 [Deployment Locations](#614-deployment-locations)
+   - 6.15 [Vehicle Panel](#615-vehicle-panel)
+   - 6.16 [Vehicle Timeseries](#616-vehicle-timeseries)
 7. [Status Bar](#7-status-bar)
 8. [Archive Mode](#8-archive-mode)
 9. [Outlook Text Panel](#9-outlook-text-panel)
@@ -54,6 +55,7 @@ STORM is a standalone desktop application purpose-built for severe weather storm
 | UI Framework | PyQt6 (QMainWindow + QWebEngineView) |
 | Map Renderer | MapLibre GL JS (embedded in browser engine) |
 | Vector Tiles | Offline MBTiles served via custom `storm://` URL scheme |
+| Optional Base Layers | Offline NLCD and USGS satellite MBTiles |
 | Radar Decoding | MetPy + matplotlib (Level 3, Unidata THREDDS) |
 | Satellite Imagery | IEM WMS (GOES-East, GOES-West) |
 | SFCOA Mesoanalysis | NSSL SFCOA vector tiles |
@@ -80,6 +82,7 @@ python main.py
 - Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm` (created via `python setup.py` or `conda env create -f envs/storm.yml`)
 - The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately)
+- Optional offline base-layer MBTiles files: `storm_nlcd.mbtiles` for NLCD land cover and `satellite.mbtiles` for USGS imagery
 
 **Quick Setup:**
 ```bash
@@ -207,27 +210,30 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 | **Click a feature** | Open info popup (SPC outlook, watch, warning, annotation, etc.) |
 | **Right-click** | Finish current drawing or measurement |
 | **Hover over feature** | Show tooltip |
+| **Hover over road** | Show road name/reference and surface class when available |
 
 ### Map Layers (Render Order, bottom to top)
 
 1. Offline vector base map (terrain, streets, water bodies, labels)
-2. SPC categorical outlook polygons (MRGL / SLGHT / ENH / MDT / HIGH)
-3. SPC probabilistic outlook polygons (tornado / wind / hail probability shading + hatching)
-4. NWS watches (county-polygon outlines)
-5. SPC Mesoscale Discussions (polygon outline + numeric label)
-6. NWS warnings (storm-polygon fills, phenom-specific colors)
-7. GOES satellite imagery (optional, opacity-controlled)
-8. NEXRAD radar overlay (semi-transparent PNG raster)
-9. SFCOA mesoanalysis contours
-10. Surface obs station models (OK Mesonet, WTM, ASOS)
-11. Station plot icons (MetPy-style, at vehicle positions)
-12. Vehicle markers (colored dots + info popups)
-13. Annotations (road closure / construction / flooding / downed-lines / debris markers)
-14. Drawings (fronts, polylines, polygons)
-15. Storm motion cones
-16. Routing line (active route geometry)
-17. Measurement tool geometry
-18. Deployment location markers
+2. Optional USGS satellite basemap
+3. Optional NLCD land-cover raster
+4. SPC categorical outlook polygons (MRGL / SLGHT / ENH / MDT / HIGH)
+5. SPC probabilistic outlook polygons (tornado / wind / hail probability shading + hatching)
+6. NWS watches (county-polygon outlines)
+7. SPC Mesoscale Discussions (polygon outline + numeric label)
+8. NWS warnings (storm-polygon fills, phenom-specific colors)
+9. GOES satellite imagery (optional, opacity-controlled)
+10. NEXRAD radar overlay (semi-transparent PNG raster)
+11. SFCOA mesoanalysis contours
+12. Surface obs station models (OK Mesonet, WTM, ASOS)
+13. Station plot icons (MetPy-style, at vehicle positions)
+14. Vehicle markers (colored dots + info popups)
+15. Annotations (road closure / construction / flooding / downed-lines / debris markers)
+16. Drawings (fronts, polylines, polygons)
+17. Storm motion cones
+18. Routing line (active route geometry)
+19. Measurement tool geometry
+20. Deployment location markers
 
 ---
 
@@ -397,6 +403,8 @@ When you toggle a product on within the cache window, data displays instantly fr
 
 Clicking the button expands the satellite drawer.
 
+This controls live GOES weather satellite imagery. The offline USGS satellite basemap is separate and lives in the MAP drawer.
+
 #### Coverage Mode Selection
 
 | Button | Description |
@@ -559,9 +567,36 @@ Click one or more product buttons to add those contours to the map. Clicking a s
 
 ---
 
-### 6.7 Routing
+### 6.7 Map Tools & Base Layers
 
-**Button:** `ROUTING` (checkable toggle, expands drawer)
+**Button:** `MAP` (checkable toggle, expands drawer)
+
+The MAP drawer groups map-context tools and optional offline base layers:
+
+| Button | Description |
+|--------|-------------|
+| **ROUTE** | Opens turn-by-turn routing controls. Hidden in VIEWER mode. |
+| **MEASURE** | Starts the distance measurement tool. |
+| **LANDCOVER** | Toggles the offline NLCD land-cover raster when `tiles/storm_nlcd.mbtiles` is installed. |
+| **SAT** | Toggles the offline USGS satellite basemap when `tiles/satellite.mbtiles` is installed. |
+
+LANDCOVER and SAT are available to normal users. They appear only when the matching MBTiles file exists in the `tiles/` folder.
+
+#### Land-Cover Controls
+
+When LANDCOVER is enabled, a small drawer opens with an opacity slider and a compact NLCD class legend. Hovering over the NLCD overlay reports the land-cover class under the cursor when tile data is available.
+
+NLCD is also available in the layer-order pill, so it can be reordered relative to radar, satellite, hazards, annotations, drawings, and other map overlays.
+
+#### Satellite Basemap
+
+The SAT button switches the underlying map into a cached USGS imagery basemap. It is an offline reference layer and does not replace the live GOES satellite overlay in [Section 6.3](#63-satellite).
+
+---
+
+### 6.8 Routing
+
+**Button:** `MAP` → `ROUTE` (checkable toggle, expands drawer)
 
 Provides turn-by-turn driving directions rendered on the map.
 
@@ -589,9 +624,9 @@ When the vehicle is within 30 m of the destination, STORM shows an arrival notif
 
 ---
 
-### 6.8 Annotations
+### 6.9 Annotations
 
-**Button:** `ANNOTATIONS` (checkable toggle, expands drawer)
+**Button:** `ANNOTATE` (checkable toggle, expands drawer)
 
 Annotations are field-condition markers placed on the map and synced to all vehicles over MQTT.
 
@@ -604,6 +639,10 @@ Annotations are field-condition markers placed on the map and synced to all vehi
 | ~ | Flooded Road | Blue (#4A9EFF) | Standing water over road |
 | ⚡ | Downed Power Lines | Yellow (#FFD166) | Electrical hazard on road |
 | ! | Road Debris | Orange (#FF6B35) | Debris field on road |
+| H | High Pressure | Blue (#4A9EFF) | Mark a high-pressure center |
+| L | Low Pressure | Red (#E53935) | Mark a low-pressure center |
+
+The pressure button opens a High/Low selector before placement, then creates the corresponding H or L marker.
 
 #### Placing an Annotation
 
@@ -611,7 +650,7 @@ Annotations are field-condition markers placed on the map and synced to all vehi
 2. Click any location on the map.
 3. A dialog opens showing the clicked coordinates and an optional "Note" text field.
 4. Add any relevant note (e.g., "Road completely blocked at intersection with CR-1234").
-5. Click **Add to Map**.
+5. Click **Confirm**.
 6. The annotation marker appears on the map immediately and is published to all connected vehicles via MQTT.
 
 #### Editing or Deleting an Annotation
@@ -635,7 +674,7 @@ Changes, moves, and deletions are published to all connected vehicles.
 
 ---
 
-### 6.9 Drawings
+### 6.10 Drawings
 
 **Button:** `DRAWINGS` (collapsible drawer)
 
@@ -685,7 +724,7 @@ All changes are synced via MQTT.
 
 ---
 
-### 6.10 Storm Motion Cone
+### 6.11 Storm Motion Cone
 
 **Button:** `CONE`
 
@@ -723,9 +762,9 @@ Cones are synced via MQTT (`storm/cones/{id}` topic).
 
 ---
 
-### 6.11 Measurement Tool
+### 6.12 Measurement Tool
 
-**Button:** `MEASURE` (checkable toggle)
+**Button:** `MAP` → `MEASURE` (checkable toggle)
 
 Measures great-circle distances on the map.
 
@@ -745,7 +784,7 @@ Measures great-circle distances on the map.
 
 ---
 
-### 6.12 Station Plots
+### 6.13 Station Plots
 
 **Button:** `STATION PLOTS` (checkable toggle)
 
@@ -779,7 +818,7 @@ Station plots are generated as PNG images (135×135 px, transparent background) 
 
 ---
 
-### 6.13 Deployment Locations
+### 6.14 Deployment Locations
 
 **Button:** `DEPLOY LOCS` (checkable toggle, expands drawer)
 
@@ -812,7 +851,7 @@ An additional slider controls the displayed circle radius for each location mark
 
 ---
 
-### 6.14 Vehicle Panel
+### 6.15 Vehicle Panel
 
 **Button:** `VEHICLES` (toggles the right-side dock panel)
 
@@ -845,11 +884,11 @@ When a vehicle is selected, the detail section shows:
 | **Pressure** | Atmospheric pressure in mb (purple text) |
 | **TIMESERIES Button** | Opens the vehicle timeseries dialog (only shown for vehicles with observation history) |
 
-The TIMESERIES button appears only for non-local vehicles that have published meteorological observations. See [Section 6.15](#615-vehicle-timeseries) for full timeseries documentation.
+The TIMESERIES button appears only for non-local vehicles that have published meteorological observations. See [Section 6.16](#616-vehicle-timeseries) for full timeseries documentation.
 
 ---
 
-### 6.15 Vehicle Timeseries
+### 6.16 Vehicle Timeseries
 
 **Access:** Click the **TIMESERIES** button in the vehicle detail section of the Vehicle Panel.
 
@@ -1288,6 +1327,8 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | NWS Warnings | Every 2 minutes | All active VTEC phenomenons |
 | GOES Satellite (CONUS) | Every 5 minutes | Full CONUS, up to 10 frames |
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
+| Offline NLCD Land Cover | Local MBTiles | Optional `tiles/storm_nlcd.mbtiles`; no network polling |
+| Offline USGS Satellite Basemap | Local MBTiles | Optional `tiles/satellite.mbtiles`; no network polling |
 | SFCOA Mesoanalysis | On demand | Catalog refresh plus selected vector-tile products |
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
@@ -1494,8 +1535,8 @@ MapLibre GL running inside QWebEngineView cannot reliably read back canvas pixel
 **QWebChannel Async Initialization**
 The `bridge` object that connects Python and JavaScript is initialized asynchronously after the map loads. All JavaScript API functions are stubbed as no-ops (`_stormNoop`) until the bridge is ready. In practice this is transparent to the user, but very rapid actions in the first second after launch may be silently dropped.
 
-**MBTiles File Not Included in Repository**
-The offline vector tile database (`storm.mbtiles`) is large (500 MB–1 GB) and is not included in the git repository. It must be downloaded separately and placed in the project root.
+**MBTiles Files Not Included in Repository**
+The offline vector tile database (`storm.mbtiles`) is large (500 MB–1 GB) and is not included in the git repository. Optional NLCD and satellite-basemap caches are also distributed outside git. Place MBTiles files in the `tiles/` folder.
 
 **SPC Text Product Latency**
 IEM AFOS sometimes responds slowly (up to 20 seconds per request). STORM waits patiently rather than timing out aggressively. This is normal behavior during high-traffic SPC issuance periods.
@@ -1516,6 +1557,8 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | Feature | Default | Disabled By |
 |---------|---------|-------------|
 | Offline vector base map | ✅ Always | n/a (requires storm.mbtiles) |
+| Offline NLCD land cover | ✅ Enabled when installed | Requires `tiles/storm_nlcd.mbtiles` |
+| Offline USGS satellite basemap | ✅ Enabled when installed | Requires `tiles/satellite.mbtiles` |
 | NEXRAD Radar overlay | ✅ Enabled | `--disable-radar` |
 | GOES Satellite overlay | ✅ Enabled | n/a |
 | SPC Hazards (outlook, tor, wind, hail) | ✅ Enabled | n/a |

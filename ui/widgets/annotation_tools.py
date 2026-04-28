@@ -217,14 +217,15 @@ class AnnotationTools(QWidget):
         row1_layout.setSpacing(4)
 
         for type_def in ANNOTATION_TYPES:
-            if type_def["key"] == "fork":
-                continue  # fork is placed separately after storm_motion
+            if type_def["key"] in ("fork", "high_pressure", "low_pressure"):
+                continue  # fork and pressure are placed separately
             btn = AnnotationButton(
                 type_key=type_def["key"],
                 symbol=type_def["symbol"],
-                label=type_def["label"],
+                label=type_def.get("short_label", type_def["label"]),
                 color=type_def["color"],
             )
+            btn.setToolTip(type_def["label"])
             btn.clicked.connect(lambda checked, b=btn: self._on_button_clicked(b))
             self._buttons.append(btn)
             row1_layout.addWidget(btn)
@@ -308,6 +309,17 @@ class AnnotationTools(QWidget):
             btn.clicked.connect(lambda checked, b=btn: self._on_button_clicked(b))
             self._buttons.append(btn)
             row2_layout.addWidget(btn)
+
+        btn_pressure = AnnotationButton(
+            type_key="pressure_system",
+            symbol="H/L",
+            label="Pressure",
+            color="#E8EAF0",
+        )
+        btn_pressure.setToolTip("High / Low Pressure")
+        btn_pressure.clicked.connect(lambda checked, b=btn_pressure: self._on_button_clicked(b))
+        self._buttons.append(btn_pressure)
+        row2_layout.addWidget(btn_pressure)
 
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.VLine)

@@ -1,7 +1,7 @@
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QWidget
+    QPushButton, QWidget, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt
 
@@ -71,9 +71,17 @@ class AnnotationPlaceDialog(QDialog):
         )
 
         self._result_label: str = ""
-        meta = ANNOTATION_TYPE_MAP.get(
-            type_key, {"symbol": "?", "label": type_key, "color": ACCENT}
-        )
+        self._result_type_key: str = type_key
+        self._pressure_default_label = ""
+        self._is_pressure_selector = type_key == "pressure_system"
+        if self._is_pressure_selector:
+            meta = {"symbol": "L", "label": "Pressure System", "color": "#E53935"}
+            self._result_type_key = "low_pressure"
+            self._pressure_default_label = ANNOTATION_TYPE_MAP["low_pressure"]["label"]
+        else:
+            meta = ANNOTATION_TYPE_MAP.get(
+                type_key, {"symbol": "?", "label": type_key, "color": ACCENT}
+            )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -95,6 +103,29 @@ class AnnotationPlaceDialog(QDialog):
         )
         layout.addWidget(coord_label)
 
+        if self._is_pressure_selector:
+            pressure_row = QWidget()
+            pressure_layout = QHBoxLayout(pressure_row)
+            pressure_layout.setContentsMargins(0, 0, 0, 0)
+            pressure_layout.setSpacing(12)
+
+            self._pressure_group = QButtonGroup(self)
+            self._low_radio = QRadioButton("Low")
+            self._high_radio = QRadioButton("High")
+            self._low_radio.setChecked(True)
+            self._low_radio.toggled.connect(self._on_pressure_changed)
+            self._high_radio.toggled.connect(self._on_pressure_changed)
+            self._pressure_group.addButton(self._low_radio)
+            self._pressure_group.addButton(self._high_radio)
+
+            for radio, color in ((self._low_radio, "#E53935"), (self._high_radio, "#4A9EFF")):
+                radio.setStyleSheet(
+                    f"font-size: 11px; font-weight: 700; color: {color}; background: transparent;"
+                )
+                pressure_layout.addWidget(radio)
+            pressure_layout.addStretch()
+            layout.addWidget(pressure_row)
+
         note_hint = QLabel("Note (optional)")
         note_hint.setStyleSheet(
             f"font-size: 10px; color: {TEXT_MUTED}; background: transparent;"
@@ -102,8 +133,9 @@ class AnnotationPlaceDialog(QDialog):
         layout.addWidget(note_hint)
 
         self._note_edit = QLineEdit()
-        self._note_edit.setPlaceholderText(meta["label"])
-        self._note_edit.setText(meta["label"])
+        default_label = self._pressure_default_label or meta["label"]
+        self._note_edit.setPlaceholderText(default_label)
+        self._note_edit.setText(default_label)
         self._note_edit.selectAll()
         layout.addWidget(self._note_edit)
 
@@ -125,6 +157,22 @@ class AnnotationPlaceDialog(QDialog):
     def _on_confirm(self):
         self._result_label = self._note_edit.text().strip()
         self.accept()
+
+    def _on_pressure_changed(self):
+        if not self._is_pressure_selector:
+            return
+        next_type = "high_pressure" if self._high_radio.isChecked() else "low_pressure"
+        previous_label = self._pressure_default_label
+        next_label = ANNOTATION_TYPE_MAP[next_type]["label"]
+        self._result_type_key = next_type
+        self._pressure_default_label = next_label
+        if self._note_edit.text().strip() in ("", previous_label):
+            self._note_edit.setText(next_label)
+            self._note_edit.selectAll()
+        self._note_edit.setPlaceholderText(next_label)
+
+    def result_type_key(self) -> str:
+        return self._result_type_key
 
     def result_label(self) -> str:
         return self._result_label

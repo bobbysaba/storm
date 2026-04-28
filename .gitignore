@@ -3,7 +3,7 @@
 # AWS keys
 aws/
 
-# mbtiles file (too large for git — download separately via Google Drive)
+# mbtiles files (too large for git — download separately or build locally)
 tiles/*.mbtiles
 
 # claude details 

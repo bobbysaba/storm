@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.0] - 2026-04-28
+### Added
+- MAP drawer now exposes optional offline NLCD land-cover and USGS satellite-basemap toggles to normal users when `tiles/storm_nlcd.mbtiles` and `tiles/satellite.mbtiles` are present.
+- Land-cover controls include an opacity slider and NLCD class legend, with hover labels for land-cover classes on the map.
+- Added `scripts/make_satellite_mbtiles.py` to build the optional USGS satellite basemap cache.
+- Added high- and low-pressure annotation markers with a pressure selector in the placement dialog.
+
+### Changed
+- NLCD land cover and satellite basemap no longer require admin mode.
+- Routing and measurement controls now live under the MAP drawer with the optional base-layer controls.
+- Road labels and road hover readouts are available at lower zoom levels and prefer route/reference shields when available.
+
 ## [1.2.0] - 2026-04-24
 ### Added
 - SFCOA mesoanalysis overlays are now available in normal user sessions, with valid-time stepping, refresh controls, grouped variable buttons, and MapLibre vector-tile rendering.

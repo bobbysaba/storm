@@ -2,6 +2,7 @@
 import csv
 import json
 import logging
+import os
 import threading
 import time
 import feature_flags
@@ -27,6 +28,8 @@ from ui.controls.routing_controls import RoutingControls, _make_loc_icon
 from ui.widgets.nav_pill import NavPill
 from ui.controls.deploy_locs_controls import DeployLocsControls
 from ui.controls.satellite_controls import SatelliteControls
+from ui.controls.map_controls import MapControls
+from ui.controls.landcover_controls import LandcoverControls
 from ui.controls.hrrr_controls import HrrrControls
 from ui.controls.mesoanalysis_controls import MesoanalysisControls
 from ui.controls.sfcoa_controls import SfcoaControls
@@ -86,6 +89,12 @@ log = logging.getLogger(__name__)
 SCAN_MOVE_THRESHOLD_KM = 0.1
 SCAN_MOVE_FIXES_TO_STOP = 3
 VEHICLE_PANEL_WIDTH = 340
+NLCD_TILES_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "storm_nlcd.mbtiles")
+)
+SATELLITE_TILES_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "satellite.mbtiles")
+)
 
 
 def _hrrr_hour_label(value: object) -> str:
@@ -1073,15 +1082,27 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self._add_separator(tb)
 
-        self.btn_measure = self._toolbar_toggle(
-            "MEASURE", "Click two points to measure distance", tb
+        self.btn_map = self._toolbar_toggle("MAP", "Map tools and base layers", tb)
+        nlcd_available = feature_flags.is_enabled("nlcd") and os.path.isfile(NLCD_TILES_PATH)
+        satellite_available = (
+            feature_flags.is_enabled("satellite_basemap")
+            and os.path.isfile(SATELLITE_TILES_PATH)
         )
-
-        self._add_separator(tb)
-
-        self.btn_route = self._toolbar_toggle(
-            "ROUTE", "Get turn-by-turn directions", tb
+        self.map_controls = MapControls(
+            route_available=not self._viewer,
+            landcover_available=nlcd_available,
+            satellite_available=satellite_available,
+            parent=self._map_container,
         )
+        self.map_controls.setObjectName("floatingToolbar")
+        self.btn_map.toggled.connect(self.map_controls.toggle_drawer)
+        self.btn_map.toggled.connect(self._start_layout_pulse)
+
+        self.btn_measure = self.map_controls.btn_measure
+        self.btn_route = self.map_controls.btn_route
+        self.btn_nlcd = self.map_controls.btn_landcover
+        self.btn_satellite_basemap = self.map_controls.btn_satellite_basemap
+
         self.routing_controls = RoutingControls(self._map_container)
         self.routing_controls.setObjectName("floatingToolbar")
         self.btn_route.toggled.connect(self.routing_controls.toggle_drawer)
@@ -1092,6 +1113,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.routing_controls.enter_pick_mode.connect(
             lambda: self.btn_sounding.setChecked(False) if self.btn_sounding.isChecked() else None
         )
+        self.routing_controls.enter_pick_mode.connect(
+            lambda: self.btn_measure.setChecked(False) if self.btn_measure.isChecked() else None
+        )
         self.routing_controls.cancel_pick_mode.connect(
             lambda: self.map_widget.set_route_pick_mode(False)
         )
@@ -1101,8 +1125,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.map_pick_for_route.connect(
             self.routing_controls.on_map_pick
         )
-        if self._viewer:
-            self.btn_route.hide()
+        if nlcd_available:
+            self.landcover_controls = LandcoverControls(self._map_container)
+            self.landcover_controls.setObjectName("floatingToolbar")
+            self.btn_nlcd.toggled.connect(self.landcover_controls.toggle_drawer)
+            self.btn_nlcd.toggled.connect(self._start_layout_pulse)
+            self.btn_nlcd.toggled.connect(self._on_nlcd_toggled)
+            self.landcover_controls.opacity_changed.connect(self._on_nlcd_opacity_changed)
+        if satellite_available:
+            self.btn_satellite_basemap.toggled.connect(self._on_satellite_basemap_toggled)
         if self._archive:
             self.btn_prev_locs.hide()
             # no archive data sources for these — hide to prevent crashes.
@@ -1118,6 +1149,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.nav_pill.open_drawer_requested.connect(self._on_pill_expand_requested)
         self.nav_pill.clear_requested.connect(self.routing_controls._on_clear)
         self.btn_route.toggled.connect(self._on_route_drawer_toggled)
+        self.btn_route.toggled.connect(
+            lambda on: self.btn_measure.setChecked(False) if on and self.btn_measure.isChecked() else None
+        )
 
     def _on_nav_updated(self, step_text: str, summary: str):
         """Show/refresh the nav pill — but only when the toolbar drawer is open."""
@@ -1441,6 +1475,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 _stack(self.sounding_controls)
             if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
                 _stack(self.annotation_tools)
+            if hasattr(self, "map_controls") and self.btn_map.isChecked():
+                _stack(self.map_controls)
+            if hasattr(self, "landcover_controls") and self.btn_nlcd.isChecked():
+                _stack(self.landcover_controls)
             if hasattr(self, "routing_controls") and self.btn_route.isChecked():
                 _stack(self.routing_controls)
 
@@ -2349,6 +2387,19 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if frames:
                 self._render_satellite_frame(frames[-1])
                 self.map_widget.set_satellite_visible(True)
+
+    def _on_nlcd_toggled(self, checked: bool):
+        self._set_layer_active("nlcd", checked)
+        if hasattr(self, "landcover_controls"):
+            self.map_widget.set_nlcd_opacity(self.landcover_controls.opacity())
+        self.map_widget.set_nlcd_visible(checked)
+
+    def _on_nlcd_opacity_changed(self, opacity: float):
+        self.map_widget.set_nlcd_opacity(opacity)
+
+    def _on_satellite_basemap_toggled(self, checked: bool):
+        self._set_layer_active("satellite_basemap", checked)
+        self.map_widget.set_satellite_basemap_visible(checked)
 
     def _on_hrrr_drawer_toggled(self, checked: bool):
         if checked and self._hrrr_fetcher is None:
@@ -4134,6 +4185,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 "storm cone — select first radar feature position",
                 needs_click=False,
             )
+        elif type_key == "pressure_system":
+            self._active_annotation_type = type_key
+            self.map_widget.set_drawing_mode(False)
+            self.map_widget.set_annotation_mode(True)
+            self._set_placement_prompt("pressure system")
         elif type_key:
             self._active_annotation_type = type_key
             self.map_widget.set_drawing_mode(False)
@@ -4170,7 +4226,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             dlg = AnnotationPlaceDialog(self._active_annotation_type, lat, lon, viewer_mode=self._viewer, parent=self)
             if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:
                 annotation = Annotation.new(
-                    type_key=self._active_annotation_type,
+                    type_key=dlg.result_type_key(),
                     lat=lat,
                     lon=lon,
                     label=dlg.result_label(),
