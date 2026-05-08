@@ -12,12 +12,6 @@ class Feature:
 
 
 FEATURES = {
-    "hrrr": Feature(
-        key="hrrr",
-        label="HRRR overlays",
-        default_enabled=True,
-        admin_only=True,
-    ),
     "mesoanalysis": Feature(
         key="mesoanalysis",
         label="Mesoanalysis overlays",

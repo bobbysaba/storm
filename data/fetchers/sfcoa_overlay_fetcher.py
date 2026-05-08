@@ -5,29 +5,24 @@ import logging
 import os
 import re
 import sqlite3
-import ssl
 import tempfile
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from socket import timeout as SocketTimeout
-import xml.etree.ElementTree as ET
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
+
+import config
 
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 STORM/1.0"
 _CACHE_DIR = Path(tempfile.gettempdir()) / "storm_sfcoa_mbtiles"
-
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
 @dataclass(frozen=True)
@@ -121,33 +116,20 @@ class SfcoaOverlayFetcher(QObject):
         try:
             times = _times_from_index(self._base_url)
             if not times:
-                times = _times_from_catalog(self._base_url)
-            if not times:
-                times = _times_from_recent_catalog_probes(self._base_url)
+                raise RuntimeError("SFCOA index returned no runs")
             self._times = sorted(times, key=lambda item: item.time_id)
             self.times_ready.emit(self._times)
         except Exception as exc:
-            log.warning("SFCOA catalog fetch failed: %s", exc)
-            self.fetch_error.emit(f"SFCOA catalog: {_friendly_error(exc, self._base_url)}")
+            log.warning("SFCOA index fetch failed: %s", exc)
+            self.fetch_error.emit(f"SFCOA index: {_friendly_error(exc, self._base_url)}")
 
     def _fetch_variables_worker(self, time_id: str) -> None:
         if not time_id:
             return
         try:
-            variables = _variables_from_time_index(self._base_url, time_id)
+            variables = _variables_from_metadata(self._base_url, time_id)
             if not variables:
-                metadata_variables = _variables_from_shared_metadata(self._base_url, time_id)
-                catalog_variables = _variables_from_time_catalog(self._base_url, time_id)
-                if metadata_variables and catalog_variables:
-                    available = {var.variable_id for var in catalog_variables}
-                    variables = [
-                        var for var in metadata_variables
-                        if var.variable_id in available
-                    ]
-                else:
-                    variables = metadata_variables or catalog_variables
-            if not variables:
-                variables = _variables_from_time_catalog(self._base_url, time_id)
+                raise RuntimeError("SFCOA metadata returned no variables")
             self._variables_by_time[time_id] = variables
             self.variables_ready.emit(time_id, variables)
         except Exception as exc:
@@ -223,26 +205,16 @@ def _abs_url(base_url: str, path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
-def _catalog_url(base_url: str, *parts: str) -> str:
-    base = base_url.rstrip("/")
-    if "/fileServer/" in base:
-        base = base.replace("/fileServer/", "/catalog/", 1)
-    else:
-        base = base.replace("/thredds/files/", "/thredds/catalog/", 1)
-    for part in parts:
-        base = f"{base}/{str(part).strip('/')}"
-    return f"{base}/catalog.xml"
-
-
-def _fetch_text(url: str) -> str:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=_SSL_CTX) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+def _request_headers() -> dict[str, str]:
+    headers = {"User-Agent": USER_AGENT}
+    if config.NSSL_API_KEY:
+        headers["X-API-Key"] = config.NSSL_API_KEY
+    return headers
 
 
 def _fetch_json(url: str) -> dict:
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=_SSL_CTX) as resp:
+    req = Request(url, headers=_request_headers())
+    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         raw = resp.read()
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -253,77 +225,16 @@ def _fetch_json(url: str) -> dict:
     return payload
 
 
-def _maybe_fetch_json(url: str) -> dict:
-    try:
-        return _fetch_json(url)
-    except HTTPError as exc:
-        if exc.code in (404, 410):
-            return {}
-        raise
-
-
 def _times_from_index(base_url: str) -> list[SfcoaTime]:
-    payload = _maybe_fetch_json(_abs_url(base_url, "index.json"))
-    if not payload:
-        payload = _maybe_fetch_json(_abs_url(base_url, "latest.json"))
-    values = payload.get("times") or []
+    payload = _fetch_json(_abs_url(base_url, "index.json"))
+    values = payload.get("runs") or payload.get("times") or []
     if not values and payload.get("latest"):
         values = [payload["latest"]]
     return [_sfcoa_time(str(value)) for value in values if _is_time_id(str(value))]
 
 
-def _times_from_catalog(base_url: str) -> list[SfcoaTime]:
-    root = ET.fromstring(_fetch_text(_catalog_url(base_url)))
-    times: list[SfcoaTime] = []
-    for ref in root.findall(".//{*}catalogRef"):
-        name = str(
-            ref.get("name")
-            or ref.get("{http://www.w3.org/1999/xlink}title")
-            or ""
-        ).strip()
-        if _is_time_id(name):
-            times.append(_sfcoa_time(name))
-    return times
-
-
-def _times_from_recent_catalog_probes(base_url: str, hours_back: int = 24) -> list[SfcoaTime]:
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    times: list[SfcoaTime] = []
-    for offset in range(max(1, int(hours_back)) + 1):
-        candidate = now - timedelta(hours=offset)
-        time_id = candidate.strftime("%Y%m%d_%H")
-        if _time_catalog_exists(base_url, time_id):
-            times.append(_sfcoa_time(time_id))
-    return times
-
-
-def _time_catalog_exists(base_url: str, time_id: str) -> bool:
-    try:
-        text = _fetch_text(_catalog_url(base_url, time_id))
-    except HTTPError as exc:
-        if exc.code in (400, 404, 410):
-            return False
-        raise
-    except (URLError, TimeoutError, SocketTimeout):
-        raise
-    return "TDS Catalog" in text or "<catalog" in text
-
-
-def _variables_from_time_index(base_url: str, time_id: str) -> list[SfcoaVariable]:
-    payload = _maybe_fetch_json(_abs_url(base_url, f"{time_id}/index.json"))
-    values = payload.get("variables") if payload else None
-    if isinstance(values, dict):
-        return [
-            _variable_from_metadata(var_id, meta if isinstance(meta, dict) else {})
-            for var_id, meta in values.items()
-        ]
-    if isinstance(values, list):
-        return [_variable_from_metadata(str(var_id), {}) for var_id in values]
-    return []
-
-
-def _variables_from_shared_metadata(base_url: str, time_id: str) -> list[SfcoaVariable]:
-    payload = _maybe_fetch_json(_abs_url(base_url, f"{time_id}/metadata.json"))
+def _variables_from_metadata(base_url: str, time_id: str) -> list[SfcoaVariable]:
+    payload = _fetch_json(_abs_url(base_url, f"{time_id}/metadata.json"))
     values = payload.get("variables") if payload else None
     if not isinstance(values, dict):
         return []
@@ -331,30 +242,6 @@ def _variables_from_shared_metadata(base_url: str, time_id: str) -> list[SfcoaVa
         _variable_from_metadata(_clean_variable_id(var_id), meta if isinstance(meta, dict) else {})
         for var_id, meta in values.items()
     ]
-    return sorted(variables, key=lambda item: (item.group, item.label, item.variable_id))
-
-
-def _variables_from_time_catalog(base_url: str, time_id: str) -> list[SfcoaVariable]:
-    root = ET.fromstring(_fetch_text(_catalog_url(base_url, time_id)))
-    variable_ids: set[str] = set()
-    for ref in root.findall(".//{*}catalogRef"):
-        name = str(
-            ref.get("name")
-            or ref.get("{http://www.w3.org/1999/xlink}title")
-            or ""
-        ).strip().strip("/")
-        if name and not _is_time_id(name):
-            variable_ids.add(name)
-    for ds in root.findall(".//{*}dataset"):
-        url_path = str(ds.get("urlPath") or "")
-        match = re.search(rf"/?{re.escape(time_id)}/([^/]+)/", url_path)
-        if match:
-            variable_ids.add(_clean_variable_id(match.group(1)))
-            continue
-        name = str(ds.get("name") or "").strip().strip("/")
-        if name and "/" not in name and name not in {"metadata.json", "index.json"}:
-            variable_ids.add(_clean_variable_id(name))
-    variables = [_variable_from_metadata(var_id, {}) for var_id in variable_ids]
     return sorted(variables, key=lambda item: (item.group, item.label, item.variable_id))
 
 
@@ -401,8 +288,8 @@ def _download_mbtiles(url: str, time_id: str, variable_id: str) -> Path:
         return path
 
     tmp_path = path.with_suffix(".tmp")
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=_SSL_CTX) as resp:
+    req = Request(url, headers=_request_headers())
+    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
         data = resp.read()
     if not data:
         raise RuntimeError(f"empty MBTiles file from {url}")
@@ -528,6 +415,6 @@ def _friendly_error(exc: Exception, base_url: str) -> str:
     reason = getattr(exc, "reason", None)
     if isinstance(exc, URLError) and reason:
         text = str(reason)
-    if isinstance(exc, (TimeoutError, SocketTimeout)):
+    if isinstance(exc, TimeoutError):
         return f"timeout connecting to {base_url}"
     return text

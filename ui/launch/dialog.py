@@ -69,6 +69,7 @@ class LaunchDialog(QDialog):
             "auto_satellite": s.value("launch/auto_satellite", "",        type=str),
             "auto_obs_ok":       s.value("launch/auto_obs_ok",       False, type=bool),
             "auto_obs_wtm":      s.value("launch/auto_obs_wtm",      False, type=bool),
+            "auto_obs_ks":       s.value("launch/auto_obs_ks",       False, type=bool),
             "radar_resolution":  s.value("launch/radar_resolution",  -1,    type=int),
         }
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -348,7 +349,7 @@ class LaunchDialog(QDialog):
         obs_lbl.setFixedWidth(28)
         obs_row.addWidget(obs_lbl)
         self._obs_btns: dict[str, QPushButton] = {}
-        for key, label in (("ok", "OK MESO"), ("wtm", "WTM")):
+        for key, label in (("ok", "OK MESO"), ("wtm", "WTM"), ("ks", "KS")):
             btn = QPushButton(label)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _checked, k=key: self._toggle_obs(k))
@@ -399,7 +400,7 @@ class LaunchDialog(QDialog):
         self._select_satellite(saved.get("auto_satellite", ""))
 
         self._selected_obs: set[str] = set()
-        for key in ("ok", "wtm"):
+        for key in ("ok", "wtm", "ks"):
             if saved.get(f"auto_obs_{key}", False):
                 self._selected_obs.add(key)
         self._refresh_obs_styles()
@@ -799,6 +800,7 @@ class LaunchDialog(QDialog):
         obs = getattr(self, "_selected_obs", set())
         s.setValue("launch/auto_obs_ok",  "ok"  in obs)
         s.setValue("launch/auto_obs_wtm", "wtm" in obs)
+        s.setValue("launch/auto_obs_ks",  "ks"  in obs)
         s.setValue("launch/radar_resolution", self._res_combo.currentData())
         self.accept()
 

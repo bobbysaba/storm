@@ -75,8 +75,7 @@ def test_fetch_iem_batch_uses_utc_valid_timestamp():
 
 
 def test_fetch_ok_mesonet_uses_configured_api_headers():
-    original = sf.config.USE_NSSL_API_FOR_SURFACE
-    sf.config.USE_NSSL_API_FOR_SURFACE = True
+    assert sf.OK_API_URL.endswith("/data/mesonet/ok_mesonet.json")
     fetcher = SurfaceFetcher()
     fetcher._ok_meta = {
         "acme": {"lat": 34.80833, "lon": -98.02325, "name": "Acme"},
@@ -98,23 +97,19 @@ def test_fetch_ok_mesonet_uses_configured_api_headers():
           }
         }"""
 
-    try:
-        fetcher._http_get = _http_get
-        rows = fetcher._fetch_ok_mesonet()
+    fetcher._http_get = _http_get
+    rows = fetcher._fetch_ok_mesonet()
 
-        assert captured["url"] == sf.OK_API_URL
-        assert captured["ssl_ctx"] is None
-        assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
-        assert len(rows) == 1
-        assert rows[0]["id"] == "surface:ok:acme"
-        assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
-    finally:
-        sf.config.USE_NSSL_API_FOR_SURFACE = original
+    assert captured["url"] == sf.OK_API_URL
+    assert captured["ssl_ctx"] is None
+    assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+    assert len(rows) == 1
+    assert rows[0]["id"] == "surface:ok:acme"
+    assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
 
 
 def test_fetch_wtm_uses_configured_api_headers():
-    original = sf.config.USE_NSSL_API_FOR_SURFACE
-    sf.config.USE_NSSL_API_FOR_SURFACE = True
+    assert sf.WTM_API_URL.endswith("/data/mesonet/wtx_mesonet.json")
     fetcher = SurfaceFetcher()
     fetcher._wtm_meta = {
         "test": {"lat": 32.0, "lon": -101.0, "name": "Test WTM"},
@@ -137,18 +132,65 @@ def test_fetch_wtm_uses_configured_api_headers():
           }]
         }"""
 
-    try:
-        fetcher._http_get = _http_get
-        rows = fetcher._fetch_wtm()
+    fetcher._http_get = _http_get
+    rows = fetcher._fetch_wtm()
 
-        assert captured["url"] == sf.WTM_API_URL
-        assert captured["ssl_ctx"] is None
-        assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
-        assert len(rows) == 1
-        assert rows[0]["id"] == "surface:wtm:test"
-        assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
-    finally:
-        sf.config.USE_NSSL_API_FOR_SURFACE = original
+    assert captured["url"] == sf.WTM_API_URL
+    assert captured["ssl_ctx"] is None
+    assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+    assert len(rows) == 1
+    assert rows[0]["id"] == "surface:wtm:test"
+    assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+
+
+def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
+    assert sf.KS_API_URL.endswith("/data/mesonet/ks_mesonet.json")
+    fetcher = SurfaceFetcher()
+    captured: dict[str, object] = {}
+
+    def _http_get(url, ssl_ctx=None, headers=None):
+        captured["url"] = url
+        captured["ssl_ctx"] = ssl_ctx
+        captured["headers"] = headers
+        return b"""{
+          "time": "2026-05-07T19:10:00+00:00",
+          "results": [{
+            "station": "Alma 5SE",
+            "timestamp": "2026-05-07T19:05:00+00:00",
+            "TEMP2MAVG": "22.1",
+            "RELHUM2MAVG": "50.0",
+            "PRESSUREAVG": "96.32",
+            "WDIR10M": "212.74",
+            "WSPD10MAVG": "9.54",
+            "WSPD10MMAX": "12.58",
+            "PRECIP": "0.0",
+            "meta": {
+              "name": "Alma 5SE",
+              "abbr": "Alma 5SE",
+              "lat": 38.96615,
+              "lon": -96.2063,
+              "elevation": 428.0
+            }
+          }]
+        }"""
+
+    fetcher._http_get = _http_get
+    rows = fetcher._fetch_ks_mesonet()
+
+    assert captured["url"] == sf.KS_API_URL
+    assert captured["ssl_ctx"] is None
+    assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+    assert len(rows) == 1
+    assert rows[0]["id"] == "surface:ks:alma_5se"
+    assert rows[0]["source"] == "ks"
+    assert rows[0]["name"] == "Alma 5SE"
+    obs = rows[0]["obs"]
+    assert obs.timestamp == datetime(2026, 5, 7, 19, 5, tzinfo=timezone.utc)
+    assert obs.temperature_c == 22.1
+    assert round(obs.dewpoint_c, 1) == 11.2
+    assert obs.wind_speed_ms == 9.54
+    assert obs.wind_dir_deg == 212.74
+    assert round(obs.pressure_mb, 1) == 963.2
 
 
 def test_diagnostics_snapshot_tracks_valid_and_fetch_times():

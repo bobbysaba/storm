@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.0] - 2026-05-07
+### Added
+- Kansas Mesonet surface observations are now available from the SURFACE drawer and launch dialog alongside OK Mesonet, WTM, and ASOS.
+- KS Mesonet station plots use the NSSL API-hosted `ks_mesonet.json` feed with embedded station metadata.
+
+### Changed
+- Surface observation diagnostics, layer ordering, and station-model rendering now include KS Mesonet as an independent 5-minute mesonet source.
+
+---
+
+## [1.4.0] - 2026-05-07
+### Changed
+- Migrated NSSL-hosted CLAMPS soundings, surface mesonet feeds, annotation snapshots, archive annotation logs, and SFCOA overlays to authenticated NSSL API endpoints.
+- SFCOA now discovers available runs from the API index and product metadata from each run's `metadata.json`.
+- NSSL CLAMPS soundings now use the API directly in live and archive modes without THREDDS fallback.
+
+### Removed
+- Removed the HRRR map overlay product and its UI controls.
+- Removed legacy NSSL THREDDS fallback code for CLAMPS soundings.
+
 ## [1.3.0] - 2026-04-28
 ### Added
 - MAP drawer now exposes optional offline NLCD land-cover and USGS satellite-basemap toggles to normal users when `tiles/storm_nlcd.mbtiles` and `tiles/satellite.mbtiles` are present.

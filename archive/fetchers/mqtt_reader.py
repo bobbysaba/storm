@@ -1,7 +1,6 @@
 
 import json
 import logging
-import ssl
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,23 +16,18 @@ from network.vehicle_sync import _observation_from_payload
 
 log = logging.getLogger(__name__)
 
-_THREDDS_BASE = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/annotations"
+_ANNOTATIONS_PATH = "annotations"
 _TOPICS = ("vehicles", "annotations", "cones", "drawings")
 
 
-def _ssl_ctx() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.load_cert_chain(certfile=config.MQTT_CERT_FILE, keyfile=config.MQTT_KEY_FILE)
-    return ctx
-
-
 def _fetch_text(url: str) -> Optional[str]:
-    """Fetch a THREDDS file as text; return None on 404, raise on other errors."""
+    """Fetch an archive API file as text; return None on 404, raise on other errors."""
     try:
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
-        with urlopen(req, timeout=20, context=_ssl_ctx()) as resp:
+        headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
+        if config.NSSL_API_KEY:
+            headers["X-API-Key"] = config.NSSL_API_KEY
+        req = Request(url, headers=headers)
+        with urlopen(req, timeout=20) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
         if "404" in str(exc) or "HTTP Error 404" in str(exc):
@@ -85,7 +79,7 @@ def _parse_jsonl(text: str) -> list[tuple[datetime, dict]]:
 
 class ArchiveMQTTReader(QObject):
     """
-    Fetches STORM archive JSONL files from NSSL THREDDS and replays
+    Fetches STORM archive JSONL files from the NSSL API and replays
     vehicle positions, annotations, cones, and drawings in sync with
     the archive TimeController.
 
@@ -186,7 +180,10 @@ class ArchiveMQTTReader(QObject):
     def _fetch_all(self) -> None:
         errors = []
         for topic in _TOPICS:
-            url = f"{_THREDDS_BASE}/storm.{topic}.{self._date_str}"
+            url = (
+                f"{config.NSSL_API_ROOT}/{_ANNOTATIONS_PATH}/"
+                f"storm.{topic}.{self._date_str}"
+            )
             try:
                 text = _fetch_text(url)
                 if text:

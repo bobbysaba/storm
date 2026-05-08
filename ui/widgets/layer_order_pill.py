@@ -8,8 +8,6 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 DEFAULT_LAYERS: list[str] = [
     "nlcd",
     "satellite",
-    # HRRR frontend disabled for now; backend/fetcher code remains available.
-    # "hrrr",
     "mesoanalysis",
     "sfcoa",
     "radar",
@@ -27,13 +25,13 @@ DEFAULT_LAYERS: list[str] = [
     "route",
     "ok_mesonet",
     "wtm",
+    "ks_mesonet",
     "asos",
 ]
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
     "nlcd":         "NLCD",
-    # "hrrr":         "HRRR",
     "mesoanalysis": "Mesoanalysis",
     "sfcoa":       "SFCOA",
     "radar":        "Radar",
@@ -51,13 +49,13 @@ LAYER_LABELS: dict[str, str] = {
     "route":        "Route",
     "ok_mesonet":   "OK Mesonet",
     "wtm":          "WTM",
+    "ks_mesonet":   "KS Mesonet",
     "asos":         "ASOS",
 }
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
     "nlcd":         ["nlcd-landcover"],
-    # "hrrr":         ["hrrr-layer"],
     "mesoanalysis": ["mesoanalysis-line", "mesoanalysis-label"],
     "sfcoa":       ["sfcoa-fill", "sfcoa-line", "sfcoa-label"],
     "radar":        ["radar-overlay"],
@@ -81,6 +79,7 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "route":        ["route-casing", "route-line"],
     "ok_mesonet":   [],
     "wtm":          [],
+    "ks_mesonet":   [],
     "asos":         ["asos-plots"],
 }
 

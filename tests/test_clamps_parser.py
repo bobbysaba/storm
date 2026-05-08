@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from data.fetchers.clamps_sounding_fetcher import (
     _FILENAME_RE,
+    _api_sonde_entry,
     _format_label,
     _parse_raw_launch_location,
     _parse_skewt,
@@ -102,6 +103,29 @@ class TestFilenameRegex:
     def test_no_match(self):
         m = _FILENAME_RE.search("random_file.txt")
         assert m is None
+
+
+class TestApiSondeIndex:
+    def test_launch_time_string_entry(self):
+        entry = _api_sonde_entry("202604262003")
+        assert entry is not None
+        assert entry.file_time == datetime(2026, 4, 26, 20, 3, tzinfo=timezone.utc)
+        assert entry.skewt_url.endswith(
+            "/data/sonde/upperair.NSSL_Lidar_sonde.202604262003.skewT.text"
+        )
+
+    def test_rich_entry_accepts_relative_urls(self):
+        entry = _api_sonde_entry({
+            "valid_time": "2026-04-26T20:03:00Z",
+            "skewt_url": "/data/sonde/files/upperair.NSSL_Lidar_sonde.202604262003.skewT",
+            "raw_url": "/data/sonde/files/sharppyv2_20260426_2003.text",
+        })
+        assert entry is not None
+        assert entry.file_time == datetime(2026, 4, 26, 20, 3, tzinfo=timezone.utc)
+        assert entry.skewt_url.endswith(
+            "/data/sonde/files/upperair.NSSL_Lidar_sonde.202604262003.skewT"
+        )
+        assert entry.raw_url.endswith("/data/sonde/files/sharppyv2_20260426_2003.text")
 
 
 class TestFormatLabel:

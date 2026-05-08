@@ -155,7 +155,7 @@ A collapsible section lets you pre-select which data layers to enable automatica
 
 - **SPC / NWS / RADAR** — multi-select toggle buttons to auto-enable those overlays
 - **Satellite** — exclusive selector: OFF | CONUS | AUTO-MESO
-- **Surface obs** — multi-select: OK MESONET | WTM
+- **Surface obs** — multi-select: OK MESONET | WTM | KS
 
 #### Update Status
 
@@ -225,7 +225,7 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 9. GOES satellite imagery (optional, opacity-controlled)
 10. NEXRAD radar overlay (semi-transparent PNG raster)
 11. SFCOA mesoanalysis contours
-12. Surface obs station models (OK Mesonet, WTM, ASOS)
+12. Surface obs station models (OK Mesonet, WTM, KS Mesonet, ASOS)
 13. Station plot icons (MetPy-style, at vehicle positions)
 14. Vehicle markers (colored dots + info popups)
 15. Annotations (road closure / construction / flooding / downed-lines / debris markers)
@@ -455,7 +455,7 @@ Select which data source to use for Skew-T log-P soundings. Only one source is a
 |--------|--------|----------------|
 | **HRRR** | NCEP HRRR model via open-meteo (no API key) | Click anywhere on the map |
 | **OBS** | Observed radiosondes via IEM RAOB API | Radiosonde station markers appear; click one |
-| **NSSL** | NSSL CLAMPS DL truck soundings via THREDDS | CLAMPS markers appear when data is available; click one |
+| **NSSL** | NSSL CLAMPS DL truck soundings via NSSL API | CLAMPS markers appear when data is available; click one |
 
 In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
 
@@ -467,7 +467,7 @@ See [Section 10](#10-point-soundings) for full dialog documentation.
 
 **Button:** `SURFACE` (checkable toggle, expands drawer)
 
-Displays live surface observation station models from OK Mesonet, West Texas Mesonet, and ASOS/AWOS stations.
+Displays live surface observation station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, and ASOS/AWOS stations.
 
 #### Network Toggles (multi-select)
 
@@ -475,9 +475,10 @@ Displays live surface observation station models from OK Mesonet, West Texas Mes
 |--------|---------|----------|
 | **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
 | **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
+| **KS** | Kansas Mesonet (K-State) | ~80 stations across Kansas |
 | **ASOS** | IEM ASOS/AWOS current observations | User-drawn bounding box |
 
-Any combination can be active at once. OK Mesonet and WTM poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
+Any combination can be active at once. OK Mesonet, WTM, and KS Mesonet poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
 
 #### ASOS Bounding Box
 
@@ -505,11 +506,11 @@ Toggle station models on or off with the **Show plots** checkbox.
 
 #### Freshness Coloring
 
-The station-plot center dot is colored by observation age, not fetch time. OK Mesonet and WTM use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
+The station-plot center dot is colored by observation age, not fetch time. OK Mesonet, WTM, and KS Mesonet use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
 
 | Source | Green | Yellow | Red |
 |--------|-------|--------|-----|
-| OK Mesonet / WTM | ≤5 min | ≤10 min | >10 min |
+| OK Mesonet / WTM / KS Mesonet | ≤5 min | ≤10 min | >10 min |
 | ASOS | ≤70 min | ≤90 min | >90 min |
 
 The ASOS timestamp comes from IEM's `valid` observation time.
@@ -518,8 +519,9 @@ The ASOS timestamp comes from IEM's `valid` observation time.
 
 | Source | Endpoint |
 |--------|----------|
-| OK Mesonet | NSSL THREDDS OK Mesonet JSON + Oklahoma Mesonet metadata |
-| West Texas Mesonet | NSSL THREDDS WTM JSON + TTU Mesonet site metadata |
+| OK Mesonet | NSSL API OK Mesonet JSON + Oklahoma Mesonet metadata |
+| West Texas Mesonet | NSSL API WTM JSON + TTU Mesonet site metadata |
+| Kansas Mesonet | NSSL API KS Mesonet JSON with embedded station metadata |
 | ASOS/AWOS | IEM `currents.json` for selected station IDs; station metadata from IEM METAR GeoJSON |
 
 ---
@@ -551,7 +553,7 @@ Click one or more product buttons to add those contours to the map. Clicking a s
 
 | Button | Action |
 |--------|--------|
-| **REFRESH** | Reload the SFCOA catalog and product list |
+| **REFRESH** | Reload the SFCOA API run index and product list |
 | ⏮ | Jump to the oldest available valid time |
 | ⏪ | Step back one valid time |
 | ⏩ | Step forward one valid time |
@@ -560,7 +562,7 @@ Click one or more product buttons to add those contours to the map. Clicking a s
 
 #### How SFCOA Data Works
 
-- **Source:** NSSL SFCOA catalog via `SFCOA_BASE_URL`
+- **Source:** NSSL API SFCOA run index and per-run metadata via `SFCOA_BASE_URL`
 - **Render format:** MapLibre vector tiles with contour lines and labels
 - **Layer behavior:** SFCOA is mutually exclusive with other large overlay drawers so the toolbar stays readable
 - **Caching:** Selected product/time combinations are cached during the session for faster stepping back to recently viewed fields
@@ -1127,7 +1129,7 @@ Switch to OBS mode in the SOUNDINGS drawer. Radiosonde station markers appear on
 
 ### NSSL CLAMPS DL Truck Soundings
 
-Switch to NSSL mode in the SOUNDINGS drawer. CLAMPS truck markers appear when data is available from the NSSL THREDDS fileserver. Click a marker to fetch and display the most recent truck sounding. Up to 12 hours of soundings per truck are available.
+Switch to NSSL mode in the SOUNDINGS drawer. CLAMPS truck markers appear when data is available from the NSSL API. Click a marker to fetch and display the most recent truck sounding. Up to 12 hours of soundings per truck are available.
 
 ### Triggering a Sounding
 
@@ -1254,8 +1256,8 @@ Hovering over the Skew-T axes displays a live readout below the plot:
 
 | Item | Detail |
 |------|--------|
-| Source | NSSL CLAMPS DL truck soundings via THREDDS fileServer |
-| Catalog | `data.nssl.noaa.gov/thredds/catalog/FRDD/CLAMPS/dltruck/` |
+| Source | NSSL CLAMPS DL truck soundings via authenticated NSSL API |
+| Index | `{NSSL_API_ROOT}/data/sonde/index.json` |
 | Availability | Only when NSSL DL truck is actively collecting data |
 | History | Up to 12 hours of soundings per truck available |
 
@@ -1329,11 +1331,11 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
 | Offline NLCD Land Cover | Local MBTiles | Optional `tiles/storm_nlcd.mbtiles`; no network polling |
 | Offline USGS Satellite Basemap | Local MBTiles | Optional `tiles/satellite.mbtiles`; no network polling |
-| SFCOA Mesoanalysis | On demand | Catalog refresh plus selected vector-tile products |
+| SFCOA Mesoanalysis | On demand | API index refresh plus selected vector-tile products |
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
-| NSSL CLAMPS DL Truck | On demand | Fetched from NSSL THREDDS on click |
-| OK / WTM Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| NSSL CLAMPS DL Truck | On demand | Fetched from the NSSL API on click |
+| OK / WTM / KS Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
 | ASOS/AWOS Surface Obs (IEM) | Every 5 minutes after bbox selection | User-drawn bbox; capped for performance |
 | Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
@@ -1569,7 +1571,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | HRRR Point Soundings | ✅ Enabled | n/a |
 | Observed Radiosonde Soundings | ✅ Enabled | n/a |
 | NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
-| Surface Obs (OK / WTM / ASOS) | ✅ Enabled (when toggled on) | n/a |
+| Surface Obs (OK / WTM / KS / ASOS) | ✅ Enabled (when toggled on) | n/a |
 | SFCOA Mesoanalysis | ✅ Enabled | n/a |
 | Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |

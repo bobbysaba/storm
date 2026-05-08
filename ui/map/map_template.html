@@ -326,10 +326,6 @@
     window.stormSetSatelliteVisible = _stormNoop;
     window.stormSetSatelliteMode = _stormNoop;
     window.stormSetSatelliteOpacity = _stormNoop;
-    window.stormSetHrrrOverlay = _stormNoop;
-    window.stormSetHrrrVisible = _stormNoop;
-    window.stormSetHrrrOpacity = _stormNoop;
-    window.stormClearHrrrOverlay = _stormNoop;
     window.stormSetNlcdVisible = _stormNoop;
     window.stormSetNlcdOpacity = _stormNoop;
     window.stormSetSatelliteBasemapVisible = _stormNoop;
@@ -3469,110 +3465,6 @@
         ['coalesce', ['get', 'title'], '']
       ];
     }
-
-    var _hrrrVisible = false;
-    var _hrrrOpacity = 1.0;
-    var HRRR_SRC = 'hrrr-vector';
-    var HRRR_LINE = 'hrrr-line';
-    var HRRR_LABEL = 'hrrr-label';
-
-    function _removeHrrrLayers() {
-      try {
-        if (map.getLayer(HRRR_LABEL)) map.removeLayer(HRRR_LABEL);
-        if (map.getLayer(HRRR_LINE)) map.removeLayer(HRRR_LINE);
-        if (map.getSource(HRRR_SRC)) map.removeSource(HRRR_SRC);
-      } catch(e) {
-        console.warn('[STORM] HRRR clear warning:', e.message || e);
-      }
-    }
-
-    function _addHrrrLayer(layerDef, beforeId) {
-      try {
-        if (beforeId && map.getLayer(beforeId)) {
-          map.addLayer(layerDef, beforeId);
-        } else {
-          map.addLayer(layerDef);
-        }
-      } catch(_) {
-        try { map.addLayer(layerDef); } catch(e) {
-          console.error('[STORM] HRRR layer add error:', e.message || e);
-        }
-      }
-    }
-
-    window.stormSetHrrrOverlay = function(tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom, labelUnits) {
-      try {
-        _removeHrrrLayers();
-        map.addSource(HRRR_SRC, {
-          type: 'vector',
-          tiles: [tileUrl],
-          minzoom: minzoom || 0,
-          maxzoom: maxzoom || 8,
-          bounds: [west, south, east, north]
-        });
-        _addHrrrLayer({
-          id: HRRR_LINE,
-          type: 'line',
-          source: HRRR_SRC,
-          'source-layer': sourceLayer,
-          paint: {
-            'line-color': ['coalesce', ['get', 'stroke'], '#F2D45C'],
-            'line-width': ['coalesce', ['get', 'stroke-width'], 1],
-            'line-opacity': _hrrrOpacity
-          }
-        }, 'road-unpaved');
-        _addHrrrLayer({
-          id: HRRR_LABEL,
-          type: 'symbol',
-          source: HRRR_SRC,
-          'source-layer': sourceLayer,
-          minzoom: 0,
-          layout: {
-            'symbol-placement': 'line',
-            'text-field': _contourTextField(labelUnits),
-            'text-size': 10,
-            'text-font': ['Noto Sans Regular'],
-            'text-allow-overlap': false,
-            'text-ignore-placement': false,
-            'symbol-spacing': 320
-          },
-          paint: {
-            'text-color': '#EFF3FF',
-            'text-halo-color': '#0A0A0F',
-            'text-halo-width': 1.2,
-            'text-opacity': _hrrrOpacity
-          }
-        }, 'road-unpaved');
-        window.stormSetHrrrVisible(_hrrrVisible);
-      } catch(e) {
-        console.error('[STORM] HRRR overlay inject error:', e.message || e);
-      }
-    };
-
-    window.stormSetHrrrVisible = function(visible) {
-      _hrrrVisible = !!visible;
-      var state = _hrrrVisible ? 'visible' : 'none';
-      try {
-        if (map.getLayer(HRRR_LINE)) map.setLayoutProperty(HRRR_LINE, 'visibility', state);
-        if (map.getLayer(HRRR_LABEL)) map.setLayoutProperty(HRRR_LABEL, 'visibility', state);
-      } catch(e) {
-        console.warn('[STORM] HRRR visibility warning:', e.message || e);
-      }
-    };
-
-    window.stormSetHrrrOpacity = function(opacity) {
-      _hrrrOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
-      try {
-        if (map.getLayer(HRRR_LINE)) map.setPaintProperty(HRRR_LINE, 'line-opacity', _hrrrOpacity);
-        if (map.getLayer(HRRR_LABEL)) map.setPaintProperty(HRRR_LABEL, 'text-opacity', _hrrrOpacity);
-      } catch(e) {
-        console.warn('[STORM] HRRR opacity warning:', e.message || e);
-      }
-    };
-
-    window.stormClearHrrrOverlay = function() {
-      _removeHrrrLayers();
-    };
 
     var _mesoanalysisVisible = false;
     var _mesoanalysisOpacity = 1.0;

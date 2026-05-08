@@ -4,8 +4,8 @@ import csv
 import io
 import json
 import logging
+import math
 import pathlib
-import ssl
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -19,17 +19,11 @@ from core.observation import Observation
 
 log = logging.getLogger(__name__)
 
-# nssl THREDDS uses a cert that Python's default SSL context rejects
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode    = ssl.CERT_NONE
-
-OK_API_URL      = f"{config.NSSL_API_ROOT}/ok_mesonet.json"
-OK_THREDDS_URL  = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/ok_mesonet.json"
+OK_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ok_mesonet.json"
 OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
-WTM_API_URL     = f"{config.NSSL_API_ROOT}/wtx_mesonet.json"
-WTM_THREDDS_URL = "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Storm/data/mesonet/wtx_mesonet.json"
+WTM_API_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/wtx_mesonet.json"
 WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
+KS_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ks_mesonet.json"
 
 # iem endpoints for ASOS
 IEM_METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/metar.geojson"
@@ -60,6 +54,7 @@ class SurfaceFetcher(QObject):
         self._pending_refresh = False
         self._ok_enabled  = False
         self._wtm_enabled = False
+        self._ks_enabled  = False
         self._asos_enabled = False
         self._ok_meta:  dict[str, dict] | None = None
         self._wtm_meta: dict[str, dict] | None = None
@@ -88,8 +83,18 @@ class SurfaceFetcher(QObject):
         self._update_timer()
         self.fetch_now()
 
+    def set_ks_enabled(self, enabled: bool):
+        self._ks_enabled = enabled
+        self._update_timer()
+        self.fetch_now()
+
     def _update_timer(self):
-        if self._ok_enabled or self._wtm_enabled or (self._asos_enabled and self._asos_bbox is not None):
+        if (
+            self._ok_enabled
+            or self._wtm_enabled
+            or self._ks_enabled
+            or (self._asos_enabled and self._asos_bbox is not None)
+        ):
             self._timer.start()
         else:
             self._timer.stop()
@@ -124,6 +129,15 @@ class SurfaceFetcher(QObject):
                 stamp = wtm_time.strftime("%H:%MZ") if wtm_time else "?"
                 self._update_source_diag("wtm", "WTM", wtm_attempt, wtm_obs, wtm_stale, wtm_note)
                 parts.append(self._format_status_part("WTM", len(wtm_obs), stamp, wtm_stale, wtm_note))
+
+            if self._ks_enabled:
+                ks_attempt = datetime.now(timezone.utc)
+                ks_obs, ks_stale, ks_note = self._fetch_source("KS", "ks", self._fetch_ks_mesonet)
+                payload.extend(ks_obs)
+                ks_time = max((i["obs"].timestamp for i in ks_obs), default=None)
+                stamp = ks_time.strftime("%H:%MZ") if ks_time else "?"
+                self._update_source_diag("ks", "KS", ks_attempt, ks_obs, ks_stale, ks_note)
+                parts.append(self._format_status_part("KS", len(ks_obs), stamp, ks_stale, ks_note))
 
             if self._asos_enabled and self._asos_bbox is not None:
                 asos_attempt = datetime.now(timezone.utc)
@@ -161,8 +175,8 @@ class SurfaceFetcher(QObject):
         if self._ok_meta is None:
             self._ok_meta = self._fetch_ok_metadata()
 
-        url, ssl_ctx, headers = self._ok_source_request()
-        raw  = self._http_get(url, ssl_ctx=ssl_ctx, headers=headers)
+        raw  = self._http_get(OK_API_URL, headers=self._nssl_api_headers())
+        url = OK_API_URL
         data = self._json_from_bytes(raw, "OK Mesonet data", url)
         obs_time = self._parse_iso_utc(data.get("time"))
         obs_data = data.get("data", {})
@@ -223,8 +237,8 @@ class SurfaceFetcher(QObject):
         if self._wtm_meta is None:
             self._wtm_meta = self._fetch_wtm_metadata()
 
-        url, ssl_ctx, headers = self._wtm_source_request()
-        raw  = self._http_get(url, ssl_ctx=ssl_ctx, headers=headers)
+        raw  = self._http_get(WTM_API_URL, headers=self._nssl_api_headers())
+        url = WTM_API_URL
         data = self._json_from_bytes(raw, "WTM data", url)
         observations: list[dict] = []
 
@@ -268,6 +282,46 @@ class SurfaceFetcher(QObject):
             for row in data.get("results", [])
             if row.get("mesonet_id") and row.get("latitude") and row.get("longitude")
         }
+
+    def _fetch_ks_mesonet(self) -> list[dict]:
+        raw  = self._http_get(KS_API_URL, headers=self._nssl_api_headers())
+        data = self._json_from_bytes(raw, "KS Mesonet data", KS_API_URL)
+        observations: list[dict] = []
+
+        for row in data.get("results", []):
+            station = (row.get("station") or "").strip()
+            if not station:
+                continue
+            meta = row.get("meta") or {}
+            lat = self._float_or_none(meta.get("lat"))
+            lon = self._float_or_none(meta.get("lon"))
+            if lat is None or lon is None:
+                continue
+
+            temp_c = self._float_or_none(row.get("TEMP2MAVG"))
+            rh_pct = self._float_or_none(row.get("RELHUM2MAVG"))
+            pressure_kpa = self._float_or_none(row.get("PRESSUREAVG"))
+
+            obs = Observation(
+                vehicle_id=f"surface:ks:{self._station_key(station)}",
+                lat=lat,
+                lon=lon,
+                timestamp=self._parse_iso_utc(row.get("timestamp")),
+                icon_type="mesonet",
+                temperature_c=temp_c,
+                dewpoint_c=self._dewpoint_c_from_rh(temp_c, rh_pct),
+                wind_speed_ms=self._float_or_none(row.get("WSPD10MAVG")),
+                wind_dir_deg=self._float_or_none(row.get("WDIR10M")),
+                pressure_mb=pressure_kpa * 10.0 if pressure_kpa is not None else None,
+            )
+            observations.append({
+                "id": obs.vehicle_id,
+                "source": "ks",
+                "name": meta.get("name") or station,
+                "obs": obs,
+            })
+
+        return observations
 
 
     def set_asos_enabled(self, enabled: bool):
@@ -505,6 +559,7 @@ class SurfaceFetcher(QObject):
         for key, enabled in (
             ("ok", self._ok_enabled),
             ("wtm", self._wtm_enabled),
+            ("ks", self._ks_enabled),
             ("asos", self._asos_enabled and self._asos_bbox is not None),
         ):
             if enabled:
@@ -514,18 +569,6 @@ class SurfaceFetcher(QObject):
     @staticmethod
     def _nssl_api_headers() -> dict[str, str]:
         return {"X-API-Key": config.NSSL_API_KEY} if config.NSSL_API_KEY else {}
-
-    @staticmethod
-    def _ok_source_request() -> tuple[str, ssl.SSLContext | None, dict[str, str] | None]:
-        if config.USE_NSSL_API_FOR_SURFACE:
-            return OK_API_URL, None, SurfaceFetcher._nssl_api_headers()
-        return OK_THREDDS_URL, _SSL_CTX, None
-
-    @staticmethod
-    def _wtm_source_request() -> tuple[str, ssl.SSLContext | None, dict[str, str] | None]:
-        if config.USE_NSSL_API_FOR_SURFACE:
-            return WTM_API_URL, None, SurfaceFetcher._nssl_api_headers()
-        return WTM_THREDDS_URL, _SSL_CTX, None
 
     def _json_from_bytes(self, raw: bytes, label: str, url: str) -> Any:
         text = raw.decode("utf-8", errors="replace").strip()
@@ -554,6 +597,7 @@ class SurfaceFetcher(QObject):
         return (
             (source == "ok"  and self._ok_enabled)
             or (source == "wtm" and self._wtm_enabled)
+            or (source == "ks" and self._ks_enabled)
             or (source == "asos" and self._asos_enabled)
         )
 
@@ -562,7 +606,7 @@ class SurfaceFetcher(QObject):
         if value is None:
             return None
         value = str(value).strip()
-        if not value or value == "--":
+        if not value or value in {"--", "M"}:
             return None
         try:
             return float(value)
@@ -577,3 +621,16 @@ class SurfaceFetcher(QObject):
             return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError:
             return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _dewpoint_c_from_rh(temp_c: float | None, rh_pct: float | None) -> float | None:
+        if temp_c is None or rh_pct is None or rh_pct <= 0.0 or rh_pct > 100.0:
+            return None
+        a = 17.625
+        b = 243.04
+        gamma = math.log(rh_pct / 100.0) + (a * temp_c) / (b + temp_c)
+        return (b * gamma) / (a - gamma)
+
+    @staticmethod
+    def _station_key(station: str) -> str:
+        return "".join(ch.lower() if ch.isalnum() else "_" for ch in station).strip("_")

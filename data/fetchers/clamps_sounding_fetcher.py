@@ -1,54 +1,44 @@
 
+import json
 import logging
 import math
 import re
-import ssl
 import threading
-import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urljoin
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
-
-# nssl's THREDDS server uses a cert that Python's default SSL context rejects.
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode    = ssl.CERT_NONE
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
+import config
 from core.sounding import Sounding, SoundingSet
 
 log = logging.getLogger(__name__)
 
-_CATALOG_XML = (
-    "https://data.nssl.noaa.gov/thredds/catalog/"
-    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.b1/catalog.xml"
-)
-_CATALOG_HTML = (
-    "https://data.nssl.noaa.gov/thredds/catalog/"
-    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.b1/catalog.html"
-)
-_RAW_CATALOG_XML = (
-    "https://data.nssl.noaa.gov/thredds/catalog/"
-    "FRDD/CLAMPS/dltruck/dltruck1/ingested/dltruckdlsonderawDL1.a1/catalog.xml"
-)
-_FILESERVER_BASE = "https://data.nssl.noaa.gov/thredds/fileServer/"
-_THREDDS_NS      = "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
 _REQUEST_TIMEOUT = 20
 _LOOKBACK_HOURS  = 12
 _RAW_HEADER_BYTES = 4096
+_API_INDEX_PATH = "data/sonde/index.json"
 
 _TEST_FILE_URL = None
 
 _FILENAME_RE = re.compile(r"upperair\.NSSL_Lidar_sonde\.(\d{12})\.skewT", re.IGNORECASE)
-_RAW_FILENAME_RE = re.compile(r"sharppyv2_(\d{8})_(\d{4})\.text", re.IGNORECASE)
 _LOCATION_RE = re.compile(
     r"Release point (latitude|longitude)\s+([-+]?\d+(?:\.\d+)?)[^NSEW]*([NSEW])?",
     re.IGNORECASE,
 )
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
+
+
+@dataclass(frozen=True)
+class _SondeEntry:
+    file_time: datetime
+    skewt_url: str = ""
+    raw_url: str = ""
 
 
 class ClampsSoundingFetcher(QObject):
@@ -107,7 +97,7 @@ def _fetch_sounding_set() -> SoundingSet:
             if m else now_utc
         )
         req = Request(_TEST_FILE_URL, headers=_HEADERS)
-        with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+        with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
         snd = _parse_skewt(text, file_time, 0)
         if snd is None:
@@ -122,48 +112,34 @@ def _fetch_sounding_set() -> SoundingSet:
             station_name="NSSL CLAMPS DL Truck", source="nssl",
         )
 
+    return _fetch_sounding_set_from_api(now_utc)
+
+
+def _fetch_sounding_set_from_api(now_utc: datetime) -> SoundingSet:
     cutoff = now_utc - timedelta(hours=_LOOKBACK_HOURS)
+    entries = [
+        entry for entry in _api_sonde_entries()
+        if cutoff <= entry.file_time <= now_utc
+    ]
+    if not entries:
+        raise ValueError("No CLAMPS API soundings found in the last 12 hours")
 
-    req = Request(_CATALOG_XML, headers=_HEADERS)
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
-        xml_bytes = resp.read()
-
-    root = ET.fromstring(xml_bytes)
-
-    candidates: list[tuple[datetime, str]] = []
-    for ds in root.iter(f"{{{_THREDDS_NS}}}dataset"):
-        name = ds.get("name", "")
-        m    = _FILENAME_RE.search(name)
-        if not m:
-            continue
-        try:
-            file_time = datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(
-                tzinfo=timezone.utc
-            )
-        except ValueError:
-            continue
-        if file_time < cutoff or file_time > now_utc:
-            continue
-        url_path = ds.get("urlPath") or ds.get("ID")
-        if url_path:
-            candidates.append((file_time, url_path))
-
-    if not candidates:
-        raise ValueError("No CLAMPS soundings found in the last 12 hours")
-
-    candidates.sort(key=lambda x: x[0])
-    raw_paths = _raw_paths_by_time()
-
+    entries.sort(key=lambda entry: entry.file_time)
     soundings: list[Sounding] = []
-    for idx, (file_time, url_path) in enumerate(candidates):
+    for idx, entry in enumerate(entries):
+        if not entry.skewt_url:
+            raise ValueError("CLAMPS API index does not include sounding file URLs")
         try:
-            raw_url_path = raw_paths.get(file_time)
-            snd = _fetch_and_parse(url_path, file_time, idx, raw_url_path)
+            snd = _fetch_and_parse_url(entry.skewt_url, entry.file_time, idx, entry.raw_url)
             if snd is not None:
                 soundings.append(snd)
         except Exception as e:
-            log.warning("Failed to fetch CLAMPS file %s: %s", url_path, e)
+            log.warning("Failed to fetch CLAMPS API file %s: %s", entry.skewt_url, e)
 
+    return _soundings_to_set(soundings, now_utc)
+
+
+def _soundings_to_set(soundings: list[Sounding], now_utc: datetime) -> SoundingSet:
     if not soundings:
         raise ValueError("No valid CLAMPS soundings could be parsed")
 
@@ -187,57 +163,120 @@ def _fetch_sounding_set() -> SoundingSet:
     )
 
 
-def _fetch_and_parse(
-    url_path: str,
+def _api_sonde_entries() -> list[_SondeEntry]:
+    req = Request(_api_url(_API_INDEX_PATH), headers=_api_headers())
+    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    values = payload.get("soundings")
+    if values is None:
+        values = payload.get("launches")
+    if values is None:
+        values = payload.get("launch_times")
+    if not isinstance(values, list):
+        raise ValueError("CLAMPS API index is missing launch_times or soundings")
+
+    entries: list[_SondeEntry] = []
+    for value in values:
+        entry = _api_sonde_entry(value)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _api_sonde_entry(value: object) -> "_SondeEntry | None":
+    if isinstance(value, str):
+        file_time = _parse_launch_time(value)
+        if file_time is None:
+            return None
+        return _SondeEntry(file_time, _api_sonde_url(file_time))
+
+    if not isinstance(value, dict):
+        return None
+
+    time_value = (
+        value.get("valid_time")
+        or value.get("launch_time")
+        or value.get("time")
+        or value.get("id")
+    )
+    file_time = _parse_launch_time(time_value)
+    if file_time is None:
+        return None
+
+    skewt_url = (
+        value.get("skewt_url")
+        or value.get("skewT_url")
+        or value.get("url")
+        or value.get("file_url")
+        or ""
+    )
+    raw_url = value.get("raw_url") or value.get("raw_file_url") or ""
+    return _SondeEntry(
+        file_time=file_time,
+        skewt_url=_api_url(str(skewt_url)) if skewt_url else _api_sonde_url(file_time),
+        raw_url=_api_url(str(raw_url)) if raw_url else "",
+    )
+
+
+def _api_sonde_url(file_time: datetime) -> str:
+    stamp = file_time.strftime("%Y%m%d%H%M")
+    return _api_url(f"data/sonde/upperair.NSSL_Lidar_sonde.{stamp}.skewT.text")
+
+
+def _parse_launch_time(value: object) -> "datetime | None":
+    text = str(value or "").strip()
+    if not text:
+        return None
+    m = re.search(r"(\d{12})", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _api_url(path_or_url: str) -> str:
+    value = str(path_or_url or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    return urljoin(config.NSSL_API_ROOT.rstrip("/") + "/", value.lstrip("/"))
+
+
+def _api_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(_HEADERS)
+    if config.NSSL_API_KEY:
+        headers["X-API-Key"] = config.NSSL_API_KEY
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _fetch_and_parse_url(
+    url: str,
     file_time: datetime,
     idx: int,
-    raw_url_path: str | None = None,
+    raw_url: str = "",
 ) -> "Sounding | None":
-    url = _FILESERVER_BASE + url_path
-    req = Request(url, headers=_HEADERS)
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+    req = Request(url, headers=_api_headers())
+    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     snd = _parse_skewt(text, file_time, idx)
-    if snd is not None and raw_url_path:
-        location = _fetch_raw_launch_location(raw_url_path)
+    if snd is not None and raw_url:
+        location = _fetch_raw_launch_location_url(raw_url)
         if location is not None:
             snd.lat, snd.lon = location
     return snd
 
 
-def _raw_paths_by_time() -> dict[datetime, str]:
-    try:
-        req = Request(_RAW_CATALOG_XML, headers=_HEADERS)
-        with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
-            xml_bytes = resp.read()
-        root = ET.fromstring(xml_bytes)
-    except Exception as e:
-        log.warning("Failed to fetch CLAMPS raw catalog: %s", e)
-        return {}
-
-    paths: dict[datetime, str] = {}
-    for ds in root.iter(f"{{{_THREDDS_NS}}}dataset"):
-        name = ds.get("name", "")
-        m = _RAW_FILENAME_RE.search(name)
-        if not m:
-            continue
-        try:
-            file_time = datetime.strptime(
-                f"{m.group(1)}{m.group(2)}", "%Y%m%d%H%M"
-            ).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        url_path = ds.get("urlPath") or ds.get("ID")
-        if url_path:
-            paths[file_time] = url_path
-    return paths
-
-
-def _fetch_raw_launch_location(raw_url_path: str) -> "tuple[float, float] | None":
-    url = _FILESERVER_BASE + raw_url_path
-    headers = {**_HEADERS, "Range": f"bytes=0-{_RAW_HEADER_BYTES - 1}"}
-    req = Request(url, headers=headers)
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
+def _fetch_raw_launch_location_url(raw_url: str) -> "tuple[float, float] | None":
+    headers = _api_headers({"Range": f"bytes=0-{_RAW_HEADER_BYTES - 1}"})
+    req = Request(raw_url, headers=headers)
+    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
         text = resp.read(_RAW_HEADER_BYTES).decode("utf-8", errors="replace")
     return _parse_raw_launch_location(text)
 

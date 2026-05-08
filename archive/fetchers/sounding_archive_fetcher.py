@@ -1,12 +1,8 @@
 
 import logging
-import ssl
 import threading
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -193,62 +189,38 @@ class ArchiveSoundingFetcher(QObject):
         """Fetch all NSSL soundings from the same UTC day as t, up to and including t."""
         try:
             from data.fetchers.clamps_sounding_fetcher import (
-                _CATALOG_XML, _FILENAME_RE,
-                _HEADERS, _REQUEST_TIMEOUT, _SSL_CTX, _fetch_and_parse, _format_label,
+                _api_sonde_entries,
+                _fetch_and_parse_url,
+                _soundings_to_set,
             )
 
-            req = Request(_CATALOG_XML, headers=_HEADERS)
-            with urlopen(req, timeout=_REQUEST_TIMEOUT, context=_SSL_CTX) as resp:
-                root = ET.fromstring(resp.read())
-
-            ns = "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
             day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
-            candidates: list[tuple[datetime, str]] = []
+            entries = [
+                entry for entry in _api_sonde_entries()
+                if day_start <= entry.file_time <= t
+            ]
+            if not entries:
+                raise ValueError("No NSSL soundings available for this archive time")
 
-            for ds in root.iter(f"{{{ns}}}dataset"):
-                m = _FILENAME_RE.search(ds.get("name", ""))
-                if not m:
-                    continue
-                try:
-                    file_time = datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                if day_start <= file_time <= t:
-                    url_path = ds.get("urlPath") or ds.get("ID")
-                    if url_path:
-                        candidates.append((file_time, url_path))
-
-            if not candidates:
-                self.fetch_error.emit("No NSSL soundings available for this archive time")
-                return
-
-            candidates.sort(key=lambda x: x[0])
+            entries.sort(key=lambda entry: entry.file_time)
             soundings = []
-            for idx, (file_time, url_path) in enumerate(candidates):
+            for idx, entry in enumerate(entries):
                 try:
-                    snd = _fetch_and_parse(url_path, file_time, idx)
+                    snd = _fetch_and_parse_url(
+                        entry.skewt_url,
+                        entry.file_time,
+                        idx,
+                        entry.raw_url,
+                    )
                     if snd is not None:
-                        snd.label = _format_label(file_time)
                         soundings.append(snd)
                 except Exception as e:
-                    log.warning("ArchiveSoundingFetcher: failed to fetch NSSL file %s: %s", url_path, e)
+                    log.warning("ArchiveSoundingFetcher: failed to fetch NSSL API file %s: %s", entry.skewt_url, e)
 
-            if not soundings:
-                self.fetch_error.emit("No valid NSSL soundings could be parsed")
-                return
-
-            surface_elev = float(soundings[0].height[0]) if soundings[0].height.size > 0 else 0.0
-            sset = SoundingSet(
-                lat=0.0, lon=0.0, elevation=surface_elev,
-                fetch_time=t, soundings=soundings,
-                station_id="CLAMPS", station_name="NSSL CLAMPS DL Truck", source="nssl",
-            )
+            sset = _soundings_to_set(soundings, t)
             self.sounding_ready.emit(sset)
-        except (HTTPError, URLError, TimeoutError) as exc:
-            log.warning("ArchiveSoundingFetcher: NSSL fetch failed: %s", exc)
-            self.fetch_error.emit(f"NSSL sounding error: {exc}")
         except Exception as exc:
-            log.error("ArchiveSoundingFetcher: NSSL sounding failed: %s", exc)
+            log.error("ArchiveSoundingFetcher: NSSL API sounding failed: %s", exc)
             self.fetch_error.emit(f"NSSL sounding error: {exc}")
 
 
