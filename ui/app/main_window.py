@@ -389,6 +389,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_mqtt.cone_deleted.connect(self._recv_remote_storm_cone_deleted)
         self._archive_mqtt.drawing_received.connect(self._recv_remote_drawing)
         self._archive_mqtt.drawing_deleted.connect(self._recv_remote_drawing_deleted)
+        self._archive_mqtt.scan_sector_received.connect(self._recv_remote_scan_sector)
+        self._archive_mqtt.scan_sectors_cleared.connect(self._clear_archive_scan_sectors)
 
         # hazard fetcher.
         self._archive_hazard = ArchiveHazardFetcher(
@@ -481,6 +483,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         )
         self._archive_loading.rejected.connect(self._on_archive_loading_aborted)
 
+        self.hazard_controls.spc_day_changed.connect(self._on_archive_spc_day_changed)
         self.hazard_controls.spc_mode_changed.connect(self._on_archive_spc_mode_changed)
         self.hazard_controls.spc_watches_toggled.connect(self._on_archive_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_archive_mds_toggled)
@@ -687,6 +690,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.update_vehicle_count(0)
         self._sync_routing_vehicle_snapshot()
 
+    def _clear_archive_scan_sectors(self) -> None:
+        """Remove scan-sector overlays when archive time jumps backward."""
+        self._scan_sectors.clear()
+        self._refresh_scan_sectors()
+
     def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
         if self._archive_radar:
             self._archive_radar.set_tilt_index(tilt_idx)
@@ -722,10 +730,16 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         outlook_on = mode == "outlook"
         for key in ("MRGL", "SLGHT", "ENH", "MDT", "HIGH"):
             self.map_widget.set_spc_category_visible(key, outlook_on)
-        for key in ("tor", "wind", "hail"):
+        for key in ("tor", "wind", "hail", "prob", "sig"):
             on = mode == key
             self.map_widget.set_spc_product_visible(key, on)
         self._update_hazard_legend()
+
+    def _on_archive_spc_day_changed(self, day: int) -> None:
+        self._archive_hazard.set_spc_day(day)
+        empty = '{"type":"FeatureCollection","features":[]}'
+        self.map_widget.set_spc_geojson(empty, empty, empty, empty, empty, empty)
+        self._on_archive_spc_mode_changed(self.hazard_controls._active_spc_mode())
 
     def _on_archive_watches_toggled(self, enabled: bool) -> None:
         self.map_widget.set_spc_watches_visible(enabled)
@@ -1085,6 +1099,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.map_pick_for_route.connect(
             self.routing_controls.on_map_pick
         )
+        self.map_widget.private_pin_route_requested.connect(
+            self._on_private_pin_route_requested
+        )
         if nlcd_available:
             self.landcover_controls = LandcoverControls(self._map_container)
             self.landcover_controls.setObjectName("floatingToolbar")
@@ -1157,6 +1174,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._set_layer_active("route", False)
         self.map_widget.clear_route()
         self.map_widget.set_route_pick_mode(False)
+
+    def _on_private_pin_route_requested(self, lat: float, lon: float, label: str):
+        if self._viewer or self._monitor or self._archive:
+            return
+        if not hasattr(self, "routing_controls"):
+            return
+        self.routing_controls.route_to_pin(lat, lon, label)
+        self.btn_route.setChecked(True)
+        self._layout_overlays()
 
     def _toolbar_toggle(self, label: str, tooltip: str, layout: QHBoxLayout) -> QToolButton:
         btn = QToolButton()
@@ -1474,12 +1500,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         arc_bar_h = 0
         if hasattr(self, "_archive_controls"):
             ac = self._archive_controls
-            ac_w = min(r.width() - 2 * MARGIN, 820)
+            ac_w = min(r.width() - 2 * MARGIN, 680)
             ac.setFixedWidth(ac_w)
             ac.adjustSize()
-            arc_bar_h = ac.sizeHint().height() + 6
+            ac_h = ac.sizeHint().height()
+            arc_bar_h = ac_h + MARGIN
             ac_x = max(MARGIN, (r.width() - ac_w) // 2)
-            ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, arc_bar_h)
+            ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, ac_h)
             ac.raise_()
 
         # debug pill — bottom-center, sits above archive controls (or above bottom margin)
@@ -1910,6 +1937,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _init_hazards(self):
         self._hazard_fetcher = HazardFetcher(parent=self)
+        self.hazard_controls.spc_day_changed.connect(self._on_spc_day_changed)
         self.hazard_controls.spc_mode_changed.connect(self._on_spc_mode_changed)
         self.hazard_controls.spc_watches_toggled.connect(self._on_spc_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
@@ -2823,9 +2851,17 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.hazard_indicator.setVisible(not online)
         self._layout_overlays()
 
-    def _on_spc_received(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str):
+    def _on_spc_received(
+        self,
+        cat_str: str,
+        wind_str: str,
+        hail_str: str,
+        tor_str: str,
+        prob_str: str = '{"type":"FeatureCollection","features":[]}',
+        sig_str: str = '{"type":"FeatureCollection","features":[]}',
+    ):
         self._clear_hazard_fetch_msg()
-        self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str)
+        self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str, prob_str, sig_str)
 
     def _on_nws_raw_phenoms(self, phenoms: set):
         """Update the legend phenom set from the raw (unfiltered) NWS data.
@@ -2906,7 +2942,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             active = []
             if hc._btn_outlook.isChecked():
                 active.append("spc-cat")
-            for k in ("tor", "wind", "hail"):
+            for k in ("tor", "wind", "hail", "prob", "sig"):
                 btn = getattr(hc, f"_btn_{k}")
                 if btn.isChecked():
                     active.append(f"spc-{k}")
@@ -2921,7 +2957,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         active = []
         if any(fc._spc_categories.values()):
             active.append("spc-cat")
-        for k in ("tor", "wind", "hail"):
+        for k in ("tor", "wind", "hail", "prob", "sig"):
             if fc._spc_products.get(k):
                 active.append(f"spc-{k}")
         if fc._spc_watches_enabled:
@@ -2955,8 +2991,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 if self._archive and hasattr(self, "_time_ctrl") else None
             )
 
-            if source in ("spc-cat", "spc-tor", "spc-wind", "spc-hail"):
-                fetch_targets.append(("DAY 1 CONVECTIVE OUTLOOK", "swo", _archive_ts))
+            if source in ("spc-cat", "spc-tor", "spc-wind", "spc-hail", "spc-prob", "spc-sig"):
+                day = int(props.get("spc_day") or getattr(self.hazard_controls, "current_spc_day", lambda: 1)())
+                title = "DAY 4-8 CONVECTIVE OUTLOOK" if day >= 4 else f"DAY {day} CONVECTIVE OUTLOOK"
+                ident = f"{day}|{_archive_ts}" if _archive_ts else str(day)
+                fetch_targets.append((title, "swo", ident))
             elif source == "spc-mds":
                 name = str(props.get("name", "")).strip()
                 _m = _re.search(r'\d+', name)
@@ -2997,7 +3036,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         """Fetch SPC discussion text in a background thread.
 
         Sources:
-          Day 1 Outlook: IEM Mesonet AFOS API  (PIL: SWODY1)
+          SPC Outlooks: IEM Mesonet AFOS API (PIL: SWODY1/SWODY2/SWODY3/SWOD48)
           MDs:           SPC direct .txt URL    (https://www.spc.noaa.gov/products/md/md{nnnn}.txt)
 
         IEM rejects the SPCMCD{nnnn} PIL as too long, so MDs are fetched
@@ -3027,19 +3066,29 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         try:
             if kind == "swo":
-                # identifier is an ISO archive timestamp in archive mode, None in live mode.
+                day = 1
+                archive_identifier = None
                 if identifier:
+                    parts = str(identifier).split("|", 1)
+                    try:
+                        day = int(parts[0])
+                    except (TypeError, ValueError):
+                        day = 1
+                    archive_identifier = parts[1] if len(parts) > 1 else None
+                pil = "SWOD48" if day >= 4 else f"SWODY{max(1, min(3, day))}"
+                # archive_identifier is an ISO archive timestamp in archive mode.
+                if archive_identifier:
                     from datetime import datetime as _dt2, timedelta as _td2
-                    ts = _dt2.strptime(identifier, "%Y-%m-%dT%H:%M:%SZ")
+                    ts = _dt2.strptime(archive_identifier, "%Y-%m-%dT%H:%M:%SZ")
                     # iem AFOS ignores after/before in ISO format; sdate/edate (date-only)
                     sdate = ts.strftime("%Y-%m-%d")
                     edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
                     url = (
                         "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-                        f"?pil=SWODY1&limit=1&fmt=text&sdate={sdate}&edate={edate}"
+                        f"?pil={pil}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
                     )
                 else:
-                    url = "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SWODY1&limit=1&fmt=text"
+                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={pil}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "mcd":
                 url = f"https://www.spc.noaa.gov/products/md/md{identifier}.txt"
@@ -3117,17 +3166,22 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if generation == self._fetch_generation:
             self.outlook_panel.show_text(title, text)
 
+    def _on_spc_day_changed(self, day: int):
+        self._hazard_fetcher.set_spc_day(day)
+
     def _on_spc_mode_changed(self, mode: str):
         self._set_layer_active("spc_outlook", mode == "outlook")
         self._set_layer_active("spc_tor",     mode == "tor")
         self._set_layer_active("spc_wind",    mode == "wind")
         self._set_layer_active("spc_hail",    mode == "hail")
+        self._set_layer_active("spc_prob",    mode == "prob")
+        self._set_layer_active("spc_sig",     mode == "sig")
         outlook_on = mode == "outlook"
         for key in ("MRGL", "SLGHT", "ENH", "MDT", "HIGH"):
             self._hazard_fetcher.set_spc_category_enabled(key, outlook_on)
             self.map_widget.set_spc_category_visible(key, outlook_on)
 
-        for key in ("tor", "wind", "hail"):
+        for key in ("tor", "wind", "hail", "prob", "sig"):
             on = mode == key
             self._hazard_fetcher.set_spc_product_enabled(key, on)
             self.map_widget.set_spc_product_visible(key, on)
@@ -3136,12 +3190,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             _spc_labels = {
                 "outlook": "SPC outlook", "tor": "SPC tornado",
                 "wind": "SPC wind", "hail": "SPC hail",
+                "prob": "SPC probability", "sig": "SPC significant",
             }
             _fetch_label = f"Fetching {_spc_labels.get(mode, 'SPC')}…"
             needs_refresh = False
             if mode == "outlook":
                 needs_refresh = not self._hazard_fetcher.spc_category_cached()
-            elif mode in ("tor", "wind", "hail"):
+            elif mode in ("tor", "wind", "hail", "prob", "sig"):
                 needs_refresh = not self._hazard_fetcher.spc_product_cached(mode)
             if needs_refresh:
                 self._hazard_fetcher.force_spc_refresh()
@@ -4619,6 +4674,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
         if obs.vehicle_id == config.VEHICLE_ID and hasattr(self, "routing_controls"):
             self.routing_controls.update_own_position(obs.lat, obs.lon)
+            if not self._viewer and not self._monitor and not self._archive and obs.lat is not None and obs.lon is not None:
+                self.map_widget.set_private_pin_own_location(obs.lat, obs.lon)
         self._sync_routing_vehicle_snapshot()
         count = len(self._vehicles)
         self.update_vehicle_count(count)

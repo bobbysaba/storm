@@ -12,12 +12,13 @@ import config
 from core.annotation import Annotation
 from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
+from core.scan_sector import ScanSector
 from network.vehicle_sync import _observation_from_payload
 
 log = logging.getLogger(__name__)
 
 _ANNOTATIONS_PATH = "annotations"
-_TOPICS = ("vehicles", "annotations", "cones", "drawings")
+_TOPICS = ("vehicles", "annotations", "cones", "drawings", "scan_sectors")
 
 
 def _fetch_text(url: str) -> Optional[str]:
@@ -36,7 +37,17 @@ def _fetch_text(url: str) -> Optional[str]:
 
 
 def _parse_timestamp(obj: dict) -> Optional[datetime]:
-    """Extract a UTC datetime from a JSONL record using created_at or gps_date/gps_time."""
+    """Extract a UTC datetime from a JSONL record."""
+    # scan sectors
+    scan_ts = obj.get("timestamp")
+    if scan_ts:
+        try:
+            return datetime.fromisoformat(
+                scan_ts.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
     # annotations / cones / drawings
     ts_str = obj.get("created_at") or obj.get("deleted_at")
     if ts_str:
@@ -80,7 +91,7 @@ def _parse_jsonl(text: str) -> list[tuple[datetime, dict]]:
 class ArchiveMQTTReader(QObject):
     """
     Fetches STORM archive JSONL files from the NSSL API and replays
-    vehicle positions, annotations, cones, and drawings in sync with
+    vehicle positions, annotations, cones, drawings, and scan sectors in sync with
     the archive TimeController.
 
     Signals
@@ -96,6 +107,8 @@ class ArchiveMQTTReader(QObject):
     cone_deleted(str)                  cone_id
     drawing_received(DrawingAnnotation)
     drawing_deleted(str)               drawing_id
+    scan_sector_received(ScanSector)
+    scan_sectors_cleared()
     error(str)
     """
 
@@ -107,6 +120,8 @@ class ArchiveMQTTReader(QObject):
     cone_deleted        = pyqtSignal(str)
     drawing_received    = pyqtSignal(object)
     drawing_deleted     = pyqtSignal(str)
+    scan_sector_received = pyqtSignal(object)
+    scan_sectors_cleared = pyqtSignal()
     error               = pyqtSignal(str)
     _load_complete      = pyqtSignal()   # internal — fires on bg thread, triggers main-thread replay
 
@@ -137,6 +152,7 @@ class ArchiveMQTTReader(QObject):
         # backward jump — remove anything placed after the new time, then re-emit from scratch.
         if self._last_emit_time is not None and archive_time < self._last_emit_time:
             self.vehicles_cleared.emit()
+            self.scan_sectors_cleared.emit()
             # explicitly delete annotations/cones/drawings that are now in the future.
             for ann_id in list(self._emitted_ids["annotations"]):
                 self.annotation_deleted.emit(ann_id, "")
@@ -151,6 +167,7 @@ class ArchiveMQTTReader(QObject):
         self._emit_annotations(archive_time)
         self._emit_cones(archive_time)
         self._emit_drawings(archive_time)
+        self._emit_scan_sectors(archive_time)
 
     def first_vehicle_positions(self) -> list[tuple[str, float, float]]:
         """Return (vehicle_id, lat, lon) tuples from the first vehicle timestamp."""
@@ -279,3 +296,18 @@ class ArchiveMQTTReader(QObject):
                     self.drawing_received.emit(drawing)
                 except Exception as exc:
                     log.debug("ArchiveMQTTReader: drawing parse error: %s", exc)
+
+    def _emit_scan_sectors(self, t: datetime) -> None:
+        """Emit the most recent scan-sector state for each vehicle at or before t."""
+        latest: dict[str, dict] = {}
+        for ts, obj in self._data["scan_sectors"]:
+            if ts > t:
+                break
+            vid = obj.get("vehicle_id")
+            if vid:
+                latest[vid] = obj
+        for obj in latest.values():
+            try:
+                self.scan_sector_received.emit(ScanSector.from_dict(obj))
+            except Exception as exc:
+                log.debug("ArchiveMQTTReader: scan sector parse error: %s", exc)

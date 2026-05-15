@@ -2,6 +2,7 @@
 import logging
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtWidgets import QApplication
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class MapBridge(QObject):
     drawing_drag_ended    = pyqtSignal(str, str)           # id, coords json
     storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     storm_cone_place_drag_ended = pyqtSignal(float, float)
+    private_pin_route_requested = pyqtSignal(float, float, str)
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -56,6 +58,17 @@ class MapBridge(QObject):
     @pyqtSlot(float, float)
     def on_storm_cone_place_drag_end(self, lat: float, lon: float):
         self.storm_cone_place_drag_ended.emit(lat, lon)
+
+    @pyqtSlot(float, float, str)
+    def on_private_pin_route(self, lat: float, lon: float, label: str):
+        self.private_pin_route_requested.emit(lat, lon, label)
+
+    @pyqtSlot(str)
+    def on_private_pin_copy(self, text: str):
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception as e:
+            log.warning("private pin clipboard copy failed: %s", e)
 
     @pyqtSlot(str)
     def on_storm_cone_click(self, cone_id: str):

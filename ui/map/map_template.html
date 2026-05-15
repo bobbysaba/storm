@@ -147,6 +147,128 @@
       z-index: 200;
     }
 
+    #private-pin-menu {
+      display: none;
+      position: absolute;
+      z-index: 260;
+      min-width: 154px;
+      max-width: 220px;
+      padding: 7px;
+      background: rgba(15, 15, 26, 0.96);
+      border: 1px solid #49536F;
+      border-radius: 6px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+      font-family: "Helvetica Neue", sans-serif;
+    }
+
+    .private-pin-menu-meta {
+      color: #8E97AA;
+      font-size: 10px;
+      line-height: 1.2;
+      margin: 0 2px 6px;
+      white-space: nowrap;
+    }
+
+    .private-pin-menu-title {
+      color: #E8EDF5;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.25;
+      margin: 0 2px 3px;
+      max-width: 190px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .private-pin-menu-range {
+      color: __ACCENT_COLOR__;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.25;
+      margin: 0 2px 7px;
+      white-space: nowrap;
+    }
+
+    .private-pin-menu-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .private-pin-menu-btn {
+      width: 100%;
+      min-height: 28px;
+      border: 1px solid #2A3448;
+      border-radius: 5px;
+      background: rgba(34, 44, 64, 0.96);
+      color: #E8EDF5;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      text-align: left;
+      padding: 6px 9px;
+    }
+
+    .private-pin-menu-btn:hover {
+      border-color: __ACCENT_COLOR__;
+      color: __ACCENT_COLOR__;
+    }
+
+    .private-pin-menu-input {
+      width: 100%;
+      min-height: 28px;
+      margin-bottom: 5px;
+      border: 1px solid #2A3448;
+      border-radius: 5px;
+      background: rgba(8, 10, 16, 0.96);
+      color: #E8EDF5;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 6px 8px;
+      outline: none;
+    }
+
+    .private-pin-menu-input:focus {
+      border-color: __ACCENT_COLOR__;
+    }
+
+    .storm-private-pin {
+      width: 28px;
+      height: 34px;
+      position: relative;
+      cursor: pointer;
+      user-select: none;
+      filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.7));
+    }
+
+    .storm-private-pin::before {
+      content: "";
+      position: absolute;
+      left: 5px;
+      top: 2px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      background: __ACCENT_COLOR__;
+      border: 2px solid #F3F6FA;
+      box-shadow: 0 0 10px rgba(74, 158, 255, 0.65);
+    }
+
+    .storm-private-pin::after {
+      content: "";
+      position: absolute;
+      left: 12px;
+      top: 9px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #0A0A0F;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.75);
+    }
+
     .maplibregl-popup.storm-hover-tooltip .maplibregl-popup-content {
       background: rgba(15, 15, 26, 0.96);
       color: #E8EAF0;
@@ -338,6 +460,7 @@
     window.stormSetRoute = _stormNoop;
     window.stormClearRoute = _stormNoop;
     window.stormSetRoutePickMode = _stormNoop;
+    window.stormSetPrivatePinOwnLocation = _stormNoop;
     // cwa overlay hooks (populated when the map loads)
     window.stormSetCwaGeoJSON = _stormNoop;
     window.stormSetCwaVisible = _stormNoop;
@@ -1095,6 +1218,8 @@
       map.addSource('spc-wind', {type:'geojson', data:empty});
       map.addSource('spc-hail', {type:'geojson', data:empty});
       map.addSource('spc-tor', {type:'geojson', data:empty});
+      map.addSource('spc-prob', {type:'geojson', data:empty});
+      map.addSource('spc-sig', {type:'geojson', data:empty});
       map.addSource('spc-watches', {type:'geojson', data:empty});
       map.addSource('spc-mds', {type:'geojson', data:empty});
       map.addSource('nws-warnings', {type:'geojson', data:empty});
@@ -1278,6 +1403,17 @@
       _addSpcProductLayers('hail', windHailColor);
       _addSpcProductLayers('tor', torColor);
 
+      var anySevereColor = ['match', ['get', 'LABEL'],
+        ['SIGN', 'CIG1', 'CIG2', 'CIG3'], 'rgba(0,0,0,0)',
+        ['0.05', '5'],  '#8B5A2A',
+        ['0.15', '15'], '#F5F500',
+        ['0.30', '30'], '#EE2222',
+        ['0.45', '45'], '#EE00EE',
+        ['0.60', '60'], '#2266CC',
+        '#8B5A2A'];
+      _addSpcProductLayers('prob', anySevereColor);
+      _addSpcProductLayers('sig', anySevereColor);
+
       map.addLayer({
         id: 'spc-watches-fill',
         type: 'fill',
@@ -1418,6 +1554,10 @@
         'spc-tor-fill', 'spc-tor-sig-base',
         'spc-wind-fill', 'spc-wind-sig-base',
         'spc-hail-fill', 'spc-hail-sig-base',
+        'spc-prob-fill', 'spc-prob-sig-base',
+        'spc-prob-sign', 'spc-prob-cig1', 'spc-prob-cig2', 'spc-prob-cig3',
+        'spc-sig-fill', 'spc-sig-sig-base',
+        'spc-sig-sign', 'spc-sig-cig1', 'spc-sig-cig2', 'spc-sig-cig3',
         'spc-watches-fill', 'spc-mds-fill', 'nws-warnings-fill'
       ];
       _hazardFillLayers.forEach(function(lid) {
@@ -1672,6 +1812,8 @@
           'spc-tor-fill','spc-tor-sig-base',
           'spc-wind-fill','spc-wind-sig-base',
           'spc-hail-fill','spc-hail-sig-base',
+          'spc-prob-fill','spc-prob-sig-base',
+          'spc-sig-fill','spc-sig-sig-base',
           'spc-watches-fill','spc-mds-fill','nws-warnings-fill',
           'cwa-fill'
         ].filter(function(l) {
@@ -1685,8 +1827,8 @@
           // build a label for every unique product under the cursor.
           var _tipParts = [];
           var _tipSeen = {};
-          // probabilistic layers first (tor/wind/hail) — _spcProbLabel merges sig+prob.
-          [['spc-tor','Tor'],['spc-wind','Wind'],['spc-hail','Hail']].forEach(function(pv) {
+          // probabilistic layers first — _spcProbLabel merges CIG/significant + prob.
+          [['spc-tor','Tor'],['spc-wind','Wind'],['spc-hail','Hail'],['spc-prob','Prob'],['spc-sig','Sig']].forEach(function(pv) {
             var l = _spcProbLabel(pv[1], _hits, pv[0]);
             if (l) _tipParts.push(l);
           });
@@ -1840,7 +1982,7 @@
         }
       }
       // check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
-      var spcClickLayers = ['spc-cat-fill', 'spc-tor-fill', 'spc-wind-fill', 'spc-hail-fill', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) { return map.getLayer(l); });
+      var spcClickLayers = ['spc-cat-fill', 'spc-tor-fill', 'spc-wind-fill', 'spc-hail-fill', 'spc-prob-fill', 'spc-prob-sig-base', 'spc-prob-sign', 'spc-prob-cig1', 'spc-prob-cig2', 'spc-prob-cig3', 'spc-sig-sig-base', 'spc-sig-sign', 'spc-sig-cig1', 'spc-sig-cig2', 'spc-sig-cig3', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) { return map.getLayer(l); });
       if (spcClickLayers.length > 0) {
         var spcHits = map.queryRenderedFeatures(e.point, {layers: spcClickLayers});
         if (spcHits.length > 0) {
@@ -1855,6 +1997,8 @@
             else if (src === 'spc-tor')      key = 'spc-tor';
             else if (src === 'spc-wind')     key = 'spc-wind';
             else if (src === 'spc-hail')     key = 'spc-hail';
+            else if (src === 'spc-prob')     key = 'spc-prob';
+            else if (src === 'spc-sig')      key = 'spc-sig';
             else if (src === 'spc-mds')      key = 'spc-mds:'      + (props.name      || '');
             else if (src === 'spc-watches')  key = 'spc-watches:'   + (props.watch_num || props.event || '');
             else if (src === 'nws-warnings') key = 'nws-warnings:' + (props.event     || '') + ':' + (props.wfo || '');
@@ -2201,6 +2345,392 @@
       var m = window._stormAnnotations[id];
       if (m) m.setLngLat([lon, lat]);
     };
+
+    const _PRIVATE_PIN_STORAGE_KEY = 'storm.privatePins.v1';
+    window._stormPrivatePins = {};
+    window._stormPrivatePinOwnLocation = null;
+
+    function _privatePinsActiveTool() {
+      var mapEl = document.getElementById('map');
+      return (
+        (mapEl && (
+          mapEl.classList.contains('annotating') ||
+          mapEl.classList.contains('drawing') ||
+          mapEl.classList.contains('measuring')
+        )) ||
+        window._stormDrawingActive ||
+        window._soundingModeActive ||
+        window._soundingObsModeActive ||
+        window._routePickMode ||
+        window._stormAsosActive ||
+        window._stormConePlacementActive
+      );
+    }
+
+    function _privatePinMenu() {
+      var menu = document.getElementById('private-pin-menu');
+      if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'private-pin-menu';
+        map.getContainer().appendChild(menu);
+      }
+      return menu;
+    }
+
+    function _hidePrivatePinMenu() {
+      var menu = document.getElementById('private-pin-menu');
+      if (menu) menu.style.display = 'none';
+    }
+
+    function _privatePinCoordsLabel(lat, lon) {
+      return Number(lat).toFixed(5) + ', ' + Number(lon).toFixed(5);
+    }
+
+    function _privatePinDisplayLabel(label) {
+      label = String(label || '').trim();
+      return label || 'Private pin';
+    }
+
+    function _setPrivatePinMenuStatus(text) {
+      var menu = document.getElementById('private-pin-menu');
+      if (!menu) return;
+      var meta = menu.querySelector('.private-pin-menu-meta');
+      if (!meta) return;
+      var original = meta.getAttribute('data-coords') || meta.textContent;
+      meta.textContent = text;
+      window.clearTimeout(menu._stormPinStatusTimer);
+      menu._stormPinStatusTimer = window.setTimeout(function() {
+        meta.textContent = original;
+      }, 1200);
+    }
+
+    function _copyPrivatePinText(text) {
+      if (bridge && bridge.on_private_pin_copy) {
+        bridge.on_private_pin_copy(text);
+        _setPrivatePinMenuStatus('Copied');
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          _setPrivatePinMenuStatus('Copied');
+        }).catch(function() {
+          _fallbackCopyPrivatePinText(text);
+        });
+      } else {
+        _fallbackCopyPrivatePinText(text);
+      }
+    }
+
+    function _fallbackCopyPrivatePinText(text) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        _setPrivatePinMenuStatus('Copied');
+      } catch (_) {
+        _setPrivatePinMenuStatus('Copy failed');
+      }
+      document.body.removeChild(ta);
+    }
+
+    function _privatePinDistanceBearing(fromLat, fromLon, toLat, toLon) {
+      var R = 6371000;
+      var phi1 = fromLat * Math.PI / 180;
+      var phi2 = toLat * Math.PI / 180;
+      var dPhi = (toLat - fromLat) * Math.PI / 180;
+      var dLambda = (toLon - fromLon) * Math.PI / 180;
+      var a = Math.sin(dPhi / 2) * Math.sin(dPhi / 2) +
+        Math.cos(phi1) * Math.cos(phi2) *
+        Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
+      var distM = 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      var y = Math.sin(dLambda) * Math.cos(phi2);
+      var x = Math.cos(phi1) * Math.sin(phi2) -
+        Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+      var brng = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+      return {distanceMi: distM / 1609.344, bearingDeg: brng};
+    }
+
+    function _freshPrivatePinOwnLocation() {
+      var loc = window._stormPrivatePinOwnLocation;
+      if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return null;
+      if (Date.now() - loc.updatedAt > 120000) return null;
+      return loc;
+    }
+
+    window.stormSetPrivatePinOwnLocation = function(lat, lon) {
+      lat = Number(lat);
+      lon = Number(lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        window._stormPrivatePinOwnLocation = null;
+        return;
+      }
+      window._stormPrivatePinOwnLocation = {lat: lat, lon: lon, updatedAt: Date.now()};
+    }
+
+    function _positionPrivatePinMenu(menu, point) {
+      var pad = 8;
+      var container = map.getContainer();
+      var x = point.x + 8;
+      var y = point.y + 8;
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+      menu.style.display = 'block';
+
+      var maxX = Math.max(pad, container.clientWidth - menu.offsetWidth - pad);
+      var maxY = Math.max(pad, container.clientHeight - menu.offsetHeight - pad);
+      x = Math.max(pad, Math.min(x, maxX));
+      y = Math.max(pad, Math.min(y, maxY));
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+    }
+
+    function _loadPrivatePinRecords() {
+      try {
+        var raw = window.localStorage ? window.localStorage.getItem(_PRIVATE_PIN_STORAGE_KEY) : null;
+        var parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed.filter(function(pin) {
+          return Number.isFinite(Number(pin.lat)) && Number.isFinite(Number(pin.lon));
+        }) : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function _savePrivatePinRecords() {
+      try {
+        if (!window.localStorage) return;
+        var records = Object.keys(window._stormPrivatePins).map(function(id) {
+          var pin = window._stormPrivatePins[id];
+          return {id: id, lat: pin.lat, lon: pin.lon, label: pin.label || ''};
+        });
+        window.localStorage.setItem(_PRIVATE_PIN_STORAGE_KEY, JSON.stringify(records));
+      } catch (_) {}
+    }
+
+    function _makePrivatePinId() {
+      return 'private-pin-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function _addPrivatePin(lat, lon, id, persist, label) {
+      id = id || _makePrivatePinId();
+      if (window._stormPrivatePins[id]) {
+        window._stormPrivatePins[id].marker.remove();
+        delete window._stormPrivatePins[id];
+      }
+
+      var el = document.createElement('div');
+      el.className = 'storm-private-pin';
+      el.title = _privatePinDisplayLabel(label);
+      el.setAttribute('aria-label', _privatePinDisplayLabel(label));
+      el.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var p = map.project([lon, lat]);
+        _showPrivatePinMenu({x: p.x, y: p.y}, {lat: lat, lng: lon}, 'remove', id);
+      });
+
+      var marker = new maplibregl.Marker({element: el, anchor: 'bottom'})
+        .setLngLat([lon, lat])
+        .addTo(map);
+
+      window._stormPrivatePins[id] = {
+        marker: marker,
+        lat: Number(lat),
+        lon: Number(lon),
+        label: String(label || '').trim()
+      };
+      if (persist) _savePrivatePinRecords();
+      return id;
+    }
+
+    function _removePrivatePin(id) {
+      var pin = window._stormPrivatePins[id];
+      if (!pin) return;
+      pin.marker.remove();
+      delete window._stormPrivatePins[id];
+      _savePrivatePinRecords();
+    }
+
+    function _renamePrivatePin(id, label) {
+      var pin = window._stormPrivatePins[id];
+      if (!pin) return;
+      pin.label = String(label || '').trim();
+      var el = pin.marker.getElement();
+      if (el) {
+        el.title = _privatePinDisplayLabel(pin.label);
+        el.setAttribute('aria-label', _privatePinDisplayLabel(pin.label));
+      }
+      _savePrivatePinRecords();
+      var p = map.project([pin.lon, pin.lat]);
+      _showPrivatePinMenu({x: p.x, y: p.y}, {lat: pin.lat, lng: pin.lon}, 'remove', id);
+    }
+
+    function _makePrivatePinButton(text, onClick) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'private-pin-menu-btn';
+      btn.textContent = text;
+      btn.addEventListener('mousedown', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+      btn.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick();
+      });
+      return btn;
+    }
+
+    function _showPrivatePinRename(pinId) {
+      var pin = window._stormPrivatePins[pinId];
+      if (!pin) return;
+      var menu = _privatePinMenu();
+      var title = document.createElement('div');
+      title.className = 'private-pin-menu-title';
+      title.textContent = 'Label private pin';
+
+      var input = document.createElement('input');
+      input.className = 'private-pin-menu-input';
+      input.type = 'text';
+      input.maxLength = 48;
+      input.value = pin.label || '';
+      input.placeholder = 'Private pin';
+
+      var actions = document.createElement('div');
+      actions.className = 'private-pin-menu-actions';
+      var save = _makePrivatePinButton('Save label', function() {
+        _renamePrivatePin(pinId, input.value);
+      });
+      var clear = _makePrivatePinButton('Clear label', function() {
+        _renamePrivatePin(pinId, '');
+      });
+      var cancel = _makePrivatePinButton('Cancel', function() {
+        var p = map.project([pin.lon, pin.lat]);
+        _showPrivatePinMenu({x: p.x, y: p.y}, {lat: pin.lat, lng: pin.lon}, 'remove', pinId);
+      });
+
+      input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          _renamePrivatePin(pinId, input.value);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          cancel.click();
+        }
+      });
+
+      actions.appendChild(save);
+      actions.appendChild(clear);
+      actions.appendChild(cancel);
+      menu.innerHTML = '';
+      menu.appendChild(title);
+      menu.appendChild(input);
+      menu.appendChild(actions);
+      _positionPrivatePinMenu(menu, map.project([pin.lon, pin.lat]));
+      setTimeout(function() {
+        input.focus({preventScroll: true});
+        input.select();
+      }, 0);
+    }
+
+    function _showPrivatePinMenu(point, lngLat, mode, pinId) {
+      var menu = _privatePinMenu();
+      var lat = Number(lngLat.lat);
+      var lon = Number(lngLat.lng);
+      var pin = pinId ? window._stormPrivatePins[pinId] : null;
+      var coords = _privatePinCoordsLabel(lat, lon);
+      var ownLoc = _freshPrivatePinOwnLocation();
+      var meta = document.createElement('div');
+      var title = document.createElement('div');
+      var actions = document.createElement('div');
+
+      title.className = 'private-pin-menu-title';
+      title.textContent = pin ? _privatePinDisplayLabel(pin.label) : 'Private pin';
+      meta.className = 'private-pin-menu-meta';
+      meta.textContent = coords;
+      meta.setAttribute('data-coords', coords);
+      actions.className = 'private-pin-menu-actions';
+
+      if (ownLoc) {
+        var rb = _privatePinDistanceBearing(ownLoc.lat, ownLoc.lon, lat, lon);
+        var range = document.createElement('div');
+        range.className = 'private-pin-menu-range';
+        range.textContent = rb.distanceMi.toFixed(rb.distanceMi < 10 ? 1 : 0) + ' mi, ' + Math.round(rb.bearingDeg) + ' deg';
+        menu.innerHTML = '';
+        menu.appendChild(title);
+        menu.appendChild(meta);
+        menu.appendChild(range);
+      } else {
+        menu.innerHTML = '';
+        menu.appendChild(title);
+        menu.appendChild(meta);
+      }
+
+      if (mode === 'remove') {
+        if (ownLoc && bridge && bridge.on_private_pin_route) {
+          actions.appendChild(_makePrivatePinButton('Route to pin', function() {
+            bridge.on_private_pin_route(lat, lon, _privatePinDisplayLabel(pin && pin.label));
+            _hidePrivatePinMenu();
+          }));
+        }
+        actions.appendChild(_makePrivatePinButton('Label pin', function() {
+          _showPrivatePinRename(pinId);
+        }));
+        actions.appendChild(_makePrivatePinButton('Copy coordinates', function() {
+          _copyPrivatePinText(coords);
+        }));
+        actions.appendChild(_makePrivatePinButton('Remove private pin', function() {
+          _removePrivatePin(pinId);
+          _hidePrivatePinMenu();
+        }));
+      } else {
+        actions.appendChild(_makePrivatePinButton('Add private pin', function() {
+          _addPrivatePin(lat, lon, null, true, '');
+          _hidePrivatePinMenu();
+        }));
+        actions.appendChild(_makePrivatePinButton('Copy coordinates', function() {
+          _copyPrivatePinText(coords);
+        }));
+      }
+
+      menu.appendChild(actions);
+      _positionPrivatePinMenu(menu, point);
+      setTimeout(function() {
+        var btn = menu.querySelector('.private-pin-menu-btn');
+        if (btn) btn.focus({preventScroll: true});
+      }, 0);
+    }
+
+    function _restorePrivatePins() {
+      _loadPrivatePinRecords().forEach(function(pin) {
+        _addPrivatePin(Number(pin.lat), Number(pin.lon), pin.id, false, pin.label || '');
+      });
+    }
+
+    map.on('contextmenu', function(e) {
+      if (_privatePinsActiveTool()) {
+        _hidePrivatePinMenu();
+        return;
+      }
+      if (e.originalEvent) {
+        e.originalEvent.preventDefault();
+        e.originalEvent.stopPropagation();
+      }
+      _showPrivatePinMenu(e.point, e.lngLat, 'add', null);
+    });
+
+    map.on('click', _hidePrivatePinMenu);
+    map.on('dragstart', _hidePrivatePinMenu);
+    map.on('zoomstart', _hidePrivatePinMenu);
+    window.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Escape') _hidePrivatePinMenu();
+    });
+    window.addEventListener('blur', _hidePrivatePinMenu);
+    _restorePrivatePins();
 
     window._stormDrawings = {};
     window._stormDrawingDrag = {id: null, dragging: false, startLngLat: null, originalCoords: null};
@@ -3740,14 +4270,16 @@
       _applySatMesoBoxes();
     };
 
-    window.stormSetSpcGeoJSON = function(catJson, windJson, hailJson, torJson) {
+    window.stormSetSpcGeoJSON = function(catJson, windJson, hailJson, torJson, probJson, sigJson) {
       if (map.getSource('spc-cat')) map.getSource('spc-cat').setData(JSON.parse(catJson));
       if (map.getSource('spc-wind')) map.getSource('spc-wind').setData(JSON.parse(windJson));
       if (map.getSource('spc-hail')) map.getSource('spc-hail').setData(JSON.parse(hailJson));
       if (map.getSource('spc-tor')) map.getSource('spc-tor').setData(JSON.parse(torJson));
+      if (map.getSource('spc-prob')) map.getSource('spc-prob').setData(JSON.parse(probJson || '{"type":"FeatureCollection","features":[]}'));
+      if (map.getSource('spc-sig')) map.getSource('spc-sig').setData(JSON.parse(sigJson || '{"type":"FeatureCollection","features":[]}'));
       _applySpcCategoryFilter();
       // debug: log LABEL values present in each probabilistic product so we
-      ['wind','hail','tor'].forEach(function(name) {
+      ['wind','hail','tor','prob','sig'].forEach(function(name) {
         var src = map.getSource('spc-' + name);
         if (!src) return;
         var fc = src._data || src.serialize().data;
@@ -3766,7 +4298,7 @@
 
     window.stormSetSpcProductVisible = function(key, visible) {
       var k = String(key || '').toLowerCase();
-      if (['wind','hail','tor'].indexOf(k) === -1) return;
+      if (['wind','hail','tor','prob','sig'].indexOf(k) === -1) return;
       ['fill','line','sig-base','sign','cig1','cig2','cig3','sig-line'].forEach(function(s) {
         _setLayerVisibility('spc-' + k + '-' + s, !!visible);
       });

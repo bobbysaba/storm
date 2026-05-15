@@ -52,6 +52,7 @@ class ArchiveControls(QWidget):
         self._session_date: Optional[datetime] = None
 
         self.setObjectName("archiveControls")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._build_ui()
         self._connect_controller()
 
@@ -59,27 +60,25 @@ class ArchiveControls(QWidget):
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 5, 10, 5)
-        root.setSpacing(3)
+        root.setSpacing(2)
 
         row1 = QHBoxLayout()
-        row1.setSpacing(0)
+        row1.setSpacing(8)
         row1.setContentsMargins(0, 0, 0, 0)
 
-        archive_badge = QLabel("● ARCHIVE")
+        archive_badge = QLabel("ARCHIVE")
         archive_badge.setStyleSheet(
-            "color: #FF9F1C; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;"
+            "color: #FF9F1C; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
         )
         row1.addWidget(archive_badge)
 
         row1.addWidget(self._vdiv())
 
-        self._date_label = QLabel("----  --  --")
+        self._date_label = QLabel("---- -- --")
         self._date_label.setStyleSheet(
             "color: #C8D0DE; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
         )
         row1.addWidget(self._date_label)
-
-        row1.addWidget(self._vdiv())
 
         self._utc_label = QLabel("--:--:-- UTC")
         self._utc_label.setStyleSheet(
@@ -89,19 +88,11 @@ class ArchiveControls(QWidget):
 
         row1.addWidget(self._vdiv())
 
-        self._ct_label = QLabel("--:-- CDT")
-        self._ct_label.setStyleSheet(
+        self._local_label = QLabel("--:-- CT / --:-- MT")
+        self._local_label.setStyleSheet(
             "color: #8E97AB; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
         )
-        row1.addWidget(self._ct_label)
-
-        row1.addWidget(self._vdiv())
-
-        self._mt_label = QLabel("--:-- MDT")
-        self._mt_label.setStyleSheet(
-            "color: #8E97AB; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
-        )
-        row1.addWidget(self._mt_label)
+        row1.addWidget(self._local_label)
 
         row1.addStretch()
 
@@ -122,20 +113,15 @@ class ArchiveControls(QWidget):
         root.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.setSpacing(4)
+        row2.setSpacing(5)
         row2.setContentsMargins(0, 0, 0, 0)
 
         self._btn_start = self._ctrl_btn("⏮", "Skip to start of day")
-        self._btn_back  = self._ctrl_btn("◀",  f"Step back {STEP_SECONDS}s (Left or A)")
+        self._btn_back  = self._ctrl_btn("‹",  f"Step back {STEP_SECONDS}s (Left or A)")
         self._btn_play  = self._ctrl_btn("▶",  "Play / pause (Space)")
         self._btn_play.setCheckable(True)
-        self._btn_fwd   = self._ctrl_btn("▶",  f"Step forward {STEP_SECONDS}s (Right or D)")
-        self._btn_fwd.setText("▶")
+        self._btn_fwd   = self._ctrl_btn("›",  f"Step forward {STEP_SECONDS}s (Right or D)")
         self._btn_end   = self._ctrl_btn("⏭", "Skip to end of day")
-
-        # use slightly different icon to distinguish step-fwd from play.
-        self._btn_fwd.setText("▶›")
-        self._btn_back.setText("‹◀")
 
         for btn in (self._btn_start, self._btn_back, self._btn_play,
                     self._btn_fwd, self._btn_end):
@@ -155,13 +141,13 @@ class ArchiveControls(QWidget):
             self._speed_combo.addItem(f"{s}×")
         self._speed_combo.setCurrentIndex(SPEED_OPTIONS.index(self._tc.speed))
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
-        self._speed_combo.setFixedWidth(60)
+        self._speed_combo.setFixedWidth(54)
         row2.addWidget(self._speed_combo)
 
         row2.addWidget(self._vdiv())
 
         jump_btn = self._ctrl_btn("JUMP", "Jump to a specific time")
-        jump_btn.setFixedWidth(46)
+        jump_btn.setFixedWidth(44)
         jump_btn.setStyleSheet(jump_btn.styleSheet() or "")
         jump_btn.clicked.connect(self._show_jump_dialog)
         row2.addWidget(jump_btn)
@@ -172,13 +158,13 @@ class ArchiveControls(QWidget):
         btn = QToolButton()
         btn.setText(text)
         btn.setToolTip(tooltip)
-        btn.setFixedSize(30, 24)
+        btn.setFixedSize(28, 22)
         return btn
 
     def _vdiv(self) -> QFrame:
         d = QFrame()
         d.setFrameShape(QFrame.Shape.VLine)
-        d.setStyleSheet("color: #394056; margin: 2px 3px;")
+        d.setStyleSheet("color: #394056; margin: 3px 0;")
         return d
 
     def set_radar_status(self, text: str, error: bool = False) -> None:
@@ -262,10 +248,12 @@ class ArchiveControls(QWidget):
 
         if _CT_TZ:
             ct = t.astimezone(_CT_TZ)
-            self._ct_label.setText(ct.strftime(f"%H:%M {ct.strftime('%Z')}"))
         if _MT_TZ:
             mt = t.astimezone(_MT_TZ)
-            self._mt_label.setText(mt.strftime(f"%H:%M {mt.strftime('%Z')}"))
+        if _CT_TZ and _MT_TZ:
+            self._local_label.setText(
+                f"{ct.strftime('%H:%M %Z')} / {mt.strftime('%H:%M %Z')}"
+            )
 
 
     def add_radar_selectors(

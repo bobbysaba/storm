@@ -36,6 +36,32 @@ SPC_SIG_URLS = {
     "wind": f"{_SPC_WX_BASE}/6/query?{_SPC_QUERY_SUFFIX}",
 }
 
+SPC_DAY_LAYER_IDS: dict[int, dict[str, int]] = {
+    1: {"cat": 1, "tor": 3, "hail": 5, "wind": 7, "tor_sig": 2, "hail_sig": 4, "wind_sig": 6},
+    2: {"cat": 9, "tor": 11, "hail": 13, "wind": 15, "tor_sig": 10, "hail_sig": 12, "wind_sig": 14},
+    3: {"cat": 17, "prob": 19, "sig": 18},
+    4: {"prob": 21},
+    5: {"prob": 22},
+    6: {"prob": 23},
+    7: {"prob": 24},
+    8: {"prob": 25},
+}
+
+
+def _spc_layer_url(layer_id: int) -> str:
+    return f"{_SPC_WX_BASE}/{layer_id}/query?{_SPC_QUERY_SUFFIX}"
+
+
+def _empty_spc_payload() -> tuple[str, str, str, str, str, str]:
+    return (
+        _EMPTY_FC_STR,
+        _EMPTY_FC_STR,
+        _EMPTY_FC_STR,
+        _EMPTY_FC_STR,
+        _EMPTY_FC_STR,
+        _EMPTY_FC_STR,
+    )
+
 SPC_MD_URL = (
     "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks"
     "/spc_mesoscale_discussion/MapServer/0/query"
@@ -125,14 +151,14 @@ class HazardFetcher(QObject):
     serialization when pushing data to the MapLibre JS layer.
 
     Signals:
-      spc_received(str, str, str, str): cat, wind, hail, tor GeoJSON strings
+      spc_received(str, str, str, str, str, str): cat, wind, hail, tor, prob, sig GeoJSON strings
       nws_received(str): warnings GeoJSON string
       spc_watches_received(str): watch polygons GeoJSON string
       spc_mds_received(str): MD polygons GeoJSON string
       fetch_error(str): recoverable error text
     """
 
-    spc_received             = pyqtSignal(object, object, object, object)
+    spc_received             = pyqtSignal(object, object, object, object, object, object)
     nws_received             = pyqtSignal(object)
     nws_raw_phenoms_received = pyqtSignal(object)   # set[str] of raw (unfiltered) phenom codes
     spc_watches_received     = pyqtSignal(object)
@@ -148,7 +174,8 @@ class HazardFetcher(QObject):
         self._fetch_lock = threading.Lock()
 
         self._spc_categories = {"MRGL": False, "SLGHT": False, "ENH": False, "MDT": False, "HIGH": False}
-        self._spc_products    = {"wind": False, "hail": False, "tor": False}
+        self._spc_products    = {"wind": False, "hail": False, "tor": False, "prob": False, "sig": False}
+        self._spc_day = 1
         self._spc_watches_enabled = False
         self._spc_mds_enabled     = False
         self._nws_enabled         = False
@@ -159,9 +186,9 @@ class HazardFetcher(QObject):
         self._nws_bbox = (-116.0, 28.0, -82.0, 49.0)
 
         # in-memory cache — stores pre-serialized JSON strings
-        self._spc_cache: tuple[str, str, str, str] | None = None
-        self._spc_cache_time:    float = 0.0
-        self._spc_last_poll:     float = 0.0   # controls POLL_INTERVAL_OUTLOOK gating
+        self._spc_cache_by_day: dict[int, tuple[str, str, str, str, str, str]] = {}
+        self._spc_cache_time_by_day: dict[int, float] = {}
+        self._spc_last_poll_by_day: dict[int, float] = {}   # controls POLL_INTERVAL_OUTLOOK gating
 
         self._watches_cache: str | None = None
         self._watches_cache_time: float = 0.0
@@ -194,6 +221,12 @@ class HazardFetcher(QObject):
         if k in self._spc_products:
             self._spc_products[k] = bool(enabled)
 
+    def set_spc_day(self, day: int):
+        d = max(1, min(8, int(day or 1)))
+        if d != self._spc_day:
+            self._spc_day = d
+            self.force_spc_refresh()
+
     def set_nws_enabled(self, enabled: bool):
         self._nws_enabled = bool(enabled)
 
@@ -215,7 +248,10 @@ class HazardFetcher(QObject):
 
 
     def is_spc_fresh(self) -> bool:
-        return self._spc_cache is not None and time.time() - self._spc_cache_time < SPC_CACHE_TTL
+        return (
+            self._spc_day in self._spc_cache_by_day
+            and time.time() - self._spc_cache_time_by_day.get(self._spc_day, 0.0) < SPC_CACHE_TTL
+        )
 
     def is_watches_fresh(self) -> bool:
         return self._watches_cache is not None and time.time() - self._watches_cache_time < SPC_CACHE_TTL
@@ -227,19 +263,22 @@ class HazardFetcher(QObject):
         return self._nws_cache is not None and time.time() - self._nws_cache_time < SPC_CACHE_TTL
 
     def emit_cached_spc(self):
-        if self._spc_cache is not None:
-            self.spc_received.emit(*self._spc_cache)
+        cached = self._spc_cache_by_day.get(self._spc_day)
+        if cached is not None:
+            self.spc_received.emit(*cached)
 
     def spc_category_cached(self) -> bool:
-        if not self._spc_cache:
+        cached = self._spc_cache_by_day.get(self._spc_day)
+        if not cached:
             return False
-        cat_str, _, _, _ = self._spc_cache
+        cat_str, _, _, _, _, _ = cached
         return _fc_has_features(cat_str)
 
     def spc_product_cached(self, key: str) -> bool:
-        if not self._spc_cache:
+        cached = self._spc_cache_by_day.get(self._spc_day)
+        if not cached:
             return False
-        _, wind_str, hail_str, tor_str = self._spc_cache
+        _, wind_str, hail_str, tor_str, prob_str, sig_str = cached
         k = key.strip().lower()
         if k == "wind":
             return _fc_has_features(wind_str)
@@ -247,10 +286,14 @@ class HazardFetcher(QObject):
             return _fc_has_features(hail_str)
         if k == "tor":
             return _fc_has_features(tor_str)
+        if k == "prob":
+            return _fc_has_features(prob_str)
+        if k == "sig":
+            return _fc_has_features(sig_str)
         return False
 
     def force_spc_refresh(self):
-        self._spc_last_poll = 0
+        self._spc_last_poll_by_day[self._spc_day] = 0
 
     def emit_cached_watches(self):
         if self._watches_cache is not None:
@@ -331,7 +374,10 @@ class HazardFetcher(QObject):
             # spc outlook re-fetched on its own longer interval; active hazards every poll.
             spc_due   = (
                 (any(self._spc_categories.values()) or any(self._spc_products.values()))
-                and ((now - self._spc_last_poll >= POLL_INTERVAL_OUTLOOK) or self._spc_cache is None)
+                and (
+                    (now - self._spc_last_poll_by_day.get(self._spc_day, 0.0) >= POLL_INTERVAL_OUTLOOK)
+                    or self._spc_day not in self._spc_cache_by_day
+                )
             )
             need_watches = self._spc_watches_enabled
             need_mds     = self._spc_mds_enabled
@@ -478,13 +524,14 @@ class HazardFetcher(QObject):
 
     def _fetch_spc(self):
         now = time.time()
-        self._spc_last_poll = now  # mark polled immediately — prevents retry spam on failure
+        day = self._spc_day
+        layers = SPC_DAY_LAYER_IDS.get(day, SPC_DAY_LAYER_IDS[1])
+        self._spc_last_poll_by_day[day] = now  # mark polled immediately — prevents retry spam on failure
 
         # seed from existing cache strings; non-enabled products keep their cached value.
-        cat_str, wind_str, hail_str, tor_str = (
-            self._spc_cache
-            if self._spc_cache
-            else (_EMPTY_FC_STR, _EMPTY_FC_STR, _EMPTY_FC_STR, _EMPTY_FC_STR)
+        cat_str, wind_str, hail_str, tor_str, prob_str, sig_str = self._spc_cache_by_day.get(
+            day,
+            _empty_spc_payload(),
         )
         any_changed = False
 
@@ -492,12 +539,13 @@ class HazardFetcher(QObject):
             "wind": wind_str,
             "hail": hail_str,
             "tor": tor_str,
+            "prob": prob_str,
         }
 
         # categorical outlook
-        if any(self._spc_categories.values()):
+        if any(self._spc_categories.values()) and "cat" in layers:
             try:
-                raw, changed = self._get_raw(SPC_URLS["cat"])
+                raw, changed = self._get_raw(_spc_layer_url(layers["cat"]))
                 if changed:
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     feats = []
@@ -507,6 +555,8 @@ class HazardFetcher(QObject):
                         if not cat:
                             continue
                         props["cat"] = cat
+                        props["spc_day"] = day
+                        props["spc_product"] = "outlook"
                         feats.append({
                             "type": "Feature",
                             "geometry": f.get("geometry"),
@@ -519,11 +569,11 @@ class HazardFetcher(QObject):
                 self.fetch_error.emit(f"SPC categorical fetch failed: {exc}")
 
         # probability products — only enabled ones; disabled keep their cached string
-        for key in ("wind", "hail", "tor"):
-            if not self._spc_products.get(key, False):
+        for key in ("wind", "hail", "tor", "prob"):
+            if not self._spc_products.get(key, False) or key not in layers:
                 continue
             try:
-                raw, changed = self._get_raw(SPC_URLS[key])
+                raw, changed = self._get_raw(_spc_layer_url(layers[key]))
                 if changed:
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     feats = []
@@ -532,6 +582,8 @@ class HazardFetcher(QObject):
                         label = _spc_prob_label(props)
                         if label is not None:
                             props["LABEL"] = label
+                        props["spc_day"] = day
+                        props["spc_product"] = key
                         feats.append({
                             "type": "Feature",
                             "geometry": f.get("geometry"),
@@ -542,23 +594,31 @@ class HazardFetcher(QObject):
                         wind_str = s
                     elif key == "hail":
                         hail_str = s
-                    else:
+                    elif key == "tor":
                         tor_str = s
+                    else:
+                        prob_str = s
                     any_changed = True
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                 log.warning("SPC %s fetch failed: %s", key, exc)
                 self.fetch_error.emit(f"SPC {key} fetch failed: {exc}")
 
             # significant layer: merge into the same product as LABEL="SIGN"
-            if self._spc_products.get(key, False) and key in SPC_SIG_URLS:
+            sig_key = f"{key}_sig"
+            sig_layer_id = layers.get(sig_key)
+            if key == "prob" and sig_layer_id is None:
+                sig_layer_id = layers.get("sig")
+            if self._spc_products.get(key, False) and sig_layer_id is not None:
                 try:
-                    raw, changed = self._get_raw(SPC_SIG_URLS[key])
+                    raw, changed = self._get_raw(_spc_layer_url(sig_layer_id))
                     if changed:
                         data = json.loads(raw.decode("utf-8", errors="replace"))
                         sig_feats = []
                         for f in data.get("features", []):
                             props = dict(f.get("properties") or {})
-                            props["LABEL"] = "SIGN"
+                            props["LABEL"] = _spc_prob_label(props) or "SIGN"
+                            props["spc_day"] = day
+                            props["spc_product"] = key
                             sig_feats.append({
                                 "type": "Feature",
                                 "geometry": f.get("geometry"),
@@ -566,7 +626,10 @@ class HazardFetcher(QObject):
                             })
 
                         current_str = (
-                            wind_str if key == "wind" else hail_str if key == "hail" else tor_str
+                            wind_str if key == "wind"
+                            else hail_str if key == "hail"
+                            else tor_str if key == "tor"
+                            else prob_str
                         )
                         base = json.loads(current_str or _EMPTY_FC_STR)
                         base_feats = list(base.get("features") or [])
@@ -581,14 +644,24 @@ class HazardFetcher(QObject):
                             wind_str = merged
                         elif key == "hail":
                             hail_str = merged
-                        else:
+                        elif key == "tor":
                             tor_str = merged
+                        else:
+                            prob_str = merged
                         any_changed = True
                     elif prev_prob_strings[key] != (
-                        wind_str if key == "wind" else hail_str if key == "hail" else tor_str
+                        wind_str if key == "wind"
+                        else hail_str if key == "hail"
+                        else tor_str if key == "tor"
+                        else prob_str
                     ):
                         base = json.loads(
-                            (wind_str if key == "wind" else hail_str if key == "hail" else tor_str)
+                            (
+                                wind_str if key == "wind"
+                                else hail_str if key == "hail"
+                                else tor_str if key == "tor"
+                                else prob_str
+                            )
                             or _EMPTY_FC_STR
                         )
                         prev_base = json.loads(prev_prob_strings[key] or _EMPTY_FC_STR)
@@ -607,17 +680,41 @@ class HazardFetcher(QObject):
                                 wind_str = merged
                             elif key == "hail":
                                 hail_str = merged
-                            else:
+                            elif key == "tor":
                                 tor_str = merged
+                            else:
+                                prob_str = merged
                 except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                     log.warning("SPC %s significant fetch failed: %s", key, exc)
                     self.fetch_error.emit(f"SPC {key} significant fetch failed: {exc}")
 
+        if self._spc_products.get("sig", False) and "sig" in layers:
+            try:
+                raw, changed = self._get_raw(_spc_layer_url(layers["sig"]))
+                if changed:
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
+                    sig_feats = []
+                    for f in data.get("features", []):
+                        props = dict(f.get("properties") or {})
+                        props["LABEL"] = _spc_prob_label(props) or "SIGN"
+                        props["spc_day"] = day
+                        props["spc_product"] = "sig"
+                        sig_feats.append({
+                            "type": "Feature",
+                            "geometry": f.get("geometry"),
+                            "properties": props,
+                        })
+                    sig_str = json.dumps({"type": "FeatureCollection", "features": sig_feats})
+                    any_changed = True
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+                log.warning("SPC day %s significant fetch failed: %s", day, exc)
+                self.fetch_error.emit(f"SPC significant fetch failed: {exc}")
+
         # always update cache (preserves cached strings for non-enabled products)
-        self._spc_cache      = (cat_str, wind_str, hail_str, tor_str)
-        self._spc_cache_time = now
+        self._spc_cache_by_day[day] = (cat_str, wind_str, hail_str, tor_str, prob_str, sig_str)
+        self._spc_cache_time_by_day[day] = now
         if any_changed:
-            self.spc_received.emit(cat_str, wind_str, hail_str, tor_str)
+            self.spc_received.emit(cat_str, wind_str, hail_str, tor_str, prob_str, sig_str)
 
     def _fetch_nws_warnings(self):
         """Fetch active NWS warnings from the NOAA WWA MapServer (Layer 0).

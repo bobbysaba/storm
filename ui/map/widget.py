@@ -36,6 +36,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     storm_cone_clicked    = pyqtSignal(str)
     storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     storm_cone_place_drag_ended = pyqtSignal(float, float)
+    private_pin_route_requested = pyqtSignal(float, float, str)
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
@@ -96,6 +97,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.storm_cone_clicked.connect(self.storm_cone_clicked)
         self.bridge.storm_cone_drag_ended.connect(self.storm_cone_drag_ended)
         self.bridge.storm_cone_place_drag_ended.connect(self.storm_cone_place_drag_ended)
+        self.bridge.private_pin_route_requested.connect(self.private_pin_route_requested)
         self.bridge.map_double_clicked.connect(self.map_double_clicked)
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
@@ -500,6 +502,13 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         """Remove the route line and destination marker."""
         self.run_js("if(window.stormClearRoute) stormClearRoute();")
 
+    def set_private_pin_own_location(self, lat: float, lon: float):
+        """Expose the local vehicle fix to local-only private pin tools."""
+        self.run_js(
+            f"if(window.stormSetPrivatePinOwnLocation) "
+            f"stormSetPrivatePinOwnLocation({lat}, {lon});"
+        )
+
     def set_route_pick_mode(self, active: bool):
         """Toggle crosshair pick mode for destination selection."""
         flag = "true" if active else "false"
@@ -729,14 +738,24 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_scan_sectors_visible(self, visible: bool) -> None:
         self.run_js(f"if(window.stormSetScanSectorsVisible) stormSetScanSectorsVisible({'true' if visible else 'false'});")
 
-    def set_spc_geojson(self, cat_str: str, wind_str: str, hail_str: str, tor_str: str) -> None:
+    def set_spc_geojson(
+        self,
+        cat_str: str,
+        wind_str: str,
+        hail_str: str,
+        tor_str: str,
+        prob_str: str = '{"type":"FeatureCollection","features":[]}',
+        sig_str: str = '{"type":"FeatureCollection","features":[]}',
+    ) -> None:
         import json
         self.run_js(
             "if(window.stormSetSpcGeoJSON) stormSetSpcGeoJSON("
             f"{json.dumps(cat_str)}, "
             f"{json.dumps(wind_str)}, "
             f"{json.dumps(hail_str)}, "
-            f"{json.dumps(tor_str)}"
+            f"{json.dumps(tor_str)}, "
+            f"{json.dumps(prob_str)}, "
+            f"{json.dumps(sig_str)}"
             ");"
         )
 

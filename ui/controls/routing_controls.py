@@ -483,6 +483,33 @@ class RoutingControls(QWidget):
             if self._have_origin_text():
                 self._on_get_directions()
 
+    def route_to_pin(self, lat: float, lon: float, label: str = ""):
+        """Route from the current GPS fix to a private pin."""
+        if self._gps_lat is None or self._gps_lon is None:
+            self._set_status("GPS fix required")
+            return
+        self._own_lat = self._gps_lat
+        self._own_lon = self._gps_lon
+        self._dest_lat = lat
+        self._dest_lon = lon
+
+        dest_text = (label or "").strip()
+        if not dest_text or dest_text == "Private pin":
+            dest_text = f"{lat:.5f}, {lon:.5f}"
+
+        self._origin_input.blockSignals(True)
+        self._origin_input.setText(f"{self._gps_lat:.5f}, {self._gps_lon:.5f}")
+        self._origin_input.setStyleSheet(_STYLE_GPS)
+        self._origin_input.blockSignals(False)
+
+        self._dest_input.blockSignals(True)
+        self._dest_input.setText(dest_text[:60] + ("..." if len(dest_text) > 60 else ""))
+        self._dest_input.setStyleSheet(_STYLE_MANUAL)
+        self._dest_input.blockSignals(False)
+
+        self._update_go_enabled()
+        self._on_get_directions()
+
 
     def _on_origin_text_edited(self):
         """User manually typed in the origin field — clear resolved coords."""

@@ -10,7 +10,11 @@ from typing import Optional
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
-from data.fetchers.hazard_fetcher import _spc_cat_key, _spc_prob_label, _nws_color_for_phenom
+from data.fetchers.hazard_fetcher import (
+    _spc_cat_key,
+    _spc_prob_label,
+    _nws_color_for_phenom,
+)
 
 log = logging.getLogger(__name__)
 
@@ -22,18 +26,31 @@ _IEM_MCD_GIS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/spc_mc
 
 # spc direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
 _SPC_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/outlook/archive"
+_SPC_EXTENDED_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/exper/day4-8/archive"
 
 # cache resolution for time-varying fetches.
 _CACHE_MINUTES = 5
 
 _OUTLOOK_CYCLES = [
-    (1, 0),   # 01:00Z — Day 1 initial
-    (6, 0),   # 06:00Z
-    (13, 0),  # 13:00Z
-    (16, 30), # 16:30Z
-    (20, 0),  # 20:00Z
-    (23, 0),  # 23:00Z
+    (1, 0, 1, 0),     # 01Z issuance → 0100 archive file
+    (6, 0, 12, 0),    # 06Z issuance → 1200 valid-time archive file
+    (13, 0, 13, 0),
+    (16, 30, 16, 30),
+    (20, 0, 20, 0),
 ]
+
+_DAY_OUTLOOK_CYCLES: dict[int, list[tuple[int, int, int, int]]] = {
+    1: _OUTLOOK_CYCLES,
+    2: [(6, 0, 7, 0), (17, 0, 17, 30)],
+    3: [(7, 30, 8, 30), (19, 30, 19, 30)],
+    4: [(9, 0, 0, 0)],
+    5: [(9, 0, 0, 0)],
+    6: [(9, 0, 0, 0)],
+    7: [(9, 0, 0, 0)],
+    8: [(9, 0, 0, 0)],
+}
+
+_EMPTY_FC = '{"type":"FeatureCollection","features":[]}'
 
 
 class ArchiveHazardFetcher(QObject):
@@ -43,8 +60,8 @@ class ArchiveHazardFetcher(QObject):
 
     Signals
     -------
-    spc_received(str, str, str, str)
-        cat, wind, hail, tor GeoJSON strings — same signature as live fetcher.
+    spc_received(str, str, str, str, str, str)
+        cat, wind, hail, tor, prob, sig GeoJSON strings — same signature as live fetcher.
     nws_received(str)
         NWS warnings GeoJSON string.
     watches_received(str)
@@ -55,7 +72,7 @@ class ArchiveHazardFetcher(QObject):
     error(str)
     """
 
-    spc_received     = pyqtSignal(str, str, str, str)
+    spc_received     = pyqtSignal(str, str, str, str, str, str)
     nws_received     = pyqtSignal(str)
     watches_received = pyqtSignal(str)
     spc_mds_received = pyqtSignal(str)
@@ -79,11 +96,12 @@ class ArchiveHazardFetcher(QObject):
         self._watch_lock = threading.Lock()
         self._mcd_lock   = threading.Lock()
 
-        # outlook cache: {cycle_time → (cat, wind, hail, tor)}
-        self._outlook_cache: dict[datetime, tuple] = {}
-        self._current_cycle: Optional[datetime] = None
-        self._outlook_pending: set[datetime] = set()
+        # outlook cache: {(day, cycle_time) → (cat, wind, hail, tor, prob, sig)}
+        self._outlook_cache: dict[tuple[int, datetime], tuple[str, str, str, str, str, str]] = {}
+        self._current_cycle: Optional[tuple[int, datetime]] = None
+        self._outlook_pending: set[tuple[int, datetime]] = set()
         self._current_archive_time: Optional[datetime] = None
+        self._spc_day = 1
 
         # immediately ready — no pre-fetch step required.
         self._watches_loaded = True
@@ -105,7 +123,12 @@ class ArchiveHazardFetcher(QObject):
         """Re-emit or fetch hazard data for the current archive time."""
         if self._current_archive_time is None:
             return
+        self._current_cycle = None
         self.on_time_changed(self._current_archive_time)
+
+    def set_spc_day(self, day: int) -> None:
+        self._spc_day = max(1, min(8, int(day or 1)))
+        self._current_cycle = None
 
 
     def _update_warnings(self, t: datetime) -> None:
@@ -208,75 +231,114 @@ class ArchiveHazardFetcher(QObject):
 
 
     def _update_outlook(self, t: datetime) -> None:
-        """Fetch the Day-1 outlook cycle valid at time t."""
-        cycle = _current_outlook_cycle(t)
-        if cycle == self._current_cycle:
-            cached = self._outlook_cache.get(cycle)
+        """Fetch the selected SPC outlook day/cycle valid at time t."""
+        day = self._spc_day
+        cycle = _current_outlook_cycle(t, day)
+        cache_key = (day, cycle)
+        if cache_key == self._current_cycle:
+            cached = self._outlook_cache.get(cache_key)
             if cached:
                 self.spc_received.emit(*cached)
             return
-        self._current_cycle = cycle
-        cached = self._outlook_cache.get(cycle)
+        self._current_cycle = cache_key
+        cached = self._outlook_cache.get(cache_key)
         if cached:
             self.spc_received.emit(*cached)
             return
-        if cycle in self._outlook_pending:
+        if cache_key in self._outlook_pending:
             return
-        self._outlook_pending.add(cycle)
-        threading.Thread(target=self._fetch_outlook, args=(cycle,), daemon=True).start()
+        self._outlook_pending.add(cache_key)
+        threading.Thread(target=self._fetch_outlook, args=(day, cycle), daemon=True).start()
 
-    def _fetch_outlook(self, cycle: datetime) -> None:
+    def _fetch_outlook(self, day: int, cycle: datetime) -> None:
         try:
-            empty = '{"type":"FeatureCollection","features":[]}'
-            product_map = {
-                "categorical": "cat",
-                "wind":        "wind",
-                "hail":        "hail",
-                "tornado":     "torn",
-            }
+            results: dict[str, str] = {}
+            candidates = _outlook_cycle_candidates(cycle, day)
+            products = _archive_product_suffixes(day)
+            sig_products = _archive_sig_suffixes(day)
 
-            midnight = cycle.replace(hour=0, minute=0, second=0, microsecond=0)
-            candidates = [cycle] + sorted(
-                (midnight.replace(hour=h, minute=m) for h, m in _OUTLOOK_CYCLES
-                 if midnight.replace(hour=h, minute=m) < cycle),
-                reverse=True,
-            )
-
-            results = {}
-            for key, suffix in product_map.items():
+            for key, suffix in products.items():
                 found = False
                 for ct in candidates:
-                    url = (
-                        f"{_SPC_OUTLOOK_ARCHIVE}/{ct.strftime('%Y')}/"
-                        f"day1otlk_{ct.strftime('%Y%m%d')}_{ct.strftime('%H%M')}_{suffix}.lyr.geojson"
-                    )
+                    url = _archive_spc_url(day, ct, suffix)
                     try:
                         resp = requests.get(url, timeout=20)
                         if resp.status_code == 404:
                             continue
                         resp.raise_for_status()
-                        results[key] = _normalize_archive_spc_geojson(key, resp.text)
+                        results[key] = _normalize_archive_spc_geojson(
+                            key,
+                            resp.text,
+                            day=day,
+                            product=key,
+                        )
                         found = True
-                        log.debug("ArchiveHazardFetcher: outlook %s found at %sZ", key, ct.strftime("%H%M"))
+                        log.debug(
+                            "ArchiveHazardFetcher: day %s outlook %s found at %s",
+                            day,
+                            key,
+                            ct.strftime("%Y%m%d_%H%M"),
+                        )
                         break
                     except Exception as exc:
-                        log.warning("ArchiveHazardFetcher: outlook %s @ %sZ failed: %s", key, ct.strftime("%H%M"), exc)
+                        log.warning(
+                            "ArchiveHazardFetcher: day %s outlook %s @ %s failed: %s",
+                            day,
+                            key,
+                            ct.strftime("%Y%m%d_%H%M"),
+                            exc,
+                        )
                 if not found:
-                    results[key] = empty
+                    results[key] = _EMPTY_FC
+
+            for key, suffix in sig_products.items():
+                base_key = key if key in ("prob", "sig") else key
+                for ct in candidates:
+                    url = _archive_spc_url(day, ct, suffix)
+                    try:
+                        resp = requests.get(url, timeout=20)
+                        if resp.status_code == 404:
+                            continue
+                        resp.raise_for_status()
+                        sig_geojson = _normalize_archive_spc_geojson(
+                            "significant",
+                            resp.text,
+                            day=day,
+                            product=base_key,
+                            force_label="SIGN",
+                        )
+                        if key == "sig":
+                            results["sig"] = sig_geojson
+                        else:
+                            results[key] = _merge_significant_geojson(
+                                results.get(key, _EMPTY_FC),
+                                sig_geojson,
+                            )
+                        break
+                    except Exception as exc:
+                        log.warning(
+                            "ArchiveHazardFetcher: day %s outlook %s significant @ %s failed: %s",
+                            day,
+                            key,
+                            ct.strftime("%Y%m%d_%H%M"),
+                            exc,
+                        )
 
             payload = (
-                results.get("categorical", empty),
-                results.get("wind",        empty),
-                results.get("hail",        empty),
-                results.get("tornado",     empty),
+                results.get("categorical", _EMPTY_FC),
+                results.get("wind",        _EMPTY_FC),
+                results.get("hail",        _EMPTY_FC),
+                results.get("tornado",     _EMPTY_FC),
+                results.get("prob",        _EMPTY_FC),
+                results.get("sig",         _EMPTY_FC),
             )
-            self._outlook_cache[cycle] = payload
+            self._outlook_cache[(day, cycle)] = payload
             self.spc_received.emit(*payload)
         except Exception as exc:
             log.error("ArchiveHazardFetcher: outlook fetch error: %s", exc)
             self.error.emit(f"Outlook fetch error: {exc}")
         finally:
-            self._outlook_pending.discard(cycle)
+            self._outlook_pending.discard((day, cycle))
 
 
 
@@ -558,7 +620,14 @@ def _normalize_mcd_geojson(raw_text: str) -> str:
     return json.dumps({"type": "FeatureCollection", "features": feats})
 
 
-def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
+def _normalize_archive_spc_geojson(
+    kind: str,
+    raw_text: str,
+    *,
+    day: int | None = None,
+    product: str | None = None,
+    force_label: str | None = None,
+) -> str:
     """Normalize archive SPC GeoJSON to the same property schema live mode uses."""
     try:
         payload = json.loads(raw_text)
@@ -571,15 +640,21 @@ def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
         geom = feature.get("geometry")
         if not geom:
             continue
+        if geom.get("type") == "GeometryCollection" and not geom.get("geometries"):
+            continue
         if kind == "categorical":
             cat = _spc_cat_key(props)
             if not cat:
                 continue
             props["cat"] = cat
         else:
-            label = _spc_prob_label(props)
+            label = force_label or _spc_prob_label(props)
             if label is not None:
                 props["LABEL"] = label
+        if day is not None:
+            props["spc_day"] = day
+        if product:
+            props["spc_product"] = product
         features.append({
             "type": "Feature",
             "geometry": geom,
@@ -587,6 +662,67 @@ def _normalize_archive_spc_geojson(kind: str, raw_text: str) -> str:
         })
 
     return json.dumps({"type": "FeatureCollection", "features": features})
+
+
+def _merge_significant_geojson(base_text: str, sig_text: str) -> str:
+    """Merge significant polygons into a probabilistic product collection."""
+    try:
+        base = json.loads(base_text or _EMPTY_FC)
+        sig = json.loads(sig_text or _EMPTY_FC)
+    except json.JSONDecodeError:
+        return base_text
+
+    base_features = [
+        f for f in (base.get("features") or [])
+        if str((f.get("properties") or {}).get("LABEL", "")).upper() != "SIGN"
+    ]
+    base_features.extend(sig.get("features") or [])
+    return json.dumps({"type": "FeatureCollection", "features": base_features})
+
+
+def _archive_product_suffixes(day: int) -> dict[str, str]:
+    if day in (1, 2):
+        return {
+            "categorical": "cat",
+            "wind": "wind",
+            "hail": "hail",
+            "tornado": "torn",
+        }
+    if day == 3:
+        return {
+            "categorical": "cat",
+            "prob": "prob",
+        }
+    if 4 <= day <= 8:
+        return {"prob": f"day{day}prob"}
+    return {"categorical": "cat"}
+
+
+def _archive_sig_suffixes(day: int) -> dict[str, str]:
+    if day in (1, 2):
+        return {
+            "wind": "sigwind",
+            "hail": "sighail",
+            "tornado": "sigtorn",
+        }
+    if day == 3:
+        return {
+            "prob": "sigprob",
+            "sig": "sigprob",
+        }
+    return {}
+
+
+def _archive_spc_url(day: int, cycle: datetime, suffix: str) -> str:
+    if 4 <= day <= 8:
+        return (
+            f"{_SPC_EXTENDED_OUTLOOK_ARCHIVE}/{cycle.strftime('%Y')}/"
+            f"{suffix}_{cycle.strftime('%Y%m%d')}.lyr.geojson"
+        )
+    return (
+        f"{_SPC_OUTLOOK_ARCHIVE}/{cycle.strftime('%Y')}/"
+        f"day{day}otlk_{cycle.strftime('%Y%m%d')}_{cycle.strftime('%H%M')}_{suffix}.lyr.geojson"
+    )
 
 
 
@@ -608,12 +744,44 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _current_outlook_cycle(t: datetime) -> datetime:
-    """Return the most recent SPC outlook issuance time before t."""
+def _outlook_cycle_candidates(cycle: datetime, day: int) -> list[datetime]:
+    """Return archive filename cycles to try, newest first."""
+    if 4 <= day <= 8:
+        return [cycle, cycle - timedelta(days=1)]
+
+    cycles = _DAY_OUTLOOK_CYCLES.get(day, _DAY_OUTLOOK_CYCLES[1])
+    candidates: list[datetime] = [cycle]
+    midnight = cycle.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    for h_eff, m_eff, h_file, m_file in sorted(cycles, reverse=True):
+        _ = (h_eff, m_eff)
+        ct = midnight.replace(hour=h_file, minute=m_file)
+        if ct < cycle and ct not in candidates:
+            candidates.append(ct)
+
+    prev_midnight = midnight - timedelta(days=1)
+    for _h_eff, _m_eff, h_file, m_file in sorted(cycles, reverse=True):
+        candidates.append(prev_midnight.replace(hour=h_file, minute=m_file))
+    return candidates
+
+
+def _current_outlook_cycle(t: datetime, day: int = 1) -> datetime:
+    """Return the archive file cycle for the selected SPC day valid at time t."""
+    day = max(1, min(8, int(day or 1)))
     midnight = t.replace(hour=0, minute=0, second=0, microsecond=0)
-    candidate = midnight
-    for (h, m) in _OUTLOOK_CYCLES:
-        cycle = midnight.replace(hour=h, minute=m)
-        if cycle <= t:
-            candidate = cycle
+    cycles = _DAY_OUTLOOK_CYCLES.get(day, _DAY_OUTLOOK_CYCLES[1])
+
+    if 4 <= day <= 8:
+        issue_time = midnight.replace(hour=cycles[0][0], minute=cycles[0][1])
+        return midnight if t >= issue_time else midnight - timedelta(days=1)
+
+    candidate: datetime | None = None
+    for h_eff, m_eff, h_file, m_file in cycles:
+        effective = midnight.replace(hour=h_eff, minute=m_eff)
+        if effective <= t:
+            candidate = midnight.replace(hour=h_file, minute=m_file)
+    if candidate is None:
+        prev_midnight = midnight - timedelta(days=1)
+        _h_eff, _m_eff, h_file, m_file = cycles[-1]
+        candidate = prev_midnight.replace(hour=h_file, minute=m_file)
     return candidate

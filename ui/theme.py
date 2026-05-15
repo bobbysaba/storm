@@ -226,6 +226,71 @@ QMainWindow, QWidget {
     font-weight: 600;
 }
 
+#floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo {
+    background-color: rgba(32, 37, 58, 0.62);
+    border: 1px solid rgba(74, 83, 108, 0.48);
+    border-radius: 6px;
+    color: #E8EAF0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0px;
+    padding: 2px 18px 2px 8px;
+    min-height: 18px;
+    max-height: 24px;
+}
+
+#floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo:hover {
+    background-color: rgba(32, 37, 58, 0.78);
+    border-color: rgba(120, 138, 178, 0.72);
+    color: #EFF3FF;
+}
+
+#floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo::drop-down {
+    width: 18px;
+    border: none;
+    background: transparent;
+}
+
+#floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo QAbstractItemView {
+    background-color: #1A1A2E;
+    border: 1px solid #2E2E4E;
+    color: #E8EAF0;
+    selection-background-color: #FF6B35;
+    selection-color: #0A0A0F;
+    outline: none;
+    padding: 0px;
+    min-width: 156px;
+    min-height: 100px;
+}
+
+QFrame#spcDayPopup {
+    background-color: #1A1A2E;
+    border: 1px solid #2E2E4E;
+    border-radius: 6px;
+}
+
+QToolButton#spcDayPopupButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    color: #E8EAF0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0px;
+    padding: 0px;
+}
+
+QToolButton#spcDayPopupButton:hover {
+    background-color: #20253A;
+    color: #EFF3FF;
+}
+
+QToolButton#spcDayPopupButton:checked {
+    background-color: rgba(74, 158, 255, 0.18);
+    color: #4A9EFF;
+    font-weight: 600;
+}
+
 /* ── Map Drawer ───────────────────────────────────────── */
 #floatingToolbar QWidget#mapDrawer QToolButton,
 #floatingToolbar QToolButton[mapSubButton="true"],
@@ -976,17 +1041,24 @@ QDialog#annotationDialog QLineEdit:focus {
     border-radius: 8px;
 }
 
+#archiveControls QLabel {
+    background: transparent;
+    padding: 0;
+}
+
 #archiveControls QToolButton {
-    background-color: transparent;
+    background-color: rgba(26, 26, 46, 0.34);
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: 5px;
     color: #C8D0DE;
-    font-size: 11px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0;
 }
 
 #archiveControls QToolButton:hover {
-    background-color: #20253A;
-    border-color: #3C4664;
+    background-color: rgba(32, 37, 58, 0.85);
+    border-color: rgba(74, 83, 108, 0.75);
     color: #EFF3FF;
 }
 
@@ -1017,12 +1089,13 @@ QDialog#annotationDialog QLineEdit:focus {
 }
 
 #archiveControls QComboBox {
-    background-color: #1A1A2E;
-    border: 1px solid #1E1E2E;
-    border-radius: 4px;
+    background-color: rgba(26, 26, 46, 0.55);
+    border: 1px solid rgba(46, 46, 78, 0.85);
+    border-radius: 5px;
     color: #C8D0DE;
-    font-size: 11px;
-    padding: 2px 6px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
 }
 
 #archiveControls QComboBox:hover {
