@@ -8,7 +8,7 @@ import time
 import feature_flags
 import runtime_flags
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
@@ -86,6 +86,7 @@ log = logging.getLogger(__name__)
 
 SCAN_MOVE_THRESHOLD_KM = 0.1
 SCAN_MOVE_FIXES_TO_STOP = 3
+LIVE_RADAR_MAX_AGE_MINUTES = 45
 VEHICLE_PANEL_WIDTH = 340
 NLCD_TILES_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "storm_nlcd.mbtiles")
@@ -3563,6 +3564,21 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if not self._radar_data_enabled():
             return
 
+        scan_time = scan.scan_time
+        if scan_time.tzinfo is None:
+            scan_time = scan_time.replace(tzinfo=timezone.utc)
+        else:
+            scan_time = scan_time.astimezone(timezone.utc)
+        if datetime.now(timezone.utc) - scan_time > timedelta(minutes=LIVE_RADAR_MAX_AGE_MINUTES):
+            log.warning(
+                "discarding stale live radar scan: %s/%s %s",
+                site,
+                product,
+                scan_time.strftime("%Y-%m-%d %H:%M:%SZ"),
+            )
+            return
+        scan.scan_time = scan_time
+
         key = f"{site}/{product}"
         cache = self._scan_cache.setdefault(key, [])
 
@@ -3573,12 +3589,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         cache.append(scan)
 
         # trim to 35-minute rolling window, hard cap at 6 scans per product (12 total)
-        from datetime import datetime, timezone, timedelta
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=35)
         while cache and cache[0].scan_time < cutoff:
             cache.pop(0)
         while len(cache) > 6:
             cache.pop(0)
+
+        if scan not in cache:
+            log.debug("discarding live radar scan trimmed from cache: %s/%s", site, product)
+            return
 
         log.debug("cache updated: key=%s, n=%d frames", key, len(cache))
         
