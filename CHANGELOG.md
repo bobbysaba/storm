@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## Unreleased
+### Added
+- Colorado Mesonet surface observations are now available from the SURFACE drawer and launch dialog alongside OK Mesonet, WTM, KS Mesonet, and ASOS.
+- CO Mesonet station plots use the NSSL API-hosted `co_mesonet.json` feed with station positions and names from `co_metadata.json`.
+
+### Changed
+- Surface observation diagnostics and layer ordering now include CO Mesonet as an independent 5-minute mesonet source.
+
+---
+
 ## [1.5.0] - 2026-05-07
 ### Added
 - Kansas Mesonet surface observations are now available from the SURFACE drawer and launch dialog alongside OK Mesonet, WTM, and ASOS.

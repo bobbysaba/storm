@@ -155,7 +155,7 @@ A collapsible section lets you pre-select which data layers to enable automatica
 
 - **SPC / NWS / RADAR** — multi-select toggle buttons to auto-enable those overlays
 - **Satellite** — exclusive selector: OFF | CONUS | AUTO-MESO
-- **Surface obs** — multi-select: OK MESONET | WTM | KS
+- **Surface obs** — multi-select: OK MESONET | WTM | KS | CO
 
 #### Update Status
 
@@ -225,7 +225,7 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 9. GOES satellite imagery (optional, opacity-controlled)
 10. NEXRAD radar overlay (semi-transparent PNG raster)
 11. SFCOA mesoanalysis contours
-12. Surface obs station models (OK Mesonet, WTM, KS Mesonet, ASOS)
+12. Surface obs station models (OK Mesonet, WTM, KS Mesonet, CO Mesonet, ASOS)
 13. Station plot icons (MetPy-style, at vehicle positions)
 14. Vehicle markers (colored dots + info popups)
 15. Annotations (road closure / construction / flooding / downed-lines / debris markers)
@@ -467,7 +467,7 @@ See [Section 10](#10-point-soundings) for full dialog documentation.
 
 **Button:** `SURFACE` (checkable toggle, expands drawer)
 
-Displays live surface observation station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, and ASOS/AWOS stations.
+Displays live surface observation station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, Colorado Mesonet, and ASOS/AWOS stations.
 
 #### Network Toggles (multi-select)
 
@@ -476,9 +476,10 @@ Displays live surface observation station models from OK Mesonet, West Texas Mes
 | **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
 | **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
 | **KS** | Kansas Mesonet (K-State) | ~80 stations across Kansas |
+| **CO** | Colorado Mesonet (CoAgMET) | ~90 stations across Colorado |
 | **ASOS** | IEM ASOS/AWOS current observations | User-drawn bounding box |
 
-Any combination can be active at once. OK Mesonet, WTM, and KS Mesonet poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
+Any combination can be active at once. OK Mesonet, WTM, KS Mesonet, and CO Mesonet poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
 
 #### ASOS Bounding Box
 
@@ -506,11 +507,11 @@ Toggle station models on or off with the **Show plots** checkbox.
 
 #### Freshness Coloring
 
-The station-plot center dot is colored by observation age, not fetch time. OK Mesonet, WTM, and KS Mesonet use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
+The station-plot center dot is colored by observation age, not fetch time. OK Mesonet, WTM, KS Mesonet, and CO Mesonet use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
 
 | Source | Green | Yellow | Red |
 |--------|-------|--------|-----|
-| OK Mesonet / WTM / KS Mesonet | ≤5 min | ≤10 min | >10 min |
+| OK Mesonet / WTM / KS Mesonet / CO Mesonet | ≤5 min | ≤10 min | >10 min |
 | ASOS | ≤70 min | ≤90 min | >90 min |
 
 The ASOS timestamp comes from IEM's `valid` observation time.
@@ -522,6 +523,7 @@ The ASOS timestamp comes from IEM's `valid` observation time.
 | OK Mesonet | NSSL API OK Mesonet JSON + Oklahoma Mesonet metadata |
 | West Texas Mesonet | NSSL API WTM JSON + TTU Mesonet site metadata |
 | Kansas Mesonet | NSSL API KS Mesonet JSON with embedded station metadata |
+| Colorado Mesonet | NSSL API CO Mesonet JSON + CO station metadata |
 | ASOS/AWOS | IEM `currents.json` for selected station IDs; station metadata from IEM METAR GeoJSON |
 
 ---
@@ -1335,7 +1337,7 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
 | NSSL CLAMPS DL Truck | On demand | Fetched from the NSSL API on click |
-| OK / WTM / KS Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| OK / WTM / KS / CO Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
 | ASOS/AWOS Surface Obs (IEM) | Every 5 minutes after bbox selection | User-drawn bbox; capped for performance |
 | Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
 | Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
@@ -1571,7 +1573,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | HRRR Point Soundings | ✅ Enabled | n/a |
 | Observed Radiosonde Soundings | ✅ Enabled | n/a |
 | NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
-| Surface Obs (OK / WTM / KS / ASOS) | ✅ Enabled (when toggled on) | n/a |
+| Surface Obs (OK / WTM / KS / CO / ASOS) | ✅ Enabled (when toggled on) | n/a |
 | SFCOA Mesoanalysis | ✅ Enabled | n/a |
 | Turn-by-turn Routing | ✅ Enabled | n/a |
 | Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |

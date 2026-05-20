@@ -24,6 +24,8 @@ OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.c
 WTM_API_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/wtx_mesonet.json"
 WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 KS_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ks_mesonet.json"
+CO_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/co_mesonet.json"
+CO_META_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/co_metadata.json"
 
 # iem endpoints for ASOS
 IEM_METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/metar.geojson"
@@ -55,9 +57,11 @@ class SurfaceFetcher(QObject):
         self._ok_enabled  = False
         self._wtm_enabled = False
         self._ks_enabled  = False
+        self._co_enabled  = False
         self._asos_enabled = False
         self._ok_meta:  dict[str, dict] | None = None
         self._wtm_meta: dict[str, dict] | None = None
+        self._co_meta:  dict[str, dict] | None = None
         self._asos_stations: dict[str, dict] | None = None   # stid → {lat, lon, name}
         self._asos_bbox: tuple[float, float, float, float] | None = None
         self._last_good: dict[str, tuple[list[dict], datetime]] = {}
@@ -88,11 +92,17 @@ class SurfaceFetcher(QObject):
         self._update_timer()
         self.fetch_now()
 
+    def set_co_enabled(self, enabled: bool):
+        self._co_enabled = enabled
+        self._update_timer()
+        self.fetch_now()
+
     def _update_timer(self):
         if (
             self._ok_enabled
             or self._wtm_enabled
             or self._ks_enabled
+            or self._co_enabled
             or (self._asos_enabled and self._asos_bbox is not None)
         ):
             self._timer.start()
@@ -138,6 +148,15 @@ class SurfaceFetcher(QObject):
                 stamp = ks_time.strftime("%H:%MZ") if ks_time else "?"
                 self._update_source_diag("ks", "KS", ks_attempt, ks_obs, ks_stale, ks_note)
                 parts.append(self._format_status_part("KS", len(ks_obs), stamp, ks_stale, ks_note))
+
+            if self._co_enabled:
+                co_attempt = datetime.now(timezone.utc)
+                co_obs, co_stale, co_note = self._fetch_source("CO", "co", self._fetch_co_mesonet)
+                payload.extend(co_obs)
+                co_time = max((i["obs"].timestamp for i in co_obs), default=None)
+                stamp = co_time.strftime("%H:%MZ") if co_time else "?"
+                self._update_source_diag("co", "CO", co_attempt, co_obs, co_stale, co_note)
+                parts.append(self._format_status_part("CO", len(co_obs), stamp, co_stale, co_note))
 
             if self._asos_enabled and self._asos_bbox is not None:
                 asos_attempt = datetime.now(timezone.utc)
@@ -322,6 +341,67 @@ class SurfaceFetcher(QObject):
             })
 
         return observations
+
+    def _fetch_co_mesonet(self) -> list[dict]:
+        if self._co_meta is None:
+            self._co_meta = self._fetch_co_metadata()
+
+        raw = self._http_get(CO_API_URL, headers=self._nssl_api_headers())
+        data = self._json_from_bytes(raw, "CO Mesonet data", CO_API_URL)
+        observations: list[dict] = []
+
+        for stid in data.get("stations", []):
+            station = str(stid).strip().lower()
+            if not station:
+                continue
+            row = data.get(station)
+            meta = (self._co_meta or {}).get(station)
+            if not isinstance(row, dict) or not meta:
+                continue
+
+            temp_f = self._valid_float(row.get("t"))
+            dew_f = self._valid_float(row.get("dewpt"))
+            wind_mph = self._valid_float(row.get("windSpeed"))
+
+            obs = Observation(
+                vehicle_id=f"surface:co:{station}",
+                lat=meta["lat"],
+                lon=meta["lon"],
+                timestamp=self._parse_co_time(row.get("time")),
+                icon_type="mesonet",
+                temperature_c=self._f_to_c(temp_f),
+                dewpoint_c=self._f_to_c(dew_f),
+                wind_speed_ms=wind_mph * 0.44704 if wind_mph is not None else None,
+                wind_dir_deg=self._valid_float(row.get("windDir")),
+                pressure_mb=None,
+            )
+            observations.append({
+                "id": obs.vehicle_id,
+                "source": "co",
+                "name": meta.get("name", station.upper()),
+                "obs": obs,
+            })
+
+        return observations
+
+    def _fetch_co_metadata(self) -> dict[str, dict]:
+        raw = self._http_get(CO_META_URL, headers=self._nssl_api_headers())
+        data = self._json_from_bytes(raw, "CO station metadata", CO_META_URL)
+        meta: dict[str, dict] = {}
+        for key, row in data.items():
+            if not isinstance(row, dict):
+                continue
+            station = (row.get("station") or key or "").strip().lower()
+            lat = self._float_or_none(row.get("lat"))
+            lon = self._float_or_none(row.get("lon"))
+            if not station or lat is None or lon is None:
+                continue
+            meta[station] = {
+                "lat": lat,
+                "lon": lon,
+                "name": (row.get("name") or station.upper()).strip(),
+            }
+        return meta
 
 
     def set_asos_enabled(self, enabled: bool):
@@ -560,6 +640,7 @@ class SurfaceFetcher(QObject):
             ("ok", self._ok_enabled),
             ("wtm", self._wtm_enabled),
             ("ks", self._ks_enabled),
+            ("co", self._co_enabled),
             ("asos", self._asos_enabled and self._asos_bbox is not None),
         ):
             if enabled:
@@ -598,6 +679,7 @@ class SurfaceFetcher(QObject):
             (source == "ok"  and self._ok_enabled)
             or (source == "wtm" and self._wtm_enabled)
             or (source == "ks" and self._ks_enabled)
+            or (source == "co" and self._co_enabled)
             or (source == "asos" and self._asos_enabled)
         )
 
@@ -621,6 +703,26 @@ class SurfaceFetcher(QObject):
             return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError:
             return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _parse_co_time(value: str | None) -> datetime:
+        if not value:
+            return datetime.now(timezone.utc)
+        text = str(value).strip()
+        if "T" in text and not text.endswith("Z") and "+" not in text[10:] and "-" not in text[10:]:
+            text += "+00:00"
+        return SurfaceFetcher._parse_iso_utc(text)
+
+    @staticmethod
+    def _valid_float(value: str | float | int | None) -> float | None:
+        parsed = SurfaceFetcher._float_or_none(value)
+        if parsed is None or parsed <= -900.0:
+            return None
+        return parsed
+
+    @staticmethod
+    def _f_to_c(value: float | None) -> float | None:
+        return (value - 32.0) * 5.0 / 9.0 if value is not None else None
 
     @staticmethod
     def _dewpoint_c_from_rh(temp_c: float | None, rh_pct: float | None) -> float | None:

@@ -193,6 +193,59 @@ def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
     assert round(obs.pressure_mb, 1) == 963.2
 
 
+def test_fetch_co_mesonet_uses_configured_api_headers_and_metadata_file():
+    assert sf.CO_API_URL.endswith("/data/mesonet/co_mesonet.json")
+    assert sf.CO_META_URL.endswith("/data/mesonet/co_metadata.json")
+    fetcher = SurfaceFetcher()
+    captured: list[tuple[str, object, object]] = []
+
+    def _http_get(url, ssl_ctx=None, headers=None):
+        captured.append((url, ssl_ctx, headers))
+        if url == sf.CO_META_URL:
+            return b"""{
+              "alt01": {
+                "station": "alt01",
+                "name": "Ault",
+                "lat": 40.569,
+                "lon": -104.7195
+              }
+            }"""
+        return b"""{
+          "which": "qc",
+          "timezone": "utc",
+          "units": "us",
+          "stations": ["alt01"],
+          "alt01": {
+            "time": "2026-05-20T17:45",
+            "t": 52.63,
+            "rh": 0.645,
+            "dewpt": 41.0,
+            "windSpeed": 3.6,
+            "windDir": 148.2,
+            "gustSpeed": -999
+          }
+        }"""
+
+    fetcher._http_get = _http_get
+    rows = fetcher._fetch_co_mesonet()
+
+    assert captured == [
+        (sf.CO_META_URL, None, {"X-API-Key": sf.config.NSSL_API_KEY}),
+        (sf.CO_API_URL, None, {"X-API-Key": sf.config.NSSL_API_KEY}),
+    ]
+    assert len(rows) == 1
+    assert rows[0]["id"] == "surface:co:alt01"
+    assert rows[0]["source"] == "co"
+    assert rows[0]["name"] == "Ault"
+    obs = rows[0]["obs"]
+    assert obs.timestamp == datetime(2026, 5, 20, 17, 45, tzinfo=timezone.utc)
+    assert round(obs.temperature_c, 1) == 11.5
+    assert round(obs.dewpoint_c, 1) == 5.0
+    assert round(obs.wind_speed_ms, 2) == 1.61
+    assert obs.wind_dir_deg == 148.2
+    assert obs.pressure_mb is None
+
+
 def test_diagnostics_snapshot_tracks_valid_and_fetch_times():
     fetcher = SurfaceFetcher()
     attempt = datetime(2026, 4, 23, 19, 30, tzinfo=timezone.utc)

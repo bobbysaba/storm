@@ -13,6 +13,7 @@ class SurfaceControls(QWidget):
     ok_toggled   = pyqtSignal(bool)
     wtm_toggled  = pyqtSignal(bool)
     ks_toggled   = pyqtSignal(bool)
+    co_toggled   = pyqtSignal(bool)
     asos_toggled = pyqtSignal(bool)
     asos_bbox_requested = pyqtSignal()
     plots_toggled = pyqtSignal(bool)
@@ -42,18 +43,21 @@ class SurfaceControls(QWidget):
         r1.setContentsMargins(0, 0, 0, 0)
         r1.setSpacing(4)
 
-        self._btn_ok = self._btn("OK MESONET")
+        self._btn_ok = self._btn("OK")
         self._btn_wtm = self._btn("WTM")
         self._btn_ks = self._btn("KS")
+        self._btn_co = self._btn("CO")
         self._btn_asos = self._btn("ASOS")
         self._btn_ok.toggled.connect(self.ok_toggled.emit)
         self._btn_wtm.toggled.connect(self.wtm_toggled.emit)
         self._btn_ks.toggled.connect(self.ks_toggled.emit)
+        self._btn_co.toggled.connect(self.co_toggled.emit)
         self._btn_asos.toggled.connect(self.asos_toggled.emit)
         self._btn_asos.toggled.connect(self._on_asos_button_toggled)
         r1.addWidget(self._btn_ok)
         r1.addWidget(self._btn_wtm)
         r1.addWidget(self._btn_ks)
+        r1.addWidget(self._btn_co)
         r1.addWidget(self._btn_asos)
 
         r1.addWidget(self._vdiv())
@@ -184,7 +188,7 @@ class SurfaceControls(QWidget):
 
     def _diagnostics_html(self, diagnostics: dict) -> str:
         parts = []
-        for key in ("ok", "wtm", "ks", "asos"):
+        for key in ("ok", "wtm", "ks", "co", "asos"):
             info = diagnostics.get(key)
             if not info:
                 continue
