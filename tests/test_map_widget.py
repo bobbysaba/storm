@@ -29,3 +29,21 @@ def test_set_sfcoa_overlay_uses_supplied_tile_url_directly():
     assert len(widget.scripts) == 1
     assert "stormSetSfcoaOverlay" in widget.scripts[0]
     assert "storm://app/sfcoatiles/20260507_15-tmpc/{z}/{x}/{y}.pbf" in widget.scripts[0]
+
+
+def test_add_vehicle_passes_multiline_hover_text():
+    widget = _FakeMapWidget()
+
+    MapWidget.add_vehicle(
+        widget,
+        "p1",
+        35.0,
+        -97.0,
+        "#ffffff",
+        "mesonet",
+        "p1\n1s 25 mph | 15s avg 23 mph",
+    )
+
+    assert len(widget.scripts) == 1
+    assert "stormAddVehicle" in widget.scripts[0]
+    assert "\\n1s 25 mph" in widget.scripts[0]

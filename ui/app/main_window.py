@@ -38,6 +38,8 @@ from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_sca
 from ui.sounding.dialog import SoundingDialog
 from ui.sounding.controls import SoundingControls
 from ui.dialogs.vehicle_timeseries_dialog import VehicleTimeseriesDialog
+from archive.vehicle_speed import format_vehicle_speed
+from ui.app.overlay_geometry import bottom_left_y_avoiding
 from ui.widgets.annotation_tools import AnnotationTools
 from ui.dialogs.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog, AnnotationMoveConfirmDialog
 from ui.dialogs.drawing_dialog import (
@@ -371,6 +373,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_controls.setObjectName("archiveControls")
         self._archive_controls.set_radar_status("Radar: waiting")
         self._archive_controls.set_satellite_status("Sat: waiting")
+        self._archive_controls.set_obs_status(
+            "OBS: probing" if runtime_flags.FLAGS.admin_mode else "OBS: MQTT"
+        )
         self._archive_controls.show()
 
         # mqtt reader — vehicles, annotations, cones, drawings.
@@ -392,6 +397,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_mqtt.drawing_deleted.connect(self._recv_remote_drawing_deleted)
         self._archive_mqtt.scan_sector_received.connect(self._recv_remote_scan_sector)
         self._archive_mqtt.scan_sectors_cleared.connect(self._clear_archive_scan_sectors)
+        self._archive_vehicle_obs = None
+        self._archive_vehicle_obs_started = False
 
         # hazard fetcher.
         self._archive_hazard = ArchiveHazardFetcher(
@@ -448,6 +455,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         def _check_mqtt_loaded():
             if self._archive_mqtt._loaded:
                 self._archive_loading.set_task_done("Vehicle tracks")
+                self._start_archive_vehicle_obs()
                 self._try_auto_select_radar_station()
             else:
                 QTimer.singleShot(500, _check_mqtt_loaded)
@@ -514,6 +522,58 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # lay out the archive controls bar at the bottom of the screen.
         QTimer.singleShot(0, self._layout_overlays)
+
+    def _start_archive_vehicle_obs(self) -> None:
+        """Start the optional admin one-second observation source."""
+        if (
+            not runtime_flags.FLAGS.admin_mode
+            or self._archive_vehicle_obs_started
+            or not hasattr(self, "_archive_mqtt")
+        ):
+            return
+        self._archive_vehicle_obs_started = True
+
+        vehicles = self._archive_mqtt.vehicle_metadata()
+        if not vehicles:
+            self._archive_controls.set_obs_status("OBS: MQTT fallback")
+            return
+
+        from archive.fetchers.vehicle_obs_archive_fetcher import ArchiveVehicleObsFetcher
+
+        self._archive_vehicle_obs = ArchiveVehicleObsFetcher(
+            session_date=self._archive_time,
+            parent=self,
+        )
+        self._archive_vehicle_obs.observation_ready.connect(
+            self._on_archive_dense_vehicle_position
+        )
+        self._archive_vehicle_obs.load_finished.connect(
+            self._on_archive_vehicle_obs_loaded
+        )
+        self._archive_vehicle_obs.error.connect(
+            lambda msg: log.warning("One-second archive unavailable: %s", msg)
+        )
+        # MQTT is connected first so its rewind clear/fallback pass happens before
+        # dense observations overlay the vehicles they cover.
+        self._time_ctrl.time_changed.connect(
+            self._archive_vehicle_obs.on_time_changed
+        )
+        self._archive_vehicle_obs.load(vehicles)
+
+    def _on_archive_vehicle_obs_loaded(self, vehicle_ids: set[str]) -> None:
+        total = len(self._archive_mqtt.vehicle_metadata())
+        if not vehicle_ids:
+            self._archive_controls.set_obs_status("OBS: MQTT fallback")
+            return
+
+        self._archive_controls.set_precision_mode(True)
+        if len(vehicle_ids) == total:
+            status = f"OBS: 1-second ({len(vehicle_ids)})"
+        else:
+            status = f"OBS: partial {len(vehicle_ids)}/{total}"
+        self._archive_controls.set_obs_status(status, active=True)
+        self._archive_vehicle_obs.on_time_changed(self._time_ctrl.current_time)
+        self._layout_overlays()
 
     def _try_auto_select_radar_station(self) -> None:
         """Pick the nearest NEXRAD station from vehicle positions, or fall back
@@ -673,6 +733,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_archive_vehicle_position(self, obs) -> None:
         """Update a vehicle marker from the MQTT archive."""
+        dense_obs = getattr(self, "_archive_vehicle_obs", None)
+        if (
+            dense_obs is not None
+            and dense_obs.has_fresh_observation(
+                obs.vehicle_id,
+                self._time_ctrl.current_time,
+            )
+        ):
+            return
         self.update_vehicle_obs(obs)
         
         # also update timeseries dialog if open
@@ -682,6 +751,25 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if observations:
                 self._vehicle_timeseries_dlg.update_vehicle(
                     obs.vehicle_id, observations)
+
+    def _on_archive_dense_vehicle_position(self, obs) -> None:
+        """Update a vehicle from the optional one-second archive."""
+        if not self._archive_vehicle_obs.has_fresh_observation(
+            obs.vehicle_id,
+            self._time_ctrl.current_time,
+        ):
+            return
+        self.update_vehicle_obs(obs)
+        if (
+            self._vehicle_timeseries_dlg is not None
+            and self._vehicle_timeseries_dlg.isVisible()
+        ):
+            observations = self._get_archive_vehicle_history(obs.vehicle_id)
+            if observations:
+                self._vehicle_timeseries_dlg.update_vehicle(
+                    obs.vehicle_id,
+                    observations,
+                )
 
     def _on_archive_vehicles_cleared(self) -> None:
         """Remove all vehicle markers when time jumps backward."""
@@ -1502,6 +1590,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # archive controls bar — centered, pinned to bottom
         arc_bar_h = 0
+        archive_rect = None
         if hasattr(self, "_archive_controls"):
             ac = self._archive_controls
             ac_w = min(r.width() - 2 * MARGIN, 680)
@@ -1511,6 +1600,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             arc_bar_h = ac_h + MARGIN
             ac_x = max(MARGIN, (r.width() - ac_w) // 2)
             ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, ac_h)
+            archive_rect = (ac_x, r.height() - arc_bar_h, ac_w, ac_h)
             ac.raise_()
 
         # debug pill — bottom-center, sits above archive controls (or above bottom margin)
@@ -1523,11 +1613,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             dp.move(dp_x, dp_bottom - dp_h)
             dp.raise_()
 
-        # left status pill — bottom-left corner (never offset by centered archive bar)
+        # Left status pill stays bottom-left when there is room.  On narrower
+        # archive layouts it moves above the playback bar instead of covering it.
         if hasattr(self, "_status_left"):
             self._status_left.adjustSize()
             sl = self._status_left.size()
-            _status_y = r.height() - sl.height() - MARGIN
+            _status_y = bottom_left_y_avoiding(
+                r.height(),
+                MARGIN,
+                sl.width(),
+                sl.height(),
+                archive_rect,
+            )
             self._status_left.setGeometry(
                 MARGIN, _status_y,
                 sl.width(), sl.height()
@@ -4701,7 +4798,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         marker_color = self._obs_age_color(obs)
         age_label = self._obs_age_label(obs)
         self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
-        self.map_widget.add_vehicle(obs.vehicle_id, obs.lat, obs.lon, marker_color, v.icon_type)
+        hover_text = self._archive_vehicle_hover_text(obs.vehicle_id)
+        self.map_widget.add_vehicle(
+            obs.vehicle_id,
+            obs.lat,
+            obs.lon,
+            marker_color,
+            v.icon_type,
+            hover_text=hover_text,
+        )
         if obs.vehicle_id == config.VEHICLE_ID and hasattr(self, "routing_controls"):
             self.routing_controls.update_own_position(obs.lat, obs.lon)
             if not self._viewer and not self._monitor and not self._archive and obs.lat is not None and obs.lon is not None:
@@ -4719,6 +4824,28 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.map_widget.follow_move(obs.lat, obs.lon)
         if obs.vehicle_id == config.VEHICLE_ID:
             self._update_local_scan_from_vehicle(obs)
+
+    def _archive_vehicle_hover_text(self, vehicle_id: str) -> str:
+        """Build the admin archive vehicle name and ground-speed tooltip."""
+        if (
+            not self._archive
+            or not runtime_flags.FLAGS.admin_mode
+            or not hasattr(self, "_time_ctrl")
+        ):
+            return vehicle_id
+
+        archive_time = self._time_ctrl.current_time
+        dense_obs = getattr(self, "_archive_vehicle_obs", None)
+        if (
+            dense_obs is not None
+            and dense_obs.has_fresh_observation(vehicle_id, archive_time)
+        ):
+            speed = dense_obs.speed(vehicle_id, archive_time)
+        elif hasattr(self, "_archive_mqtt"):
+            speed = self._archive_mqtt.vehicle_speed(vehicle_id, archive_time)
+        else:
+            return vehicle_id
+        return f"{vehicle_id}\n{format_vehicle_speed(speed)}"
 
     def _follow_target_id(self) -> str | None:
         """Return the vehicle ID to follow: local vehicle, first selected, or sole vehicle."""
@@ -5239,6 +5366,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         """Extract vehicle observation history from archive MQTT data."""
         if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
             return []
+
+        dense_obs = getattr(self, "_archive_vehicle_obs", None)
+        if (
+            dense_obs is not None
+            and vehicle_id in dense_obs.available_vehicle_ids
+        ):
+            return dense_obs.history(vehicle_id, self._time_ctrl.current_time)
         
         from network import vehicle_sync
         

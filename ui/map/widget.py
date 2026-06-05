@@ -163,9 +163,13 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             self._js_queue.append(script)
 
     def add_vehicle(self, vehicle_id: str, lat: float, lon: float,
-                    color: str = ACCENT_COLOR, icon_type: str = "car"):
+                    color: str = ACCENT_COLOR, icon_type: str = "car",
+                    hover_text: str | None = None):
+        tooltip = hover_text or vehicle_id
         self.run_js(
-            f"stormAddVehicle('{vehicle_id}', {lat}, {lon}, '{color}', '{icon_type}');"
+            "stormAddVehicle("
+            f"{json.dumps(vehicle_id)}, {lat}, {lon}, {json.dumps(color)}, "
+            f"{json.dumps(icon_type)}, {json.dumps(tooltip)});"
         )
 
     def remove_vehicle(self, vehicle_id: str):

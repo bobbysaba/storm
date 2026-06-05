@@ -17,7 +17,7 @@ try:
 except ImportError:
     _HAS_ZONEINFO = False
 
-from archive.time_controller import TimeController, SPEED_OPTIONS, STEP_SECONDS
+from archive.time_controller import TimeController, SPEED_OPTIONS
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +31,8 @@ class ArchiveControls(QWidget):
 
     Connects to a TimeController and exposes:
       • Play / pause
-      • Step forward / backward (STEP_SECONDS each)
-      • Skip to start / end of day
+      • Normal mode: ±10-second and ±1-minute steps
+      • Precision mode: ±1-second and ±10-second steps
       • Scrubber slider (seconds since midnight UTC of the session date)
       • Speed selector
       • Jump-to-time dialog
@@ -110,18 +110,26 @@ class ArchiveControls(QWidget):
         )
         row1.addWidget(self._sat_status)
 
+        row1.addWidget(self._vdiv())
+
+        self._obs_status = QLabel("OBS: MQTT")
+        self._obs_status.setStyleSheet(
+            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
+        row1.addWidget(self._obs_status)
+
         root.addLayout(row1)
 
         row2 = QHBoxLayout()
         row2.setSpacing(5)
         row2.setContentsMargins(0, 0, 0, 0)
 
-        self._btn_start = self._ctrl_btn("⏮", "Skip to start of day")
-        self._btn_back  = self._ctrl_btn("‹",  f"Step back {STEP_SECONDS}s (Left or A)")
+        self._btn_start = self._ctrl_btn("-1m", "Step back 1 minute")
+        self._btn_back  = self._ctrl_btn("-10", "Step back 10 seconds (Left or A)")
         self._btn_play  = self._ctrl_btn("▶",  "Play / pause (Space)")
         self._btn_play.setCheckable(True)
-        self._btn_fwd   = self._ctrl_btn("›",  f"Step forward {STEP_SECONDS}s (Right or D)")
-        self._btn_end   = self._ctrl_btn("⏭", "Skip to end of day")
+        self._btn_fwd   = self._ctrl_btn("+10", "Step forward 10 seconds (Right or D)")
+        self._btn_end   = self._ctrl_btn("+1m", "Step forward 1 minute")
 
         for btn in (self._btn_start, self._btn_back, self._btn_play,
                     self._btn_fwd, self._btn_end):
@@ -129,11 +137,11 @@ class ArchiveControls(QWidget):
 
         row2.addWidget(self._vdiv())
 
-        speed_lbl = QLabel("SPEED")
-        speed_lbl.setStyleSheet(
+        self._speed_label = QLabel("SPEED")
+        self._speed_label.setStyleSheet(
             "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
         )
-        row2.addWidget(speed_lbl)
+        row2.addWidget(self._speed_label)
 
         self._speed_combo = QComboBox()
         self._speed_combo.setObjectName("archiveSpeedCombo")
@@ -153,6 +161,7 @@ class ArchiveControls(QWidget):
         row2.addWidget(jump_btn)
 
         root.addLayout(row2)
+        self._precision_mode = False
 
     def _ctrl_btn(self, text: str, tooltip: str) -> QToolButton:
         btn = QToolButton()
@@ -181,15 +190,36 @@ class ArchiveControls(QWidget):
             f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
         )
 
+    def set_obs_status(self, text: str, active: bool = False) -> None:
+        self._obs_status.setText(text)
+        color = "#39D98A" if active else "#8E97AB"
+        self._obs_status.setStyleSheet(
+            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+        )
+
+    def set_precision_mode(self, enabled: bool) -> None:
+        """Use one-second playback navigation when dense observations are available."""
+        self._precision_mode = enabled
+        self._btn_start.setText("-10")
+        self._btn_back.setText("-1")
+        self._btn_fwd.setText("+1")
+        self._btn_end.setText("+10")
+        self._btn_start.setToolTip("Step back 10 seconds")
+        self._btn_back.setToolTip("Step back 1 second (Left or A)")
+        self._btn_fwd.setToolTip("Step forward 1 second (Right or D)")
+        self._btn_end.setToolTip("Step forward 10 seconds")
+        self._speed_label.setVisible(not enabled)
+        self._speed_combo.setVisible(not enabled)
+        self._tc.set_precision_playback(enabled)
 
     def _connect_controller(self):
         self._tc.time_changed.connect(self._on_time_changed)
         self._tc.playing_changed.connect(self._on_playing_changed)
 
         self._btn_start.clicked.connect(self._on_skip_start)
-        self._btn_back.clicked.connect(self._tc.step_backward)
+        self._btn_back.clicked.connect(self._on_step_back)
         self._btn_play.clicked.connect(self._tc.toggle_play)
-        self._btn_fwd.clicked.connect(self._tc.step_forward)
+        self._btn_fwd.clicked.connect(self._on_step_forward)
         self._btn_end.clicked.connect(self._on_skip_end)
 
         # keyboard shortcuts — these require a parent window to be set.
@@ -206,10 +236,10 @@ class ArchiveControls(QWidget):
             return
         self._shortcuts_installed = True
         QShortcut(QKeySequence(Qt.Key.Key_Space),  win).activated.connect(self._tc.toggle_play)
-        QShortcut(QKeySequence(Qt.Key.Key_Left),   win).activated.connect(self._tc.step_backward)
-        QShortcut(QKeySequence(Qt.Key.Key_Right),  win).activated.connect(self._tc.step_forward)
-        QShortcut(QKeySequence(Qt.Key.Key_A),      win).activated.connect(self._tc.step_backward)
-        QShortcut(QKeySequence(Qt.Key.Key_D),      win).activated.connect(self._tc.step_forward)
+        QShortcut(QKeySequence(Qt.Key.Key_Left),   win).activated.connect(self._on_step_back)
+        QShortcut(QKeySequence(Qt.Key.Key_Right),  win).activated.connect(self._on_step_forward)
+        QShortcut(QKeySequence(Qt.Key.Key_A),      win).activated.connect(self._on_step_back)
+        QShortcut(QKeySequence(Qt.Key.Key_D),      win).activated.connect(self._on_step_forward)
         QShortcut(QKeySequence(Qt.Key.Key_Home),   win).activated.connect(self._on_skip_start)
         QShortcut(QKeySequence(Qt.Key.Key_End),    win).activated.connect(self._on_skip_end)
 
@@ -226,15 +256,17 @@ class ArchiveControls(QWidget):
     def _on_speed_changed(self, idx: int) -> None:
         self._tc.set_speed_by_index(idx)
 
+    def _on_step_back(self) -> None:
+        self._tc.step(-1 if self._precision_mode else -10)
+
+    def _on_step_forward(self) -> None:
+        self._tc.step(1 if self._precision_mode else 10)
+
     def _on_skip_start(self) -> None:
-        t = self._tc.current_time
-        midnight = t.replace(hour=0, minute=0, second=0, microsecond=0)
-        self._tc.set_time(midnight)
+        self._tc.step(-10 if self._precision_mode else -60)
 
     def _on_skip_end(self) -> None:
-        t = self._tc.current_time
-        end_of_day = t.replace(hour=23, minute=59, second=59, microsecond=0)
-        self._tc.set_time(end_of_day)
+        self._tc.step(10 if self._precision_mode else 60)
 
     def _show_jump_dialog(self) -> None:
         dlg = _JumpToTimeDialog(self._tc.current_time, self)

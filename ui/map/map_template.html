@@ -2110,23 +2110,33 @@
       hailcam: function(c) { return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M21.5,12 L18.1,15.5 L16.8,20.2 L12,19 L7.2,20.2 L5.9,15.5 L2.5,12 L5.9,8.5 L7.2,3.8 L12,5 L16.8,3.8 L18.1,8.5 Z" fill="'+c+'"/></svg>'; },
     };
 
-    window.stormAddVehicle = function(id, lat, lon, color, iconType) {
+    window.stormAddVehicle = function(id, lat, lon, color, iconType, hoverText) {
       const existing = document.getElementById("vehicle-" + id);
-      if (existing) existing.remove();
-
       var _iconFn = _vIcons[iconType] || _vIcons.car;
       var _c = color || "__ACCENT_COLOR__";
+      if (existing) {
+        existing.style.filter = "drop-shadow(0 0 5px " + _c + ")";
+        existing.innerHTML = _iconFn(_c);
+        existing.dataset.hoverText = hoverText || id;
+        if (existing._stormMarker) {
+          existing._stormMarker.setLngLat([lon, lat]);
+        }
+        return;
+      }
+
       const el = document.createElement("div");
       el.id = "vehicle-" + id;
       el.style.cssText = "width:28px;height:28px;cursor:pointer;";
       el.style.filter = "drop-shadow(0 0 5px " + _c + ")";
       el.innerHTML = _iconFn(_c);
+      el.dataset.hoverText = hoverText || id;
 
       el.addEventListener("mouseenter", function(e) {
         window._vehicleHovering = true;
         var tip = document.getElementById("hazard-tooltip");
         if (tip) {
-          tip.textContent = id;
+          tip.textContent = el.dataset.hoverText || id;
+          tip.style.whiteSpace = "pre-line";
           tip.style.display = "block";
           tip.style.left = (e.clientX + 14) + "px";
           tip.style.top  = (e.clientY - 36) + "px";
@@ -2145,14 +2155,15 @@
         if (tip) tip.style.display = "none";
       });
 
-      new maplibregl.Marker({ element: el, anchor: "center" })
+      el._stormMarker = new maplibregl.Marker({ element: el, anchor: "center" })
         .setLngLat([lon, lat])
         .addTo(map);
     };
 
     window.stormRemoveVehicle = function(id) {
       const el = document.getElementById("vehicle-" + id);
-      if (el) el.remove();
+      if (el && el._stormMarker) el._stormMarker.remove();
+      else if (el) el.remove();
     };
 
     window.stormFlyTo = function(lat, lon, zoom) {

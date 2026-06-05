@@ -1,0 +1,219 @@
+"""One-second FOFS mobile-mesonet observations for admin archive playback."""
+
+from __future__ import annotations
+
+import bisect
+import csv
+import io
+import logging
+import ssl
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from archive.vehicle_aliases import thredds_vehicle_id
+from archive.vehicle_speed import VehicleSpeed, calculate_vehicle_speed
+from core.observation import Observation
+
+log = logging.getLogger(__name__)
+
+_FILE_ROOT = (
+    "https://data.nssl.noaa.gov/thredds/fileServer/"
+    "FOFS/Mobile-Mesonet/data"
+)
+_USER_AGENT = "Mozilla/5.0 STORM/1.0"
+_FRESH_SECONDS = 60
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return the compatibility context required by data.nssl.noaa.gov."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _daily_url(vehicle_id: str, date_str: str) -> str:
+    directory = thredds_vehicle_id(vehicle_id)
+    return f"{_FILE_ROOT}/{directory}/raw/{date_str}.txt"
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_vehicle_csv(
+    text: str,
+    vehicle_id: str,
+    icon_type: str | None = None,
+) -> list[Observation]:
+    """Parse a FOFS daily CSV file into timestamp-sorted observations."""
+    observations: list[Observation] = []
+    for row in csv.DictReader(io.StringIO(text)):
+        try:
+            timestamp = datetime.strptime(
+                f"{row['gps_date'].strip()}{row['gps_time'].strip().zfill(6)}",
+                "%d%m%y%H%M%S",
+            ).replace(tzinfo=timezone.utc)
+            lat = float(row["lat"])
+            lon = float(row["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        observations.append(Observation(
+            vehicle_id=vehicle_id,
+            lat=lat,
+            lon=lon,
+            timestamp=timestamp,
+            icon_type=icon_type,
+            temperature_c=_float_or_none(row.get("t_fast")),
+            dewpoint_c=_float_or_none(row.get("dewpoint")),
+            wind_speed_ms=_float_or_none(row.get("sfc_wspd")),
+            wind_dir_deg=_float_or_none(row.get("sfc_wdir")),
+            pressure_mb=_float_or_none(row.get("pressure")),
+        ))
+
+    observations.sort(key=lambda obs: obs.timestamp)
+    return observations
+
+
+class ArchiveVehicleObsFetcher(QObject):
+    """Loads and replays optional one-second observations for archive vehicles."""
+
+    observation_ready = pyqtSignal(object)
+    vehicles_cleared = pyqtSignal()
+    load_finished = pyqtSignal(object)  # set[str] of MQTT vehicle IDs
+    error = pyqtSignal(str)
+
+    def __init__(self, session_date: datetime, parent=None):
+        super().__init__(parent)
+        self._date_str = session_date.strftime("%Y%m%d")
+        self._observations: dict[str, list[Observation]] = {}
+        self._timestamps: dict[str, list[datetime]] = {}
+        self._last_indices: dict[str, int] = {}
+        self._last_time: datetime | None = None
+        self._loaded = False
+
+    @property
+    def available_vehicle_ids(self) -> set[str]:
+        return set(self._observations)
+
+    def load(self, vehicles: dict[str, str | None]) -> None:
+        """Probe and load daily files for MQTT vehicle IDs in a background thread."""
+        threading.Thread(
+            target=self._load_all,
+            args=(dict(vehicles),),
+            daemon=True,
+        ).start()
+
+    def on_time_changed(self, archive_time: datetime) -> None:
+        if not self._loaded:
+            return
+        if self._last_time is not None and archive_time < self._last_time:
+            self._last_indices.clear()
+            self.vehicles_cleared.emit()
+        self._last_time = archive_time
+
+        for vehicle_id in self._observations:
+            index = self._index_at(vehicle_id, archive_time)
+            if index < 0 or self._last_indices.get(vehicle_id) == index:
+                continue
+            self._last_indices[vehicle_id] = index
+            self.observation_ready.emit(self._observations[vehicle_id][index])
+
+    def has_fresh_observation(self, vehicle_id: str, archive_time: datetime) -> bool:
+        """Return whether one-second data should supersede MQTT at this time."""
+        index = self._index_at(vehicle_id, archive_time)
+        if index < 0:
+            return False
+        age = (archive_time - self._observations[vehicle_id][index].timestamp).total_seconds()
+        return 0 <= age <= _FRESH_SECONDS
+
+    def history(self, vehicle_id: str, through_time: datetime) -> list[Observation]:
+        """Return one-second observations for a vehicle through the requested time."""
+        index = self._index_at(vehicle_id, through_time)
+        if index < 0:
+            return []
+        return self._observations[vehicle_id][:index + 1]
+
+    def speed(self, vehicle_id: str, archive_time: datetime) -> VehicleSpeed:
+        return calculate_vehicle_speed(
+            self._observations.get(vehicle_id, []),
+            archive_time,
+            short_seconds=1,
+            average_seconds=15,
+        )
+
+    def first_vehicle_positions(self) -> list[tuple[str, float, float]]:
+        result = []
+        for vehicle_id, observations in self._observations.items():
+            if observations:
+                first = observations[0]
+                result.append((vehicle_id, first.lat, first.lon))
+        return result
+
+    def _index_at(self, vehicle_id: str, archive_time: datetime) -> int:
+        timestamps = self._timestamps.get(vehicle_id)
+        if not timestamps:
+            return -1
+        return bisect.bisect_right(timestamps, archive_time) - 1
+
+    def _load_all(self, vehicles: dict[str, str | None]) -> None:
+        loaded: dict[str, list[Observation]] = {}
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(self._fetch_vehicle, vehicle_id, icon_type): vehicle_id
+                for vehicle_id, icon_type in vehicles.items()
+            }
+            for future in as_completed(futures):
+                vehicle_id = futures[future]
+                try:
+                    observations = future.result()
+                    if observations:
+                        loaded[vehicle_id] = observations
+                except Exception as exc:
+                    log.warning("One-second archive load failed for %s: %s", vehicle_id, exc)
+                    errors.append(f"{vehicle_id}: {exc}")
+
+        self._observations = loaded
+        self._timestamps = {
+            vehicle_id: [obs.timestamp for obs in observations]
+            for vehicle_id, observations in loaded.items()
+        }
+        self._loaded = True
+        if errors and not loaded:
+            self.error.emit("; ".join(errors))
+        self.load_finished.emit(set(loaded))
+
+    def _fetch_vehicle(
+        self,
+        vehicle_id: str,
+        icon_type: str | None,
+    ) -> list[Observation]:
+        url = _daily_url(vehicle_id, self._date_str)
+        request = Request(url, headers={"User-Agent": _USER_AGENT})
+        try:
+            with urlopen(request, timeout=30, context=_ssl_context()) as response:
+                text = response.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            if exc.code in (404, 410):
+                return []
+            raise
+        observations = parse_vehicle_csv(text, vehicle_id, icon_type)
+        log.info(
+            "One-second archive: loaded %d observations for %s from %s",
+            len(observations),
+            vehicle_id,
+            url,
+        )
+        return observations

@@ -14,6 +14,7 @@ from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
 from core.scan_sector import ScanSector
 from network.vehicle_sync import _observation_from_payload
+from archive.vehicle_speed import VehicleSpeed, calculate_vehicle_speed
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ class ArchiveMQTTReader(QObject):
         self._date_str = session_date.strftime("%Y%m%d")
         self._data: dict[str, list[tuple[datetime, dict]]] = {t: [] for t in _TOPICS}
         self._loaded = False
+        self._vehicle_observations: dict[str, list] = {}
         self._pending_time: Optional[datetime] = None
         self._last_emit_time: Optional[datetime] = None
         # track which annotation/cone/drawing ids have been emitted so we can
@@ -186,8 +188,37 @@ class ArchiveMQTTReader(QObject):
                 continue
         return result
 
+    def vehicle_metadata(self) -> dict[str, str | None]:
+        """Return vehicle IDs and their first advertised icon type."""
+        vehicles: dict[str, str | None] = {}
+        for _, obj in self._data.get("vehicles", []):
+            vehicle_id = obj.get("vehicle_id")
+            if not vehicle_id:
+                continue
+            icon_type = (obj.get("icon_type") or "").strip() or None
+            if vehicle_id not in vehicles or vehicles[vehicle_id] is None:
+                vehicles[vehicle_id] = icon_type
+        return vehicles
+
+    def vehicle_speed(self, vehicle_id: str, archive_time: datetime) -> VehicleSpeed:
+        """Return MQTT-cadence ground speeds for a vehicle."""
+        return calculate_vehicle_speed(
+            self._vehicle_observations.get(vehicle_id, []),
+            archive_time,
+            short_seconds=10,
+            average_seconds=30,
+        )
+
     def _on_load_complete(self) -> None:
         """Called on the main thread once background fetch finishes."""
+        histories: dict[str, list] = {}
+        for _, obj in self._data.get("vehicles", []):
+            try:
+                observation = _observation_from_payload(obj)
+            except Exception:
+                continue
+            histories.setdefault(observation.vehicle_id, []).append(observation)
+        self._vehicle_observations = histories
         self._loaded = True
         if self._pending_time is not None:
             self.on_time_changed(self._pending_time)

@@ -12,8 +12,8 @@ _TICK_MS = 500
 # available playback speed multipliers.
 SPEED_OPTIONS = [1, 5, 10, 30, 60, 120, 300]
 
-# step size used by the ← / → buttons (seconds of archive time).
-STEP_SECONDS = 30    # match vehicle position update interval
+# Legacy default step retained for callers outside ArchiveControls.
+STEP_SECONDS = 30
 
 
 class TimeController(QObject):
@@ -78,13 +78,16 @@ class TimeController(QObject):
 
     def step_forward(self) -> None:
         """Advance by STEP_SECONDS and pause."""
-        self.pause()
-        self._advance(STEP_SECONDS)
+        self.step(STEP_SECONDS)
 
     def step_backward(self) -> None:
         """Rewind by STEP_SECONDS and pause."""
+        self.step(-STEP_SECONDS)
+
+    def step(self, seconds: int) -> None:
+        """Pause and move by an arbitrary number of archive seconds."""
         self.pause()
-        self._advance(-STEP_SECONDS)
+        self._advance(seconds)
 
     def play(self) -> None:
         if self._playing:
@@ -123,6 +126,14 @@ class TimeController(QObject):
     def set_speed_by_index(self, idx: int) -> None:
         self._speed_idx = max(0, min(len(SPEED_OPTIONS) - 1, idx))
 
+    def set_precision_playback(self, enabled: bool) -> None:
+        """Configure exact one-second ticks for dense observation playback."""
+        self.pause()
+        self._timer.setInterval(1000 if enabled else _TICK_MS)
+        if enabled:
+            self.set_speed(1)
+            self._current_time = self._current_time.replace(microsecond=0)
+            self.time_changed.emit(self._current_time)
 
     def seconds_since_midnight(self) -> int:
         """Current archive time expressed as seconds since 00:00:00 UTC."""
@@ -138,12 +149,12 @@ class TimeController(QObject):
 
     def _ms_per_archive_second(self) -> float:
         """Wall-clock ms required to advance one archive second at current speed."""
-        return _TICK_MS / self.speed
+        return self._timer.interval() / self.speed
 
     def _on_tick(self) -> None:
         """Called every _TICK_MS wall-clock ms while playing."""
         # each wall-clock tick represents `speed` archive-seconds worth of time.
-        archive_seconds = _TICK_MS / 1000.0 * self.speed
+        archive_seconds = self._timer.interval() / 1000.0 * self.speed
         self._advance(archive_seconds)
 
     def _advance(self, archive_seconds: float) -> None:
