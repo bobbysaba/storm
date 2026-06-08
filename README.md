@@ -33,7 +33,7 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **Real-time annotations** — place road closure, construction, flooding, downed lines, debris, and storm motion cones on the map; editable and movable after placement; synced over MQTT
 - **Drawing tools** — create fronts, custom-styled polylines, and custom-styled polygons on the map; synced over MQTT via DrawingSync
 - **Station plot markers** — MetPy-style station plot PNGs rendered at vehicle positions (temperature, dewpoint, pressure, wind barb); synced over MQTT
-- **Surface obs** — live station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, Colorado Mesonet, and user-selected ASOS/AWOS bounding boxes; OK/WTM/KS/CO poll every 5 minutes, ASOS reuses or redraws a selected bbox
+- **Surface obs** — live station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, Colorado Mesonet, Nebraska Mesonet, and user-selected ASOS/AWOS bounding boxes; OK/WTM/KS/CO/NE poll every 5 minutes, ASOS reuses or redraws a selected bbox
 - **SFCOA mesoanalysis overlays** — NSSL SFCOA vector-tile contours with grouped thermodynamic, parcel, lapse-rate, shear, helicity, composite, upper-air, and wind products; step through recent valid times and overlay one or more variables on the map
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters (including 0–3 km CAPE), kinematics table, surface T/Td labels, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
@@ -238,7 +238,7 @@ storm/
 │   │   ├── sounding_fetcher.py  # On-demand HRRR point sounding via open-meteo
 │   │   ├── obs_sounding_fetcher.py  # Observed radiosonde soundings via IEM RAOB
 │   │   ├── clamps_sounding_fetcher.py  # NSSL CLAMPS DL truck soundings via API
-│   │   ├── surface_fetcher.py   # OK Mesonet / WTM / KS / CO Mesonet / ASOS surface obs
+│   │   ├── surface_fetcher.py   # OK / WTM / KS / CO / NE Mesonet / ASOS surface obs
 │   │   ├── sfcoa_overlay_fetcher.py # SFCOA mesoanalysis vector-tile overlays
 │   │   ├── routing_fetcher.py   # OSRM turn-by-turn routing + Nominatim geocoding
 │   │   └── vad_fetcher.py       # NEXRAD VAD fetch helpers
@@ -361,7 +361,7 @@ storm/
 - **MQTT** — AWS IoT broker over TLS port 8883. Topic layout: `storm/vehicles/{id}`, `storm/annotations/{id}`, `storm/cones/{id}`, `storm/drawings/{id}`. Messages expire at 08:00 UTC the following day.
 - **Vehicle locations** — Live vehicle positions come from MQTT subscriptions on `storm/vehicles/{id}`. Local obs sources publish to that topic, and all connected clients subscribe to the same stream for fleet positions.
 - **Radar source** — NEXRAD Level 3 via Unidata THREDDS (public, no auth). N0B (super-res reflectivity) with N0Q/N0R fallbacks; N0U (velocity) with N0S fallback. Archive mode supports Level 2 radar with full dual-pol products.
-- **Surface obs** — `SurfaceFetcher` (`data/fetchers/surface_fetcher.py`) polls OK Mesonet, West Texas Mesonet (WTM), Kansas Mesonet, and Colorado Mesonet from the NSSL API every 5 minutes and fetches ASOS/AWOS observations from IEM for a user-drawn bounding box. Station model PNGs are rendered via MetPy/matplotlib, served through the in-process `storm://` scheme, and displayed as map markers via `SurfacePlotLayer` (`ui/layers/surface_plot_layer.py`).
+- **Surface obs** — `SurfaceFetcher` (`data/fetchers/surface_fetcher.py`) polls OK Mesonet, West Texas Mesonet (WTM), Kansas Mesonet, Colorado Mesonet, and Nebraska Mesonet from the NSSL API every 5 minutes and fetches ASOS/AWOS observations from IEM for a user-drawn bounding box. Station model PNGs are rendered via MetPy/matplotlib, served through the in-process `storm://` scheme, and displayed as map markers via `SurfacePlotLayer` (`ui/layers/surface_plot_layer.py`).
 - **SFCOA overlays** — `SfcoaOverlayFetcher` (`data/fetchers/sfcoa_overlay_fetcher.py`) reads the NSSL API SFCOA run index and per-run metadata, exposes grouped variables through `SfcoaControls`, and renders selected vector-tile contour products through the MapLibre bridge.
 - **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via the NSSL API (`ClampsSoundingFetcher`) in `data/fetchers/`. Sounding UI lives in `ui/sounding/`.
 - **Routing** — `RoutingFetcher` (`data/fetchers/routing_fetcher.py`) geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.

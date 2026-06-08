@@ -26,6 +26,7 @@ WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
 KS_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ks_mesonet.json"
 CO_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/co_mesonet.json"
 CO_META_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/co_metadata.json"
+NE_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ne_mesonet.json"
 
 # iem endpoints for ASOS
 IEM_METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/metar.geojson"
@@ -58,6 +59,7 @@ class SurfaceFetcher(QObject):
         self._wtm_enabled = False
         self._ks_enabled  = False
         self._co_enabled  = False
+        self._ne_enabled  = False
         self._asos_enabled = False
         self._ok_meta:  dict[str, dict] | None = None
         self._wtm_meta: dict[str, dict] | None = None
@@ -97,12 +99,18 @@ class SurfaceFetcher(QObject):
         self._update_timer()
         self.fetch_now()
 
+    def set_ne_enabled(self, enabled: bool):
+        self._ne_enabled = enabled
+        self._update_timer()
+        self.fetch_now()
+
     def _update_timer(self):
         if (
             self._ok_enabled
             or self._wtm_enabled
             or self._ks_enabled
             or self._co_enabled
+            or self._ne_enabled
             or (self._asos_enabled and self._asos_bbox is not None)
         ):
             self._timer.start()
@@ -157,6 +165,15 @@ class SurfaceFetcher(QObject):
                 stamp = co_time.strftime("%H:%MZ") if co_time else "?"
                 self._update_source_diag("co", "CO", co_attempt, co_obs, co_stale, co_note)
                 parts.append(self._format_status_part("CO", len(co_obs), stamp, co_stale, co_note))
+
+            if self._ne_enabled:
+                ne_attempt = datetime.now(timezone.utc)
+                ne_obs, ne_stale, ne_note = self._fetch_source("NE", "ne", self._fetch_ne_mesonet)
+                payload.extend(ne_obs)
+                ne_time = max((i["obs"].timestamp for i in ne_obs), default=None)
+                stamp = ne_time.strftime("%H:%MZ") if ne_time else "?"
+                self._update_source_diag("ne", "NE", ne_attempt, ne_obs, ne_stale, ne_note)
+                parts.append(self._format_status_part("NE", len(ne_obs), stamp, ne_stale, ne_note))
 
             if self._asos_enabled and self._asos_bbox is not None:
                 asos_attempt = datetime.now(timezone.utc)
@@ -403,6 +420,55 @@ class SurfaceFetcher(QObject):
             }
         return meta
 
+    def _fetch_ne_mesonet(self) -> list[dict]:
+        raw = self._http_get(NE_API_URL, headers=self._nssl_api_headers())
+        payload = self._json_from_bytes(raw, "NE Mesonet data", NE_API_URL)
+        observations: list[dict] = []
+
+        for row in payload.get("data", []):
+            station_id = str(row.get("id") or "").strip()
+            lat = self._float_or_none(row.get("latitude"))
+            lon = self._float_or_none(row.get("longitude"))
+            if not station_id or lat is None or lon is None:
+                continue
+
+            data = row.get("data") or {}
+            temperature = data.get("temperature") or {}
+            dewpoint = data.get("dewPoint") or {}
+            pressure = data.get("pressure") or {}
+            wind = data.get("wind") or {}
+            wind_level = wind.get("tenMeter") or {}
+            wind_speed = wind_level.get("speed") or {}
+            wind_direction = wind_level.get("direction") or {}
+            if self._float_or_none(wind_speed.get("avg")) is None:
+                wind_level = wind.get("threeMeter") or {}
+                wind_speed = wind_level.get("speed") or {}
+                wind_direction = wind_level.get("direction") or {}
+
+            obs = Observation(
+                vehicle_id=f"surface:ne:{station_id}",
+                lat=lat,
+                lon=lon,
+                timestamp=self._parse_iso_utc(row.get("timestamp")),
+                icon_type="mesonet",
+                temperature_c=self._float_or_none(temperature.get("twoMeter")),
+                dewpoint_c=self._float_or_none(dewpoint.get("twoMeter")),
+                wind_speed_ms=self._float_or_none(wind_speed.get("avg")),
+                wind_dir_deg=self._float_or_none(wind_direction.get("avg")),
+                pressure_mb=self._float_or_none(pressure.get("seaLevel")),
+            )
+            observations.append({
+                "id": obs.vehicle_id,
+                "source": "ne",
+                "name": str(row.get("name") or f"NE Mesonet {station_id}").strip(),
+                "obs": obs,
+            })
+
+        if not observations:
+            raise RuntimeError("NE Mesonet data returned no station rows")
+
+        return observations
+
 
     def set_asos_enabled(self, enabled: bool):
         self._asos_enabled = enabled
@@ -641,6 +707,7 @@ class SurfaceFetcher(QObject):
             ("wtm", self._wtm_enabled),
             ("ks", self._ks_enabled),
             ("co", self._co_enabled),
+            ("ne", self._ne_enabled),
             ("asos", self._asos_enabled and self._asos_bbox is not None),
         ):
             if enabled:
@@ -680,6 +747,7 @@ class SurfaceFetcher(QObject):
             or (source == "wtm" and self._wtm_enabled)
             or (source == "ks" and self._ks_enabled)
             or (source == "co" and self._co_enabled)
+            or (source == "ne" and self._ne_enabled)
             or (source == "asos" and self._asos_enabled)
         )
 

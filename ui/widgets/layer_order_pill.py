@@ -29,6 +29,7 @@ DEFAULT_LAYERS: list[str] = [
     "wtm",
     "ks_mesonet",
     "co_mesonet",
+    "ne_mesonet",
     "asos",
 ]
 
@@ -56,6 +57,7 @@ LAYER_LABELS: dict[str, str] = {
     "wtm":          "WTM",
     "ks_mesonet":   "KS Mesonet",
     "co_mesonet":   "CO Mesonet",
+    "ne_mesonet":   "NE Mesonet",
     "asos":         "ASOS",
 }
 
@@ -93,6 +95,7 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "wtm":          [],
     "ks_mesonet":   [],
     "co_mesonet":   [],
+    "ne_mesonet":   [],
     "asos":         ["asos-plots"],
 }
 

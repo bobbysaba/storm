@@ -246,6 +246,59 @@ def test_fetch_co_mesonet_uses_configured_api_headers_and_metadata_file():
     assert obs.pressure_mb is None
 
 
+def test_fetch_ne_mesonet_uses_configured_api_headers_and_embedded_metadata():
+    assert sf.NE_API_URL.endswith("/data/mesonet/ne_mesonet.json")
+    fetcher = SurfaceFetcher()
+    captured: dict[str, object] = {}
+
+    def _http_get(url, ssl_ctx=None, headers=None):
+        captured["url"] = url
+        captured["ssl_ctx"] = ssl_ctx
+        captured["headers"] = headers
+        return b"""{
+          "data": [{
+            "id": 54,
+            "name": "Holdrege 5N",
+            "latitude": 40.5045,
+            "longitude": -99.360083,
+            "timestamp": "2026-05-20T20:21:00.000000Z",
+            "data": {
+              "temperature": {"twoMeter": 12.91},
+              "dewPoint": {"twoMeter": 6.43},
+              "pressure": {"seaLevel": 1023.71},
+              "wind": {
+                "threeMeter": {
+                  "speed": {"avg": 2.4851},
+                  "direction": {"avg": 65.2785}
+                },
+                "tenMeter": {
+                  "speed": {"avg": null},
+                  "direction": {"avg": null}
+                }
+              }
+            }
+          }]
+        }"""
+
+    fetcher._http_get = _http_get
+    rows = fetcher._fetch_ne_mesonet()
+
+    assert captured["url"] == sf.NE_API_URL
+    assert captured["ssl_ctx"] is None
+    assert captured["headers"] == {"X-API-Key": sf.config.NSSL_API_KEY}
+    assert len(rows) == 1
+    assert rows[0]["id"] == "surface:ne:54"
+    assert rows[0]["source"] == "ne"
+    assert rows[0]["name"] == "Holdrege 5N"
+    obs = rows[0]["obs"]
+    assert obs.timestamp == datetime(2026, 5, 20, 20, 21, tzinfo=timezone.utc)
+    assert obs.temperature_c == 12.91
+    assert obs.dewpoint_c == 6.43
+    assert obs.wind_speed_ms == 2.4851
+    assert obs.wind_dir_deg == 65.2785
+    assert obs.pressure_mb == 1023.71
+
+
 def test_diagnostics_snapshot_tracks_valid_and_fetch_times():
     fetcher = SurfaceFetcher()
     attempt = datetime(2026, 4, 23, 19, 30, tzinfo=timezone.utc)

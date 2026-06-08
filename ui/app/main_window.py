@@ -958,6 +958,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._launch_auto_obs_wtm    = s.value("launch/auto_obs_wtm",    False, type=bool)
         self._launch_auto_obs_ks     = s.value("launch/auto_obs_ks",     False, type=bool)
         self._launch_auto_obs_co     = s.value("launch/auto_obs_co",     False, type=bool)
+        self._launch_auto_obs_ne     = s.value("launch/auto_obs_ne",     False, type=bool)
 
         if not self._disable_radar:
             self._init_radar()
@@ -987,6 +988,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.surface_controls._btn_ks.setChecked(True)
         if self._launch_auto_obs_co:
             self.surface_controls._btn_co.setChecked(True)
+        if self._launch_auto_obs_ne:
+            self.surface_controls._btn_ne.setChecked(True)
         sat = self._launch_auto_satellite
         if sat == "conus":
             self.satellite_controls._btn_conus.setChecked(True)
@@ -2246,6 +2249,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.surface_controls.co_toggled.connect(
             lambda v: self._on_surface_source_toggled("co", v)
         )
+        self.surface_controls.ne_toggled.connect(
+            lambda v: self._on_surface_source_toggled("ne", v)
+        )
         self.surface_controls.asos_toggled.connect(self._on_asos_toggled)
         self.surface_controls.asos_bbox_requested.connect(self._start_new_asos_bbox)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
@@ -2379,6 +2385,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         elif source == "co":
             self._surface_fetcher.set_co_enabled(enabled)
             self._set_layer_active("co_mesonet", enabled)
+        elif source == "ne":
+            self._surface_fetcher.set_ne_enabled(enabled)
+            self._set_layer_active("ne_mesonet", enabled)
         else:
             return
 
@@ -2394,6 +2403,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return bool(getattr(self._surface_fetcher, "_ks_enabled", False))
         if source == "co":
             return bool(getattr(self._surface_fetcher, "_co_enabled", False))
+        if source == "ne":
+            return bool(getattr(self._surface_fetcher, "_ne_enabled", False))
         if source == "asos":
             return bool(
                 getattr(self._surface_fetcher, "_asos_enabled", False)
