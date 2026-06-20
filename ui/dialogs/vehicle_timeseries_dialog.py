@@ -28,7 +28,20 @@ _LEGEND_QSS = (
     "font-size: 10px; font-family: monospace; font-weight: 600;"
 )
 
-# distinguishable per-vehicle colors on a dark background
+# semantic variable colors (used on plot lines/scatter)
+_CLR_TEMP = "#ff5555"   # red
+_CLR_DEWP = "#55cc66"   # green
+_CLR_WSPD = "#4fc3f7"   # sky blue
+_CLR_WDIR = "#ffa040"   # orange
+_CLR_PRES = "#ce93d8"   # lavender
+
+# per-slot styling — max 3 simultaneous vehicles
+_MAX_VEHICLES     = 3
+_SLOT_LINESTYLES  = ['-', '--', ':']
+_SLOT_MARKERS     = ['o', '^', 's']    # wdir scatter marker per slot
+_SLOT_GLYPHS      = ['━━', '╌╌', '┈┈'] # legend line-style indicator per slot
+
+# per-vehicle palette used only for toggle buttons and legend vehicle-id text
 _VEHICLE_PALETTE = [
     "#ff6b6b",  # coral red
     "#4fc3f7",  # sky blue
@@ -128,7 +141,9 @@ class VehicleTimeseriesDialog(QDialog):
 
         self._vehicles: dict[str, list[Observation]] = {}
         self._enabled_vehicles: set[str] = set()
-        self._vehicle_colors: dict[str, str] = {}
+        self._vehicle_colors: dict[str, str] = {}   # button/legend id colors only
+        self._vehicle_slots: dict[str, int] = {}    # vid → slot index (0-2)
+        self._free_slots: list[int] = [0, 1, 2]
         self._vehicle_toggles: dict[str, QPushButton] = {}
         self._vehicle_arrays: dict[str, tuple] = {}
         self._primary_id: str = ""
@@ -145,7 +160,10 @@ class VehicleTimeseriesDialog(QDialog):
         self._vehicles = dict(all_vehicles)
         self._primary_id = primary_id
         self._enabled_vehicles = {primary_id}
+        self._vehicle_slots = {}
+        self._free_slots = [0, 1, 2]
         self._assign_colors()
+        self._vehicle_slots[primary_id] = self._free_slots.pop(0)
         self._rebuild_toggle_row()
         self._draw()
         if not self.isVisible():
@@ -266,6 +284,8 @@ class VehicleTimeseriesDialog(QDialog):
                 self._toggle_layout.count() - 1, btn)
             self._vehicle_toggles[vid] = btn
 
+        self._update_toggle_disabled_states()
+
     def _apply_toggle_style(self, btn: QPushButton, color: str, checked: bool):
         if checked:
             btn.setStyleSheet(
@@ -273,6 +293,8 @@ class VehicleTimeseriesDialog(QDialog):
                 f"border: 1px solid {color}; border-radius: 12px; "
                 f"padding: 2px 12px; font-size: 11px; font-weight: bold; }}"
                 f"QPushButton:hover {{ background-color: {color}dd; }}"
+                f"QPushButton:disabled {{ background-color: {color}55; "
+                f"color: #666688; border-color: transparent; }}"
             )
         else:
             btn.setStyleSheet(
@@ -281,15 +303,33 @@ class VehicleTimeseriesDialog(QDialog):
                 f"padding: 2px 12px; font-size: 11px; font-weight: bold; }}"
                 f"QPushButton:hover {{ border-color: {color}; "
                 f"background-color: {color}22; }}"
+                f"QPushButton:disabled {{ color: #333355; "
+                f"border-color: #222233; }}"
             )
 
     def _on_vehicle_toggled(self, vid: str, btn: QPushButton, checked: bool):
-        self._apply_toggle_style(btn, self._vehicle_colors[vid], checked)
         if checked:
+            if len(self._enabled_vehicles) >= _MAX_VEHICLES or not self._free_slots:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+                return
+            self._vehicle_slots[vid] = self._free_slots.pop(0)
             self._enabled_vehicles.add(vid)
         else:
+            if vid in self._vehicle_slots:
+                self._free_slots.append(self._vehicle_slots.pop(vid))
+                self._free_slots.sort()
             self._enabled_vehicles.discard(vid)
+        self._apply_toggle_style(btn, self._vehicle_colors[vid], checked)
+        self._update_toggle_disabled_states()
         self._draw()
+
+    def _update_toggle_disabled_states(self):
+        at_cap = len(self._enabled_vehicles) >= _MAX_VEHICLES
+        for vid, btn in self._vehicle_toggles.items():
+            if vid not in self._enabled_vehicles:
+                btn.setEnabled(not at_cap)
 
 
     def _draw(self):
@@ -355,24 +395,27 @@ class VehicleTimeseriesDialog(QDialog):
         for vid in enabled:
             times, temp_f, dewp_f, wspd_kt, wdir_deg, pres_mb, _ = (
                 self._vehicle_arrays[vid])
-            color = self._vehicle_colors[vid]
+            slot = self._vehicle_slots[vid]
+            ls   = _SLOT_LINESTYLES[slot]
+            mkr  = _SLOT_MARKERS[slot]
 
-            # panel 1 — Temp solid, Dewp dashed (same vehicle color)
-            ax1.plot(times, temp_f, color=color, linewidth=lw,
-                     marker='.', markersize=ms, zorder=3)
-            ax1.plot(times, dewp_f, color=color, linewidth=lw * 0.85,
-                     marker='.', markersize=ms * 0.8,
-                     linestyle='--', alpha=0.65, zorder=3)
+            # panel 1 — Temp (red), Dewpoint (green); line style = vehicle slot
+            ax1.plot(times, temp_f, color=_CLR_TEMP, linewidth=lw,
+                     linestyle=ls, marker='.', markersize=ms, zorder=3)
+            ax1.plot(times, dewp_f, color=_CLR_DEWP, linewidth=lw * 0.85,
+                     linestyle=ls, marker='.', markersize=ms * 0.8,
+                     alpha=0.85, zorder=3)
 
-            # panel 2 — Speed solid, direction scatter dots
-            ax2.plot(times, wspd_kt, color=color, linewidth=lw,
-                     marker='.', markersize=ms, zorder=3)
+            # panel 2 — Wind speed (blue); wdir scatter (orange, marker = slot)
+            ax2.plot(times, wspd_kt, color=_CLR_WSPD, linewidth=lw,
+                     linestyle=ls, marker='.', markersize=ms, zorder=3)
             ax2_right.scatter(times, wdir_deg,
-                              color=color, s=5, alpha=0.65, zorder=3)
+                              color=_CLR_WDIR, marker=mkr,
+                              s=8, alpha=0.75, zorder=3)
 
-            # panel 3 — Pressure solid
-            ax3.plot(times, pres_mb, color=color, linewidth=lw,
-                     marker='.', markersize=ms, zorder=3)
+            # panel 3 — Pressure (lavender); line style = vehicle slot
+            ax3.plot(times, pres_mb, color=_CLR_PRES, linewidth=lw,
+                     linestyle=ls, marker='.', markersize=ms, zorder=3)
 
             if len(times):
                 if t_min is None or times[0] < t_min:
@@ -453,28 +496,39 @@ class VehicleTimeseriesDialog(QDialog):
                 'pres' → {vid: pres_str}
         """
         parts = []
+        muted = _MUTED if not values else None
         for vid in self._vehicle_arrays:
-            color = self._vehicle_colors.get(vid, _MUTED)
-            vid_html = f'<span style="color:{color};">━ {vid}</span>'
-            val_color = _TEXT if values else _MUTED
+            btn_color = self._vehicle_colors.get(vid, _MUTED)
+            slot      = self._vehicle_slots.get(vid, 0)
+            glyph     = _SLOT_GLYPHS[slot]
+            vid_html  = (
+                f'<span style="color:{btn_color};">{glyph} {vid}</span>'
+            )
 
             if field == 'temp':
                 tv, tdv = (values or {}).get(vid, ("--", "--"))
+                tc  = _CLR_TEMP if values else _MUTED
+                tdc = _CLR_DEWP if values else _MUTED
                 parts.append(
                     f'{vid_html}'
-                    f'<span style="color:{val_color};"> T:{tv} Td:{tdv}</span>'
+                    f'<span style="color:{tc};"> T:{tv}</span>'
+                    f'<span style="color:{tdc};"> Td:{tdv}</span>'
                 )
             elif field == 'wind':
                 wsv, wdv = (values or {}).get(vid, ("--", "--"))
+                wsc = _CLR_WSPD if values else _MUTED
+                wdc = _CLR_WDIR if values else _MUTED
                 parts.append(
                     f'{vid_html}'
-                    f'<span style="color:{val_color};"> {wsv} ● {wdv}</span>'
+                    f'<span style="color:{wsc};"> {wsv}</span>'
+                    f'<span style="color:{wdc};"> ● {wdv}</span>'
                 )
             elif field == 'pres':
-                pv = (values or {}).get(vid, "--")
+                pv  = (values or {}).get(vid, "--")
+                pc  = _CLR_PRES if values else _MUTED
                 parts.append(
                     f'{vid_html}'
-                    f'<span style="color:{val_color};"> {pv}</span>'
+                    f'<span style="color:{pc};"> {pv}</span>'
                 )
         return '&nbsp;&nbsp;&nbsp;'.join(parts)
 

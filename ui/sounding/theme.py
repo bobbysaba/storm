@@ -24,6 +24,12 @@ _EIL_CLR    = "#00e676"
 _RM_CLR     = "#ff6b6b"
 _LM_CLR     = "#4fc3f7"
 
+# per-source identity for comparison overlay
+_SOURCE_COLORS = {"obs": "#ff6b6b", "hrrr": "#4fc3f7", "nssl": "#81c784"}
+_SOURCE_LABELS = {"obs": "OBS",     "hrrr": "HRRR",    "nssl": "NSSL"}
+_SOURCE_LS     = {"obs": "-",       "hrrr": "--",       "nssl": ":"}
+_SOURCE_GLYPHS = {"obs": "━━",      "hrrr": "╌╌",       "nssl": "┈┈"}
+
 _HODO_LAYERS = [
     ("#ff8585", 0,  3),
     ("#ffe45c", 3,  6),

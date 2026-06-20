@@ -7,6 +7,9 @@ import subprocess
 import sys
 import threading
 
+# Suppress console windows on Windows for all subprocess calls
+_HIDE_WINDOW = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
@@ -55,17 +58,17 @@ class UpdateWorker(QObject):
             subprocess.run(
                 ["git", "fetch", "--quiet"],
                 cwd=self._root, timeout=10,
-                capture_output=True, check=True,
+                capture_output=True, check=True, **_HIDE_WINDOW,
             )
             dirty = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=True, **_HIDE_WINDOW,
             ).stdout.strip()
             ahead = subprocess.run(
                 ["git", "rev-list", "origin/main..HEAD", "--count"],
                 cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=True, **_HIDE_WINDOW,
             ).stdout.strip()
             if dirty or int(ahead) > 0:
                 self.check_done.emit(-2)   # dev build — don't offer update
@@ -73,7 +76,7 @@ class UpdateWorker(QObject):
             r = subprocess.run(
                 ["git", "rev-list", "HEAD..origin/main", "--count"],
                 cwd=self._root, timeout=5,
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=True, **_HIDE_WINDOW,
             )
             self.check_done.emit(int(r.stdout.strip()))
         except Exception:
@@ -94,7 +97,7 @@ class UpdateWorker(QObject):
             subprocess.run(
                 ["git", "pull"],
                 cwd=self._root, timeout=30,
-                capture_output=True, check=True,
+                capture_output=True, check=True, **_HIDE_WINDOW,
             )
             hash_after  = self._env_hash()
             deps_changed = bool(hash_before) and hash_before != hash_after
@@ -110,7 +113,7 @@ class UpdateWorker(QObject):
             try:
                 subprocess.run(
                     [cmd, "--version"],
-                    capture_output=True, timeout=5, check=True,
+                    capture_output=True, timeout=5, check=True, **_HIDE_WINDOW,
                 )
                 return cmd
             except Exception:
@@ -136,6 +139,7 @@ class UpdateWorker(QObject):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                **_HIDE_WINDOW,
             )
             try:
                 stdout, stderr = self._conda_proc.communicate(timeout=300)

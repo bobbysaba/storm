@@ -38,7 +38,7 @@ from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_sca
 from ui.sounding.dialog import SoundingDialog
 from ui.sounding.controls import SoundingControls
 from ui.dialogs.vehicle_timeseries_dialog import VehicleTimeseriesDialog
-from archive.vehicle_speed import format_vehicle_speed
+from archive.vehicle_speed import calculate_vehicle_speed, format_vehicle_speed
 from ui.app.overlay_geometry import bottom_left_y_avoiding
 from ui.widgets.annotation_tools import AnnotationTools
 from ui.dialogs.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog, AnnotationMoveConfirmDialog
@@ -56,6 +56,7 @@ from data.fetchers.sounding_fetcher import SoundingFetcher
 from data.fetchers.obs_sounding_fetcher import ObsSoundingFetcher
 from data.fetchers.clamps_sounding_fetcher import ClampsSoundingFetcher
 from data.stations.sounding_stations import build_stations_geojson
+from data.stations.sounding_utils import nearest_obs_station, nssl_within_radius_km
 from data.fetchers.hazard_fetcher import HazardFetcher
 from data.update_checker import UpdateWorker
 from data.fetchers.satellite_fetcher import SatelliteFetcher
@@ -2015,15 +2016,22 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._radar_initial_backfill_complete = False
         self._radar_backfill_products_received = set()
 
-        self._sounding_fetcher      = SoundingFetcher(self)
-        self._obs_sounding_fetcher  = ObsSoundingFetcher(self)
+        self._sounding_fetcher        = SoundingFetcher(self)
+        self._obs_sounding_fetcher    = ObsSoundingFetcher(self)
         self._clamps_sounding_fetcher = ClampsSoundingFetcher(self)
-        self._sounding_dialog       = SoundingDialog(self)
+        self._sounding_dialog         = SoundingDialog(self)
         self._nssl_sounding_refresh_timer = QTimer(self)
         self._nssl_sounding_refresh_timer.setInterval(5 * 60 * 1000)
         self._nssl_sounding_refresh_timer.timeout.connect(
             self._refresh_nssl_sounding_if_visible
         )
+
+        # dedicated comparison fetchers — their sounding_ready goes to add_source
+        self._comp_hrrr_fetcher = SoundingFetcher(self)
+        self._comp_obs_fetcher  = ObsSoundingFetcher(self)
+        self._comp_nssl_fetcher = ClampsSoundingFetcher(self)
+
+        self._last_nssl_sset = None   # cached for NSSL proximity checks
 
         self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
@@ -2031,6 +2039,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._obs_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
         self._clamps_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._clamps_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+
+        self._comp_hrrr_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
+        self._comp_hrrr_fetcher.fetch_error.connect(self._on_sounding_error)
+        self._comp_obs_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
+        self._comp_obs_fetcher.fetch_error.connect(self._on_sounding_error)
+        self._comp_nssl_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
+        self._comp_nssl_fetcher.fetch_error.connect(self._on_sounding_error)
+
+        self._sounding_dialog.source_requested.connect(self._on_comparison_source_requested)
 
         self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
         self.map_widget.obs_sounding_station_clicked.connect(self._on_obs_station_click)
@@ -2252,6 +2269,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.surface_controls.ne_toggled.connect(
             lambda v: self._on_surface_source_toggled("ne", v)
         )
+        self.surface_controls.sd_toggled.connect(
+            lambda v: self._on_surface_source_toggled("sd", v)
+        )
         self.surface_controls.asos_toggled.connect(self._on_asos_toggled)
         self.surface_controls.asos_bbox_requested.connect(self._start_new_asos_bbox)
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
@@ -2388,6 +2408,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         elif source == "ne":
             self._surface_fetcher.set_ne_enabled(enabled)
             self._set_layer_active("ne_mesonet", enabled)
+        elif source == "sd":
+            self._surface_fetcher.set_sd_enabled(enabled)
+            self._set_layer_active("sd_mesonet", enabled)
         else:
             return
 
@@ -2405,6 +2428,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return bool(getattr(self._surface_fetcher, "_co_enabled", False))
         if source == "ne":
             return bool(getattr(self._surface_fetcher, "_ne_enabled", False))
+        if source == "sd":
+            return bool(getattr(self._surface_fetcher, "_sd_enabled", False))
         if source == "asos":
             return bool(
                 getattr(self._surface_fetcher, "_asos_enabled", False)
@@ -3565,11 +3590,73 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_sounding_ready(self, sset):
         self.status_msg_label.setText("")
+        if sset.is_nssl:
+            self._last_nssl_sset = sset
         self._sounding_dialog.load(sset)
+
+        available = self._compute_available_sources(sset)
+        self._sounding_dialog.set_available_sources(available)
+
         if sset.is_nssl and not self._archive:
             self._nssl_sounding_refresh_timer.start()
         elif hasattr(self, "_nssl_sounding_refresh_timer"):
             self._nssl_sounding_refresh_timer.stop()
+
+    def _compute_available_sources(self, sset) -> dict:
+        """Determine which comparison source pills to show for a given primary SoundingSet."""
+        available = {}
+        nssl = getattr(self, "_last_nssl_sset", None)
+
+        if sset.source == "hrrr":
+            obs = nearest_obs_station(sset.lat, sset.lon)
+            if obs:
+                available["obs"] = obs
+            if nssl and nssl_within_radius_km(nssl.lat, nssl.lon, sset.lat, sset.lon):
+                available["nssl"] = {}
+
+        elif sset.source == "obs":
+            available["hrrr"] = {"lat": sset.lat, "lon": sset.lon}
+            if nssl and nssl_within_radius_km(nssl.lat, nssl.lon, sset.lat, sset.lon):
+                available["nssl"] = {}
+
+        elif sset.source == "nssl":
+            if sset.lat != 0.0 or sset.lon != 0.0:
+                available["hrrr"] = {"lat": sset.lat, "lon": sset.lon}
+                obs = nearest_obs_station(sset.lat, sset.lon)
+                if obs:
+                    available["obs"] = obs
+
+        return available
+
+    def _on_comp_sounding_ready(self, sset):
+        """Called when a comparison (secondary) sounding finishes fetching."""
+        self.status_msg_label.setText("")
+        if sset.is_nssl:
+            self._last_nssl_sset = sset
+        self._sounding_dialog.add_source(sset)
+
+    def _on_comparison_source_requested(self, source: str, meta: dict):
+        """Triggered when the user clicks an inactive pill in the sounding dialog."""
+        if source == "hrrr":
+            lat = meta.get("lat", 0.0)
+            lon = meta.get("lon", 0.0)
+            if lat == 0.0 and lon == 0.0:
+                return
+            self.status_msg_label.setText(f"Fetching HRRR comparison sounding…")
+            self._comp_hrrr_fetcher.fetch(lat, lon)
+        elif source == "obs":
+            sid  = meta.get("station_id", "")
+            name = meta.get("name", "")
+            lat  = meta.get("lat", 0.0)
+            lon  = meta.get("lon", 0.0)
+            elev = meta.get("elev", 0.0)
+            if not sid:
+                return
+            self.status_msg_label.setText(f"Fetching OBS comparison sounding {sid}…")
+            self._comp_obs_fetcher.fetch(sid, name, lat, lon, elev)
+        elif source == "nssl":
+            self.status_msg_label.setText("Fetching NSSL comparison sounding…")
+            self._comp_nssl_fetcher.fetch()
 
     def _on_sounding_error(self, msg: str):
         self.status_msg_label.setText(f"Sounding error: {msg}")
@@ -4837,25 +4924,33 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._update_local_scan_from_vehicle(obs)
 
     def _archive_vehicle_hover_text(self, vehicle_id: str) -> str:
-        """Build the admin archive vehicle name and ground-speed tooltip."""
-        if (
-            not self._archive
-            or not runtime_flags.FLAGS.admin_mode
-            or not hasattr(self, "_time_ctrl")
-        ):
+        """Build the admin vehicle name and ground-speed tooltip (archive or live)."""
+        if not runtime_flags.FLAGS.admin_mode:
             return vehicle_id
 
-        archive_time = self._time_ctrl.current_time
-        dense_obs = getattr(self, "_archive_vehicle_obs", None)
-        if (
-            dense_obs is not None
-            and dense_obs.has_fresh_observation(vehicle_id, archive_time)
-        ):
-            speed = dense_obs.speed(vehicle_id, archive_time)
-        elif hasattr(self, "_archive_mqtt"):
-            speed = self._archive_mqtt.vehicle_speed(vehicle_id, archive_time)
+        if self._archive:
+            if not hasattr(self, "_time_ctrl"):
+                return vehicle_id
+            archive_time = self._time_ctrl.current_time
+            dense_obs = getattr(self, "_archive_vehicle_obs", None)
+            if (
+                dense_obs is not None
+                and dense_obs.has_fresh_observation(vehicle_id, archive_time)
+            ):
+                speed = dense_obs.speed(vehicle_id, archive_time)
+            elif hasattr(self, "_archive_mqtt"):
+                speed = self._archive_mqtt.vehicle_speed(vehicle_id, archive_time)
+            else:
+                return vehicle_id
         else:
-            return vehicle_id
+            history = self._vehicle_history.get(vehicle_id)
+            if not history:
+                return vehicle_id
+            now = datetime.now(tz=timezone.utc)
+            speed = calculate_vehicle_speed(
+                list(history), now, short_seconds=10, average_seconds=30
+            )
+
         return f"{vehicle_id}\n{format_vehicle_speed(speed)}"
 
     def _follow_target_id(self) -> str | None:

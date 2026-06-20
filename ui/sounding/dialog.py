@@ -7,9 +7,9 @@ from matplotlib.transforms import blended_transform_factory
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QWidget, QGridLayout, QSizePolicy, QSlider, QFrame,
-    QToolButton,
+    QToolButton, QPushButton, QScrollArea,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -32,9 +32,30 @@ from ui.sounding.theme import (
     _ACCENT, _AX_BG, _BARB_CLR, _BORDER, _DEWP_CLR, _EIL_CLR, _EXPORT_BTN_QSS,
     _FIG_BG, _HDR_CLR, _HODO_LAYERS, _LM_CLR, _MUTED, _PARCEL_CLR, _RM_CLR,
     _SLIDER_QSS, _TEMP_CLR, _TEXT, _VPARCEL_CLR, _VTEMP_CLR, _force_bg, _lbl,
+    _SOURCE_COLORS, _SOURCE_LABELS, _SOURCE_LS, _SOURCE_GLYPHS,
 )
 
+def _pill_qss(src: str, active: bool) -> str:
+    color = _SOURCE_COLORS[src]
+    if active:
+        return (
+            f"QPushButton {{ background-color: {color}22; color: {color}; "
+            f"border: 1.5px solid {color}; border-radius: 10px; "
+            f"padding: 2px 10px; font-size: 10px; font-weight: 700; }}"
+            f"QPushButton:hover {{ background-color: {color}44; }}"
+        )
+    return (
+        f"QPushButton {{ background-color: transparent; color: {_MUTED}; "
+        f"border: 1.5px solid {_BORDER}; border-radius: 10px; "
+        f"padding: 2px 10px; font-size: 10px; font-weight: 700; }}"
+        f"QPushButton:hover {{ border-color: {color}; color: {color}; }}"
+    )
+
+
 class SoundingDialog(QDialog):
+
+    # emitted when user clicks an inactive source pill; main_window handles the fetch
+    source_requested = pyqtSignal(str, dict)   # source_key, metadata
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
@@ -52,6 +73,7 @@ class SoundingDialog(QDialog):
             + _SLIDER_QSS
         )
 
+        # primary sounding state (original behaviour)
         self._sset: SoundingSet | None = None
         self._cur_idx       = 0
         self._param_labels: dict[str, QLabel] = {}
@@ -65,22 +87,47 @@ class SoundingDialog(QDialog):
         self._eil_base_p: float | None = None
         self._eil_top_p:  float | None = None
 
+        # multi-source comparison state
+        self._primary_source: str = "hrrr"
+        self._sources:  dict[str, SoundingSet] = {}      # source_key → SoundingSet
+        self._enabled_sources: set[str] = set()           # sources currently drawn
+        self._source_cur_idx:  dict[str, int] = {}        # scrubber index per source
+        self._available_sources: dict[str, dict] = {}     # source_key → fetch metadata
+        self._pill_widgets: dict[str, QPushButton] = {}
+        # comparison row labels: source_key → QLabel (one line per source)
+        self._comp_row_labels: dict[str, QLabel] = {}
+
         self._build_ui()
 
 
     def load(self, sset: SoundingSet):
+        # reset comparison state on new primary load
+        self._sources = {}
+        self._enabled_sources = set()
+        self._source_cur_idx = {}
+        self._available_sources = {}
+        self._pill_widgets = {}
+        self._clear_comp_strips()
+        self._pill_scroll.setVisible(False)
+
+        self._primary_source = sset.source
+        self._sources[sset.source] = sset
+        self._enabled_sources.add(sset.source)
+
         self._sset = sset
-        
+
         # check if this is an observed or NSSL sounding set
         if sset.is_observed or sset.is_nssl:
             # default to the most recent (last) sounding
             self._cur_idx = len(sset.soundings) - 1
+            self._source_cur_idx[sset.source] = self._cur_idx
             self.setWindowTitle("NSSL Observed Sounding" if sset.is_nssl else "Observed Sounding")
         else:
             # existing logic for HRRR/Model soundings: default to F0 (Analysis)
             self._cur_idx = next(
                 (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
             )
+            self._source_cur_idx[sset.source] = self._cur_idx
             self.setWindowTitle("HRRR Point Sounding")
 
         self._rebuild_scrubber()
@@ -88,6 +135,93 @@ class SoundingDialog(QDialog):
         if not self.isVisible():
             self.show()
         self.raise_()
+
+    def set_available_sources(self, available: dict):
+        """Tell dialog which comparison sources are available to load.
+
+        available = {
+            "hrrr": {"lat": ..., "lon": ...},
+            "obs":  {"station_id": ..., "name": ..., "lat": ...,
+                     "lon": ..., "elev": ..., "distance_km": ...},
+            "nssl": {},
+        }
+        Sources not present → pills hidden.  Primary source is never included.
+        """
+        self._available_sources = dict(available)
+        self._rebuild_pill_row()
+
+    def add_source(self, sset: SoundingSet):
+        """Add a comparison sounding set to the overlay."""
+        src = sset.source
+        self._sources[src] = sset
+        self._enabled_sources.add(src)
+        # pick best matching index: for HRRR secondary snap to F0; for OBS/NSSL use latest
+        if sset.is_observed or sset.is_nssl:
+            self._source_cur_idx[src] = len(sset.soundings) - 1
+        else:
+            self._source_cur_idx[src] = next(
+                (i for i, s in enumerate(sset.soundings) if s.slot_offset == 0), 0
+            )
+        # update pill to active state
+        if src in self._pill_widgets:
+            self._pill_widgets[src].setStyleSheet(_pill_qss(src, True))
+            self._pill_widgets[src].setText(self._pill_label(src))
+        self._draw()
+
+    def _remove_source(self, src: str):
+        self._enabled_sources.discard(src)
+        if src in self._pill_widgets:
+            self._pill_widgets[src].setStyleSheet(_pill_qss(src, False))
+        self._clear_comp_strip(src)
+        self._draw()
+
+    # ── pill row ────────────────────────────────────────────────────────────────
+
+    def _pill_label(self, src: str) -> str:
+        lbl = _SOURCE_LABELS.get(src, src.upper())
+        meta = self._available_sources.get(src, {})
+        if src == "obs" and "distance_km" in meta:
+            lbl = f"{lbl} · {meta['distance_km']:.0f} km"
+        return lbl
+
+    def _rebuild_pill_row(self):
+        # clear existing pill widgets
+        while self._pill_layout.count():
+            item = self._pill_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._pill_widgets.clear()
+
+        sources_to_show = [s for s in ("obs", "hrrr", "nssl")
+                           if s != self._primary_source and s in self._available_sources]
+        if not sources_to_show:
+            self._pill_scroll.setVisible(False)
+            return
+
+        self._pill_scroll.setVisible(True)
+        for src in sources_to_show:
+            active = src in self._enabled_sources
+            btn = QPushButton(self._pill_label(src))
+            btn.setStyleSheet(_pill_qss(src, active))
+            btn.setFixedHeight(22)
+            btn.clicked.connect(lambda checked, s=src: self._on_pill_clicked(s))
+            self._pill_layout.addWidget(btn)
+            self._pill_widgets[src] = btn
+        self._pill_layout.addStretch(1)
+
+    def _on_pill_clicked(self, src: str):
+        if src in self._enabled_sources:
+            self._remove_source(src)
+        elif src in self._sources:
+            # already fetched, just re-enable
+            self._enabled_sources.add(src)
+            if src in self._pill_widgets:
+                self._pill_widgets[src].setStyleSheet(_pill_qss(src, True))
+            self._draw()
+        else:
+            # request fetch from main_window
+            meta = self._available_sources.get(src, {})
+            self.source_requested.emit(src, meta)
 
 
     def _build_ui(self):
@@ -152,6 +286,27 @@ class SoundingDialog(QDialog):
         header_row.addLayout(export_row)
 
         root.addLayout(header_row)
+
+        # source comparison pill row (hidden until available_sources is set)
+        self._pill_scroll = QScrollArea()
+        self._pill_scroll.setFixedHeight(30)
+        self._pill_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._pill_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._pill_scroll.setWidgetResizable(True)
+        self._pill_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+        )
+        pill_inner = QWidget()
+        pill_inner.setAutoFillBackground(False)
+        self._pill_layout = QHBoxLayout(pill_inner)
+        self._pill_layout.setContentsMargins(4, 2, 4, 2)
+        self._pill_layout.setSpacing(6)
+        self._pill_layout.addStretch(1)
+        self._pill_scroll.setWidget(pill_inner)
+        self._pill_scroll.setVisible(False)
+        root.addWidget(self._pill_scroll)
 
         self._fig    = Figure(facecolor=_FIG_BG)
         self._canvas = FigureCanvas(self._fig)
@@ -269,12 +424,65 @@ class SoundingDialog(QDialog):
 
         root.addWidget(scalar_w)
 
+        # comparison source parameter strips (one per non-primary active source)
+        self._comp_strip_widget = QWidget()
+        self._comp_strip_widget.setAutoFillBackground(False)
+        comp_vl = QVBoxLayout(self._comp_strip_widget)
+        comp_vl.setContentsMargins(4, 2, 4, 2)
+        comp_vl.setSpacing(2)
+        self._comp_strip_layout = comp_vl
+        self._comp_strip_widget.setVisible(False)
+        root.addWidget(self._comp_strip_widget)
+
     def _save_png(self):
         save_widget_png(self, "storm_sounding", "Save Sounding PNG")
 
     def _copy_png(self):
         copy_widget_png(self, "storm_sounding")
 
+
+    # ── comparison strip helpers ─────────────────────────────────────────────────
+
+    def _clear_comp_strip(self, src: str):
+        if src in self._comp_row_labels:
+            self._comp_row_labels.pop(src).deleteLater()
+        if not self._comp_row_labels:
+            self._comp_strip_widget.setVisible(False)
+
+    def _clear_comp_strips(self):
+        for lbl in list(self._comp_row_labels.values()):
+            lbl.deleteLater()
+        self._comp_row_labels.clear()
+        self._comp_strip_widget.setVisible(False)
+
+    def _update_comp_strip(self, src: str, params: dict):
+        _A = Qt.AlignmentFlag.AlignLeft
+        color = _SOURCE_COLORS[src]
+        glyph = _SOURCE_GLYPHS[src]
+        label_name = _SOURCE_LABELS[src]
+
+        def _fmt(key, fmt="{:.0f}"):
+            v = params.get(key)
+            return fmt.format(v) if v is not None else "—"
+
+        text = (
+            f"{glyph} {label_name}  "
+            f"SB {_fmt('sbcape')}  ML {_fmt('mlcape')}  MU {_fmt('mucape')} J/kg  │  "
+            f"SRH01 {_fmt('srh01')}  SRH03 {_fmt('srh03')} m²/s²  │  "
+            f"SHR06 {_fmt('shear06')} kt  │  "
+            f"STP {_fmt('stp', '{:.2f}')}  SCP {_fmt('scp', '{:.2f}')}"
+        )
+
+        if src not in self._comp_row_labels:
+            lbl = _lbl(text, color=color, size=9)
+            self._comp_strip_layout.addWidget(lbl)
+            self._comp_row_labels[src] = lbl
+        else:
+            self._comp_row_labels[src].setText(text)
+
+        self._comp_strip_widget.setVisible(True)
+
+    # ── scrubber ─────────────────────────────────────────────────────────────────
 
     def _rebuild_scrubber(self):
         while self._tick_row.count():
@@ -331,6 +539,7 @@ class SoundingDialog(QDialog):
 
     def _on_scrubber_changed(self, idx: int):
         self._cur_idx = idx
+        self._source_cur_idx[self._primary_source] = idx
         self._update_header()
         self._draw()
 
@@ -411,16 +620,27 @@ class SoundingDialog(QDialog):
         except Exception as e:
             log.debug("EIL calculation failed: %s", e)
 
+        # gather secondary sondes (all enabled non-primary sources)
+        secondary_snds: list[tuple] = []
+        for src in ("obs", "hrrr", "nssl"):
+            if src == self._primary_source or src not in self._enabled_sources:
+                continue
+            sset = self._sources.get(src)
+            if sset and sset.soundings:
+                idx = self._source_cur_idx.get(src, 0)
+                sec_snd = sset.soundings[min(idx, len(sset.soundings) - 1)]
+                secondary_snds.append((sec_snd, src))
+
         self._fig.clear()
         self._cursor_hline = None
         self._skewt_ax     = None
 
-        self._draw_skewt(snd)
-        self._update_params(snd)
+        self._draw_skewt(snd, secondary_snds)
+        self._update_params(snd, secondary_snds)
         self._canvas.draw_idle()
 
 
-    def _draw_skewt(self, snd: Sounding):
+    def _draw_skewt(self, snd: Sounding, secondary_snds: list | None = None):
         skewt = SkewT(self._fig, rotation=45, rect=(0.07, 0.04, 0.91, 0.93))
         ax = skewt.ax
         self._skewt_ax = ax
@@ -585,11 +805,33 @@ class SoundingDialog(QDialog):
                     transform=_bl, color=_EIL_CLR,
                     fontsize=6, va="center", ha="left", alpha=0.85)
 
+        # secondary source overlays — temp/dewpoint traces only (no barbs/parcel/shading)
+        if secondary_snds:
+            for sec_snd, src_key in secondary_snds:
+                try:
+                    sec_pres = sec_snd.pressure    * units.hPa
+                    sec_temp = sec_snd.temperature * units.degC
+                    sec_dewp = sec_snd.dewpoint    * units.degC
+                    _sec_pt = (
+                        _thin_to_mandatory(sec_snd.pressure)
+                        if len(sec_snd.pressure) > 200
+                        else np.arange(len(sec_snd.pressure))
+                    )
+                    ls = _SOURCE_LS[src_key]
+                    skewt.plot(sec_pres[_sec_pt], sec_temp[_sec_pt],
+                               color=_TEMP_CLR, linewidth=1.7,
+                               linestyle=ls, alpha=0.80, zorder=4)
+                    skewt.plot(sec_pres[_sec_pt], sec_dewp[_sec_pt],
+                               color=_DEWP_CLR, linewidth=1.7,
+                               linestyle=ls, alpha=0.80, zorder=4)
+                except Exception as e:
+                    log.debug("secondary skewt overlay failed for %s: %s", src_key, e)
+
         ax_hodo = ax.inset_axes([0.675, 0.625, 0.30, 0.36])
-        self._draw_hodograph_inset(snd, ax_hodo)
+        self._draw_hodograph_inset(snd, ax_hodo, secondary_snds)
 
 
-    def _draw_hodograph_inset(self, snd: Sounding, ax):
+    def _draw_hodograph_inset(self, snd: Sounding, ax, secondary_snds: list | None = None):
         ax.set_facecolor(_AX_BG + "dd")
         for sp in ax.spines.values():
             sp.set_edgecolor(_BORDER)
@@ -698,6 +940,43 @@ class SoundingDialog(QDialog):
         except Exception as e:
             log.debug("Bunkers storm motion failed: %s", e)
 
+        # secondary source hodograph overlays — same height colormap, different linestyle
+        if secondary_snds:
+            for sec_snd, src_key in secondary_snds:
+                try:
+                    if len(sec_snd.pressure) > 200:
+                        sec_cand = _thin_to_mandatory(sec_snd.pressure)
+                    else:
+                        sec_cand = np.arange(len(sec_snd.pressure))
+                    sec_wind_mask = ~np.isnan(sec_snd.u_wind[sec_cand])
+                    sec_thin = sec_cand[sec_wind_mask]
+                    if len(sec_thin) < 2:
+                        continue
+                    sec_u = (sec_snd.u_wind[sec_thin] * units("m/s")).to("knots").magnitude
+                    sec_v = (sec_snd.v_wind[sec_thin] * units("m/s")).to("knots").magnitude
+                    sec_hgt_agl = (sec_snd.height[sec_thin] - sec_snd.height[sec_thin[0]]) / 1000.0
+
+                    sec_pts  = np.column_stack([sec_u, sec_v]).reshape(-1, 1, 2)
+                    sec_segs = np.concatenate([sec_pts[:-1], sec_pts[1:]], axis=1)
+                    sec_colors = []
+                    for i in range(len(sec_hgt_agl) - 1):
+                        mid_h = (sec_hgt_agl[i] + sec_hgt_agl[i + 1]) / 2.0
+                        clr = _HODO_LAYERS[-1][0]
+                        for c, lo, hi in _HODO_LAYERS:
+                            if lo <= mid_h < hi:
+                                clr = c
+                                break
+                        sec_colors.append(clr)
+
+                    ax.add_collection(LineCollection(
+                        sec_segs, colors=sec_colors,
+                        linewidth=2.0,
+                        linestyle=_SOURCE_LS[src_key],
+                        alpha=0.75, zorder=3,
+                    ))
+                except Exception as e:
+                    log.debug("secondary hodograph overlay failed for %s: %s", src_key, e)
+
 
     def _on_mouse_move(self, event):
         if event.inaxes is not self._skewt_ax or self._current_snd is None:
@@ -728,7 +1007,125 @@ class SoundingDialog(QDialog):
             self._canvas.draw_idle()
 
 
-    def _update_params(self, snd: Sounding):
+    def _calc_key_params(self, snd: Sounding) -> dict:
+        """Calculate a compact set of params for comparison strip display."""
+        out: dict = {}
+        try:
+            pres = snd.pressure    * units.hPa
+            temp = snd.temperature * units.degC
+            dewp = snd.dewpoint    * units.degC
+            wind_valid = (
+                np.isfinite(snd.pressure) & np.isfinite(snd.height)
+                & np.isfinite(snd.u_wind) & np.isfinite(snd.v_wind)
+            )
+            wind_pres    = snd.pressure[wind_valid] * units.hPa
+            wind_u_ms    = snd.u_wind[wind_valid]   * units("m/s")
+            wind_v_ms    = snd.v_wind[wind_valid]   * units("m/s")
+            wind_hgt     = snd.height[wind_valid]   * units.m
+            wind_hgt_agl = (snd.height[wind_valid] - snd.height[0]) * units.m
+
+            # SB CAPE
+            try:
+                sb_p = mpcalc.parcel_profile(pres, temp[0], dewp[0])
+                sb_cape, _ = _vt_cape_cin(pres, temp, dewp, sb_p,
+                                          pres[0:1], temp[0:1], dewp[0:1])
+                out["sbcape"] = sb_cape
+            except Exception:
+                out["sbcape"] = None
+
+            # ML CAPE
+            try:
+                ml_p2, ml_t2, ml_td2 = mpcalc.mixed_parcel(pres, temp, dewp,
+                                                             depth=100 * units.hPa)
+                ml_par = mpcalc.parcel_profile(pres, ml_t2, ml_td2)
+                ml_cape, _ = _vt_cape_cin(
+                    pres, temp, dewp, ml_par,
+                    ml_p2.reshape(1) if hasattr(ml_p2, "reshape") else ml_p2,
+                    ml_t2.reshape(1) if hasattr(ml_t2, "reshape") else ml_t2,
+                    ml_td2.reshape(1) if hasattr(ml_td2, "reshape") else ml_td2,
+                )
+                out["mlcape"] = ml_cape
+            except Exception:
+                out["mlcape"] = None
+
+            # MU CAPE
+            try:
+                mu_res = mpcalc.most_unstable_parcel(pres, temp, dewp, depth=300 * units.hPa)
+                mu_par = mpcalc.parcel_profile(pres, mu_res[1], mu_res[2])
+                mu_cape, _ = _vt_cape_cin(
+                    pres, temp, dewp, mu_par,
+                    mu_res[0].reshape(1) if hasattr(mu_res[0], "reshape") else mu_res[0],
+                    mu_res[1].reshape(1) if hasattr(mu_res[1], "reshape") else mu_res[1],
+                    mu_res[2].reshape(1) if hasattr(mu_res[2], "reshape") else mu_res[2],
+                )
+                out["mucape"] = mu_cape
+            except Exception:
+                out["mucape"] = None
+
+            # SRH + shear (need Bunkers)
+            try:
+                if wind_valid.sum() >= 4:
+                    rm, _, _ = mpcalc.bunkers_storm_motion(
+                        wind_pres, wind_u_ms, wind_v_ms, wind_hgt)
+                    srh01, _, _ = mpcalc.storm_relative_helicity(
+                        wind_hgt_agl, wind_u_ms, wind_v_ms, depth=1 * units.km,
+                        storm_u=rm[0].to("m/s"), storm_v=rm[1].to("m/s"))
+                    srh03, _, _ = mpcalc.storm_relative_helicity(
+                        wind_hgt_agl, wind_u_ms, wind_v_ms, depth=3 * units.km,
+                        storm_u=rm[0].to("m/s"), storm_v=rm[1].to("m/s"))
+                    out["srh01"] = float(srh01.to("m**2/s**2").m)
+                    out["srh03"] = float(srh03.to("m**2/s**2").m)
+            except Exception:
+                out.setdefault("srh01", None)
+                out.setdefault("srh03", None)
+
+            # 0-6 km shear
+            try:
+                if wind_valid.sum() >= 2:
+                    us, vs = mpcalc.bulk_shear(
+                        wind_pres, wind_u_ms, wind_v_ms,
+                        height=wind_hgt_agl, depth=6 * units.km)
+                    out["shear06"] = float(np.sqrt(us**2 + vs**2).to("knots").m)
+            except Exception:
+                out.setdefault("shear06", None)
+
+            # STP
+            try:
+                ml_lcl_m = None
+                if out.get("mlcape") is not None:
+                    ml_lcl_p, _ = mpcalc.lcl(
+                        ml_p2.reshape(1)[0] if hasattr(ml_p2, "reshape") else ml_p2,
+                        ml_t2.reshape(1)[0] if hasattr(ml_t2, "reshape") else ml_t2,
+                        ml_td2.reshape(1)[0] if hasattr(ml_td2, "reshape") else ml_td2,
+                    )
+                    ml_lcl_m = float(np.interp(
+                        ml_lcl_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
+                    )) - snd.height[0]
+                if (out.get("mlcape") and ml_lcl_m is not None
+                        and out.get("srh01") and out.get("shear06")):
+                    lcl_term   = max(0.0, (2000.0 - ml_lcl_m) / 1000.0)
+                    shear_term = min(out["shear06"] / 20.0, 1.5)
+                    out["stp"] = max(0.0,
+                        (out["mlcape"] / 1500.0) * lcl_term
+                        * (out["srh01"] / 150.0) * shear_term)
+            except Exception:
+                out.setdefault("stp", None)
+
+            # SCP
+            try:
+                if (out.get("mucape") and out.get("srh01") and out.get("shear06")):
+                    out["scp"] = max(0.0,
+                        (out["mucape"] / 1000.0) * (out["srh01"] / 50.0)
+                        * (out["shear06"] / 20.0))
+            except Exception:
+                out.setdefault("scp", None)
+
+        except Exception as e:
+            log.debug("_calc_key_params failed: %s", e)
+
+        return out
+
+    def _update_params(self, snd: Sounding, secondary_snds: list | None = None):
         def _set(key, value, fmt="{:.0f}"):
             lbl = self._param_labels.get(key)
             if lbl is None:
@@ -1081,3 +1478,17 @@ class SoundingDialog(QDialog):
         except Exception as e:
             log.debug("0-3km CAPE failed: %s", e)
             _set("cape3km", None)
+
+        # update comparison strips for any active secondary sources
+        active_sec_keys = {s for _, s in (secondary_snds or [])}
+        # remove strips for sources no longer active
+        for src in list(self._comp_row_labels.keys()):
+            if src not in active_sec_keys:
+                self._clear_comp_strip(src)
+        # add/update strips for active secondary sources
+        for sec_snd, src_key in (secondary_snds or []):
+            try:
+                key_params = self._calc_key_params(sec_snd)
+                self._update_comp_strip(src_key, key_params)
+            except Exception as e:
+                log.debug("comp strip update failed for %s: %s", src_key, e)
