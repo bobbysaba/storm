@@ -214,7 +214,7 @@ def _request_headers() -> dict[str, str]:
 
 def _fetch_json(url: str) -> dict:
     req = Request(url, headers=_request_headers())
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=config.NSSL_SSL_CONTEXT) as resp:
         raw = resp.read()
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -289,7 +289,7 @@ def _download_mbtiles(url: str, time_id: str, variable_id: str) -> Path:
 
     tmp_path = path.with_suffix(".tmp")
     req = Request(url, headers=_request_headers())
-    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS, context=config.NSSL_SSL_CONTEXT) as resp:
         data = resp.read()
     if not data:
         raise RuntimeError(f"empty MBTiles file from {url}")

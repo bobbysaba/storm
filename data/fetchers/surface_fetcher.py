@@ -702,7 +702,7 @@ class SurfaceFetcher(QObject):
             req_headers.update(headers)
         req = Request(url, headers=req_headers)
         try:
-            with urlopen(req, timeout=30, context=ssl_ctx) as resp:
+            with urlopen(req, timeout=30, context=ssl_ctx or config.NSSL_SSL_CONTEXT) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
                 body = resp.read()
                 if status and status >= 400:

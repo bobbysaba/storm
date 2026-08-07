@@ -86,6 +86,10 @@ class ArchiveRadarFetcher(QObject):
 
         # maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
         self._raw_cache: dict[datetime, Optional[str]] = {}
+        # maps scan_time → parsed metpy Level2File (binary structure only,
+        # independent of product/tilt) so switching product/tilt on an
+        # already-fetched scan doesn't re-parse the raw bytes.
+        self._parsed_cache: dict[datetime, object] = {}
         self._decoded_cache: dict[tuple[datetime, str, int], Level2RadarScan] = {}
         # sorted list of all known scan times for the date.
         self._index: list[datetime] = []
@@ -111,6 +115,7 @@ class ArchiveRadarFetcher(QObject):
                 except OSError:
                     pass
         self._raw_cache.clear()
+        self._parsed_cache.clear()
         self._decoded_cache.clear()
         self._index = []
         self._pending_fetches.clear()
@@ -262,11 +267,14 @@ class ArchiveRadarFetcher(QObject):
         threading.Thread(target=self._decode_cached_scan, args=(scan_time,), daemon=True).start()
 
     def _fetch_raw_then_decode(self, scan_time: datetime) -> None:
+        cache_key = self._decode_key(scan_time)
+        decoding = False
         try:
             file_bytes = self._download_scan(scan_time)
             if file_bytes is None:
                 return
-            # write raw bytes to tmp file to keep memory footprint low.
+            # persist raw bytes to tmp file so later product/tilt switches
+            # (after this call returns) can still find the raw scan on disk.
             path = os.path.join(
                 self._tmpdir,
                 f"{self._station}_{scan_time.strftime('%Y%m%d_%H%M%S')}.dat",
@@ -274,13 +282,23 @@ class ArchiveRadarFetcher(QObject):
             with open(path, "wb") as fh:
                 fh.write(file_bytes)
             self._raw_cache[scan_time] = path
-            self._ensure_decoded(scan_time)
+
+            with self._fetch_lock:
+                if cache_key in self._decoded_cache or cache_key in self._pending_decodes:
+                    return
+                self._pending_decodes.add(cache_key)
+                decoding = True
+            # decode the bytes already in memory instead of re-reading them
+            # back from the file we just wrote.
+            self._decode_and_cache(scan_time, file_bytes, cache_key)
         except Exception as exc:
             log.error("ArchiveRadarFetcher: fetch failed for %s: %s", scan_time, exc)
             self.error.emit(f"Radar fetch error: {exc}")
         finally:
             with self._fetch_lock:
                 self._pending_fetches.discard(scan_time)
+                if decoding:
+                    self._pending_decodes.discard(cache_key)
                 self._update_loading_state()
 
     def _decode_cached_scan(self, scan_time: datetime) -> None:
@@ -291,6 +309,14 @@ class ArchiveRadarFetcher(QObject):
                 return
             with open(path, "rb") as fh:
                 file_bytes = fh.read()
+            self._decode_and_cache(scan_time, file_bytes, cache_key)
+        finally:
+            with self._fetch_lock:
+                self._pending_decodes.discard(cache_key)
+                self._update_loading_state()
+
+    def _decode_and_cache(self, scan_time: datetime, file_bytes: bytes, cache_key: tuple) -> None:
+        try:
             scan = self._decode(scan_time, file_bytes)
             self._decoded_cache[cache_key] = scan
             if (
@@ -302,10 +328,6 @@ class ArchiveRadarFetcher(QObject):
         except Exception as exc:
             log.error("ArchiveRadarFetcher: decode failed for %s: %s", scan_time, exc)
             self.error.emit(f"Radar decode error: {exc}")
-        finally:
-            with self._fetch_lock:
-                self._pending_decodes.discard(cache_key)
-                self._update_loading_state()
 
     def _update_loading_state(self) -> None:
         if not self._pending_fetches and not self._pending_decodes:
@@ -340,12 +362,25 @@ class ArchiveRadarFetcher(QObject):
         log.warning("ArchiveRadarFetcher: could not download scan %s", scan_time)
         return None
 
+    def _get_parsed(self, scan_time: datetime, file_bytes: bytes):
+        """Parse the raw Level-2 bytes with MetPy, reusing a cached parse.
+
+        Parsing is independent of the selected product/tilt, so a scan that
+        was already fetched only needs to be parsed once even if the user
+        switches products or tilts repeatedly.
+        """
+        f = self._parsed_cache.get(scan_time)
+        if f is None:
+            from metpy.io import Level2File
+            f = Level2File(io.BytesIO(file_bytes))
+            self._parsed_cache[scan_time] = f
+        return f
+
     def _decode(self, scan_time: datetime, file_bytes: bytes) -> Optional[Level2RadarScan]:
         """Decode a Level-2 file with MetPy and return a Level2RadarScan."""
-        from metpy.io import Level2File
         from pyproj import Proj, Transformer
 
-        f = Level2File(io.BytesIO(file_bytes))
+        f = self._get_parsed(scan_time, file_bytes)
 
         if not f.sweeps:
             raise RuntimeError("No sweeps found in Level-2 file")
@@ -496,6 +531,7 @@ class ArchiveRadarFetcher(QObject):
                         os.unlink(path)
                     except OSError:
                         pass
+                self._parsed_cache.pop(t, None)
                 for key in [k for k in self._decoded_cache if k[0] == t]:
                     del self._decoded_cache[key]
 

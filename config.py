@@ -1,5 +1,6 @@
 
 import os
+import ssl
 from pathlib import Path
 
 # determine the parent directory for the application
@@ -71,6 +72,25 @@ NSSL_API_KEY = os.environ.get(
     "NSSL_API_KEY",
     "bde39a474528766ea566fa21d7a0b89a8fb72a0391aa76a6bca6c26b88652aa0",
 )
+
+# api.nssl.noaa.gov serves its TLS chain without the Sectigo intermediate CA.
+# macOS/curl paper over this via AIA fetching, but Python's ssl module does
+# not, so every NSSL API caller should use this context, which trusts the
+# bundled intermediate explicitly.
+_NSSL_INTERMEDIATE_CERT = _PROJ / "certs" / "sectigo_public_server_authentication_ca_dv_r36.pem"
+
+
+def _build_nssl_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    if _NSSL_INTERMEDIATE_CERT.is_file():
+        try:
+            ctx.load_verify_locations(cafile=str(_NSSL_INTERMEDIATE_CERT))
+        except ssl.SSLError:
+            pass
+    return ctx
+
+
+NSSL_SSL_CONTEXT = _build_nssl_ssl_context()
 
 # SFCOA mesoanalysis API base URL.
 SFCOA_BASE_URL = os.environ.get(

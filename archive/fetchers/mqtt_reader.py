@@ -29,7 +29,7 @@ def _fetch_text(url: str) -> Optional[str]:
         if config.NSSL_API_KEY:
             headers["X-API-Key"] = config.NSSL_API_KEY
         req = Request(url, headers=headers)
-        with urlopen(req, timeout=20) as resp:
+        with urlopen(req, timeout=20, context=config.NSSL_SSL_CONTEXT) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except Exception as exc:
         if "404" in str(exc) or "HTTP Error 404" in str(exc):

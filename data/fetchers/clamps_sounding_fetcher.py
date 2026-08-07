@@ -97,7 +97,7 @@ def _fetch_sounding_set() -> SoundingSet:
             if m else now_utc
         )
         req = Request(_TEST_FILE_URL, headers=_HEADERS)
-        with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
         snd = _parse_skewt(text, file_time, 0)
         if snd is None:
@@ -165,7 +165,7 @@ def _soundings_to_set(soundings: list[Sounding], now_utc: datetime) -> SoundingS
 
 def _api_sonde_entries() -> list[_SondeEntry]:
     req = Request(_api_url(_API_INDEX_PATH), headers=_api_headers())
-    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
 
     values = payload.get("soundings")
@@ -263,7 +263,7 @@ def _fetch_and_parse_url(
     raw_url: str = "",
 ) -> "Sounding | None":
     req = Request(url, headers=_api_headers())
-    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     snd = _parse_skewt(text, file_time, idx)
     if snd is not None and raw_url:
@@ -276,7 +276,7 @@ def _fetch_and_parse_url(
 def _fetch_raw_launch_location_url(raw_url: str) -> "tuple[float, float] | None":
     headers = _api_headers({"Range": f"bytes=0-{_RAW_HEADER_BYTES - 1}"})
     req = Request(raw_url, headers=headers)
-    with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
         text = resp.read(_RAW_HEADER_BYTES).decode("utf-8", errors="replace")
     return _parse_raw_launch_location(text)
 

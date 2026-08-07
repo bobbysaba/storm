@@ -169,6 +169,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     # emitted from the decode thread on a decode failure — site, product.
     _radar_decode_failed = pyqtSignal(str, str)
     _render_ready = pyqtSignal(object)
+    # emitted from the archive-render thread when an archive scan PNG is ready.
+    _archive_render_ready = pyqtSignal(object)
     # emitted when the user aborts an archive loading session.
     session_aborted = pyqtSignal()
 
@@ -433,6 +435,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # radar fetcher — created once the station is known.
         self._archive_radar: "ArchiveRadarFetcher | None" = None
 
+        # single-worker pool for archive-mode renders — keeps the PNG render
+        # (numpy/scipy work) off the UI thread during archive playback. Set
+        # up here (not in _init_radar, which is skipped when radar is
+        # disabled) since archive mode doesn't depend on the live radar path.
+        from concurrent.futures import ThreadPoolExecutor
+        self._archive_render_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="archive-radar-render"
+        )
+        # incremented on station change / new scan so stale in-flight renders are discarded
+        self._archive_render_generation = 0
+        self._archive_pending_render_scan = None
+        self._archive_render_in_flight = False
+        self._archive_render_ready.connect(self._on_archive_render_ready)
+
         # wire time controller to archive fetchers.
         self._time_ctrl.time_changed.connect(self._archive_mqtt.on_time_changed)
         self._time_ctrl.time_changed.connect(self._archive_hazard.on_time_changed)
@@ -627,6 +643,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         """Instantiate and wire an ArchiveRadarFetcher for the given station."""
         from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
 
+        # discard any in-flight/pending render for the old station
+        self._archive_render_generation += 1
+        self._archive_pending_render_scan = None
+        self._archive_render_in_flight = False
+
         if self._archive_radar is not None:
             for sig in (
                 self._archive_radar.scan_ready,
@@ -686,8 +707,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
 
     def _on_archive_radar_scan(self, scan) -> None:
-        """Render a Level-2 scan from the archive fetcher."""
-        from ui.map.radar_overlay import render_scan_to_png, RENDER_GRID_SIZE
+        """Handle a newly decoded Level-2 scan from the archive fetcher.
+
+        Updates tilt/product selectors immediately (cheap, UI-thread) and
+        hands the PNG render (numpy/scipy work) off to a background thread
+        so archive playback doesn't stall the UI on every frame.
+        """
         self._current_radar_scan = scan
 
         # add tilt/product selectors to archive controls the first time;
@@ -701,22 +726,59 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             current_tilt_idx = getattr(self._archive_radar, "_tilt_idx", 0)
             self.radar_controls.set_archive_tilts(scan.available_tilts, current_tilt_idx)
 
+        self._archive_pending_render_scan = scan
+        self._submit_pending_archive_render()
+
+    def _submit_pending_archive_render(self) -> None:
+        """Submit a background render for the latest pending archive scan.
+        No-op if a render is already in flight — _on_archive_render_ready
+        will submit the newest pending scan when the current render completes."""
+        scan = self._archive_pending_render_scan
+        if scan is None or self._archive_render_in_flight:
+            return
+        self._archive_pending_render_scan = None
+        self._archive_render_in_flight = True
+        gen = self._archive_render_generation
+        from ui.map.radar_overlay import RENDER_GRID_SIZE
+        archive_grid = max(RENDER_GRID_SIZE, 768)
+        self._archive_render_executor.submit(self._bg_render_archive, gen, scan, archive_grid)
+
+    def _bg_render_archive(self, gen: int, scan, grid_size: int) -> None:
+        """Runs in the archive-render thread pool — NOT on the main thread.
+        Renders scan to PNG then emits _archive_render_ready (auto-queued to main thread)."""
+        if gen != self._archive_render_generation:
+            return
+        from ui.map.radar_overlay import render_scan_to_png
         try:
-            archive_grid = max(RENDER_GRID_SIZE, 768)
-            png, bounds, _ = render_scan_to_png(scan, archive_grid)
-            self._radar_overlay.inject(png, bounds)
-            if hasattr(self, "radar_controls"):
-                self.radar_controls.set_scan_time(
-                    scan.scan_time.strftime("%H:%MZ")
-                )
-            if hasattr(self, "_archive_controls"):
-                self._archive_controls.set_radar_status(
-                    f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg {scan.scan_time.strftime('%H:%MZ')}"
-                )
+            png, bounds, _ = render_scan_to_png(scan, grid_size)
         except Exception as exc:
             log.error("Archive radar render failed: %s", exc)
-            if hasattr(self, "_archive_controls"):
-                self._archive_controls.set_radar_status("Radar: render error", error=True)
+            self._archive_render_ready.emit({"gen": gen, "scan": scan, "error": str(exc)})
+            return
+        if gen != self._archive_render_generation:
+            return
+        self._archive_render_ready.emit({
+            "gen": gen, "scan": scan, "png": png, "bounds": bounds,
+        })
+
+    def _on_archive_render_ready(self, result: dict) -> None:
+        """Runs on the main thread — injects the pre-rendered archive PNG into the map."""
+        self._archive_render_in_flight = False
+        if result["gen"] == self._archive_render_generation:
+            scan = result["scan"]
+            if "error" in result:
+                if hasattr(self, "_archive_controls"):
+                    self._archive_controls.set_radar_status("Radar: render error", error=True)
+            else:
+                self._radar_overlay.inject(result["png"], result["bounds"])
+                if hasattr(self, "radar_controls"):
+                    self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
+                if hasattr(self, "_archive_controls"):
+                    self._archive_controls.set_radar_status(
+                        f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg {scan.scan_time.strftime('%H:%MZ')}"
+                    )
+        if self._archive_pending_render_scan is not None:
+            self._submit_pending_archive_render()
 
     def _on_archive_satellite_frame(self, frame) -> None:
         """Update the archive satellite frame; only show if the user has toggled it on."""
@@ -901,7 +963,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if config.NSSL_API_KEY:
                 headers["X-API-Key"] = config.NSSL_API_KEY
             req = Request(url, headers=headers)
-            with urlopen(req, timeout=10) as resp:
+            with urlopen(req, timeout=10, context=config.NSSL_SSL_CONTEXT) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as e:
             log.warning("current.json fetch failed: %s", e)
@@ -1212,6 +1274,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             # no archive data sources for these — hide to prevent crashes.
             self.btn_surface.hide()     # _surface_fetcher / _surface_layer absent
             self.btn_annotate.hide()    # _mqtt_client / _annotation_sync / _drawing_sync absent
+            if hasattr(self, "btn_mesoanalysis"):
+                self.btn_mesoanalysis.hide()   # Satsquatch mesoanalysis is not archived
+            if hasattr(self, "btn_sfcoa"):
+                self.btn_sfcoa.hide()          # SFCOA mesoanalysis is not archived
 
         self.nav_pill = NavPill(self._map_container)
         self._pill_route_expanded = False
