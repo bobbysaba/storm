@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "STORM: Severe Thunderstorm Observation and Reconaissance Monitor"
+abstract: >-
+  STORM is a desktop application for severe storm field operation situational awareness,
+  designed for low-bandwidth field environments. It provides offline map
+  rendering, live NEXRAD radar integration, multi-vehicle GPS tracking,
+  and team communication over constrained networks.
+authors:
+  - family-names: Saba
+    given-names: Bobby
+    # orcid: "https://orcid.org/0009-0007-6492-8501"
+    affiliation: "University of Oklahoma / CIWRO / NSSL"
+repository-code: "https://github.com/bobbysaba/storm"
+url: "https://github.com/bobbysaba/STORM"
+license: GPL-3.0-or-later
+version: "1.5.0"
+date-released: "2026-03-05"   # update to your actual release date
+keywords:
+  - storm chasing
+  - situational awareness
+  - meteorology
+  - field research software
+  - low-bandwidth networking
