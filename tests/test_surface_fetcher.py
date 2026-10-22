@@ -46,6 +46,23 @@ def test_asos_station_cache_uses_bundled_data_file():
     assert sf._ASOS_STATIONS_FILE.parent.name == "data"
 
 
+def test_ensure_asos_stations_delegates_to_the_shared_roster_loader(monkeypatch):
+    # load_asos_station_roster() is also used directly by archive mode
+    # (archive/fetchers/asos_archive_fetcher.py) -- SurfaceFetcher must keep
+    # using the same shared loader/cache, not its own separate copy.
+    calls = []
+    roster = {"OUN": {"lat": 35.24, "lon": -97.47, "name": "Norman"}}
+    monkeypatch.setattr(sf, "load_asos_station_roster", lambda: (calls.append(1), roster)[1])
+
+    fetcher = SurfaceFetcher()
+    first = fetcher._ensure_asos_stations()
+    second = fetcher._ensure_asos_stations()
+
+    assert first is roster
+    assert second is roster
+    assert len(calls) == 1  # cached on the instance after the first call
+
+
 def test_fetch_iem_batch_uses_utc_valid_timestamp():
     fetcher = SurfaceFetcher()
     fetcher._http_get = lambda _url: b"""{
@@ -77,15 +94,14 @@ def test_fetch_iem_batch_uses_utc_valid_timestamp():
 def test_fetch_ok_mesonet_uses_configured_api_headers():
     assert sf.OK_API_URL.endswith("/data/mesonet/ok_mesonet.json")
     fetcher = SurfaceFetcher()
-    fetcher._ok_meta = {
-        "acme": {"lat": 34.80833, "lon": -98.02325, "name": "Acme"},
-    }
     captured: dict[str, object] = {}
 
     def _http_get(url, ssl_ctx=None, headers=None):
         captured["url"] = url
         captured["ssl_ctx"] = ssl_ctx
         captured["headers"] = headers
+        if url == sf.OK_META_URL:
+            return b"STID,NAME,LAT,LON,PRES\nacme,Acme,34.80833,-98.02325,1012.4\n"
         return b"""{
           "time": "2026-04-23T19:25:00+00:00",
           "data": {
@@ -106,6 +122,7 @@ def test_fetch_ok_mesonet_uses_configured_api_headers():
     assert len(rows) == 1
     assert rows[0]["id"] == "surface:ok:acme"
     assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+    assert rows[0]["obs"].pressure_mb == 1012.4  # CSV MSLP, not JSON station pressure
 
 
 def test_fetch_wtm_uses_configured_api_headers():
@@ -160,6 +177,7 @@ def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
             "TEMP2MAVG": "22.1",
             "RELHUM2MAVG": "50.0",
             "PRESSUREAVG": "96.32",
+            "SLPAVG": "101.25",
             "WDIR10M": "212.74",
             "WSPD10MAVG": "9.54",
             "WSPD10MMAX": "12.58",
@@ -190,7 +208,7 @@ def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
     assert round(obs.dewpoint_c, 1) == 11.2
     assert obs.wind_speed_ms == 9.54
     assert obs.wind_dir_deg == 212.74
-    assert round(obs.pressure_mb, 1) == 963.2
+    assert obs.pressure_mb == 1012.5  # SLPAVG kPa -> hPa, not station pressure
 
 
 def test_fetch_co_mesonet_uses_configured_api_headers_and_metadata_file():

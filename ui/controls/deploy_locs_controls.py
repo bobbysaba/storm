@@ -17,9 +17,9 @@ METRICS = [
 ]
 
 _METRIC_TOOLTIPS = {
-    "rank_abi": "Annular Blockage Index — ranks deployment quality based on radar beam blockage",
-    "rank_aoi": "Areal Occultation Index — ranks deployment quality based on occultation by terrain",
-    "rqi":      "Road Quality Index — continuous road surface quality score (0–1)",
+    "rank_abi": "Annular Blockage Index · beam-blockage rank (1 best)",
+    "rank_aoi": "Areal Occultation Index · terrain-blockage rank (1 best)",
+    "rqi":      "Road Quality Index · 0–1 (1 best)",
 }
 
 _LEGENDS = {
@@ -183,7 +183,7 @@ class DeployLocsControls(QWidget):
         self._btns["rank_abi"].setChecked(True)
         self._updating = False
 
-        # initialise slider config for the default metric (no emit)
+        # initialize slider config for the default metric (no emit)
         self._init_slider("rank_abi")
 
     def _btn(self, label: str) -> QToolButton:

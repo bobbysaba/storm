@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 20
@@ -21,21 +22,8 @@ POLL_INTERVAL_ACTIVE  = 120   # watches / MDs / NWS warnings — change througho
 POLL_INTERVAL_OUTLOOK = 900   # SPC categorical + probability — updates on a fixed schedule
 SPC_CACHE_TTL         = 900   # in-memory cache TTL (aligned with outlook poll interval)
 
-_SPC_WX_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer"
+_SPC_WX_BASE = endpoints.NWS_SPC_OUTLOOK_LAYERS
 _SPC_QUERY_SUFFIX = "where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
-SPC_URLS = {
-    "cat":  f"{_SPC_WX_BASE}/1/query?{_SPC_QUERY_SUFFIX}",
-    "tor":  f"{_SPC_WX_BASE}/3/query?{_SPC_QUERY_SUFFIX}",
-    "hail": f"{_SPC_WX_BASE}/5/query?{_SPC_QUERY_SUFFIX}",
-    "wind": f"{_SPC_WX_BASE}/7/query?{_SPC_QUERY_SUFFIX}",
-}
-
-SPC_SIG_URLS = {
-    "tor":  f"{_SPC_WX_BASE}/2/query?{_SPC_QUERY_SUFFIX}",
-    "hail": f"{_SPC_WX_BASE}/4/query?{_SPC_QUERY_SUFFIX}",
-    "wind": f"{_SPC_WX_BASE}/6/query?{_SPC_QUERY_SUFFIX}",
-}
-
 SPC_DAY_LAYER_IDS: dict[int, dict[str, int]] = {
     1: {"cat": 1, "tor": 3, "hail": 5, "wind": 7, "tor_sig": 2, "hail_sig": 4, "wind_sig": 6},
     2: {"cat": 9, "tor": 11, "hail": 13, "wind": 15, "tor_sig": 10, "hail_sig": 12, "wind_sig": 14},
@@ -63,15 +51,13 @@ def _empty_spc_payload() -> tuple[str, str, str, str, str, str]:
     )
 
 SPC_MD_URL = (
-    "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks"
-    "/spc_mesoscale_discussion/MapServer/0/query"
+    f"{endpoints.NWS_SPC_MD_LAYERS}/0/query"
     "?where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
 )
 
 # wwa MapServer — active NWS warnings (sig='W').  Layer 0 serves storm-based polygon geometry
 WWA_WARNINGS_URL = (
-    "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA"
-    "/watch_warn_adv/MapServer/0/query"
+    f"{endpoints.NWS_WWA_LAYERS}/0/query"
     "?where=sig%3D%27W%27"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
     "&returnGeometry=true&f=geojson&outSR=4326"
@@ -79,8 +65,7 @@ WWA_WARNINGS_URL = (
 
 # wwa MapServer — county-level polygons for active SPC watches (TO=tornado, SV=severe tstorm).
 WWA_WATCHES_URL = (
-    "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA"
-    "/watch_warn_adv/MapServer/1/query"
+    f"{endpoints.NWS_WWA_LAYERS}/1/query"
     "?where=sig%3D%27A%27%20AND%20(phenom%3D%27TO%27%20OR%20phenom%3D%27SV%27)"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
     "&returnGeometry=true&f=geojson&outSR=4326"
@@ -183,7 +168,6 @@ class HazardFetcher(QObject):
         self._nws_filter: set[str] | None = None
 
         # nws warnings bbox — set from MBTiles domain at startup
-        self._nws_bbox = (-116.0, 28.0, -82.0, 49.0)
 
         # in-memory cache — stores pre-serialized JSON strings
         self._spc_cache_by_day: dict[int, tuple[str, str, str, str, str, str]] = {}
@@ -242,9 +226,6 @@ class HazardFetcher(QObject):
 
     def set_spc_mds_enabled(self, enabled: bool):
         self._spc_mds_enabled = bool(enabled)
-
-    def set_nws_bbox(self, lon_min: float, lat_min: float, lon_max: float, lat_max: float):
-        self._nws_bbox = (lon_min, lat_min, lon_max, lat_max)
 
 
     def is_spc_fresh(self) -> bool:

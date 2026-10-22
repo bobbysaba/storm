@@ -8,7 +8,8 @@ import zipfile
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import requests
+
+from core import package_sources
 from PyQt6.QtCore import QObject, pyqtSignal
 from data.fetchers.hazard_fetcher import (
     _spc_cat_key,
@@ -16,17 +17,26 @@ from data.fetchers.hazard_fetcher import (
     _nws_color_for_phenom,
 )
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
-_IEM_SBW_URL   = "https://mesonet.agron.iastate.edu/geojson/sbw.geojson"
+_IEM_SBW_URL   = endpoints.IEM_STORM_BASED_WARNINGS
 # these endpoints require a 12-digit YYYYMMDDHHmm timestamp via ?ts=
-_IEM_WATCH_URL = "https://mesonet.agron.iastate.edu/json/spcwatch.py"
+_IEM_WATCH_URL = endpoints.IEM_SPC_WATCHES
 # iem GIS shapefile endpoint for MCDs — returns a zip with .shp/.dbf/.prj
-_IEM_MCD_GIS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/gis/spc_mcd.py"
+_IEM_MCD_GIS_URL = endpoints.IEM_SPC_MD_GIS
 
 # spc direct archive — same GeoJSON schema as the live endpoint (LABEL, DN, etc.).
-_SPC_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/outlook/archive"
-_SPC_EXTENDED_OUTLOOK_ARCHIVE = "https://www.spc.noaa.gov/products/exper/day4-8/archive"
+_SPC_OUTLOOK_ARCHIVE = endpoints.SPC_OUTLOOK_ARCHIVE
+_SPC_EXTENDED_OUTLOOK_ARCHIVE = endpoints.SPC_EXTENDED_OUTLOOK_ARCHIVE
+
+# SPC only started publishing day1/2 outlooks as .lyr.geojson on 2020-01-01;
+# before that the archive only has the shapefile zip (day{N}otlk_..._-shp.zip,
+# one zip per cycle bundling every product's .shp/.dbf together, unlike the
+# geojson path which is one file per product). Confirmed by HEAD request:
+# .../2019/day1otlk_20190608_1300_wind.lyr.geojson -> 404
+# .../2019/day1otlk_20190608_1300-shp.zip -> 200
+_SPC_CAT_DN_LABELS = {2: "MRGL", 3: "SLGT", 4: "ENH", 5: "MDT", 6: "HIGH"}
 
 # cache resolution for time-varying fetches.
 _CACHE_MINUTES = 5
@@ -146,7 +156,7 @@ class ArchiveHazardFetcher(QObject):
     def _fetch_sbw(self, rounded_time: datetime) -> None:
         try:
             ts = rounded_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-            resp = requests.get(_IEM_SBW_URL, params={"ts": ts}, timeout=20)
+            resp = package_sources.requests_get("hazards", _IEM_SBW_URL, params={"ts": ts}, timeout=20)
             resp.raise_for_status()
             geojson_str = _normalize_sbw_geojson(resp.text)
             self._sbw_cache[rounded_time] = geojson_str
@@ -173,7 +183,7 @@ class ArchiveHazardFetcher(QObject):
     def _fetch_watches(self, rounded_time: datetime) -> None:
         try:
             ts = rounded_time.strftime("%Y%m%d%H%M")   # spcwatch.py requires YYYYMMDDHHmm
-            resp = requests.get(_IEM_WATCH_URL, params={"ts": ts}, timeout=20)
+            resp = package_sources.requests_get("hazards", _IEM_WATCH_URL, params={"ts": ts}, timeout=20)
             resp.raise_for_status()
             geojson_str = _normalize_watch_geojson(resp.text)
             self._watch_cache[rounded_time] = geojson_str
@@ -214,8 +224,14 @@ class ArchiveHazardFetcher(QObject):
                 "hour2":   t_end.hour,
                 "minute2": t_end.minute,
             }
-            resp = requests.get(_IEM_MCD_GIS_URL, params=params, timeout=30)
+            resp = package_sources.requests_get("hazards", _IEM_MCD_GIS_URL, params=params, timeout=30)
             resp.raise_for_status()
+            if not resp.content.startswith(b"PK"):
+                # IEM answers a burst of requests with a short non-zip reply; that
+                # isn't "no MDs", so don't cache it -- the next clock change asks again
+                log.info("ArchiveHazardFetcher: MCD reply for %s wasn't a zip (%r); will retry",
+                         rounded_time, resp.content[:80])
+                return
 
             features = _parse_mcd_shapefile_zip(resp.content, rounded_time)
             geojson_str = _normalize_mcd_geojson(
@@ -256,13 +272,14 @@ class ArchiveHazardFetcher(QObject):
             candidates = _outlook_cycle_candidates(cycle, day)
             products = _archive_product_suffixes(day)
             sig_products = _archive_sig_suffixes(day)
+            any_found = False
 
             for key, suffix in products.items():
                 found = False
                 for ct in candidates:
                     url = _archive_spc_url(day, ct, suffix)
                     try:
-                        resp = requests.get(url, timeout=20)
+                        resp = package_sources.requests_get("hazards", url, timeout=20)
                         if resp.status_code == 404:
                             continue
                         resp.raise_for_status()
@@ -290,13 +307,15 @@ class ArchiveHazardFetcher(QObject):
                         )
                 if not found:
                     results[key] = _EMPTY_FC
+                any_found = any_found or found
 
             for key, suffix in sig_products.items():
                 base_key = key if key in ("prob", "sig") else key
+                found = False
                 for ct in candidates:
                     url = _archive_spc_url(day, ct, suffix)
                     try:
-                        resp = requests.get(url, timeout=20)
+                        resp = package_sources.requests_get("hazards", url, timeout=20)
                         if resp.status_code == 404:
                             continue
                         resp.raise_for_status()
@@ -314,6 +333,7 @@ class ArchiveHazardFetcher(QObject):
                                 results.get(key, _EMPTY_FC),
                                 sig_geojson,
                             )
+                        found = True
                         break
                     except Exception as exc:
                         log.warning(
@@ -323,6 +343,75 @@ class ArchiveHazardFetcher(QObject):
                             ct.strftime("%Y%m%d_%H%M"),
                             exc,
                         )
+                any_found = any_found or found
+
+            # SPC only started publishing day1/2 outlooks as .lyr.geojson on
+            # 2020-01-01 -- every candidate above 404s for anything older,
+            # silently (a 404 is treated as "try the next candidate", not an
+            # error), which is why this could fail with no warning logged at
+            # all. Older dates are only in the archive as one shapefile zip
+            # per cycle bundling every product together; try it once, across
+            # the same candidate cycles, only once the geojson path has
+            # genuinely found nothing (2020+ dates always succeed above and
+            # never reach this).
+            if not any_found and day in (1, 2):
+                for ct in candidates:
+                    zip_url = _archive_spc_shapefile_zip_url(day, ct)
+                    try:
+                        resp = package_sources.requests_get("hazards", zip_url, timeout=20)
+                        if resp.status_code == 404:
+                            continue
+                        resp.raise_for_status()
+                    except Exception as exc:
+                        log.warning(
+                            "ArchiveHazardFetcher: day %s outlook shapefile zip @ %s failed: %s",
+                            day, ct.strftime("%Y%m%d_%H%M"), exc,
+                        )
+                        continue
+                    by_suffix = _parse_outlook_shapefile_zip(resp.content)
+                    if not by_suffix:
+                        continue
+                    log.info(
+                        "ArchiveHazardFetcher: day %s outlook found via pre-2020 shapefile archive at %s",
+                        day, ct.strftime("%Y%m%d_%H%M"),
+                    )
+                    # Route through the same normalization the geojson path
+                    # uses (_normalize_archive_spc_geojson) rather than
+                    # serializing the raw shapefile records directly -- the
+                    # frontend colors categorical fills off props["cat"]
+                    # and probabilistic fills off props["LABEL"] (a percent
+                    # string like "5"/"15"/"30"), neither of which the raw
+                    # DBF fields carry as-is (only DN, and LABEL for cat).
+                    # Without this, every shapefile-sourced feature rendered
+                    # with its match expression's fallback color instead of
+                    # its real risk level -- confirmed live against a real
+                    # case (2010-05-10) where this fallback path is the only
+                    # way outlook data is found at all.
+                    for key, suffix in products.items():
+                        features = by_suffix.get(suffix, [])
+                        raw_geojson = json.dumps({"type": "FeatureCollection", "features": features})
+                        results[key] = _normalize_archive_spc_geojson(
+                            key, raw_geojson, day=day, product=key,
+                        )
+                    for key, suffix in sig_products.items():
+                        base_key = key if key in ("prob", "sig") else key
+                        sig_features = by_suffix.get(suffix, [])
+                        if not sig_features:
+                            continue
+                        raw_sig_geojson = json.dumps({"type": "FeatureCollection", "features": sig_features})
+                        sig_geojson = _normalize_archive_spc_geojson(
+                            "significant", raw_sig_geojson, day=day, product=base_key, force_label="SIGN",
+                        )
+                        if key == "sig":
+                            results["sig"] = sig_geojson
+                        else:
+                            results[key] = _merge_significant_geojson(
+                                results.get(key, _EMPTY_FC),
+                                sig_geojson,
+                            )
+                    break
+                else:
+                    log.warning("ArchiveHazardFetcher: day %s outlook not found for any candidate cycle (geojson or shapefile)", day)
 
             payload = (
                 results.get("categorical", _EMPTY_FC),
@@ -408,11 +497,19 @@ def _parse_mcd_shapefile_zip(zip_bytes: bytes, filter_time: datetime) -> list:
     return features
 
 
-def _parse_shp(data: bytes) -> list:
+def _parse_shp(data: bytes, transform=None) -> list:
     """
     Minimal parser for ESRI Shapefile (.shp).
     Supports Polygon (type 5) only.  Returns a list of GeoJSON geometry dicts
     (or None for null/unsupported records).
+
+    `transform`, if given, is a callable (x, y) -> (x2, y2) applied to every
+    raw point as it's read -- SPC's shapefiles store coordinates in a
+    projected CRS (Lambert Conformal Conic; see
+    _parse_outlook_shapefile_zip), not GeoJSON's required WGS84 lon/lat, so
+    the real caller always passes a proper reprojection. None (the
+    default) is an identity no-op, kept for callers/tests that already
+    hand in lon/lat-like values directly.
     """
     if len(data) < 100:
         return []
@@ -457,7 +554,10 @@ def _parse_shp(data: bytes) -> list:
         part_starts = list(struct.unpack_from(f"<{num_parts}i", data, offset))
         offset += num_parts * 4
         pts_raw = struct.unpack_from(f"<{num_points * 2}d", data, offset)
-        points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+        if transform is None:
+            points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
+        else:
+            points = [transform(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
 
         # split points into rings using part_starts.
         rings = []
@@ -523,6 +623,141 @@ def _parse_dbf(data: bytes) -> list:
         rec_pos += record_bytes
 
     return records
+
+
+def _archive_spc_shapefile_zip_url(day: int, cycle: datetime) -> str:
+    """Pre-2020 day1/2 outlook archive URL -- one zip per cycle, bundling
+    every product's .shp/.dbf/.prj together (unlike the per-product
+    .lyr.geojson files _archive_spc_url builds for 2020+)."""
+    return (
+        f"{_SPC_OUTLOOK_ARCHIVE}/{cycle.strftime('%Y')}/"
+        f"day{day}otlk_{cycle.strftime('%Y%m%d')}_{cycle.strftime('%H%M')}-shp.zip"
+    )
+
+
+def _shapefile_lonlat_transform(prj_wkt: str):
+    """Build an (x, y) -> (lon, lat) callable from a shapefile's own .prj
+    (ESRI WKT) contents. Confirmed live (2026-09) against a real archive
+    zip: SPC's outlook shapefiles are Lambert Conformal Conic (standard
+    parallels 33N/45N, central meridian 0), not GeoJSON's required WGS84
+    lon/lat -- every product's .prj in a given zip carries the identical
+    definition. Raw .shp coordinates used directly as lon/lat (this
+    fallback's original behavior) put every polygon at a wildly wrong
+    location -- e.g. one real Oklahoma categorical-outlook ring's raw
+    coordinates inverse-projected as plain Web Mercator landed in
+    northern Canada, nowhere near the visible map extent.
+    """
+    from pyproj import CRS, Transformer
+    crs = CRS.from_wkt(prj_wkt)
+    transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    return lambda x, y: transformer.transform(x, y)
+
+
+# Degrees, applied post-reprojection. SPC's pre-2020 archive shapefiles are
+# raw, unsmoothed marching-squares contours off their underlying probability
+# grid -- confirmed live: a real outlook ring had thousands of vertices in an
+# alternating-diagonal staircase pattern (e.g. consecutive vertex deltas of
+# (0.050, -0.021) then (0.026, 0.040) repeating), nothing like the smoother
+# curves SPC's own 2020+ .lyr.geojson archive already publishes pre-smoothed.
+# ~0.05 deg (~5 km over CONUS) removes that staircase noise without visibly
+# eating into the outlook's real shape at the zoom levels this renders at.
+_OUTLOOK_SIMPLIFY_TOLERANCE_DEG = 0.05
+
+
+def _simplify_outlook_geometry(geom: dict, tolerance_deg: float) -> dict:
+    """Douglas-Peucker-simplify a reprojected Polygon's ring(s) to smooth
+    out grid-contour staircasing. Falls back to the original geometry
+    whenever shapely can't produce a valid, non-empty result (e.g. a
+    sliver ring simplifying away entirely) -- a jagged polygon is still
+    correct; a missing one wouldn't be."""
+    if geom.get("type") != "Polygon":
+        return geom
+    try:
+        from shapely.geometry import mapping, shape
+        simplified = shape(geom).simplify(tolerance_deg, preserve_topology=True)
+        if simplified.is_empty or not simplified.is_valid or simplified.geom_type != "Polygon":
+            return geom
+        return mapping(simplified)
+    except Exception as exc:
+        log.warning("Outlook shapefile zip: geometry simplification failed, using raw ring: %s", exc)
+        return geom
+
+
+def _parse_outlook_shapefile_zip(zip_bytes: bytes) -> dict[str, list[dict]]:
+    """Parse a pre-2020 outlook zip into {suffix: [GeoJSON Feature, ...]},
+    keyed by the same suffix strings _archive_product_suffixes /
+    _archive_sig_suffixes use (cat, wind, hail, torn, sigwind, sighail,
+    sigtorn) -- one member pair per suffix, named
+    day{N}otlk_..._{suffix}.shp/.dbf. Each record's only real field is a
+    numeric DN: the categorical outlook's risk-level code (2-6, mapped via
+    _SPC_CAT_DN_LABELS) or the probabilistic layers' percent-contour value,
+    which _spc_prob_label already reads directly off props["DN"].
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        log.warning("Outlook shapefile zip: bad zip: %s", exc)
+        return {}
+
+    names = zf.namelist()
+    # Every product's .prj in a real zip carries the identical projection
+    # (confirmed live) -- read whichever one is present once, rather than
+    # re-parsing it per suffix. Without a usable transform, raw .shp
+    # coordinates (a projected CRS, not lon/lat) would misplace every
+    # polygon, so this is treated the same as an unreadable zip rather
+    # than silently emitting geometry at the wrong location.
+    prj_name = next((n for n in names if n.lower().endswith(".prj")), None)
+    if prj_name is None:
+        log.warning("Outlook shapefile zip: no .prj found; refusing to guess a coordinate system")
+        return {}
+    try:
+        transform = _shapefile_lonlat_transform(zf.read(prj_name).decode("ascii", errors="replace"))
+    except Exception as exc:
+        log.warning("Outlook shapefile zip: could not parse %s: %s", prj_name, exc)
+        return {}
+
+    by_suffix: dict[str, list[dict]] = {}
+    for suffix in ("cat", "wind", "hail", "torn", "sigwind", "sighail", "sigtorn"):
+        shp_name = next((n for n in names if n.lower().endswith(f"_{suffix}.shp")), None)
+        dbf_name = next((n for n in names if n.lower().endswith(f"_{suffix}.dbf")), None)
+        if not shp_name or not dbf_name:
+            continue
+        geometries = _parse_shp(zf.read(shp_name), transform=transform)
+        records = _parse_dbf(zf.read(dbf_name))
+
+        features = []
+        for geom, rec in zip(geometries, records):
+            if geom is None:
+                continue
+            geom = _simplify_outlook_geometry(geom, _OUTLOOK_SIMPLIFY_TOLERANCE_DEG)
+            dn_raw = rec.get("DN")
+            try:
+                dn = int(dn_raw) if dn_raw is not None else None
+            except (TypeError, ValueError):
+                dn = None
+            if dn is None:
+                continue
+            if suffix.startswith("sig") and dn <= 0:
+                # DN=0 on a sig* layer is SPC's "no significant risk"
+                # placeholder -- the shapefile format needs at least one
+                # record even when there's nothing to draw, so it ships a
+                # degenerate polygon instead of an empty file. Confirmed
+                # against a real archive day (2019-06-08): sigwind/sigtorn
+                # both carried a tiny throwaway DN=0 polygon that day, while
+                # sighail's real DN=10 significant-hail contour came through
+                # as expected. Rendering the DN=0 one would draw a false
+                # "significant" overlay where none exists.
+                continue
+            props = dict(rec, DN=dn)
+            if suffix == "cat":
+                label = _SPC_CAT_DN_LABELS.get(dn)
+                if label is None:
+                    continue
+                props["LABEL"] = label
+            features.append({"type": "Feature", "geometry": geom, "properties": props})
+        by_suffix[suffix] = features
+
+    return by_suffix
 
 
 def _parse_yyyymmddHHMM(s: str) -> Optional[datetime]:

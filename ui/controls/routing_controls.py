@@ -31,7 +31,7 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
-# text-colour styles applied inline on the QLineEdit fields
+# text-color styles applied inline on the QLineEdit fields
 _STYLE_GPS    = "color: #39D98A;"   # green  — set via GPS loc button
 _STYLE_MANUAL = "color: #EFF3FF;"   # white  — manually entered / map-picked
 
@@ -120,7 +120,7 @@ class RoutingControls(QWidget):
 
     Signals:
         enter_pick_mode()              — either pick button was activated
-        cancel_pick_mode()             — pick mode was cancelled
+        cancel_pick_mode()             — pick mode was canceled
         route_calculated(RouteResult)  — a route was successfully fetched
         route_cleared()                — user cleared the route
     """
@@ -209,7 +209,7 @@ class RoutingControls(QWidget):
         # map-pick button for origin
         self._btn_origin_pick = QToolButton()
         self._btn_origin_pick.setText("⊕")
-        self._btn_origin_pick.setToolTip("Click on map to set start point")
+        self._btn_origin_pick.setToolTip("Pick start on map")
         self._btn_origin_pick.setCheckable(True)
         self._btn_origin_pick.setFixedSize(24, 24)
         self._btn_origin_pick.toggled.connect(self._on_origin_pick_toggled)
@@ -218,7 +218,7 @@ class RoutingControls(QWidget):
         self._btn_origin_loc = QToolButton()
         self._btn_origin_loc.setIcon(_loc_icon())
         self._btn_origin_loc.setIconSize(QSize(14, 14))
-        self._btn_origin_loc.setToolTip("Use current GPS location as start point")
+        self._btn_origin_loc.setToolTip("Start at GPS location")
         self._btn_origin_loc.setObjectName("locBtn")
         self._btn_origin_loc.setFixedSize(24, 24)
         self._btn_origin_loc.setEnabled(False)
@@ -228,7 +228,7 @@ class RoutingControls(QWidget):
         self._btn_origin_vehicle = QToolButton()
         self._btn_origin_vehicle.setIcon(_vehicle_icon())
         self._btn_origin_vehicle.setIconSize(QSize(14, 14))
-        self._btn_origin_vehicle.setToolTip("Use a vehicle's location as start point")
+        self._btn_origin_vehicle.setToolTip("Start at vehicle")
         self._btn_origin_vehicle.setObjectName("locBtn")
         self._btn_origin_vehicle.setFixedSize(24, 24)
         self._btn_origin_vehicle.setEnabled(False)
@@ -262,7 +262,7 @@ class RoutingControls(QWidget):
 
         self._btn_dest_pick = QToolButton()
         self._btn_dest_pick.setText("⊕")
-        self._btn_dest_pick.setToolTip("Click on map to set destination")
+        self._btn_dest_pick.setToolTip("Pick destination on map")
         self._btn_dest_pick.setCheckable(True)
         self._btn_dest_pick.setFixedSize(24, 24)
         self._btn_dest_pick.toggled.connect(self._on_dest_pick_toggled)
@@ -271,7 +271,7 @@ class RoutingControls(QWidget):
         self._btn_dest_loc = QToolButton()
         self._btn_dest_loc.setIcon(_loc_icon())
         self._btn_dest_loc.setIconSize(QSize(14, 14))
-        self._btn_dest_loc.setToolTip("Use current GPS location as destination")
+        self._btn_dest_loc.setToolTip("Destination: GPS location")
         self._btn_dest_loc.setObjectName("locBtn")
         self._btn_dest_loc.setFixedSize(24, 24)
         self._btn_dest_loc.setEnabled(False)
@@ -281,7 +281,7 @@ class RoutingControls(QWidget):
         self._btn_dest_vehicle = QToolButton()
         self._btn_dest_vehicle.setIcon(_vehicle_icon())
         self._btn_dest_vehicle.setIconSize(QSize(14, 14))
-        self._btn_dest_vehicle.setToolTip("Use a vehicle's location as destination")
+        self._btn_dest_vehicle.setToolTip("Destination: vehicle")
         self._btn_dest_vehicle.setObjectName("locBtn")
         self._btn_dest_vehicle.setFixedSize(24, 24)
         self._btn_dest_vehicle.setEnabled(False)
@@ -312,7 +312,7 @@ class RoutingControls(QWidget):
         # copy ETA — useful for monitor operators to paste into comms
         self._btn_copy_eta = QToolButton()
         self._btn_copy_eta.setText("COPY ETA")
-        self._btn_copy_eta.setToolTip("Copy route summary to clipboard")
+        self._btn_copy_eta.setToolTip("Copy route summary")
         self._btn_copy_eta.setVisible(False)
         self._btn_copy_eta.clicked.connect(self._on_copy_eta)
 

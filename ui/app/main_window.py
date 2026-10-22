@@ -9,20 +9,33 @@ import feature_flags
 import runtime_flags
 from collections import deque
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
-    QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout,
-    QFileDialog, QSizePolicy,
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QLabel,
+    QVBoxLayout,
+    QHBoxLayout,
+    QToolButton,
+    QFrame,
+    QCheckBox,
+    QPushButton,
+    QGridLayout,
+    QFileDialog,
+    QSizePolicy,
+    QLineEdit,
+    QTextEdit,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QIcon, QPixmap, QPainter
+from PyQt6.QtGui import QKeySequence, QShortcut, QIcon, QPixmap, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
 from ui.theme import DARK_THEME, ACCENT
-from ui.map.widget import MapWidget, TILES_PATH
-from ui.controls.radar_controls import RadarControls, NEXRAD_SITES
+from ui.map.widget import MapWidget
+from ui.controls.radar_controls import RadarControls, NOXP_SITE_ID
 from ui.controls.hazard_controls import HazardControls
 from ui.controls.routing_controls import RoutingControls, _make_loc_icon
 from ui.widgets.nav_pill import NavPill
@@ -33,6 +46,9 @@ from ui.controls.landcover_controls import LandcoverControls
 from ui.controls.mesoanalysis_controls import MesoanalysisControls
 from ui.controls.sfcoa_controls import SfcoaControls
 from ui.controls.surface_controls import SurfaceControls
+from ui.controls.raw_lidar_controls import RawLidarControls
+from ui.controls.track_controls import TrackControls
+from ui.controls.trail_controls import TrailControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
 from ui.sounding.dialog import SoundingDialog
@@ -65,12 +81,18 @@ from data.fetchers.sfcoa_overlay_fetcher import SfcoaOverlayFetcher
 from data.fetchers.surface_fetcher import SurfaceFetcher
 from data.radar.radar_decoder import decode_nexrad_l3
 import config
+from data import endpoints
+from core import perf_log
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
 from core.storm_cone import StormCone, motion_from_fixes
 from core.scan_sector import ScanSector, feature_collection
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from core.observation import Observation
 from core.vehicle import Vehicle
+from core.storm_track import (
+    TrackPoint, default_track_dir, new_track_path, read_track_file, unused_path,
+    track_filename, write_track_csv, write_track_excel,
+)
 from network.mqtt_client import MQTTClient
 from network.annotation_sync import AnnotationSync
 from network.storm_cone_sync import StormConeSync
@@ -88,6 +110,12 @@ from ui.app.main_window_map_helpers import MainWindowMapHelpersMixin
 log = logging.getLogger(__name__)
 
 SCAN_MOVE_THRESHOLD_KM = 0.1
+# archive: how long radar waits for vehicle positions (to pick the nearest
+# radar) before starting from home; it moves when the vehicles arrive
+RADAR_WAIT_FOR_VEHICLES_MS = 10_000
+# shown at the top of the map while a box is being drawn
+ASOS_BOX_HINT = "Drag a box on the map to load ASOS stations"
+DAMAGE_BOX_HINT = "Drag a box on the map to find NWS damage-survey paths"
 SCAN_MOVE_FIXES_TO_STOP = 3
 LIVE_RADAR_MAX_AGE_MINUTES = 45
 VEHICLE_PANEL_WIDTH = 340
@@ -146,6 +174,33 @@ def _clear_layout(layout):
             w.deleteLater()
 
 
+from core.case_package import PACKAGES_ROOT as CASE_PACKAGES_ROOT  # noqa: E402
+
+
+def _package_fetch(url: str) -> bytes:
+    """A loaded file's bytes for a case package: the copy kept during the
+    session when small, otherwise a fresh download (checked against the
+    recorded hash by case_package.build)."""
+    from urllib.request import Request, urlopen
+    from core import provenance
+    kept = provenance.kept_bytes(url)
+    if kept is not None:
+        return kept
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
+    with urlopen(request, timeout=180, context=config.NSSL_SSL_CONTEXT) as response:
+        return response.read()
+
+
+def _velocity_status_tag(scan) -> str:
+    """Short note for the radar status line on processed velocity."""
+    notes = getattr(scan, "velocity_processing", "") or ""
+    if "dealiased (" in notes:
+        return " · dealiased"
+    if notes.startswith("raw:"):
+        return " · not dealiased"
+    return ""
+
+
 class _NetChecker(QObject):
     """Worker that checks internet connectivity from a background thread."""
     result_ready = pyqtSignal(str)   # "ok", "slow", or "none"
@@ -171,6 +226,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     _render_ready = pyqtSignal(object)
     # emitted from the archive-render thread when an archive scan PNG is ready.
     _archive_render_ready = pyqtSignal(object)
+    # emitted from the archive super-res render thread when a debounced
+    # high-resolution PNG is ready (Tier 2 — see _submit_archive_superres_render).
+    _archive_superres_ready = pyqtSignal(object)
+    # emitted from the NOXP render thread when a rendered sweep PNG is ready.
+    _noxp_render_ready = pyqtSignal(object)
+    # emitted from the raw-lidar map-overlay render thread when a scan PNG
+    # is ready (north-referenced PPI/CSM rays -- see ui/map/lidar_overlay.py).
+    _lidar_overlay_render_ready = pyqtSignal(object)
     # emitted when the user aborts an archive loading session.
     session_aborted = pyqtSignal()
 
@@ -180,12 +243,28 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         monitor: bool = False,
         viewer: bool = False,
         archive_time=None,    # datetime | None
+        case_package=None,    # path of a case package to open once started
     ):
         super().__init__()
+        self._case_package_at_start = case_package
+        self.restart_with = None   # (archive_time, package path) for main.py's session loop
+        from core import package_sources, provenance
+        provenance.reset()          # provenance records this session's loads only
+        package_sources.deactivate()
+        if case_package:
+            # serve the package's data files before any fetcher starts downloading
+            try:
+                from core import case_package as _case_package
+                _manifest, _ = _case_package.read(Path(case_package))
+                package_sources.activate(Path(case_package), _manifest.get("data", []))
+            except ValueError as exc:
+                log.warning("Case package %s not usable: %s", case_package, exc)
         self._debug = debug
         self._monitor = monitor
         self._viewer = viewer
         self._archive_time = archive_time    # None = live mode
+        import log_context
+        log_context.set_case(f"archive {archive_time:%Y-%m-%d}" if archive_time else "live")
         self._archive = archive_time is not None
         self._current_radar_scan = None
         self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
@@ -203,7 +282,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._sfcoa_times = []
         self._sfcoa_variables_by_time: dict[str, list] = {}
         self._sfcoa_overlay_cache: dict[tuple[str, str], dict] = {}
-        self._sfcoa_status_text = ""
 
         self.setWindowTitle(
             f"STORM  v{config.VERSION}"
@@ -215,6 +293,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # global dark theme applied once here — all children inherit via QSS cascade
         self.setStyleSheet(DARK_THEME)
+        # long button descriptions wrap instead of running across the screen
+        from ui.tooltips import ReadableToolTips
+        if QApplication.instance() is not None and not hasattr(QApplication.instance(), "_storm_tooltips"):
+            QApplication.instance()._storm_tooltips = ReadableToolTips(QApplication.instance())
+            QApplication.instance().installEventFilter(QApplication.instance()._storm_tooltips)
         # build UI in dependency order
         self._runtime_safe = runtime_flags.FLAGS.runtime_safe
 
@@ -223,6 +306,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._init_statusbar()
         self._init_vehicle_panel()
         self._radar_station_sites = self._load_radar_station_sites()
+        # NOXP (archive mobile radar) state, defined in every mode: the shared
+        # radar-site code (_push_radar_station_sites, radar rendering) reads
+        # it in live mode too, where it simply stays off. Archive startup
+        # resets it per session.
+        self._noxp_active = False
+        self._archive_noxp = None
+        self._noxp_station_site: dict | None = None
         self._radar_station_picker_visible = False
         self._radar_auto_site_pending = not monitor and not self._archive
         self._startup_sequence_started = False
@@ -247,6 +337,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._disable_radar = runtime_flags.FLAGS.disable_radar
         self._disable_mqtt = runtime_flags.FLAGS.disable_mqtt
         self._disable_annotations = runtime_flags.FLAGS.disable_annotations
+        # storm-cone placement state, read by the radar status line too; set
+        # here so it exists when annotations (and so _init_storm_cone) are off
+        self._pending_cone_motion_fix = None
         self._disable_deploy_locs = runtime_flags.FLAGS.disable_deploy_locs
         self._disable_data_inputs = runtime_flags.FLAGS.disable_data_inputs
 
@@ -327,12 +420,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         QTimer.singleShot(0, self._layout_overlays)
         QTimer.singleShot(220, self._layout_overlays)
 
-        # ctrl+d toggles debug panel even outside --debug mode (emergency diagnostic)
-        self._debug_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
-        self._debug_shortcut.activated.connect(self._toggle_debug_panel)
-        # ctrl+E toggles error log panel
-        self._error_log_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
-        self._error_log_shortcut.activated.connect(self._toggle_error_log_panel)
+        # File / Edit / View / Help in the menu bar (the top of the screen on
+        # macOS); it also owns Cmd+D (debug panel) and Cmd+E (error log)
+        self._init_menu_bar()
         # esc cancels in-progress line/polygon/front drawing.
         self._esc_shortcut = QShortcut(QKeySequence("Escape"), self)
         self._esc_shortcut.activated.connect(self._on_escape_pressed)
@@ -356,29 +446,60 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _begin_archive_startup(self):
         """Called once the map is ready in archive mode."""
+        perf_log.event("archive.start", archive_time=self._archive_time.isoformat(), admin=bool(runtime_flags.FLAGS.admin_mode))
+        # keep the download caches bounded (raw lidar, NOXP); before this
+        # session downloads anything, so nothing it uses can be removed
+        threading.Thread(target=self._prune_download_caches, daemon=True, name="cache-prune").start()
         from archive.session import ArchiveSession
         from archive.time_controller import TimeController
         from archive.fetchers.radar_archive_fetcher import ArchiveRadarFetcher
         from archive.fetchers.satellite_archive_fetcher import ArchiveSatelliteFetcher
         from archive.fetchers.hazard_archive_fetcher import ArchiveHazardFetcher
         from archive.fetchers.sounding_archive_fetcher import ArchiveSoundingFetcher
+        from archive.fetchers.clamps_wind_archive_fetcher import ArchiveClampsWindFetcher
         from archive.fetchers.mqtt_reader import ArchiveMQTTReader
         from ui.controls.archive_controls import ArchiveControls
-        from ui.dialogs.archive_loading_dialog import ArchiveLoadingDialog
+        from ui.widgets.archive_loading_indicator import ArchiveLoadingIndicator
 
         self._archive_session = ArchiveSession(start_time=self._archive_time)
 
         # time controller — central archive clock.
         self._time_ctrl = TimeController(start_time=self._archive_time, parent=self)
+        self._time_ctrl.playing_changed.connect(self._on_archive_playing_changed)
 
         # archive controls bar at bottom of screen.
         self._archive_controls = ArchiveControls(self._time_ctrl, self._map_container)
         self._archive_controls.setObjectName("archiveControls")
         self._archive_controls.set_radar_status("Radar: waiting")
         self._archive_controls.set_satellite_status("Sat: waiting")
-        self._archive_controls.set_obs_status(
-            "OBS: probing" if runtime_flags.FLAGS.admin_mode else "OBS: MQTT"
-        )
+        self._archive_controls.set_obs_status("OBS: probing")
+        self._archive_controls.change_day_requested.connect(self._on_change_day_requested)
+        # archive mode has one bar: the status panel's live pieces move into it
+        # (the wall clock, mode badge and version don't -- see Help > About)
+        self.status_msg_label.setMaximumWidth(380)
+        self.status_msg_label.setStyleSheet("color: #9BA3B2; font-size: 11px;")
+        for widget in (self.status_msg_label, self.coord_label, self.vehicle_count_label, self.net_indicator):
+            self._archive_controls.add_info_widget(widget)
+        self.coord_label.setStyleSheet(self.coord_label.styleSheet() + "font-size: 11px;")
+        self.vehicle_count_label.setStyleSheet(self.vehicle_count_label.styleSheet() + "font-size: 11px;")
+        self._status_left.hide()
+        # EXIT floats on its own at the map's top right, apart from the header
+        # and the time bar (positioned in _layout_overlays)
+        self._exit_button = QToolButton(self._map_container)
+        self._exit_button.setObjectName("archiveExitButton")
+        self._exit_button.setText("EXIT")
+        self._exit_button.setToolTip("Exit this session and pick a different day")
+        self._exit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._exit_button.setStyleSheet(
+            "QToolButton#archiveExitButton { color: #F87171; background-color: rgba(15, 15, 26, 0.92); "
+            "border: 1px solid rgba(248, 113, 113, 0.55); border-radius: 6px; padding: 0 10px; "
+            "font-size: 11px; font-weight: 700; letter-spacing: 1px; } "
+            "QToolButton#archiveExitButton:hover { background-color: rgba(248, 113, 113, 0.16); }")
+        self._exit_button.clicked.connect(self._archive_controls.request_exit)
+        self._exit_button.show()
+        self._update_menu_state()
+        if self._case_package_at_start:
+            self._later(0, lambda: self._load_case_package(Path(self._case_package_at_start), at_start=True))
         self._archive_controls.show()
 
         # mqtt reader — vehicles, annotations, cones, drawings.
@@ -402,6 +523,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_mqtt.scan_sectors_cleared.connect(self._clear_archive_scan_sectors)
         self._archive_vehicle_obs = None
         self._archive_vehicle_obs_started = False
+        self._archive_vehicle_obs_from_catalog = False
+        self._archive_vehicle_obs_roster_size = 0
+        self._archive_vehicle_obs_loaded = False
+        # True while _try_auto_select_radar_station is waiting on the dense
+        # observation source (see its own docstring) rather than having
+        # already fallen back to home.
+        self._radar_station_awaiting_dense_obs = False
 
         # hazard fetcher.
         self._archive_hazard = ArchiveHazardFetcher(
@@ -423,11 +551,142 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._sounding_dialog = SoundingDialog(self)
         self._archive_sounding = ArchiveSoundingFetcher(parent=self)
         self._archive_sounding.sounding_ready.connect(self._on_sounding_ready)
-        self._archive_sounding.fetch_error.connect(
-            lambda msg: self.status_msg_label.setText(f"Sounding: {msg}")
-        )
-        # also initialise the sounding-station layer so the map shows clickable sites.
+        self._archive_sounding.coptersondes_ready.connect(self._on_archive_coptersondes_ready)
+        self._watch_worker_errors(self._archive_sounding, self._archive_sounding.fetch_error, "Sounding")
+        # also initialize the sounding-station layer so the map shows clickable sites.
         self._sounding_stations_geojson = build_stations_geojson()
+
+        from archive.fetchers.clamps_surface_playback import ClampsSurfacePlayback
+        self._archive_clamps_surface = ClampsSurfacePlayback(self)
+        self._archive_clamps_surface.loaded.connect(self._on_clamps_surface_loaded)
+        self._watch_worker_errors(self._archive_clamps_surface, self._archive_clamps_surface.error, "CLAMPS surface")
+        self._time_ctrl.time_changed.connect(self._update_clamps_surface)
+        self._archive_clamps_surface.load(self._archive_time)
+
+        # CLAMPS wind profiles (VAD dialog reuse; on-demand, like soundings).
+        self._archive_clamps_wind = ArchiveClampsWindFetcher(parent=self)
+        self._archive_clamps_wind.sets_ready.connect(self._on_archive_clamps_wind_ready)
+        self._watch_worker_errors(self._archive_clamps_wind, self._archive_clamps_wind.error, "CLAMPS wind")
+
+        # NOXP mobile radar (auto-discovered at startup, selected the same
+        # way as any NEXRAD site -- click its marker/"Stations" entry).
+        # True whenever NOXP is the site currently displayed on the map;
+        # always defined (not just under the feature flag) since it's
+        # checked from the general WSR-88D render/selector-population path
+        # regardless of whether NOXP itself is enabled.
+        self._noxp_active = False
+        self._archive_noxp = None
+        # The site-picker/"Stations" entry for NOXP -- only appended once a
+        # volume has actually loaded and given it a position (see
+        # _push_radar_station_sites), so it can't be picked before there's
+        # somewhere to point the fetch. Always defined for the same reason
+        # as _noxp_active above -- _push_radar_station_sites reads it from
+        # the general (not NOXP-gated) radar-site-marker setup path.
+        self._noxp_station_site: dict | None = None
+        if feature_flags.is_enabled("noxp_radar"):
+            from archive.fetchers.noxp_radar_archive_fetcher import ArchiveNoxpRadarFetcher
+            self._noxp_current_volume = None
+            self._noxp_overlay = None
+            self._noxp_generation = 0
+            self._noxp_render_busy = False
+            self._noxp_render_pending = None
+            self._noxp_asset_url = None
+            # The campaign/platform this case's year resolved to at startup
+            # (archive/catalog.py KnownPlatform), and the assets discovered
+            # for it -- previously held by noxp_controls, now that there's
+            # no drawer widget to hold them.
+            self._noxp_platform = None
+            self._noxp_assets: list = []
+            # Cached separately from ArchiveControls' scan-step buttons,
+            # which only ever hold one active list -- swapped in/out of
+            # them as NOXP activates/deactivates (see _activate_noxp_radar)
+            # so switching back to WSR-88D doesn't need a re-fetch.
+            self._wsr88d_scan_times: list[str] = []
+            self._noxp_scan_times: list[str] = []
+            self._archive_noxp = ArchiveNoxpRadarFetcher(parent=self)
+            self._archive_noxp.assets_ready.connect(self._on_archive_noxp_assets_ready)
+            self._archive_noxp.volume_loaded.connect(self._on_archive_noxp_volume_loaded)
+            # NOXP discovery/load errors (e.g. a bounded THREDDS crawl
+            # running out of budget mid-tree) are routine background noise,
+            # not something worth interrupting the shared status line for --
+            # they're already logged (see ArchiveNoxpRadarFetcher's own
+            # log.warning calls) for anyone who actually needs them.
+            self._time_ctrl.time_changed.connect(self._on_time_changed_update_noxp_overlay)
+
+        # CLAMPS raw lidar quicklook (discovers every known source once per
+        # archive date; on-demand load of one selected file).
+        self._archive_raw_lidar = None
+        # map-overlay state: the chosen lidar's PPI / CSM sweep at the clock
+        # (_render_lidar_overlay below).
+        self._lidar_overlay_generation = 0
+        self._lidar_overlay_key = None         # (scan, field) on the map now; re-rendered only when it changes
+        self._lidar_large_loading = set()      # instruments whose held-back files are loading
+        self._lidar_awaiting_first_render = False
+        self._lidar_overlay = None
+        self._lidar_overlay_field = None
+        self._lidar_min_intensity = None      # RAW LIDAR intensity filter; None draws every cell
+        self._lidar_sites = {}               # trailer -> recorded site (header of its files)
+        self._lidar_files_by = {}            # instrument -> its loaded files (RawLidarRays with .scans)
+        self._lidar_large_by = {}            # instrument -> files held back for size (loaded once chosen)
+        self._lidar_locations = []           # every place a lidar scanned from (core/lidar_scans.locations)
+        self._lidar_unplaced = {}            # instrument -> scans with no position
+        self._lidar_marker_ids = set()       # location markers on the map (while LIDAR is open)
+        self._lidar_survey_done = False
+        self._lidar_location = None          # the chosen location
+        self._lidar_instrument = ""          # its lidar
+        self._lidar_scans = []               # its scans
+        self._lidar_overlay_render_in_flight = False
+        self._lidar_overlay_pending = False
+        if feature_flags.is_enabled("raw_lidar_quicklook"):
+            from archive.fetchers.raw_lidar_quicklook_fetcher import ArchiveRawLidarQuicklookFetcher
+            self._archive_raw_lidar = ArchiveRawLidarQuicklookFetcher(parent=self)
+            self._archive_raw_lidar.assets_ready.connect(self._on_archive_raw_lidar_assets_ready)
+            self._archive_raw_lidar.sites_ready.connect(self._on_raw_lidar_sites_ready)
+            self._archive_raw_lidar.instrument_file_ready.connect(self._on_lidar_file_ready)
+            self._archive_raw_lidar.instrument_large_file.connect(self._on_lidar_large_file)
+            self._archive_raw_lidar.instrument_loaded.connect(self._on_lidar_instrument_loaded)
+            self._archive_raw_lidar.survey_done.connect(self._on_lidar_survey_done)
+            self._watch_worker_errors(self._archive_raw_lidar, self._archive_raw_lidar.error, "Raw lidar")
+            self._archive_raw_lidar.fetch(self._archive_time)
+            self._time_ctrl.time_changed.connect(self._on_time_changed_update_lidar_overlay)
+
+        # ASOS historical surface observations (bbox-draw, replays with the
+        # archive clock -- the archive-mode counterpart to live mode's
+        # SurfaceFetcher/set_asos_bbox_mode feature). btn_archive_asos and
+        # its toggle handling live in _init_toolbar, which always runs
+        # before this.
+        self._archive_asos = None
+        if feature_flags.is_enabled("archive_asos"):
+            from archive.fetchers.asos_archive_fetcher import ArchiveAsosFetcher
+            self._archive_asos = ArchiveAsosFetcher(self._archive_time, parent=self)
+            self._archive_asos_cache: dict[str, tuple[tuple, bytes]] = {}
+            self._archive_asos_station_ids: set[str] = set()
+            self._archive_asos_render_generation = 0
+            self._archive_asos_pending: dict[str, tuple[str, object]] = {}
+            self._archive_asos_flush_scheduled = False
+            self._archive_asos.stations_updated.connect(self._on_archive_asos_station_updated)
+            self._archive_asos.stations_cleared.connect(self._on_archive_asos_stations_cleared)
+            self._archive_asos.load_finished.connect(self._on_archive_asos_load_finished)
+            self._watch_worker_errors(self._archive_asos, self._archive_asos.error, "ASOS")
+            self._time_ctrl.time_changed.connect(self._archive_asos.on_time_changed)
+            self.map_widget.asos_bbox_selected.connect(self._on_archive_asos_bbox_selected)
+
+        # Damage-survey paths (DAT, falling back to NCEI Storm Events),
+        # bbox-draw like ASOS above -- reuses the same asos_bbox_selected
+        # draw tool (decided deliberately: the draw gesture itself is
+        # generic, only the method/signal names are ASOS-specific; each
+        # feature self-guards by its own toolbar button's checked state).
+        # No render-worker/chunking needed here, unlike ASOS's per-station
+        # PNG glyphs -- this is one JS call with a modest GeoJSON payload.
+        self._archive_damage_paths = None
+        if feature_flags.is_enabled("damage_paths"):
+            from archive.fetchers.damage_paths_archive_fetcher import ArchiveDamagePathsFetcher
+            self._archive_damage_paths = ArchiveDamagePathsFetcher(self._archive_time, parent=self)
+            self._archive_damage_paths_showing = False
+            self._archive_damage_paths.paths_ready.connect(self._on_archive_damage_paths_ready)
+            self._watch_worker_errors(self._archive_damage_paths, self._archive_damage_paths.error, "Damage paths")
+            self.map_widget.asos_bbox_selected.connect(self._on_archive_damage_paths_bbox_selected)
+        self.map_widget.asos_box_cancelled.connect(self._on_archive_box_cancelled)
 
         # radar overlay (reuses existing renderer).
         self._radar_overlay = RadarOverlay(self.map_widget)
@@ -448,19 +707,59 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_pending_render_scan = None
         self._archive_render_in_flight = False
         self._archive_render_ready.connect(self._on_archive_render_ready)
+        self._noxp_render_ready.connect(self._on_noxp_render_ready)
+        self._lidar_overlay_render_ready.connect(self._on_lidar_overlay_render_ready)
+
+        # Tier 2: debounced archive "super-res" render (see ui/map/radar_overlay's
+        # ARCHIVE_SUPERRES_GRID_SIZE). Runs on its own single-worker pool so a
+        # slow ~4096px render can never block/delay the fast Tier-1 preview
+        # above, which stays responsive during active scrubbing.
+        from ui.app.radar_superres_cache import RadarSuperresCache
+        self._archive_superres_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="archive-radar-superres"
+        )
+        self._archive_superres_cache = RadarSuperresCache(capacity=12)
+        from ui.map.radar_overlay import ARCHIVE_SUPERRES_GRID_SIZE
+        self._archive_superres_size = ARCHIVE_SUPERRES_GRID_SIZE   # steps down on a slow computer
+        self._archive_superres_timer = QTimer(self)
+        self._archive_superres_timer.setSingleShot(True)
+        self._archive_superres_timer.setInterval(500)
+        self._archive_superres_timer.timeout.connect(self._on_archive_superres_timer_fired)
+        self._archive_superres_ready.connect(self._on_archive_superres_ready)
+        self._archive_superres_pending = None
+        self._radar_settled_scan = None      # the scan whose full-resolution image is on the map
 
         # wire time controller to archive fetchers.
         self._time_ctrl.time_changed.connect(self._archive_mqtt.on_time_changed)
         self._time_ctrl.time_changed.connect(self._archive_hazard.on_time_changed)
         self._time_ctrl.time_changed.connect(self._archive_satellite.on_time_changed)
         self._time_ctrl.time_changed.connect(self._archive_sounding.on_time_changed)
+        if hasattr(self, "btn_track"):
+            # _init_toolbar() (called from __init__, before _time_ctrl exists)
+            # already built the TRACK tab -- the time_changed connection has
+            # to wait until here, once _time_ctrl is actually constructed.
+            self._time_ctrl.time_changed.connect(self._on_time_changed_update_track_highlight)
+            QTimer.singleShot(0, self._open_session_track_at_start)
+        if hasattr(self, "trail_controls"):
+            self._time_ctrl.time_changed.connect(self._schedule_trails)
 
-        # show loading dialog while initial data fetches run.
-        loading_tasks = ["Vehicle tracks", "Radar index", "Hazard data", "Satellite index"]
-        self._archive_loading = ArchiveLoadingDialog(
-            session_label=self._archive_time.strftime("%Y-%m-%d  %H:%M UTC"),
+        # Small top-left status text while initial data fetches run, in
+        # place of a blocking modal -- the session is interactive
+        # immediately, this just narrates what's still loading in the
+        # background. Ordered to match actual completion order, not just
+        # alphabetically/arbitrarily: Hazard and Satellite are fast
+        # independent checks, Mesonets is a slower network fetch, and
+        # Radar can only start once Mesonets has picked a station (see
+        # _try_auto_select_radar_station) -- so Radar always finishes
+        # last. Mobile Radar (NOXP) is a bounded THREDDS crawl -- slower
+        # and less predictable than any of the above, and never blocks
+        # the case from being viewed (see NoxpArchive's disk-backed
+        # discovery cache for why a later visit to the same campaign is
+        # nowhere near this slow) -- so it goes last of all.
+        loading_tasks = ["SPC & NWS", "Satellite", "Mesonets", "Radar", "Mobile Radar"]
+        self._archive_loading = ArchiveLoadingIndicator(
             tasks=loading_tasks,
-            parent=self,
+            parent=self._map_container,
         )
 
         # start background fetches; mark tasks done via callbacks.
@@ -471,49 +770,153 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # track completion of loading tasks.
         def _check_mqtt_loaded():
             if self._archive_mqtt._loaded:
-                self._archive_loading.set_task_done("Vehicle tracks")
+                self._archive_loading.set_task_done("Mesonets")
                 self._start_archive_vehicle_obs()
                 self._try_auto_select_radar_station()
+                self._update_archive_session_end()
             else:
-                QTimer.singleShot(500, _check_mqtt_loaded)
+                self._later(500, _check_mqtt_loaded)
 
         def _check_hazard_loaded():
             if self._archive_hazard._watches_loaded:
-                self._archive_loading.set_task_done("Hazard data")
+                self._archive_loading.set_task_done("SPC & NWS")
             else:
-                QTimer.singleShot(500, _check_hazard_loaded)
+                self._later(500, _check_hazard_loaded)
 
-        self._archive_satellite.error.connect(
-            lambda _: self._archive_loading.set_task_error("Satellite index")
-            if self._archive_loading.isVisible() else None
-        )
+        self._archive_satellite.error.connect(self._on_archive_satellite_loading_error)
         self._archive_satellite.error.connect(self._on_archive_satellite_error)
 
         def _check_satellite_indexed():
-            if not self._archive_loading.isVisible():
+            if not self._archive_loading.startup_pending():
                 return
             if "conus" in self._archive_satellite._indexed_modes:
-                self._archive_loading.set_task_done("Satellite index")
+                self._archive_loading.set_task_done("Satellite")
             else:
-                QTimer.singleShot(1000, _check_satellite_indexed)
+                self._later(1000, _check_satellite_indexed)
 
-        QTimer.singleShot(500, _check_satellite_indexed)
+        self._later(500, _check_satellite_indexed)
 
-        QTimer.singleShot(400, _check_mqtt_loaded)
-        QTimer.singleShot(400, _check_hazard_loaded)
+        self._later(400, _check_mqtt_loaded)
+        self._later(400, _check_hazard_loaded)
+
+        # Mobile Radar (NOXP): find this case's own campaign by year and
+        # search it for this specific day automatically -- no manual
+        # Campaign/Volume picking. NoxpArchive.discover() resumes via its
+        # own internal catalog memo on a repeat call against the same
+        # instance (see ArchiveNoxpRadarFetcher._get_noxp), so retrying
+        # here actually makes progress instead of re-crawling from
+        # scratch. "Nothing found" is the normal case (NOXP is rarely
+        # deployed) -- times out to done, not an error.
+        if self._archive_noxp is not None:
+            from archive.catalog import ALL_PLATFORMS, catalogs_for_platform
+            from archive.session import session_bounds
+            _year_str = str(self._archive_time.year)
+            _noxp_platform = next(
+                (p for p in ALL_PLATFORMS if p.family == "NOXP Radar" and _year_str in p.display_name),
+                None,
+            )
+            if _noxp_platform is None:
+                self._archive_loading.set_task_done("Mobile Radar")
+            else:
+                self._noxp_platform = _noxp_platform
+                _noxp_catalog_root = catalogs_for_platform(_noxp_platform)[0].url
+                _noxp_retries = {"n": 0}
+
+                # Once the foreground per-day search below concludes (either
+                # way -- found something, or gave up), pay down a full,
+                # unfiltered crawl of this campaign root in the background.
+                # A per-day search alone only ever answers the one date the
+                # user is looking at right now -- most of the time actually
+                # spent here is browsing a whole campaign one case at a time
+                # (per Tyler, 2026-09-18), so the date that matters next is
+                # usually a *different* one, not a repeat of this one. Once
+                # this root reports back as fully indexed
+                # (root_index_progress), every other date in it answers
+                # instantly from then on, this session and every future one
+                # (see NoxpArchive._cache_root_index -- it's a disk cache).
+                # Deliberately NOT started until the foreground search is
+                # done: both share the fetcher's one worker thread, and
+                # starting this earlier would compete with -- and could
+                # measurably slow down -- the very loading-dialog checkmark
+                # this whole feature exists to speed up on a *later* visit.
+                # Once running, it continues well past when the loading
+                # dialog itself closes. try_background_index() only starts
+                # when the worker is otherwise idle, and skips (retried on
+                # the next tick) rather than preempting a real foreground
+                # request already queued there -- but the reverse isn't
+                # true: a foreground click that lands *while* a tick is
+                # already running (e.g. loading a NOXP volume) still has to
+                # wait for that tick to finish, since there's no mid-crawl
+                # cancellation wired up. Kept to a modest budget (not the
+                # foreground path's own 40) specifically to bound that
+                # worst case to a handful of seconds rather than tens.
+                _NOXP_BACKGROUND_INDEX_BUDGET = 20
+
+                def _tick_noxp_background_index(_root=_noxp_catalog_root):
+                    if self._archive_noxp is None or self._archive_noxp.closed:
+                        return
+                    if not self._archive_noxp.try_background_index(_root, budget=_NOXP_BACKGROUND_INDEX_BUDGET):
+                        self._later(3000, _tick_noxp_background_index)  # worker busy -- retry later
+
+                def _on_noxp_root_indexed(catalog_root, fully_indexed, _root=_noxp_catalog_root):
+                    if catalog_root != _root or self._archive_noxp is None or self._archive_noxp.closed:
+                        return
+                    if not fully_indexed:
+                        self._later(2000, _tick_noxp_background_index)
+
+                self._archive_noxp.root_index_progress.connect(_on_noxp_root_indexed)
+
+                def _on_noxp_startup_assets(platform_id, assets, _platform=_noxp_platform):
+                    if platform_id != _platform.platform_id or not self._archive_loading.startup_pending():
+                        return
+                    # any volume inside the session's span, which runs into
+                    # the next UTC morning (archive/session.py)
+                    _start, _cap = session_bounds(self._archive_time)
+                    matching = [a for a in assets if a.nominal_time is not None and _start <= a.nominal_time <= _cap]
+                    if not matching:
+                        return   # crawl still incomplete or genuinely nothing here -- _retry_noxp_discovery decides
+                    self._archive_loading.set_task_done("Mobile Radar")
+                    try:
+                        self._archive_noxp.assets_ready.disconnect(_on_noxp_startup_assets)
+                    except (TypeError, RuntimeError):
+                        pass
+                    nearest = min(matching, key=lambda a: abs((a.nominal_time - self._archive_time).total_seconds()))
+                    self._on_noxp_asset_selected(nearest)
+                    self._later(2000, _tick_noxp_background_index)
+
+                self._archive_noxp.assets_ready.connect(_on_noxp_startup_assets)
+
+                def _retry_noxp_discovery(_platform=_noxp_platform, _root=_noxp_catalog_root):
+                    if not self._archive_loading.startup_pending():
+                        return
+                    _noxp_retries["n"] += 1
+                    if _noxp_retries["n"] > 15:   # ~45s of retries at 3s apart
+                        self._archive_loading.set_task_done("Mobile Radar")
+                        self._later(2000, _tick_noxp_background_index)
+                        return
+                    self._archive_noxp.discover(_platform.platform_id, _root, self._archive_time)
+                    self._later(3000, _retry_noxp_discovery)
+
+                _retry_noxp_discovery()
 
         self._archive_loading.show()
-        # trigger an initial data load for all fetchers once loading completes.
-        self._archive_loading.accepted.connect(
-            lambda: self._time_ctrl.set_time(self._time_ctrl.current_time)
-        )
-        self._archive_loading.rejected.connect(self._on_archive_loading_aborted)
+        # once every background task finishes, re-nudge every fetcher with a
+        # fresh time-changed signal -- catches any that only just finished
+        # wiring up mid-startup and missed the very first one.
+        self._archive_loading.all_done.connect(self._renudge_archive_clock)
 
         self.hazard_controls.spc_day_changed.connect(self._on_archive_spc_day_changed)
         self.hazard_controls.spc_mode_changed.connect(self._on_archive_spc_mode_changed)
         self.hazard_controls.spc_watches_toggled.connect(self._on_archive_watches_toggled)
         self.hazard_controls.spc_mds_toggled.connect(self._on_archive_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_archive_nws_toggled)
+        # CWA boundaries are a static local shapefile, the same in live and
+        # archive. _init_hazards() wires the toggle only in live mode (it runs
+        # from the post-startup fetchers), so archive mode wires it here.
+        # UniqueConnection: _begin_archive_startup() can run more than once
+        # per app lifetime, and one click must toggle the layer exactly once.
+        self.hazard_controls.cwa_toggled.connect(
+            self._on_cwa_toggled, type=Qt.ConnectionType.UniqueConnection)
         self.hazard_controls.fetch_requested.connect(self._archive_hazard.refresh_now)
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
 
@@ -530,30 +933,34 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.radar_controls.configure_for_archive(True)
         self.radar_controls.product_changed.connect(self._on_archive_product_changed)
         self.radar_controls.tilt_changed.connect(self._on_archive_tilt_changed)
+        self.radar_controls.velocity_options_changed.connect(self._apply_velocity_options)
+        self._refresh_velocity_options_row()
 
-        self.map_widget.set_radar_stations(self._radar_station_sites)
+        self._push_radar_station_sites()
         self.map_widget.radar_station_clicked.connect(self._on_radar_station_clicked)
         self.radar_controls.stations_requested.connect(self._toggle_radar_station_picker)
 
-        QTimer.singleShot(200, lambda: self._time_ctrl.set_time(self._archive_time))
+        self._later(200, lambda: self._time_ctrl.set_time(self._archive_time))
 
         # lay out the archive controls bar at the bottom of the screen.
         QTimer.singleShot(0, self._layout_overlays)
 
     def _start_archive_vehicle_obs(self) -> None:
-        """Start the optional admin one-second observation source."""
+        """Start the one-second observation source (FOFS mesonet files)."""
         if (
-            not runtime_flags.FLAGS.admin_mode
-            or self._archive_vehicle_obs_started
+            self._archive_vehicle_obs_started
             or not hasattr(self, "_archive_mqtt")
         ):
             return
         self._archive_vehicle_obs_started = True
 
+        # Recorded MQTT vehicles (which carry icon types); the fetcher adds
+        # every vehicle THREDDS publishes files for this session in its
+        # background load (archive/fofs_index.py), so probes never connected
+        # to STORM, and new vehicle folders, are included too.
         vehicles = self._archive_mqtt.vehicle_metadata()
-        if not vehicles:
-            self._archive_controls.set_obs_status("OBS: MQTT fallback")
-            return
+        self._archive_vehicle_obs_from_catalog = not vehicles
+        self._archive_vehicle_obs_roster_size = len(vehicles)
 
         from archive.fetchers.vehicle_obs_archive_fetcher import ArchiveVehicleObsFetcher
 
@@ -577,46 +984,182 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         )
         self._archive_vehicle_obs.load(vehicles)
 
+    def _update_archive_session_end(self) -> None:
+        """Size the timeline to the day's activity (archive/session.py) once
+        the evidence is in: the recorded MQTT history, plus the one-second
+        vehicle tracks whenever those are being loaded -- waiting for both
+        so the timeline doesn't shrink and then grow again. With no
+        evidence at all the session keeps its full UTC day, as before."""
+        from archive.session import activity_end, session_bounds
+        if not getattr(self._archive_mqtt, "_loaded", False):
+            return
+        if self._archive_vehicle_obs_started and not self._archive_vehicle_obs_loaded:
+            return
+        times = self._archive_mqtt.activity_times()
+        if self._archive_vehicle_obs is not None and self._archive_vehicle_obs_loaded:
+            times += self._archive_vehicle_obs.activity_times()
+        end = activity_end(self._archive_time, times)
+        if end is None:
+            start, _ = session_bounds(self._archive_time)
+            end = start + timedelta(days=1)
+        log.info("Archive session runs to %s (%d activity markers)", end.isoformat(), len(times))
+        self._time_ctrl.set_window_end(end)
+
     def _on_archive_vehicle_obs_loaded(self, vehicle_ids: set[str]) -> None:
-        total = len(self._archive_mqtt.vehicle_metadata())
+        self._archive_vehicle_obs_loaded = True
+        if perf_log.enabled():
+            perf_log.event("mesonet.loaded", vehicles=len(vehicle_ids),
+                           rows=sum(len(v) for v in (self._archive_vehicle_obs._observations or {}).values()))
+        # the lidar truck's track is already here: its lidar files use it too
+        from archive.vehicle_aliases import mqtt_vehicle_id
+        from archive.fetchers.vehicle_obs_archive_fetcher import remember_dltruck_track
+        truck = (self._archive_vehicle_obs._observations or {}).get(mqtt_vehicle_id("dltruck"))
+        if truck:
+            remember_dltruck_track(truck)
+        self._schedule_trails()
+        self._update_archive_session_end()
+        if self._radar_station_awaiting_dense_obs:
+            self._radar_station_awaiting_dense_obs = False
+            self._try_auto_select_radar_station()
+
+        self._archive_vehicle_obs_roster_size = self._archive_vehicle_obs.roster_size
+        total = self._archive_vehicle_obs_roster_size
         if not vehicle_ids:
-            self._archive_controls.set_obs_status("OBS: MQTT fallback")
+            status = (
+                "OBS: no catalog data for this date"
+                if self._archive_vehicle_obs_from_catalog
+                else "OBS: MQTT fallback"
+            )
+            self._archive_controls.set_obs_status(status)
             return
 
         self._archive_controls.set_precision_mode(True)
+        source_label = "catalog" if self._archive_vehicle_obs_from_catalog else "1-second"
         if len(vehicle_ids) == total:
-            status = f"OBS: 1-second ({len(vehicle_ids)})"
+            status = f"OBS: {source_label} ({len(vehicle_ids)})"
         else:
-            status = f"OBS: partial {len(vehicle_ids)}/{total}"
+            status = f"OBS: {source_label} partial {len(vehicle_ids)}/{total}"
         self._archive_controls.set_obs_status(status, active=True)
         self._archive_vehicle_obs.on_time_changed(self._time_ctrl.current_time)
         self._layout_overlays()
 
     def _try_auto_select_radar_station(self) -> None:
-        """Pick the nearest NEXRAD station from vehicle positions, or fall back
-        to the home location when no MQTT data is available."""
+        """Pick the nearest NEXRAD station to where the deployment actually
+        was at the requested archive start time, or fall back to the home
+        location when no position data is available at all. Deliberately
+        uses the position nearest self._archive_time rather than the day's
+        first GPS fix -- a deployment can stage from a base far from the
+        actual storm intercept, so the day's first position is a poor
+        proxy for where the probes ended up.
+
+        The coarse MQTT vehicles topic (ArchiveMQTTReader) can genuinely
+        have no history for a date STORM wasn't deployed/connected for --
+        _start_archive_vehicle_obs already has its own fallback for this
+        exact case (the dense one-second observations, probing the
+        full FOFS roster directly), so before giving up to the home
+        location this also waits for and checks that richer source rather
+        than declaring "no vehicle positions" while it's simply still
+        loading.
+        """
         if not hasattr(self, "_archive_mqtt"):
             return
-        positions = self._archive_mqtt.first_vehicle_positions()
+        if getattr(self, "_package_radar_station", None):     # an opened case package names it: no waiting
+            self._apply_radar_station(None)
+            return
+        positions = self._archive_mqtt.vehicle_positions_near(self._archive_time)
         if positions:
-            _, lat, lon = positions[0]
-            site = self._nearest_nexrad(lat, lon, archive=True)
-        else:
-            log.info(
-                "Archive: no vehicle positions — falling back to home location "
-                "(%.3f, %.3f) for radar station selection",
-                config.HOME_LAT, config.HOME_LON,
-            )
-            site = self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True)
+            self._finish_radar_station_selection(positions, "MQTT")
+            return
 
+        dense = getattr(self, "_archive_vehicle_obs", None)
+        if dense is not None and not self._archive_vehicle_obs_loaded:
+            # Still loading (started just before this call, in
+            # _check_mqtt_loaded) -- _on_archive_vehicle_obs_loaded will
+            # call this again once it's ready, instead of this falling
+            # back to home immediately.
+            self._radar_station_awaiting_dense_obs = True
+            # On a slow connection the one-second archive took ~100 s to load
+            # (or time out) on a field laptop, with no radar at all meanwhile.
+            # After a short wait, start from home; switch once vehicles arrive.
+            QTimer.singleShot(RADAR_WAIT_FOR_VEHICLES_MS, self._radar_wait_for_vehicles_timed_out)
+            return
+        if dense is not None:
+            positions = dense.vehicle_positions_near(self._archive_time)
+            if positions:
+                self._finish_radar_station_selection(positions, "1-second archive")
+                return
+
+        if getattr(self, "_radar_station_provisional", False):
+            self._radar_station_provisional = False   # already running from home
+            return
+        log.info(
+            "Archive: no vehicle positions from any source — falling back to "
+            "home location (%.3f, %.3f) for radar station selection",
+            config.HOME_LAT, config.HOME_LON,
+        )
+        self._apply_radar_station(self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True))
+
+    def _radar_wait_for_vehicles_timed_out(self) -> None:
+        if not self._radar_station_awaiting_dense_obs or self._archive_radar is not None:
+            return
+        log.info("Archive: vehicle positions not loaded after %d s; starting radar from home for now",
+                 RADAR_WAIT_FOR_VEHICLES_MS // 1000)
+        perf_log.event("note", what="radar started from home while vehicles load")
+        self._radar_station_provisional = True
+        self._apply_radar_station(self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True))
+
+    def _finish_radar_station_selection(self, positions, source: str) -> None:
+        vehicle_id, lat, lon = positions[0]
+        site = self._nearest_nexrad(lat, lon, archive=True)
+        if getattr(self, "_radar_station_provisional", False):
+            # radar started from home while vehicles loaded: move only if
+            # the vehicles were near another radar and nobody picked one since
+            self._radar_station_provisional = False
+            if getattr(self, "_radar_station_user_picked", False) or (
+                    self._archive_radar is not None and self._archive_radar.station == site):
+                return
+        log.info(
+            "Archive: radar station selected from %s (%s) at (%.4f, %.4f) "
+            "(nearest reported position to the requested %s start time) -> %s",
+            vehicle_id, source, lat, lon, self._archive_time.isoformat(), site,
+        )
+        if len(positions) > 1:
+            log.info(
+                "Archive: %d vehicles reported at that same timestamp; "
+                "used the first (%s) -- others: %s",
+                len(positions), vehicle_id,
+                [(v, round(la, 4), round(lo, 4)) for v, la, lo in positions[1:]],
+            )
+        self._apply_radar_station(site)
+
+    def _apply_radar_station(self, site: "str | None") -> None:
+        package_site = getattr(self, "_package_radar_station", None)
+        if package_site:                    # an opened case package names its station
+            self._package_radar_station = None
+            site = package_site
         if not site:
             self.status_msg_label.setText(
                 "Could not determine radar station — select one on the map"
             )
             return
-
-        self._archive_session.radar_station = site
+        self._center_map_on_case(site)
         self._start_archive_radar(site)
+
+    # Regional view around the case's radar: its ~230 km coverage plus
+    # some surroundings.
+    _CASE_VIEW_ZOOM = 7.5
+
+    def _center_map_on_case(self, site: str) -> None:
+        """Once per session, start the map on the case -- centered on the
+        radar chosen for it (the one nearest the vehicles at the session's
+        start time) -- instead of the default view over central Oklahoma."""
+        if getattr(self, "_archive_map_centered", False):
+            return
+        info = next((i for i in (self._radar_station_sites or []) if i.get("site_id") == site), None)
+        if info is None or info.get("lat") is None or info.get("lon") is None:
+            return
+        self._archive_map_centered = True
+        self.map_widget.fly_to(info["lat"], info["lon"], zoom=self._CASE_VIEW_ZOOM)
 
     def _nearest_nexrad(self, lat: float, lon: float, archive: bool = False) -> "str | None":
         """Return the 4-letter NEXRAD ID closest to lat/lon.
@@ -646,13 +1189,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # discard any in-flight/pending render for the old station
         self._archive_render_generation += 1
         self._archive_pending_render_scan = None
-        self._archive_render_in_flight = False
+        self._archive_superres_timer.stop()
+        self._archive_superres_pending = None
 
         if self._archive_radar is not None:
             for sig in (
                 self._archive_radar.scan_ready,
                 self._archive_radar.loading_changed,
                 self._archive_radar.error,
+                self._archive_radar.index_loaded,
             ):
                 try:
                     sig.disconnect()
@@ -663,41 +1208,32 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             except Exception:
                 pass
 
+            self._archive_radar.shutdown()
+            self._archive_radar.deleteLater()            # a child of the window: freed only when deleted
+            self._archive_radar = None
+            self._current_radar_scan = None               # the old station's volume goes with it
+
+        self._radar_overlay.clear()
+        self._archive_controls.set_rendered_radar(None)
         self._archive_radar = ArchiveRadarFetcher(
             station=station,
             session_date=self._archive_time,
             parent=self,
         )
         self._archive_radar.scan_ready.connect(self._on_archive_radar_scan)
-        self._archive_radar.loading_changed.connect(
-            lambda loading: (
-                self.status_msg_label.setText(f"Radar: loading {station}…" if loading else ""),
-                self._archive_controls.set_radar_status(f"Radar: loading {station}…")
-                if loading and hasattr(self, "_archive_controls") else None
-            )
-        )
+        self._apply_velocity_options()
+        if hasattr(self, "_archive_controls"):
+            self._archive_radar.index_loaded.connect(self._on_archive_radar_index_loaded)
+        self._archive_radar.loading_changed.connect(self._on_archive_radar_loading_changed)
         self._archive_radar.error.connect(self._on_archive_radar_error)
         self._time_ctrl.time_changed.connect(self._archive_radar.on_time_changed)
 
         loading = getattr(self, "_archive_loading", None)
-        if loading is not None and loading.isVisible():
-            self._archive_radar.index_loaded.connect(
-                lambda _: loading.set_status("Fetching first radar scan…")
-            )
-            self._archive_radar.scan_ready.connect(
-                lambda _: loading.set_task_done("Radar index")
-            )
-            self._archive_radar.error.connect(
-                lambda _: loading.set_task_error("Radar index")
-            )
-            _radar_timeout = QTimer(self)
-            _radar_timeout.setSingleShot(True)
-            _radar_timeout.setInterval(45_000)
-            _radar_timeout.timeout.connect(
-                lambda: loading.set_task_done("Radar index")
-                if loading.isVisible() else None
-            )
-            _radar_timeout.start()
+        if loading is not None and loading.startup_pending():
+            self._archive_radar.index_loaded.connect(self._on_archive_radar_index_loading_status)
+            self._archive_radar.scan_ready.connect(self._on_archive_radar_loading_done)
+            self._archive_radar.error.connect(self._on_archive_radar_loading_error)
+            self._later(45_000, self._on_archive_radar_loading_done)
 
         if hasattr(self, "radar_controls"):
             self.radar_controls.set_selected_site(station, emit=False)
@@ -705,6 +1241,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_radar.load_index()
         self._archive_radar.on_time_changed(self._time_ctrl.current_time)
 
+
+    def _on_archive_radar_scan_package_view(self) -> None:
+        """Apply an opened package's radar product/tilt once products exist."""
+        view = getattr(self, "_package_radar_view", None)
+        if not view:
+            return
+        self._package_radar_view = None
+        if view.get("product"):
+            self.radar_controls.set_current_product(view["product"])
+        tilt = view.get("tilt_index")
+        if tilt is not None:
+            self.radar_controls.select_tilt(tilt)
 
     def _on_archive_radar_scan(self, scan) -> None:
         """Handle a newly decoded Level-2 scan from the archive fetcher.
@@ -714,16 +1262,22 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         so archive playback doesn't stall the UI on every frame.
         """
         self._current_radar_scan = scan
+        if getattr(self, "_package_radar_view", None):
+            self._later(0, self._on_archive_radar_scan_package_view)
 
-        # add tilt/product selectors to archive controls the first time;
-        if hasattr(scan, "available_products"):
+        # add tilt/product selectors to archive controls the first time --
+        # skipped while NOXP is the displayed radar, or every incoming
+        # WSR-88D scan (decoding keeps running in the background so
+        # switching back is instant) would clobber the NOXP field/sweep
+        # lists the RADAR tab is currently showing.
+        if hasattr(scan, "available_products") and not self._noxp_active:
             from core.level2_radar_scan import L2_PRODUCTS
             products = [
                 (f, L2_PRODUCTS[f]["label"]) for f in scan.available_products
                 if f in L2_PRODUCTS
             ]
             self.radar_controls.set_archive_products(products)
-            current_tilt_idx = getattr(self._archive_radar, "_tilt_idx", 0)
+            current_tilt_idx = getattr(scan, "tilt_index", getattr(self._archive_radar, "_tilt_idx", 0))
             self.radar_controls.set_archive_tilts(scan.available_tilts, current_tilt_idx)
 
         self._archive_pending_render_scan = scan
@@ -764,21 +1318,137 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_archive_render_ready(self, result: dict) -> None:
         """Runs on the main thread — injects the pre-rendered archive PNG into the map."""
         self._archive_render_in_flight = False
-        if result["gen"] == self._archive_render_generation:
+        if result["gen"] == self._archive_render_generation and result["scan"] is self._current_radar_scan:
             scan = result["scan"]
             if "error" in result:
                 if hasattr(self, "_archive_controls"):
                     self._archive_controls.set_radar_status("Radar: render error", error=True)
+            elif self._noxp_active:
+                pass  # NOXP is the displayed radar -- WSR-88D keeps decoding warm in the background, just not injected
             else:
                 self._radar_overlay.inject(result["png"], result["bounds"])
+                perf_log.event("radar.shown", scan=scan.scan_time.isoformat(), product=scan.product,
+                               first=not getattr(self, "_perf_radar_shown", False))
+                self._perf_radar_shown = True
                 if hasattr(self, "radar_controls"):
                     self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
                 if hasattr(self, "_archive_controls"):
+                    self._archive_controls.set_rendered_radar(scan)
                     self._archive_controls.set_radar_status(
-                        f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg {scan.scan_time.strftime('%H:%MZ')}"
+                        f"Radar: {scan.product} {scan.tilt_deg:.1f}°{_velocity_status_tag(scan)}"
                     )
+                # Tier 2: (re)start the debounced super-res upgrade for this frame.
+                # Any earlier pending fire is implicitly superseded — QTimer.start()
+                # on a running single-shot timer restarts its countdown.
+                self._archive_superres_pending = (
+                    self._archive_render_generation, self._archive_radar.station, scan,
+                )
+                self._archive_superres_timer.start()
         if self._archive_pending_render_scan is not None:
             self._submit_pending_archive_render()
+
+    def _on_archive_superres_timer_fired(self) -> None:
+        """Tier 2: the archive clock has been settled for the debounce window —
+        serve the cached super-res PNG if we have one, else render one in the
+        background. Never touches the Tier-1 pipeline above."""
+        pending = getattr(self, "_archive_superres_pending", None)
+        if pending is None or self._noxp_active:
+            return
+        gen, station, scan = pending
+        if gen != self._archive_render_generation or station != self._archive_radar.station:
+            return  # station switched since this frame settled — stale
+
+        from ui.map.radar_overlay import ARCHIVE_SUPERRES_CROP_RADIUS_M
+        key = self._archive_superres_cache.make_key(
+            station, scan.pyart_field, scan.tilt_deg, scan.scan_time,
+            getattr(scan, "velocity_processing", "") or "",
+        )
+        cached = self._archive_superres_cache.get(key)
+        if cached is not None:
+            png, bounds = cached
+            self._radar_overlay.inject(png, bounds)
+            self._radar_settled_scan = scan
+            return
+
+        if self._sharp_render_would_be_stale(scan):
+            return   # rendered when playback pauses (see _on_archive_playing_changed)
+        self._archive_superres_busy = True
+        self._archive_superres_executor.submit(
+            self._bg_render_archive_superres, gen, station, scan, key,
+            self._archive_superres_size, ARCHIVE_SUPERRES_CROP_RADIUS_M,
+        )
+
+    def _sharp_render_would_be_stale(self, scan) -> bool:
+        """While playing: would the next radar scan reach the clock before a
+        sharp render of this one finishes (judged by the last render's time)?
+        Then the result would be thrown away -- at 120x on an M2, 12 of 13
+        were -- and the work only slows decoding of the frames playback needs."""
+        if not self._time_ctrl.is_playing:
+            return False
+        if getattr(self, "_archive_superres_busy", False):
+            return True            # don't queue behind one still rendering
+        last_s = getattr(self, "_archive_superres_wall_s", None)
+        if last_s is None:
+            return False
+        upcoming = self._archive_radar.next_scan_after(scan.scan_time)
+        if upcoming is None:
+            return False
+        wall_left = (upcoming - self._time_ctrl.current_time).total_seconds() / max(self._time_ctrl.speed, 1)
+        return wall_left < last_s
+
+    def _on_archive_playing_changed(self, playing: bool) -> None:
+        """Paused: give the frame on screen its sharp render if playback skipped it."""
+        if not playing and getattr(self, "_archive_superres_pending", None) is not None:
+            self._archive_superres_timer.start()
+
+    def _bg_render_archive_superres(
+        self, gen: int, station: str, scan, key: tuple, grid_size: int, crop_radius_m: float,
+    ) -> None:
+        """Runs in the archive-superres thread pool — NOT on the main thread."""
+        import time as _time
+        from ui.map.radar_overlay import next_superres_size, render_scan_to_png
+        # this thread's own CPU time, not wall time: while radar scans are
+        # still downloading and decoding, a render waits on them too, and on
+        # an M2 a 4096 px render then took ~4 s of wall time for ~2 s of work
+        started, started_wall = _time.thread_time(), _time.perf_counter()
+        try:
+            png, bounds, _ = render_scan_to_png(scan, grid_size, crop_radius_m=crop_radius_m)
+        except Exception as exc:
+            log.error("Archive radar super-res render failed: %s", exc)
+            return
+        finally:
+            self._archive_superres_busy = False
+        took = _time.thread_time() - started
+        self._archive_superres_wall_s = _time.perf_counter() - started_wall   # for _sharp_render_would_be_stale
+        smaller = next_superres_size(grid_size, took)
+        if smaller < self._archive_superres_size:
+            self._archive_superres_size = smaller
+            log.info("Archive radar sharp render took %.1f s of CPU at %d px; using %d px from now on",
+                     took, grid_size, smaller)
+            perf_log.event("note", what="sharp radar render stepped down", cpu_s=round(took, 2),
+                           from_px=grid_size, to_px=smaller)
+        self._archive_superres_ready.emit({
+            "gen": gen, "station": station, "scan": scan, "key": key,
+            "png": png, "bounds": bounds,
+        })
+
+    def _on_archive_superres_ready(self, result: dict) -> None:
+        """Runs on the main thread — caches and injects the super-res PNG,
+        unless the archive clock/station has moved on since it was submitted."""
+        if result["gen"] != self._archive_render_generation:
+            return  # station changed mid-render
+        if result["station"] != self._archive_radar.station:
+            return
+        if self._noxp_active:
+            return  # NOXP took over the map since this was submitted
+        pending = getattr(self, "_archive_superres_pending", None)
+        if pending is None or pending[2] is not result["scan"]:
+            return  # archive clock moved to a different frame since this was submitted
+
+        self._archive_superres_cache.put(result["key"], result["png"], result["bounds"])
+        self._radar_overlay.inject(result["png"], result["bounds"])
+        perf_log.event("radar.shown_sharp", scan=result["scan"].scan_time.isoformat())
+        self._radar_settled_scan = result["scan"]
 
     def _on_archive_satellite_frame(self, frame) -> None:
         """Update the archive satellite frame; only show if the user has toggled it on."""
@@ -793,6 +1463,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._layout_overlays()
         if self.btn_satellite.isChecked():
             self.map_widget.set_satellite_visible(True)
+
+    def _on_clamps_surface_loaded(self, rows):
+        self._archive_clamps_surface.install(rows)
+        self._update_clamps_surface(self._time_ctrl.current_time)
+
+    def _update_clamps_surface(self, when):
+        for key in self._archive_clamps_surface.rows:
+            obs = self._archive_clamps_surface.at(key, when)
+            if obs is None:
+                self._hide_vehicle(key)
+            else:
+                vehicle = self._vehicles.get(key)
+                if vehicle is None or vehicle.latest_obs is not obs:
+                    self.update_vehicle_obs(obs)
 
     def _on_archive_vehicle_position(self, obs) -> None:
         """Update a vehicle marker from the MQTT archive."""
@@ -848,12 +1532,39 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._refresh_scan_sectors()
 
     def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
+        if self._noxp_active:
+            self._on_noxp_render_requested(tilt_idx, self.radar_controls.current_product())
+            return
         if self._archive_radar:
             self._archive_radar.set_tilt_index(tilt_idx)
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_radar_status(f"Radar: loading tilt {tilt_idx}")
 
+    def _refresh_velocity_options_row(self) -> None:
+        """Dealias / storm-relative apply to archive WSR-88D velocity only."""
+        self.radar_controls.set_velocity_options_visible(
+            not self._noxp_active and self.radar_controls.current_product() == "velocity")
+
+    def _apply_velocity_options(self, *_args) -> None:
+        from archive.fetchers.radar_archive_fetcher import VelocityOptions
+        if not getattr(self, "_archive_radar", None):
+            return
+        dealias_on, storm_relative_on = self.radar_controls.velocity_options()
+        motion = self.track_storm_motion() if storm_relative_on and hasattr(self, "_track_points") else None
+        self._archive_radar.set_velocity_options(VelocityOptions(
+            dealias=dealias_on,
+            # rounded so a nudge of a track point doesn't redo every sweep
+            storm_motion=(round(motion.u_ms, 1), round(motion.v_ms, 1)) if motion else None,
+        ))
+
     def _on_archive_product_changed(self, pyart_field: str) -> None:
+        self._refresh_velocity_options_row()
+        if self._noxp_active:
+            # pyart_field is a NOXP native field name (DBZ, VEL, ...) here,
+            # not a WSR-88D product code -- never hand it to the WSR-88D
+            # fetcher below.
+            self._on_noxp_render_requested(self.radar_controls.current_tilt_index(), pyart_field)
+            return
         if self._archive_radar:
             self._archive_radar.set_product(pyart_field)
         if hasattr(self, "_archive_controls"):
@@ -865,14 +1576,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.status_msg_label.setText(msg)
         self._layout_overlays()
 
-    def _on_archive_loading_aborted(self) -> None:
-        """User clicked Abort on the loading dialog — quit the application."""
-        self.session_aborted.emit()
-        QApplication.quit()
+    def _on_change_day_requested(self) -> None:
+        """User confirmed the DAY button in ArchiveControls — same clean
+        exit path as the loading-dialog Abort, just triggered mid-session."""
+        self._change_day_requested = True
+        self.close()
 
     def _on_archive_satellite_error(self, msg: str) -> None:
         if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_satellite_status("Sat: error", error=True)
+            if msg.startswith("No GOES"):          # nothing for this date: not a fault
+                self._archive_controls.set_satellite_status(f"Sat: none -- {msg}")
+            else:
+                self._archive_controls.set_satellite_status("Sat: error", error=True)
         self.status_msg_label.setText(f"Satellite: {msg}")
         self._layout_overlays()
 
@@ -957,7 +1672,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         """One-shot background fetch of current.json to pre-populate annotations on launch."""
         from urllib.request import urlopen, Request
 
-        url = f"{config.NSSL_API_ROOT}/current.json"
+        url = endpoints.nssl_api(endpoints.NSSL_CURRENT_OBS)
         try:
             headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
             if config.NSSL_API_KEY:
@@ -1097,16 +1812,16 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _init_toolbar(self):
         self._floating_toolbar = QWidget(self._map_container)
-        self._floating_toolbar.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self._floating_toolbar)
 
         tb = QHBoxLayout(self._floating_toolbar)
         tb.setContentsMargins(8, 4, 8, 4)
         tb.setSpacing(4)
 
-        self.btn_radar = self._toolbar_toggle("RADAR", "Show/hide radar controls", tb)
+        self.btn_radar = self._toolbar_toggle("RADAR", "", tb)
         # radar controls drop down below the toolbar as a separate floating pill
         self.radar_controls = RadarControls(self._map_container)
-        self.radar_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.radar_controls)
         self.btn_radar.toggled.connect(self.radar_controls.toggle_drawer)
         self.btn_radar.toggled.connect(
             lambda on: self._set_radar_station_picker_visible(False) if not on else None
@@ -1114,15 +1829,41 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # pulse layout updates for the duration of the open/close animation
         self.btn_radar.toggled.connect(self._start_layout_pulse)
 
+        # RAW LIDAR next to RADAR: both remote sensors with scans to look at.
+        # It opens only once the date is known to have lidar data.
+        if self._archive and feature_flags.is_enabled("raw_lidar_quicklook"):
+            self.btn_raw_lidar = self._toolbar_toggle(
+                "LIDAR", "Doppler lidar: the lidar truck and the CLAMPS trailers", tb
+            )
+            self.btn_raw_lidar.setEnabled(False)
+            self.btn_raw_lidar.setToolTip("Looking for lidar data for this date…")
+            self.raw_lidar_controls = RawLidarControls(self._map_container)
+            self._set_floating_toolbar(self.raw_lidar_controls)
+            from archive.fetchers.raw_lidar_archive_fetcher import KNOWN_RAW_LIDAR_SOURCES
+            self.raw_lidar_controls.set_sources(KNOWN_RAW_LIDAR_SOURCES)
+            self.btn_raw_lidar.toggled.connect(self.raw_lidar_controls.toggle_drawer)
+            self.btn_raw_lidar.toggled.connect(self._start_layout_pulse)
+            self.btn_raw_lidar.toggled.connect(self._show_lidar_locations)
+            self.raw_lidar_controls.availability_changed.connect(self._on_raw_lidar_availability)
+            self.raw_lidar_controls.field_selected.connect(self._on_raw_lidar_field_selected)
+            self.raw_lidar_controls.min_intensity_changed.connect(self._on_lidar_min_intensity_changed)
+            self.raw_lidar_controls.winds_requested.connect(self._on_vad_requested)
+            self.raw_lidar_controls.data_toggled.connect(self._on_lidar_data_toggled)
+            self.raw_lidar_controls.location_requested.connect(self._center_on_lidar_location)
+            self.raw_lidar_controls.radar_visible_toggled.connect(self.map_widget.set_radar_visible)
+            if not feature_flags.is_enabled("noxp_radar"):       # else connected with NOXP below
+                self.map_widget.platform_marker_clicked.connect(self._on_platform_marker_clicked)
+
         self._add_separator(tb)
 
-        self.btn_vehicles = self._toolbar_toggle("VEHICLES", "Toggle vehicle panel", tb)
+        self.btn_vehicles = self._toolbar_toggle(
+            "VEHICLES", "Vehicle list and observation trails" if self._archive else "", tb)
 
         self.btn_prev_locs = self._toolbar_toggle(
-            "PREV LOCS", "Show previous truck deployment locations", tb
+            "PREV LOCS", "Previous deployments", tb
         )
         self.deploy_locs_controls = DeployLocsControls(self._map_container)
-        self.deploy_locs_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.deploy_locs_controls)
         self.btn_prev_locs.toggled.connect(self.deploy_locs_controls.toggle_drawer)
         self.btn_prev_locs.toggled.connect(self._start_layout_pulse)
         self.deploy_locs_controls.content_resized.connect(self._start_layout_pulse)
@@ -1130,13 +1871,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._add_separator(tb)
 
         self.btn_hazards = self._toolbar_toggle(
-            "HAZARDS", "Show/hide SPC and NWS hazard overlays", tb
+            "HAZARDS", "SPC and NWS hazards", tb
         )
         self.hazard_controls = HazardControls(self._map_container)
-        self.hazard_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.hazard_controls)
         self.btn_hazards.toggled.connect(self.hazard_controls.toggle_drawer)
         self.btn_hazards.toggled.connect(self._start_layout_pulse)
         self.hazard_controls.content_resized.connect(self._start_layout_pulse)
+        if self._archive and feature_flags.is_enabled("damage_paths"):
+            # damage surveys are NWS hazard products: a toggle in the HAZARDS
+            # drawer (checking it starts drawing a box)
+            self.btn_damage_paths = self.hazard_controls.add_damage_paths_button()
+            self.btn_damage_paths.toggled.connect(self._on_damage_paths_toggled)
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
@@ -1146,10 +1892,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._add_separator(tb)
 
         self.btn_satellite = self._toolbar_toggle(
-            "SATELLITE", "Show/hide GOES satellite imagery overlay", tb
+            "SATELLITE", "GOES satellite imagery", tb
         )
         self.satellite_controls = SatelliteControls(self._map_container)
-        self.satellite_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.satellite_controls)
         self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
         self.btn_satellite.toggled.connect(self._start_layout_pulse)
         self.btn_satellite.toggled.connect(self._on_satellite_toggled)
@@ -1159,33 +1905,142 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         if feature_flags.is_enabled("mesoanalysis"):
             self.btn_mesoanalysis = self._toolbar_toggle(
-                "MESO", "Show/hide Satsquatch mesoanalysis contours", tb
+                "MESO", "Satsquatch mesoanalysis", tb
             )
             self.mesoanalysis_controls = MesoanalysisControls(self._map_container)
-            self.mesoanalysis_controls.setObjectName("floatingToolbar")
+            self._set_floating_toolbar(self.mesoanalysis_controls)
             self.btn_mesoanalysis.toggled.connect(self.mesoanalysis_controls.toggle_drawer)
             self.btn_mesoanalysis.toggled.connect(self._start_layout_pulse)
             self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
 
         if feature_flags.is_enabled("sfcoa"):
             self.btn_sfcoa = self._toolbar_toggle(
-                "SFCOA", "Show/hide SFCOA mesoanalysis contours", tb
+                "SFCOA", "SFCOA mesoanalysis", tb
             )
             self.sfcoa_controls = SfcoaControls(self._map_container)
-            self.sfcoa_controls.setObjectName("floatingToolbar")
+            self._set_floating_toolbar(self.sfcoa_controls)
             self.btn_sfcoa.toggled.connect(self.sfcoa_controls.toggle_drawer)
             self.btn_sfcoa.toggled.connect(self._start_layout_pulse)
             self.btn_sfcoa.toggled.connect(self._on_sfcoa_drawer_toggled)
             self.sfcoa_controls.content_resized.connect(self._start_layout_pulse)
 
-        if feature_flags.is_enabled("mesoanalysis") or feature_flags.is_enabled("sfcoa"):
+        if self._archive and (
+            feature_flags.is_enabled("noxp_radar")
+            or feature_flags.is_enabled("raw_lidar_quicklook")
+            or feature_flags.is_enabled("archive_asos")
+            or feature_flags.is_enabled("damage_paths")
+        ):
             self._add_separator(tb)
 
+        if self._archive and feature_flags.is_enabled("noxp_radar"):
+            # No drawer -- NOXP is a site in the RADAR tab's own picker
+            # (see _push_radar_station_sites/_on_radar_station_clicked).
+            # The always-on truck marker (set_noxp_site, updated as
+            # volumes load) is still a second way in, clicked the same as
+            # any other platform marker.
+            self.map_widget.platform_marker_clicked.connect(self._on_platform_marker_clicked)
+
+
+        if self._archive:
+            # R and V flip reflectivity/velocity whether or not TRACK is open
+            self._radar_product_shortcuts = []
+            for key in ("R", "V"):
+                shortcut = QShortcut(QKeySequence(key), self)
+                shortcut.activated.connect(self._toggle_radar_product_shortcut)
+                self._radar_product_shortcuts.append(shortcut)
+
+        # TRACK before TRAILS: trails' time-to-space and storm-relative
+        # quantities use the storm track
+        if self._archive and feature_flags.is_enabled("storm_track"):
+            self.btn_track = self._toolbar_toggle(
+                "TRACK", "Subjectively track the mesocyclone", tb
+            )
+            self.track_controls = TrackControls(self._map_container)
+            self._set_floating_toolbar(self.track_controls)
+            # the "track the storm" links beside grayed storm-relative options
+            self.radar_controls.track_requested.connect(lambda: self.btn_track.setChecked(True))
+            self.btn_track.toggled.connect(self.track_controls.toggle_drawer)
+            self.btn_track.toggled.connect(self._start_layout_pulse)
+            self.btn_track.toggled.connect(self._on_track_edit_toggled)
+            self.track_controls.export_requested.connect(self._export_track_as)
+            self.track_controls.clear_requested.connect(self._on_clear_track_requested)
+            self.track_controls.load_requested.connect(self._load_track_file)
+            self.track_controls.reset_requested.connect(self._reset_track_to_original)
+            self.track_controls.undo_requested.connect(self._undo_track_edit)
+            self.track_controls.redo_requested.connect(self._redo_track_edit)
+            self.track_controls.layers_changed.connect(lambda *_: self._apply_track_visibility())
+            self.track_controls.table_requested.connect(self._open_track_table)
+            self.track_controls.open_folder_requested.connect(self._open_track_folder)
+            self.track_controls.workspace_selected.connect(self._switch_track_workspace)
+            self.track_controls.new_workspace_requested.connect(self._new_track_workspace)
+            self.track_controls.open_track_requested.connect(
+                lambda path: self._open_track(Path(path)))
+            self.map_widget.track_point_add_requested.connect(self._on_track_point_add)
+            self.map_widget.track_point_selected.connect(self._on_track_point_select)
+            self.map_widget.track_point_moved.connect(self._on_track_point_moved)
+            self.map_widget.track_point_delete_requested.connect(self._delete_track_point)
+            self.map_widget.track_marker_add_requested.connect(self._on_track_marker_add)
+            self.map_widget.track_marker_rename_requested.connect(self._on_track_marker_rename)
+            self.map_widget.track_marker_remove_requested.connect(self._on_track_marker_remove)
+            self._track_marker = None   # {lat, lon, label}; one per session, never saved
+            # D, Delete and Backspace all delete the selected point, and A adds
+            # one at the marker, as in MESO-VIEW. D and A only while TRACK is
+            # on -- otherwise they step radar frames (ArchiveControls).
+            self._track_delete_shortcuts = []
+            for key in ("D", "Delete", "Backspace"):
+                shortcut = QShortcut(QKeySequence(key), self)
+                shortcut.activated.connect(self._delete_selected_track_point)
+                self._track_delete_shortcuts.append(shortcut)
+            self._track_marker_point_shortcut = QShortcut(QKeySequence("A"), self)
+            self._track_marker_point_shortcut.activated.connect(self._add_track_point_at_marker)
+            self._set_track_letter_keys(False)
+            # Cmd+Z / Cmd+Shift+Z are Edit > Undo / Redo (_init_menu_bar)
+            # self._time_ctrl doesn't exist yet here (_init_toolbar runs from
+            # __init__, before _begin_archive_startup creates it) -- that
+            # connection is made there instead, guarded by hasattr(self, "btn_track").
+            self._init_track_state()
+            self._track_session_opened = False   # the date's saved track opens on the first TRACK click
+            self._refresh_track_controls()
+            self._refresh_track_workspace_lists()
+
+        if self._archive and feature_flags.is_enabled("obs_trails"):
+            # trails are the vehicles' own observations: their controls are
+            # the VEHICLES drawer, with a "show trails" switch
+            self.trail_controls = TrailControls(self._map_container)
+            self._set_floating_toolbar(self.trail_controls)
+            if hasattr(self, "btn_track"):
+                self.trail_controls.track_requested.connect(lambda: self.btn_track.setChecked(True))
+            # one panel with the vehicle list: _init_vehicle_panel puts this
+            # row at its bottom, so it opens and closes with it
+            self.trail_controls.settings_changed.connect(self._schedule_trails)
+            from core.trails import TrailBuilder
+            self._trail_builder = TrailBuilder()
+            self._trails_timer = QTimer(self)
+            self._trails_timer.setSingleShot(True)
+            self._trails_timer.setInterval(250)     # coalesce clock ticks while playing
+            self._trails_timer.timeout.connect(self._refresh_trails)
+
+        if self._archive and feature_flags.is_enabled("archive_asos"):
+            # archive mode's surface stations: ASOS, by drawing a box (live
+            # mode's SURFACE drawer, below, is hidden in archive mode)
+            self._add_separator(tb)
+            self.btn_archive_surface = self._toolbar_toggle(
+                "SURFACE", "Historical ASOS stations (draw a box)", tb
+            )
+            from ui.controls.archive_surface_controls import ArchiveSurfaceControls
+            self.archive_surface_controls = ArchiveSurfaceControls(self._map_container)
+            self._set_floating_toolbar(self.archive_surface_controls)
+            self.btn_archive_surface.toggled.connect(self.archive_surface_controls.toggle_drawer)
+            self.btn_archive_surface.toggled.connect(self._start_layout_pulse)
+            # the drawer's ASOS button: checking it starts the box
+            self.btn_archive_asos = self.archive_surface_controls.asos_button
+            self.btn_archive_asos.toggled.connect(self._on_archive_asos_toggled)
+
         self.btn_surface = self._toolbar_toggle(
-            "SURFACE", "Show/hide surface observation controls", tb
+            "SURFACE", "", tb
         )
         self.surface_controls = SurfaceControls(self._map_container)
-        self.surface_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.surface_controls)
         self.btn_surface.toggled.connect(self.surface_controls.toggle_drawer)
         self.btn_surface.toggled.connect(self._start_layout_pulse)
         self.surface_controls.content_resized.connect(self._start_layout_pulse)
@@ -1193,10 +2048,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._add_separator(tb)
 
         self.btn_sounding = self._toolbar_toggle(
-            "SOUNDING", "Click map for HRRR point sounding or observed radiosonde data", tb
+            "SOUNDING", "HRRR and observed soundings", tb
         )
         self.sounding_controls = SoundingControls(self._map_container)
-        self.sounding_controls.setObjectName("floatingToolbar")
+        if self._archive:
+            self.sounding_controls._btn_copter.show()
+            self.sounding_controls.coptersonde_selected.connect(self._on_sounding_ready)
+        self._set_floating_toolbar(self.sounding_controls)
         self.btn_sounding.toggled.connect(self.sounding_controls.toggle_drawer)
         self.btn_sounding.toggled.connect(self._start_layout_pulse)
         self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
@@ -1204,11 +2062,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._add_separator(tb)
 
         self.btn_annotate = self._toolbar_toggle(
-            "ANNOTATE", "Place road annotations and storm motion cone", tb
+            "ANNOTATE", "Annotations and storm motion", tb
         )
         # annotation tools drop down below the toolbar as a separate floating pill
         self.annotation_tools = AnnotationTools(self._map_container)
-        self.annotation_tools.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.annotation_tools)
         self.btn_annotate.toggled.connect(self.annotation_tools.toggle_drawer)
         self.btn_annotate.toggled.connect(self._start_layout_pulse)
 
@@ -1226,17 +2084,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             satellite_available=satellite_available,
             parent=self._map_container,
         )
-        self.map_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.map_controls)
         self.btn_map.toggled.connect(self.map_controls.toggle_drawer)
         self.btn_map.toggled.connect(self._start_layout_pulse)
 
         self.btn_measure = self.map_controls.btn_measure
+        self.map_controls.btn_annotations.toggled.connect(self.map_widget.set_annotations_visible)
         self.btn_route = self.map_controls.btn_route
         self.btn_nlcd = self.map_controls.btn_landcover
         self.btn_satellite_basemap = self.map_controls.btn_satellite_basemap
 
         self.routing_controls = RoutingControls(self._map_container)
-        self.routing_controls.setObjectName("floatingToolbar")
+        self._set_floating_toolbar(self.routing_controls)
         self.btn_route.toggled.connect(self.routing_controls.toggle_drawer)
         self.btn_route.toggled.connect(self._start_layout_pulse)
         self.routing_controls.enter_pick_mode.connect(
@@ -1262,7 +2121,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         )
         if nlcd_available:
             self.landcover_controls = LandcoverControls(self._map_container)
-            self.landcover_controls.setObjectName("floatingToolbar")
+            self._set_floating_toolbar(self.landcover_controls)
             self.btn_nlcd.toggled.connect(self.landcover_controls.toggle_drawer)
             self.btn_nlcd.toggled.connect(self._start_layout_pulse)
             self.btn_nlcd.toggled.connect(self._on_nlcd_toggled)
@@ -1387,7 +2246,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
             "color: #00CFFF; background: transparent; border: none; padding: 0;"
         )
-        self.update_indicator.setToolTip("Click to apply update and restart STORM")
+        self.update_indicator.setToolTip("Update and restart STORM")
         self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_indicator.setVisible(False)
         self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
@@ -1398,6 +2257,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             "color: #9BA3B2; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
         )
         row0.addWidget(self.status_msg_label)
+        from ui.map.html import basemap_source
+        if basemap_source() == "online":
+            self.status_msg_label.setText("Map: online tiles (no tiles/storm.mbtiles)")
+            self.status_msg_label.setToolTip("The base map loads from OpenFreeMap while connected. "
+                                             "Put storm.mbtiles in the tiles folder to use it offline.")
         row0.addStretch()
 
         row1 = QHBoxLayout()
@@ -1450,23 +2314,33 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(8)
 
-        # gps fix status — vehicle mode only (hidden in monitor/viewer)
+        # gps fix status — vehicle mode only (hidden in monitor/viewer/archive:
+        # archive playback has no live GPS to report).
+        _show_gps = not (self._monitor or self._viewer or self._archive)
         self.gps_indicator = QLabel("● NO GPS FIX")
         self.gps_indicator.setStyleSheet(
             "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
         )
-        self.gps_indicator.setVisible(not (self._monitor or self._viewer))
+        self.gps_indicator.setVisible(_show_gps)
         row2.addWidget(self.gps_indicator)
 
-        if not (self._monitor or self._viewer):
-            row2.addWidget(self._status_divider())
+        _gps_divider = self._status_divider()
+        _gps_divider.setVisible(_show_gps)
+        row2.addWidget(_gps_divider)
 
+        # AWS connection status — relevant in monitor/viewer (still a live
+        # MQTT connection) but guaranteed offline/irrelevant in archive mode.
+        _show_conn = not self._archive
         self.conn_indicator = QLabel("● AWS OFFLINE")
         self.conn_indicator.setStyleSheet(
             "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
         )
+        self.conn_indicator.setVisible(_show_conn)
         row2.addWidget(self.conn_indicator)
-        row2.addWidget(self._status_divider())
+
+        _conn_divider = self._status_divider()
+        _conn_divider.setVisible(_show_conn)
+        row2.addWidget(_conn_divider)
 
         self.net_indicator = QLabel("")
         self.net_indicator.setStyleSheet(
@@ -1506,7 +2380,595 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         div.setStyleSheet("color: #394056; margin: 4px 0;")
         return div
 
+    # Background workers signal from their own threads. Their slots are bound
+    # methods of this window (never lambdas capturing it), so Qt knows the
+    # window is the receiver and drops pending deliveries once it's gone --
+    # a lambda would still run against a deleted window (native crash seen
+    # in rapid open/close stress runs). closeEvent also silences them.
+    def _watch_worker_errors(self, worker, signal, label: str) -> None:
+        if not hasattr(self, "_worker_labels"):
+            self._worker_labels = {}
+        self._worker_labels[id(worker)] = label
+        signal.connect(self._on_worker_error)
+
+    def _on_worker_error(self, msg: str) -> None:
+        label = getattr(self, "_worker_labels", {}).get(id(self.sender()), "Archive")
+        self.status_msg_label.setText(f"{label}: {msg}")
+
+    def _on_archive_satellite_loading_error(self, _msg=None) -> None:
+        if self._archive_loading.startup_pending():
+            self._archive_loading.set_task_error("Satellite")
+
+    def _on_archive_radar_loading_changed(self, loading: bool) -> None:
+        station = self._archive_radar.station if self._archive_radar else ""
+        self.status_msg_label.setText(f"Radar: loading {station}…" if loading else "")
+        if loading and hasattr(self, "_archive_controls"):
+            self._archive_controls.set_radar_status(f"Radar: loading {station}…")
+
+    # ---- observation trails (core/trails.py) ------------------------------
+    def _schedule_trails(self, *_args) -> None:
+        """Throttled: at most one trail rebuild per 250 ms while the clock runs."""
+        timer = getattr(self, "_trails_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _trail_observations(self) -> dict:
+        """Each platform's full observation list (time-ordered), preferring
+        the densest source: one-second FOFS, then CLAMPS surface, then the
+        recorded MQTT history for anything else on the map."""
+        found = {}
+        dense = getattr(self, "_archive_vehicle_obs", None)
+        if dense is not None:
+            for vid in dense.available_vehicle_ids:
+                found[vid] = dense._observations[vid]
+        surface = getattr(self, "_archive_clamps_surface", None)
+        if surface is not None:
+            for key, rows in surface.rows.items():
+                found.setdefault(key, rows)
+        for vid in list(getattr(self, "_vehicles", {})):
+            if vid not in found:
+                history = self._get_archive_vehicle_history(vid)
+                if history:
+                    found[vid] = history
+        return found
+
+    def _refresh_trails(self) -> None:
+        from core.derived import QUANTITIES
+        from core.trails import color_stops
+        if not hasattr(self, "trail_controls"):
+            return
+        if not self.trail_controls.trails_on():
+            self.map_widget.set_trails(None)
+            return
+        quantity, minutes, time_to_space, wind_barbs, sr_barbs = self.trail_controls.settings()
+        end = self._time_ctrl.current_time
+        motion = self.track_storm_motion() if hasattr(self, "_track_points") else None
+        track = list(getattr(self, "_track_points", []))
+        observations = self._trail_observations()
+        asos_ids = frozenset()
+        asos = getattr(self, "_archive_asos", None)
+        if time_to_space and motion is not None and asos is not None:
+            # fixed stations only make a path relative to the storm, so ASOS
+            # joins the trails in time-to-space mode (as in MESO-VIEW)
+            asos_obs = {f"ASOS {sid}": rows for sid, rows in asos._observations.items() if rows}
+            observations.update(asos_obs)
+            asos_ids = frozenset(asos_obs)
+        fc, (vmin, vmax), n = self._trail_builder.build(
+            observations, quantity, end - timedelta(minutes=minutes), end,
+            track_points=track, motion=motion, time_to_space=time_to_space and motion is not None,
+            no_station_pressure=asos_ids, wind_barbs=wind_barbs,
+            storm_relative_barbs=sr_barbs and motion is not None,
+        )
+        units = QUANTITIES[quantity].units
+        stops = color_stops(quantity, vmin, vmax) if n else []
+        self.map_widget.set_trails(fc, stops, units, QUANTITIES[quantity].label)
+        self.trail_controls.set_scale(stops, vmin, vmax, units)
+        if n:
+            self.trail_controls.set_status("")       # trails on the map say enough; explain only an empty one
+        elif time_to_space and motion is not None:
+            self.trail_controls.set_status("No observations within the storm track's time span")
+        else:
+            self.trail_controls.set_status(f"No {QUANTITIES[quantity].label.lower()} in the last {minutes} min")
+
+    # ---- Video Studio: is the map finished drawing the clock's moment? ------
+    def studio_frame_pending(self) -> str | None:
+        """What the map is still drawing for the archive clock's current time
+        (None when everything is in), so a movie frame is only captured once
+        complete: the radar's full-resolution image of the scan for this time,
+        the chosen lidar's sweep, the observation trails, satellite frames."""
+        t = self._time_ctrl.current_time
+        radar = getattr(self, "_archive_radar", None)
+        # (the radar panel's "show data" box is a live-mode switch, hidden and
+        # unchecked in archive mode, where the radar always loads)
+        if radar is not None and not self._noxp_active:
+            if getattr(radar, "index_loading", False):
+                return "radar index"                      # e.g. the station was just (re)chosen
+            if getattr(self, "_package_radar_view", None):
+                return "radar product"                    # a station switch, product/tilt still to apply
+            wanted = radar._nearest_scan_before(t)
+            scan = self._current_radar_scan
+            if wanted is not None:
+                if scan is None or scan.scan_time != wanted:
+                    return "radar scan"
+                if not self._scan_matches_radar(scan, radar):
+                    return "radar product"
+                if self._archive_render_in_flight or self._archive_pending_render_scan is not None:
+                    return "radar image"
+                if self._radar_settled_scan is not scan:
+                    return "radar full resolution"
+        if getattr(self, "_lidar_overlay_render_in_flight", False) or getattr(self, "_lidar_overlay_pending", False):
+            return "lidar sweep"
+        if self._lidar_scans and hasattr(self, "raw_lidar_controls") and self.raw_lidar_controls.data_is_on():
+            from core.lidar_scans import scan_at
+            sweep = scan_at(self._lidar_scans, t)
+            if self._lidar_overlay_key != (id(sweep) if sweep is not None else None,
+                                           self._lidar_overlay_field or "velocity"):
+                return "lidar sweep"
+        if hasattr(self, "_trails_timer") and self._trails_timer.isActive():
+            return "trails"
+        sat = getattr(self, "_archive_satellite", None)
+        if sat is not None and getattr(sat, "_pending", None):
+            return "satellite"
+        return None
+
+    @staticmethod
+    def _scan_matches_radar(scan, radar) -> bool:
+        """The scan on screen is the station and product the radar was last
+        asked for. (Its tilt index counts within the product's own tilts, so
+        it isn't compared here; a new tilt arrives as a new scan anyway.)"""
+        return (getattr(scan, "site", radar.station) == radar.station
+                and getattr(scan, "pyart_field", radar._product) == radar._product)
+
+    # ---- Video Studio: the radar a keyframe shows ------------------------------
+    def studio_radar_state(self) -> dict | None:
+        """The radar on screen: station (or NOXP), product and tilt."""
+        if self._noxp_active:
+            station = NOXP_SITE_ID
+        elif getattr(self, "_archive_radar", None) is not None:
+            station = self._archive_radar.station
+        else:
+            return None
+        return {"station": station, "product": self.radar_controls.current_product(),
+                "tilt": self.radar_controls.current_tilt_index()}
+
+    def studio_apply_radar(self, state: dict | None) -> None:
+        """Show the radar a keyframe recorded, if it isn't already showing."""
+        if not state or self.studio_radar_state() == state:
+            return
+        station, product, tilt = state.get("station"), state.get("product"), state.get("tilt")
+        current = self.studio_radar_state() or {}
+        if station and station != current.get("station"):
+            # the product and tilt are applied when the new station's first scan arrives
+            self._package_radar_view = {"product": product, "tilt_index": tilt}
+            self._on_radar_station_clicked(station)
+            return
+        if product and product != current.get("product"):
+            self.radar_controls.set_current_product(product)
+        if tilt is not None and tilt != self.radar_controls.current_tilt_index():
+            self.radar_controls.select_tilt(tilt)
+
+    # ---- menu bar -----------------------------------------------------------
+    def _init_menu_bar(self) -> None:
+        """File: cases, screenshot, ending the session. Edit: undo/redo (track
+        edits, or the text field being typed in). View: error log and debug
+        panel. Help: the user guide and About. Archive-only items stay
+        disabled until the archive session has started (_update_menu_state)."""
+        from PyQt6.QtGui import QAction
+        bar = self.menuBar()
+
+        def action(menu, text, slot, shortcut=None, role=None):
+            a = QAction(text, self)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            if role is not None:
+                a.setMenuRole(role)
+            a.triggered.connect(lambda _checked=False: slot())
+            menu.addAction(a)
+            return a
+
+        file_menu = bar.addMenu("File")
+        self._menu_archive_actions = [
+            action(file_menu, "Open Case Package…", self._open_case_package, "Ctrl+O"),
+            action(file_menu, "Export Case Package…", self._export_case_package, "Ctrl+Shift+E"),
+            action(file_menu, "Show Case Packages Folder", self._show_case_packages_folder),
+        ]
+        file_menu.addSeparator()
+        action(file_menu, "Save Map Screenshot…", self._menu_screenshot, "Ctrl+Shift+S")
+        self._studio_action = action(file_menu, "Video Studio", self._toggle_studio, "Ctrl+Shift+V")
+        self._studio_action.setCheckable(True)
+        self._menu_archive_actions.append(self._studio_action)
+        file_menu.addSeparator()
+        self._menu_archive_actions.append(
+            action(file_menu, "Exit Session and Change Day…", self._menu_exit_session))
+
+        edit_menu = bar.addMenu("Edit")
+        action(edit_menu, "Undo", lambda: self._menu_undo(redo=False), "Ctrl+Z")
+        action(edit_menu, "Redo", lambda: self._menu_undo(redo=True), "Ctrl+Shift+Z")
+
+        view_menu = bar.addMenu("View")
+        action(view_menu, "Error Log", self._toggle_error_log_panel, "Ctrl+E")
+        action(view_menu, "Debug Panel", self._toggle_debug_panel, "Ctrl+D")
+
+        help_menu = bar.addMenu("Help")
+        action(help_menu, "STORM User Guide", self._show_user_guide)
+        action(help_menu, "About STORM", self._show_about, role=QAction.MenuRole.AboutRole)
+        self._update_menu_state()
+
+    def _update_menu_state(self) -> None:
+        ready = self._archive and hasattr(self, "_archive_controls")
+        for a in getattr(self, "_menu_archive_actions", []):
+            a.setVisible(self._archive)
+            a.setEnabled(ready)
+
+    def _menu_undo(self, *, redo: bool) -> None:
+        # a text field being typed in keeps its own undo
+        focus = QApplication.focusWidget()
+        studio = getattr(self, "_studio", None)
+        if focus is not None and hasattr(focus, "undo") and hasattr(focus, "redo"):
+            focus.redo() if redo else focus.undo()
+        elif studio is not None and studio.isVisible():
+            studio.redo() if redo else studio.undo()
+        elif hasattr(self, "_track_points"):
+            self._redo_track_edit() if redo else self._undo_track_edit()
+
+    def _menu_screenshot(self) -> None:
+        if hasattr(self, "btn_screenshot"):
+            self._on_screenshot_clicked()
+
+    # ---- Video Studio (ui/studio/) ---------------------------------------------
+    def _studio_open(self) -> bool:
+        studio = getattr(self, "_studio", None)
+        return studio is not None and studio.isVisible()
+
+    def _toggle_studio(self) -> None:
+        self._close_studio() if self._studio_open() else self._open_studio()
+
+    def _open_studio(self) -> None:
+        """The studio takes the archive bar's place, and its keys (Space,
+        arrows, Home / End, Delete, , .) while open."""
+        if not hasattr(self, "_archive_controls"):
+            return
+        if getattr(self, "_studio", None) is None:
+            from ui.studio.panel import StudioPanel
+            self._studio = StudioPanel(self, self._map_container)
+            self._studio.closed.connect(self._close_studio)
+            self._studio.export_requested.connect(self._export_studio)
+        self._archive_controls.set_shortcuts_enabled(False)
+        for shortcut in getattr(self, "_track_delete_shortcuts", ()):
+            shortcut.setEnabled(False)
+        if hasattr(self, "_track_marker_point_shortcut"):
+            self._track_marker_point_shortcut.setEnabled(False)
+        self._archive_controls.hide()
+        self._studio.show()
+        self._studio_action.setChecked(True)
+        self._layout_overlays()
+
+    def _close_studio(self) -> None:
+        studio = getattr(self, "_studio", None)
+        if studio is None:
+            return
+        studio.hide()
+        self._archive_controls.show()
+        self._archive_controls.set_shortcuts_enabled(True)
+        for shortcut in getattr(self, "_track_delete_shortcuts", ())[1:]:     # Delete, Backspace
+            shortcut.setEnabled(True)
+        if hasattr(self, "_track_delete_shortcuts"):
+            self._set_track_letter_keys(hasattr(self, "btn_track") and self.btn_track.isChecked())
+        self._studio_action.setChecked(False)
+        self._layout_overlays()
+
+    def _export_studio(self) -> None:
+        """Render the studio's movie frame by frame, with progress and Cancel."""
+        from ui.dialogs.task_progress_dialog import TaskProgressDialog
+        from ui.studio.exporter import StudioExporter
+        project = self._studio.project
+        folder = self._studio.folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        ext = {"mp4": ".mp4", "gif": ".gif", "png": ""}[project.format]
+        if project.format == "png":
+            path = QFileDialog.getExistingDirectory(self, "Folder for the PNG frames", str(folder))
+            if not path:
+                return
+            path = Path(path) / project.file_stem()
+        else:
+            path, _ = QFileDialog.getSaveFileName(self, "Export Video", str(folder / f"{project.file_stem()}{ext}"),
+                                                  f"{project.format.upper()} (*{ext})")
+            if not path:
+                return
+            path = Path(path)
+        exporter = StudioExporter(self, project, path, self)
+        bar = TaskProgressDialog("Export Video", f"Rendering {path.name}", self)
+        bar.canceled.connect(exporter.cancel)
+        exporter.progress.connect(lambda done, total, detail: bar.set_progress(done, total, detail))
+
+        def finished(ok, message):
+            bar.finish()
+            self._studio_exporter = None
+            if ok:
+                self.status_msg_label.setText(f"Video saved: {message}")
+                if self._studio_open():
+                    self._studio.flash(f"Saved {message}", 10)
+                self._notify_saved(path, "Video saved", message)
+            elif message != "Export canceled":
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Export Video", message)
+            else:
+                self.status_msg_label.setText("Video export canceled")
+                if self._studio_open():
+                    self._studio.flash("Export canceled")
+        exporter.finished.connect(finished)
+        self._studio_exporter = exporter
+        bar.show()
+        exporter.start()
+
+    def _menu_exit_session(self) -> None:
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.request_exit()
+
+    def _show_case_packages_folder(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        CASE_PACKAGES_ROOT.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CASE_PACKAGES_ROOT)))
+
+    def _show_user_guide(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[2] / "STORM_USER_GUIDE.md")))
+
+    def _show_about(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        from core.case_package import storm_version
+        v = storm_version()
+        commit = f"\nCommit {v['commit'][:10]}" + (" (with local changes)" if v.get("uncommitted_changes") else "") \
+            if v.get("commit") else ""
+        QMessageBox.about(self, "About STORM",
+                          f"STORM {v.get('version') or ''}\n"
+                          f"Severe Thunderstorm Observation and Reconnaissance Monitor{commit}")
+
+    # ---- case packages (core/case_package.py) ----------------------------
+    def _case_settings(self) -> dict:
+        from archive.session import session_bounds
+        start, end = self._time_ctrl.window
+        dealias_on, storm_relative_on = self.radar_controls.velocity_options()
+        iso = lambda t: t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "session_date": self._track_session_day().isoformat() if hasattr(self, "_track_points")
+                            else session_bounds(self._archive_time)[0].date().isoformat(),
+            "archive_time": iso(self._archive_time),
+            "window_start": iso(start), "window_end": iso(end),
+            "clock_time": iso(self._time_ctrl.current_time),
+            "radar_station": getattr(self._archive_radar, "station", None) if getattr(self, "_archive_radar", None) else None,
+            "radar_product": self.radar_controls.current_product(),
+            "radar_tilt_index": self.radar_controls.current_tilt_index(),
+            "velocity": {"dealias": dealias_on, "storm_relative": storm_relative_on},
+            "track_workspace": self._track_workspace().name if hasattr(self, "_track_points") else None,
+        }
+
+    def _default_case_frame(self, session: tuple[datetime, datetime]) -> tuple[datetime, datetime]:
+        """The storm track's span with 30 minutes either side when the date
+        has a track, otherwise the hour either side of the clock; never
+        outside the session."""
+        pad = timedelta(minutes=30)
+        points = getattr(self, "_track_points", None)
+        if points:
+            start, end = points[0].time - pad, points[-1].time + pad
+        else:
+            clock = self._time_ctrl.current_time
+            start, end = clock - timedelta(hours=1), clock + timedelta(hours=1)
+        return max(start, session[0]), min(end, session[1])
+
+    def _export_case_package(self) -> None:
+        """Choose what to include (all by default), then build the package
+        in the background with a progress bar and cancel."""
+        import threading
+        from PyQt6.QtWidgets import QMessageBox
+        from core import case_package, provenance
+        from ui.dialogs.case_export_dialog import CaseExportDialog
+        from ui.dialogs.task_progress_dialog import TaskProgressDialog
+        sources = provenance.snapshot()
+        tracks = []
+        if hasattr(self, "_track_points"):
+            tracks = [t["path"] for t in self._session_tracks()]
+        session = self._time_ctrl.window
+        listed = case_package.listed_files(sources, provenance.kept_bytes)
+        dialog = CaseExportDialog(sources, len(tracks), session, self._default_case_frame(session), self,
+                                  listed=listed)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        include_tracks, kinds, time_frame = dialog.choices()
+        if dialog.include_listed():
+            # a catalog lists every date it holds: only the frame (or the session) is wanted
+            keep = case_package.in_time_frame(sources + listed, time_frame or session)
+            sources = sources + [e for e in listed if e["url"] in keep]
+        tracks = tracks if include_tracks else []
+
+        case = self._case_settings()
+        if time_frame is not None:
+            case["clock_time"] = min(max(case["clock_time"], f"{time_frame[0]:%Y-%m-%dT%H:%M:%SZ}"),
+                                     f"{time_frame[1]:%Y-%m-%dT%H:%M:%SZ}")
+        folder = CASE_PACKAGES_ROOT / self._track_session_day().strftime("%Y%m%d")
+        folder.mkdir(parents=True, exist_ok=True)
+        clock = self._time_ctrl.current_time
+        name = f"STORM_case_{self._track_session_day():%Y%m%d}_{case.get('radar_station') or 'noradar'}_{clock:%H%M}Z.zip"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Case Package", str(unused_path(folder / name)),
+                                              "STORM case package (*.zip)")
+        if not path:
+            return
+        path = Path(path)
+
+        state = {"done": 0, "total": 1, "label": "", "error": None, "finished": False}
+        cancel = threading.Event()
+
+        def progress(done, total, label):
+            state.update(done=done, total=max(total, 1), label=label)
+
+        def work():
+            try:
+                case_package.build(path, case=case, tracks=tracks, sources=sources, include_kinds=kinds,
+                                   time_frame=time_frame, fetch=_package_fetch, progress=progress, cancel=cancel)
+            except Exception as exc:  # noqa: BLE001 -- disk full, canceled, ...
+                state["error"] = exc
+            finally:
+                state["finished"] = True
+
+        bar = TaskProgressDialog("Export Case Package", f"Packing {path.name}", self)
+        bar.canceled.connect(cancel.set)
+        bar.show()
+        threading.Thread(target=work, daemon=True, name="case-export").start()
+        while not state["finished"]:
+            bar.set_progress(state["done"], state["total"], state["label"])
+            QApplication.processEvents()
+            threading.Event().wait(0.05)
+        bar.finish()
+        if isinstance(state["error"], InterruptedError):
+            self.status_msg_label.setText("Case export canceled")
+            return
+        if state["error"] is not None:
+            QMessageBox.warning(self, "Export Case Package", f"Couldn't write {path.name}:\n{state['error']}")
+            return
+        manifest, _ = case_package.read(path)
+        missing = len(manifest.get("data_not_packed", []))
+        detail = (f"{len(tracks)} storm track(s) and {len(manifest.get('data', []))} data file(s) included"
+                  + (f"; {missing} file(s) could not be downloaded and were left out" if missing else "")
+                  + (f"; {manifest['data_changed_since_viewed']} file(s) changed upstream since viewed"
+                     if manifest.get("data_changed_since_viewed") else "") + ".")
+        self.status_msg_label.setText(f"Case package saved: {path.name}")
+        self._notify_saved(path, "Case package saved", detail)
+
+    def _open_case_package(self) -> None:
+        folder = CASE_PACKAGES_ROOT
+        path, _ = QFileDialog.getOpenFileName(self, "Open Case Package", str(folder if folder.is_dir() else Path.home()),
+                                              "STORM case package (*.zip)")
+        if path:
+            self._load_case_package(Path(path))
+
+    def _load_case_package(self, path: Path, *, at_start: bool = False) -> None:
+        """Import the package's tracks into the active workspace and restore
+        its case. Another date reopens STORM on that date first."""
+        from PyQt6.QtWidgets import QMessageBox
+        from core import case_package
+        try:
+            manifest, tracks = case_package.read(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Open Case Package", f"{path.name}: {exc}")
+            return
+        case = manifest["case"]
+        archive_time = datetime.fromisoformat(case["archive_time"].replace("Z", "+00:00"))
+        if not at_start and case["session_date"] != self._case_settings()["session_date"]:
+            reply = QMessageBox.question(
+                self, "Open Case Package",
+                f"{path.name} is for {case['session_date']}. Close this session and open that date?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Yes:
+                self.restart_with = (archive_time, str(path))
+                self._change_day_requested = True
+                self.close()
+            return
+
+        imported = []
+        if hasattr(self, "_track_points") and tracks:
+            workspace, day = self._track_workspace(), self._track_session_day()
+            folder = workspace.root
+            folder.mkdir(parents=True, exist_ok=True)
+            for name, data in tracks.items():
+                # reopening the same package reuses the identical copy already here
+                same = next((f for f in folder.glob("*.csv") if f.read_bytes() == data), None)
+                target = same or unused_path(folder / name)
+                if same is None:
+                    target.write_bytes(data)
+                    workspace.record_track(day, target, data.count(b"\n") - 1)
+                imported.append(target)
+            self._refresh_track_workspace_lists()
+            self._open_track(imported[0], confirmed=True)
+
+        station = case.get("radar_station")
+        self._package_radar_view = {"product": case.get("radar_product"),
+                                    "tilt_index": case.get("radar_tilt_index")}
+        velocity = case.get("velocity") or {}
+        self.radar_controls._chk_dealias.setChecked(bool(velocity.get("dealias")))
+        if station and station != NOXP_SITE_ID:
+            if getattr(self, "_archive_radar", None) is None:
+                self._package_radar_station = station          # used when the radar starts
+            elif self._archive_radar.station != station:
+                self._on_radar_station_clicked(station)
+            else:
+                self._later(0, self._on_archive_radar_scan_package_view)
+        if velocity.get("storm_relative") and self.radar_controls._chk_storm_relative.isEnabled():
+            self.radar_controls._chk_storm_relative.setChecked(True)
+        clock = datetime.fromisoformat(case["clock_time"].replace("Z", "+00:00"))
+        self._later(1500 if at_start else 0, lambda: (self._time_ctrl.pause(), self._time_ctrl.set_time(clock)))
+        from core import package_sources
+        if not at_start and manifest.get("data"):
+            package_sources.activate(path, manifest["data"])
+        n = len(imported)
+        frame = manifest.get("time_frame")
+        summary = (f"{n} storm track{'s' if n != 1 else ''} imported into your "
+                   f"'{self._track_workspace().name}' workspace:\n{Path(imported[0]).parent}"
+                   if n and hasattr(self, "_track_points") else "")
+        if frame:
+            summary += (" " if summary else "") + (
+                f"Data packed for {frame['start'][11:16]}–{frame['end'][11:16]}Z; "
+                "other times download from the source when online.")
+        self.status_msg_label.setText(f"Opened case package {path.name}")
+        self._notify_saved(path, "Case package opened", summary)
+
+    def _renudge_archive_clock(self) -> None:
+        self._time_ctrl.set_time(self._time_ctrl.current_time)
+
+    def _on_archive_radar_index_loading_status(self, _index=None) -> None:
+        if hasattr(self, "_archive_loading"):
+            self._archive_loading.set_status("Fetching first radar scan…")
+
+    def _on_archive_radar_loading_done(self, _scan=None) -> None:
+        if hasattr(self, "_archive_loading") and self._archive_loading.startup_pending():
+            self._archive_loading.set_task_done("Radar")
+
+    def _on_archive_radar_loading_error(self, _msg=None) -> None:
+        if hasattr(self, "_archive_loading"):
+            self._archive_loading.set_task_error("Radar")
+
+    def _later(self, msec: int, callback) -> None:
+        """QTimer.singleShot tied to this window: the timer is a child, so it
+        dies with the window, and callbacks are skipped once closing has
+        begun. A bare singleShot lambda outlives the window and ran against
+        deleted widgets (native crash in rapid open/close stress runs)."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def fire():
+            timer.deleteLater()
+            if not getattr(self, "_closing", False):
+                callback()
+        timer.timeout.connect(fire)
+        timer.start(msec)
+
+    def _silence_archive_workers(self) -> None:
+        """No more signals from any archive worker once the window closes;
+        their threads may still be finishing downloads."""
+        from PyQt6.QtCore import QObject
+        from PyQt6.QtWidgets import QWidget
+        for name, value in list(vars(self).items()):
+            if name.startswith("_archive_") and isinstance(value, QObject) and not isinstance(value, QWidget):
+                try:
+                    value.blockSignals(True)
+                except RuntimeError:
+                    pass   # already deleted
+
     def closeEvent(self, event):
+        self._closing = True
+        from core import package_sources
+        package_sources.deactivate()
+        self._silence_archive_workers()
+        self._lidar_overlay_generation = getattr(self, "_lidar_overlay_generation", 0) + 1
+        self._lidar_instrument = ""            # late lidar files and renders are dropped
+        self._lidar_overlay_pending = False
+        self._noxp_generation = getattr(self, '_noxp_generation', 0) + 1
+        self._noxp_render_pending = None
+        if getattr(self, '_archive_noxp', None) is not None:
+            self._archive_noxp.shutdown()
+        if getattr(self, "_archive_clamps_surface", None) is not None:
+            self._archive_clamps_surface.shutdown()
         _s = QSettings("NSSL", "STORM")
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
@@ -1533,10 +2995,35 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._obs_watcher.stop()
         if hasattr(self, "_mqtt_client"):
             self._mqtt_client.disconnect()
+        if hasattr(self, "map_widget") and self.map_widget is not None:
+            # must run before a replacement MainWindow/MapWidget is built in
+            # this process (session loop) -- otherwise the new window's
+            # storm:// registration silently no-ops and its page goes blank.
+            self.map_widget.shutdown()
+        if hasattr(self, "_archive_radar") and self._archive_radar is not None:
+            self._archive_radar.shutdown()
+        if hasattr(self, "_archive_superres_timer"):
+            self._archive_superres_timer.stop()
+        # thread pools outlive their MainWindow unless explicitly shut down
+        # (ThreadPoolExecutor worker threads are non-daemon) -- without this,
+        # every "change day" round-trip through main.py's session loop would
+        # leak one more set of idle worker threads forever.
+        for _exec_name in (
+            "_archive_render_executor", "_archive_superres_executor",
+            "_decode_executor", "_render_executor",
+        ):
+            _executor = getattr(self, _exec_name, None)
+            if _executor is not None:
+                _executor.shutdown(wait=False, cancel_futures=True)
         self._cleanup_debug_panel()
 
         super().closeEvent(event)
-        QApplication.quit()
+        if getattr(self, "_change_day_requested", False):
+            # main.py's session loop is listening for this -- it'll show the
+            # launch dialog again instead of tearing down the process.
+            self.session_aborted.emit()
+        else:
+            QApplication.quit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1550,6 +3037,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # map always fills the full container (overlays float on top)
         self.map_widget.setGeometry(r)
+
+        # archive-mode background-loading indicator -- subtle, upper-left,
+        # never blocks the map underneath it (see ArchiveLoadingIndicator)
+        if hasattr(self, "_archive_loading"):
+            al = self._archive_loading
+            al.adjustSize()
+            al.move(MARGIN, MARGIN)
+            al.raise_()
 
         # toolbar: shrink-wrap to content, center horizontally, float with margin
         if hasattr(self, "_floating_toolbar"):
@@ -1565,6 +3060,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             tb_x = max(0, (r.width() - tb_w) // 2)
             self._floating_toolbar.setGeometry(tb_x, MARGIN, tb_w, tb_h)
             self._floating_toolbar.raise_()
+
+            # archive EXIT: top right, a snug pill centered on the header's
+            # row and clear of it; on a window too narrow for both it drops
+            # below the header's row
+            if hasattr(self, "_exit_button"):
+                ex = self._exit_button
+                ex_w, ex_h = ex.sizeHint().width(), 24
+                ex_x = r.width() - ex_w - MARGIN
+                beside = ex_x >= tb_x + tb_w + MARGIN
+                ex_y = MARGIN + (tb_h - ex_h) // 2 if beside else MARGIN + tb_h + 4
+                ex.setGeometry(ex_x, ex_y, ex_w, ex_h)
+                ex.raise_()
 
             # stack open pills below the toolbar to avoid overlap
             _drop_y = MARGIN + tb_h + 4
@@ -1615,8 +3122,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 _stack(self.mesoanalysis_controls)
             if hasattr(self, "sfcoa_controls") and self.btn_sfcoa.isChecked():
                 _stack(self.sfcoa_controls)
+            if hasattr(self, "raw_lidar_controls") and self.btn_raw_lidar.isChecked():
+                _stack(self.raw_lidar_controls)
+            if hasattr(self, "track_controls") and self.btn_track.isChecked():
+                _stack(self.track_controls)
             if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
                 _stack(self.surface_controls)
+            if hasattr(self, "archive_surface_controls") and self.btn_archive_surface.isChecked():
+                _stack(self.archive_surface_controls)
             if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
                 _stack(self.sounding_controls)
             if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
@@ -1658,20 +3171,25 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                            OutlookPanel.PANEL_WIDTH, panel_h)
             op.raise_()
 
-        # archive controls bar — centered, pinned to bottom
+        # archive bar — full width, pinned to the bottom; the map's own bottom
+        # controls (zoom, scale, legend) are lifted above it. The Video Studio
+        # panel takes its place while open.
         arc_bar_h = 0
         archive_rect = None
         if hasattr(self, "_archive_controls"):
-            ac = self._archive_controls
-            ac_w = min(r.width() - 2 * MARGIN, 680)
+            studio = getattr(self, "_studio", None)
+            ac = studio if studio is not None and studio.isVisible() else self._archive_controls
+            ac_w = r.width() - 2 * MARGIN
             ac.setFixedWidth(ac_w)
             ac.adjustSize()
             ac_h = ac.sizeHint().height()
             arc_bar_h = ac_h + MARGIN
-            ac_x = max(MARGIN, (r.width() - ac_w) // 2)
-            ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, ac_h)
-            archive_rect = (ac_x, r.height() - arc_bar_h, ac_w, ac_h)
+            ac.setGeometry(MARGIN, r.height() - arc_bar_h, ac_w, ac_h)
+            archive_rect = (MARGIN, r.height() - arc_bar_h, ac_w, ac_h)
             ac.raise_()
+            if getattr(self, "_map_bottom_inset", None) != arc_bar_h:
+                self._map_bottom_inset = arc_bar_h
+                self.map_widget.run_js(f"if (window.stormSetBottomInset) stormSetBottomInset({arc_bar_h});")
 
         # debug pill — bottom-center, sits above archive controls (or above bottom margin)
         if hasattr(self, "_debug_pill"):
@@ -1685,7 +3203,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # Left status pill stays bottom-left when there is room.  On narrower
         # archive layouts it moves above the playback bar instead of covering it.
-        if hasattr(self, "_status_left"):
+        _status_y = r.height() - arc_bar_h - MARGIN       # without the panel: just above the bar
+        if hasattr(self, "_status_left") and not self._status_left.isHidden():
             self._status_left.adjustSize()
             sl = self._status_left.size()
             _status_y = bottom_left_y_avoiding(
@@ -1703,7 +3222,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # layer order pill — sits directly above the status pill
         if hasattr(self, "_layer_pill"):
-            lp_w = self._layer_pill.width()
             lp_h = self._layer_pill.height()
             # anchor bottom of pill to just above the status pill
             lp_bottom = _status_y - 4
@@ -1715,7 +3233,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # re-center button — bottom-right, above MapLibre zoom controls (~70px tall)
         _ZOOM_CTRL_H = 70   # approximate height of MapLibre NavigationControl
         _GAP = 6
-        _recenter_top = r.height() - _ZOOM_CTRL_H - _GAP
+        _recenter_top = r.height() - arc_bar_h - _ZOOM_CTRL_H - _GAP
         if hasattr(self, "btn_recenter"):
             btn_w = self.btn_recenter.width()
             btn_h = self.btn_recenter.height()
@@ -1910,6 +3428,19 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             )
 
 
+    @staticmethod
+    def _set_floating_toolbar(widget) -> None:
+        """Name a drawer "floatingToolbar" and re-apply the theme inside it.
+        Qt doesn't restyle widgets when an ancestor is renamed: anything
+        polished before (e.g. a button hidden or shown while the drawer was
+        built) kept the plain style -- COPTERSONDE showed a black box when
+        selected, and "track the storm" a button instead of a link."""
+        widget.setObjectName("floatingToolbar")
+        style = widget.style()
+        for child in [widget, *widget.findChildren(QWidget)]:
+            style.unpolish(child)
+            style.polish(child)
+
     def _init_vehicle_panel(self):
         self.vehicle_panel = QWidget(self._map_container)
         self.vehicle_panel.setObjectName("vehiclePill")
@@ -1964,6 +3495,21 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._vehicle_rows_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._vehicle_rows_widget.setVisible(False)
         layout.addWidget(self._vehicle_rows_widget)
+
+        # archive: the trail controls are the bottom of this same panel
+        if hasattr(self, "trail_controls"):
+            divider = QFrame()
+            divider.setFrameShape(QFrame.Shape.HLine)
+            divider.setFixedHeight(1)
+            divider.setStyleSheet("background-color: rgba(74, 83, 108, 0.45); border: none;")
+            layout.addSpacing(2)
+            layout.addWidget(divider)
+            self.trail_controls.setParent(self.vehicle_panel)
+            # keep its floatingToolbar control styles, without a second box
+            self.trail_controls.setStyleSheet("#floatingToolbar { background: transparent; border: none; }")
+            self.trail_controls.layout().setContentsMargins(0, 2, 0, 0)
+            self.trail_controls.setMaximumHeight(16777215)
+            layout.addWidget(self.trail_controls)
 
         # no stretch so the pill shrink-wraps to content
 
@@ -2071,7 +3617,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._radar_error_clear_timer.setSingleShot(True)
         self._radar_error_clear_timer.timeout.connect(self._clear_radar_error)
 
-        self.map_widget.set_radar_stations(self._radar_station_sites)
+        self._push_radar_station_sites()
         self.radar_controls.set_selected_site("KTLX")
 
         initial_site = self.radar_controls.current_site()
@@ -2130,7 +3676,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.hazard_controls.spc_mds_toggled.connect(self._on_spc_mds_toggled)
         self.hazard_controls.nws_warnings_toggled.connect(self._on_nws_warnings_toggled)
         self.hazard_controls.nws_filter_changed.connect(self._on_nws_filter_changed)
-        self.hazard_controls.cwa_toggled.connect(self._on_cwa_toggled)
+        self.hazard_controls.cwa_toggled.connect(
+            self._on_cwa_toggled, type=Qt.ConnectionType.UniqueConnection)
         self.hazard_controls.fetch_requested.connect(self._on_hazard_fetch_requested)
 
         self._hazard_fetcher.spc_received.connect(self._on_spc_received)
@@ -2146,25 +3693,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._hazard_error_clear_timer = QTimer()
         self._hazard_error_clear_timer.setSingleShot(True)
         self._hazard_error_clear_timer.timeout.connect(self._clear_hazard_error)
-
-        # seed NWS bbox from MBTiles domain extent so warnings are filtered
-        try:
-            import sqlite3 as _sqlite3
-            from ui.map.widget import TILES_PATH as _TILES_PATH
-            _conn = _sqlite3.connect(_TILES_PATH)
-            _row = _conn.execute(
-                "SELECT value FROM metadata WHERE name='bounds'"
-            ).fetchone()
-            _conn.close()
-            if _row:
-                _lon_min, _lat_min, _lon_max, _lat_max = (
-                    float(x) for x in _row[0].split(",")
-                )
-                self._hazard_fetcher.set_nws_bbox(
-                    _lon_min, _lat_min, _lon_max, _lat_max
-                )
-        except Exception:
-            pass
 
         # load persisted NWS filter selections from QSettings and apply.
         try:
@@ -2343,6 +3871,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
         self.map_widget.asos_bbox_selected.connect(self._on_asos_bbox_selected)
+        self.map_widget.asos_box_cancelled.connect(self._on_live_asos_box_cancelled)
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
         self._surface_fetcher.diagnostics_updated.connect(self.surface_controls.set_diagnostics)
@@ -2350,7 +3879,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._surface_fetcher.error.connect(self._on_surface_error)
 
         self._surface_fetcher.start()
-        QTimer.singleShot(1200, lambda: self._surface_layer.set_visible(
+        self._later(1200, lambda: self._surface_layer.set_visible(
             self.surface_controls.plots_visible()
         ))
 
@@ -2533,7 +4062,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_satellite_toggled(self, checked: bool):
         self._set_layer_active("satellite", checked)
         if self._archive:
-            # archive mode: simply show/hide the overlay the archive fetcher is updating.
+            # archive mode: frames are fetched only while the layer is on
+            if getattr(self, "_archive_satellite", None) is not None:
+                self._archive_satellite.set_active(checked)
             has_data = getattr(self, "_archive_sat_has_data", False)
             self.map_widget.set_satellite_visible(checked and has_data)
             return
@@ -2709,7 +4240,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         return [west, south, east, north]
 
     def _on_mesoanalysis_error(self, msg: str):
-        self.mesoanalysis_controls.set_status(str(msg))
+        self.mesoanalysis_controls.set_status("Could not load mesoanalysis. See status bar.")
         self.status_msg_label.setText(str(msg))
 
     def _on_sfcoa_times_ready(self, times):
@@ -2805,7 +4336,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if product_id and time_id:
             self._sfcoa_overlay_cache[(product_id, time_id)] = metadata
         summary = self._sfcoa_status_summary(metadata)
-        self._sfcoa_status_text = summary
         self.sfcoa_controls.set_status(summary.replace("SFCOA ", "", 1))
         self.status_msg_label.setText(summary)
         if self._sfcoa_visible:
@@ -2854,7 +4384,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_sfcoa_error(self, msg: str):
         text = f"SFCOA: {msg}"
-        self.sfcoa_controls.set_status(text)
+        self.sfcoa_controls.set_status("Could not load SFCOA. See status bar.")
         self.status_msg_label.setText(text)
 
     def _on_satellite_mode_changed(self, mode: str):
@@ -3041,7 +4571,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._layout_overlays()
             # defer the actual removeLayer + removeSource until the renderer has
             _guard_gen = self._render_generation
-            QTimer.singleShot(400, lambda: self._deferred_radar_clear(_guard_gen))
+            self._later(400, lambda: self._deferred_radar_clear(_guard_gen))
 
     def _deferred_radar_clear(self, guard_gen: int):
         """Remove the MapLibre radar source/layer after the deferred delay.
@@ -3294,15 +4824,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                     # iem AFOS ignores after/before in ISO format; sdate/edate (date-only)
                     sdate = ts.strftime("%Y-%m-%d")
                     edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
-                    url = (
-                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-                        f"?pil={pil}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
-                    )
+                    url = f"{endpoints.IEM_AFOS}?pil={pil}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
                 else:
-                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={pil}&limit=1&fmt=text"
+                    url = f"{endpoints.IEM_AFOS}?pil={pil}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "mcd":
-                url = f"https://www.spc.noaa.gov/products/md/md{identifier}.txt"
+                url = endpoints.spc_md_text(identifier)
                 text = _fetch(url)
             elif kind == "watch":
                 # identifier is "NNNN" in live mode or "NNNN|ISO_TS" in archive mode.
@@ -3316,12 +4843,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                     ts = _dt2.strptime(archive_ts, "%Y-%m-%dT%H:%M:%SZ")
                     sdate = (ts - _td2(days=1)).strftime("%Y-%m-%d")
                     edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
-                    url = (
-                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
-                        f"?pil=SEL{sel_digit}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
-                    )
+                    url = f"{endpoints.IEM_AFOS}?pil=SEL{sel_digit}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
                 else:
-                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SEL{sel_digit}&limit=1&fmt=text"
+                    url = f"{endpoints.IEM_AFOS}?pil=SEL{sel_digit}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "warning":
                 if not identifier:
@@ -3340,7 +4864,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                     if year and wfo and phenom and sig and etn_raw:
                         etn_int = int(etn_raw.lstrip("0") or "0")
                         api_url = (
-                            "https://mesonet.agron.iastate.edu/json/vtec_event.py"
+                            f"{endpoints.IEM_VTEC_EVENT}"
                             f"?wfo={wfo}&year={year}&phenomena={phenom}"
                             f"&significance={sig}&etn={etn_int}"
                         )
@@ -3485,7 +5009,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if getattr(self, '_site_change_from_map_click', False):
             # js click handler already set raster-opacity to 0 — just sync
             self._radar_overlay._hidden = True
-            self._radar_overlay._current_scan = None
         else:
             # non-click path (auto-site, etc.) — safe to send JS
             self._radar_overlay.hide()
@@ -3522,7 +5045,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         site = self.radar_controls.current_site()
         avail = self._radar_product_availability.get(product, True)
         cur = self.status_msg_label.text()
-        prefix = "Radar:"
         if not avail:
             name_map = {"N0C": "Correlation Coefficient", "N0K": "Specific Diff. Phase"}
             name = name_map.get(product, product)
@@ -3556,12 +5078,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if hasattr(self, "map_widget"):
             self.map_widget.set_route_pick_mode(False)
 
+    def _on_archive_coptersondes_ready(self, sets):
+        if self.sounding_controls.active_mode != 'coptersonde':
+            return
+        self.sounding_controls.set_coptersondes(sets)
+        self.status_msg_label.setText(f"CopterSonde: {len(sets)} site(s)" if sets else "No CopterSonde profiles for this date")
+
     def _on_sounding_mode_changed(self, mode: str):
         """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
         if not self.btn_sounding.isChecked():
             return
         if self._archive:
-            # archive mode: HRRR → model sounding, OBS → radiosonde, NSSL not supported.
+            # archive mode: HRRR → model sounding, OBS → radiosonde,
+            # NSSL → CLAMPS radiosonde launch, falling back to a CLAMPS
+            # TROPoe thermodynamic retrieval if no launch exists for the day.
             if mode == "hrrr":
                 self.map_widget.set_obs_sounding_mode(False)
                 self.map_widget.clear_sounding_stations()
@@ -3570,6 +5100,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
                 self.map_widget.set_obs_sounding_mode(True)
+            elif mode == "coptersonde":
+                self.map_widget.set_sounding_mode(False)
+                self.map_widget.set_obs_sounding_mode(False)
+                self.map_widget.clear_sounding_stations()
+                self.status_msg_label.setText("Fetching CopterSonde profiles…")
+                self._archive_sounding.fetch_coptersondes()
             else:  # nssl
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_obs_sounding_mode(False)
@@ -3603,7 +5139,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._surface_fetcher.set_asos_enabled(enabled)
         self._set_layer_active("asos", enabled)
         if enabled and self._surface_fetcher._asos_bbox is None:
-            self.map_widget.set_asos_bbox_mode(True)
+            self.map_widget.set_asos_bbox_mode(True, ASOS_BOX_HINT)
         elif not enabled:
             self.map_widget.set_asos_bbox_mode(False)
             self._remove_surface_source_plots("asos")
@@ -3630,7 +5166,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._surface_fetcher.set_asos_enabled(True)
             self._set_layer_active("asos", True)
         self.status_msg_label.setText("ASOS: draw a new bounding box")
-        self.map_widget.set_asos_bbox_mode(True)
+        self.map_widget.set_asos_bbox_mode(True, ASOS_BOX_HINT)
+
+    def _on_live_asos_box_cancelled(self):
+        """Esc / right-click while drawing: with no box yet, ASOS has nothing to show, so turn it off."""
+        if self._surface_fetcher._asos_bbox is None and self.surface_controls.asos_enabled():
+            self.surface_controls.set_asos_enabled(False)
+            self.status_msg_label.setText("ASOS: box canceled")
 
     def _on_asos_bbox_selected(self, west: float, south: float, east: float, north: float):
         """Triggered when user finishes an ASOS bbox selection on the map."""
@@ -3648,7 +5190,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 log.error("ASOS fetch failed to start: %s", exc, exc_info=True)
                 self.status_msg_label.setText(f"ASOS fetch error: {exc}")
 
-        QTimer.singleShot(50, _start_asos_fetch)
+        self._later(50, _start_asos_fetch)
 
     def _on_obs_station_click(self, station_id: str, name: str, lat: float, lon: float, elev: float):
         self.status_msg_label.setText(f"Fetching OBS sounding {station_id}…")
@@ -3685,7 +5227,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if nssl and nssl_within_radius_km(nssl.lat, nssl.lon, sset.lat, sset.lon):
                 available["nssl"] = {}
 
-        elif sset.source == "nssl":
+        elif sset.source in ("nssl", "coptersonde", "clamps_tropoe"):
             if sset.lat != 0.0 or sset.lon != 0.0:
                 available["hrrr"] = {"lat": sset.lat, "lon": sset.lon}
                 obs = nearest_obs_station(sset.lat, sset.lon)
@@ -3708,7 +5250,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             lon = meta.get("lon", 0.0)
             if lat == 0.0 and lon == 0.0:
                 return
-            self.status_msg_label.setText(f"Fetching HRRR comparison sounding…")
+            self.status_msg_label.setText("Fetching HRRR comparison sounding…")
             self._comp_hrrr_fetcher.fetch(lat, lon)
         elif source == "obs":
             sid  = meta.get("station_id", "")
@@ -3742,11 +5284,1449 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._clamps_sounding_fetcher.fetch()
 
     def _on_vad_requested(self):
-        """Open VAD wind profile hodograph dialog for the current radar site."""
+        """Open the VAD wind-profile hodograph dialog: live NEXRAD VAD for
+        the current radar site, or CLAMPS wind profiles for the archive
+        date/known platforms in archive mode (fetched on the archive
+        clock, not "now" -- live NEXRAD semantics don't apply here)."""
+        if self._archive:
+            self.status_msg_label.setText("Fetching lidar wind profiles (lidar truck and CLAMPS trailers)…")
+            if not self._archive_clamps_wind.fetch(self._archive_time):  # covers the whole session span
+                self.status_msg_label.setText("Lidar wind profiles: fetch already in progress")
+            return
+
         site = self.radar_controls.current_site()
         from ui.dialogs.vad_dialog import VADDialog
         dlg = VADDialog(site, parent=self)
         dlg.exec()
+
+    def _on_archive_clamps_wind_ready(self, sets: dict) -> None:
+        if not sets:
+            self.status_msg_label.setText("Lidar wind profiles: no data for this date")
+            return
+        from archive.fetchers.clamps_wind_archive_fetcher import wind_source_name
+        platform_id = sorted(sets)[0]
+        if len(sets) > 1:
+            from PyQt6.QtWidgets import QInputDialog
+            names = {wind_source_name(pid): pid for pid in sorted(sets)}
+            name, accepted = QInputDialog.getItem(self, "Lidar wind profiles", "Instrument", list(names), 0, False)
+            if not accepted:
+                return
+            platform_id = names[name]
+        self.status_msg_label.setText(f"Lidar wind profiles: {wind_source_name(platform_id)}")
+        from ui.dialogs.vad_dialog import VADDialog
+        dlg = VADDialog(wind_source_name(platform_id), parent=self, preloaded_set=sets[platform_id],
+                        start_time=self._time_ctrl.current_time)
+        dlg.exec()
+
+    # -- NOXP mobile radar (archive) ------------------------------------
+    # NOXP is a site in the same RADAR-tab picker as every NEXRAD station
+    # (see _push_radar_station_sites / the NOXP branch in
+    # _on_radar_station_clicked) -- there is no separate drawer anymore.
+    # self._noxp_active is true exactly while NOXP is the displayed radar;
+    # WSR-88D fetching/decoding keeps running in the background regardless
+    # (see the _noxp_active guards in _on_archive_render_ready and the
+    # super-res path) so switching back is instant, not a fresh fetch.
+
+    def _push_radar_station_sites(self) -> None:
+        """Push the NEXRAD site list to the map, plus NOXP's entry once it
+        has a known position. Never mutates self._radar_station_sites
+        itself -- _nearest_nexrad/_nearest_radar_site iterate that list to
+        auto-pick a WSR-88D station, and "NOXP" isn't a valid station for
+        ArchiveRadarFetcher."""
+        sites = list(self._radar_station_sites or [])
+        if self._noxp_station_site is not None:
+            sites.append(self._noxp_station_site)
+        self.map_widget.set_radar_stations(sites)
+
+    def _on_archive_noxp_assets_ready(self, platform_id: str, assets: list) -> None:
+        if self._noxp_platform is None or self._noxp_platform.platform_id != platform_id:
+            return  # a later platform selection has already superseded this result
+        self._noxp_assets = assets
+        self._noxp_scan_times = [
+            a.nominal_time.strftime("%Y-%m-%dT%H:%M:%SZ") for a in assets if a.nominal_time is not None
+        ]
+        if self._noxp_active:
+            self._archive_controls.set_available_scan_times(self._noxp_scan_times)
+
+    def _on_archive_radar_index_loaded(self, iso_times: list[str]) -> None:
+        self._wsr88d_scan_times = iso_times
+        if not self._noxp_active:
+            self._archive_controls.set_available_scan_times(iso_times)
+
+    def _noxp_asset_near(self, when):
+        """Nearest discovered NOXP asset to `when`, or None if nothing's
+        been discovered yet this session."""
+        from archive.fetchers.noxp_radar_archive_fetcher import nearest_noxp_asset
+        return nearest_noxp_asset(self._noxp_assets, when)
+
+    def _on_noxp_asset_selected(self, asset) -> None:
+        if self._noxp_platform is None:
+            return
+        # RadarAsset has no .url (unlike LidarAsset) -- catalog_url is the
+        # identifier available both now (from the asset) and later (NoxpArchive
+        # .load() preserves it verbatim into the loaded volume's provenance),
+        # since the actual resolved download URL isn't known until deep
+        # inside load() and can't be compared against at request time.
+        self._noxp_asset_url = asset.catalog_url
+        self._archive_noxp.load_volume(self._noxp_platform.platform_id, asset)
+
+    def _on_archive_noxp_volume_loaded(self, platform_id: str, volume) -> None:
+        if (
+            self._noxp_platform is None
+            or self._noxp_platform.platform_id != platform_id
+            or volume.provenance.get('catalog_url') != self._noxp_asset_url
+        ):
+            return
+        self._noxp_current_volume = volume
+        # Plot the instrument's location as soon as we know it -- no LOCATE
+        # click needed, since the case's day/time is already what's being
+        # looked at (independent of scan_type -- meaningful for RHI too).
+        # This is also what makes NOXP a selectable radar site in the
+        # first place: it only joins the picker once it has a position.
+        from archive.fetchers.noxp_radar_archive_fetcher import noxp_site_at
+        site = noxp_site_at(volume)
+        self.map_widget.set_noxp_site(site)
+        self._noxp_station_site = (
+            {"site_id": NOXP_SITE_ID, "name": "NOXP (mobile)", "lat": site["lat"], "lon": site["lon"]}
+            if site is not None else None
+        )
+        self._push_radar_station_sites()
+        if self._noxp_active:
+            self._populate_noxp_selectors(volume)
+            self._on_noxp_render_requested(
+                self.radar_controls.current_tilt_index(), self.radar_controls.current_product()
+            )
+
+    def _populate_noxp_selectors(self, volume) -> None:
+        """(Re)populate the RADAR tab's product/tilt combos from a NOXP
+        volume. set_archive_products already preserves the current product
+        code by itself if the new volume still has it (radar_controls
+        tracks that internally); sweep index has no such combo-level
+        memory, so it's clamped here from whatever tilt was showing before
+        this volume loaded -- this is what keeps field/sweep selection
+        steady across clock-driven volume switches."""
+        if volume.scan_type != "ppi":
+            return
+        from archive.fetchers.noxp_radar_archive_fetcher import noxp_sweep_elevations
+        from core.noxp_radar_scan import field_meta
+        fields = sorted(volume.fields)
+        if not fields:
+            return
+        self.radar_controls.set_archive_products([(f, field_meta(f)["label"]) for f in fields])
+        elevations = noxp_sweep_elevations(volume)
+        prior_sweep = self.radar_controls.current_tilt_index()
+        sweep_idx = max(0, min(prior_sweep, len(elevations) - 1)) if elevations else 0
+        self.radar_controls.set_archive_tilts(elevations, sweep_idx)
+
+    def _activate_noxp_radar(self) -> None:
+        """Make NOXP the displayed radar -- the same action a NEXRAD site
+        marker click performs for a WSR-88D station, just for the mobile
+        platform. Only reachable once _noxp_station_site exists (a volume
+        has already loaded and given NOXP a position), so
+        _noxp_current_volume is never None here."""
+        if self._noxp_current_volume is None:
+            return
+        self._noxp_generation += 1
+        self._noxp_active = True
+        self._refresh_velocity_options_row()
+        self.radar_controls.set_selected_site(NOXP_SITE_ID, emit=False)
+        self._radar_overlay.hide(transient=False)
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_available_scan_times(self._noxp_scan_times)
+        self._populate_noxp_selectors(self._noxp_current_volume)
+        self._on_noxp_render_requested(
+            self.radar_controls.current_tilt_index(), self.radar_controls.current_product()
+        )
+        # the volume loaded at startup placed NOXP's marker; the clock may be
+        # hours from it, so go to the volume nearest the clock now (not on the
+        # next clock change)
+        self._on_time_changed_update_noxp_overlay(self._time_ctrl.current_time)
+
+    def _deactivate_noxp_radar(self) -> None:
+        self._noxp_generation += 1
+        self._noxp_active = False
+        self._refresh_velocity_options_row()
+        if self._noxp_overlay is not None:
+            self._noxp_overlay.clear()
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_available_scan_times(self._wsr88d_scan_times)
+        if self._current_radar_scan is not None:
+            self._archive_pending_render_scan = self._current_radar_scan
+            self._submit_pending_archive_render()
+
+    def _on_platform_marker_clicked(self, platform_id: str) -> None:
+        if platform_id == "noxp":
+            self._activate_noxp_radar()
+        elif platform_id.startswith("lidarloc-") and hasattr(self, "btn_raw_lidar"):
+            self._on_lidar_location_clicked(platform_id[len("lidarloc-"):])
+
+    def _on_time_changed_update_noxp_overlay(self, when) -> None:
+        """Auto-advance NOXP's loaded volume as the archive clock moves,
+        same idea as the CLAMPS lidar overlay -- once NOXP is the displayed
+        radar it should track "now," not stay pinned to whatever volume
+        was active when it was selected. Unlike lidar (one file already
+        holds a whole day of rays to slice), each NOXP volume is a
+        separate discovered file, so this means picking the nearest-time
+        asset and fetching it, not just re-slicing already-loaded data."""
+        if not self._noxp_active:
+            return
+        asset = self._noxp_asset_near(when)
+        if asset is None or asset.catalog_url == self._noxp_asset_url:
+            return
+        self._on_noxp_asset_selected(asset)
+
+    def _on_noxp_render_requested(self, sweep_index: int, field_name: str) -> None:
+        if self._noxp_current_volume is None:
+            return
+        self._noxp_generation += 1
+        request = (self._noxp_current_volume, sweep_index, field_name, self._noxp_generation)
+        if self._noxp_render_busy:
+            self._noxp_render_pending = request
+            return
+        self._start_noxp_render(request)
+
+    def _start_noxp_render(self, request):
+        self._noxp_render_busy = True
+        threading.Thread(target=self._bg_render_noxp, args=request, daemon=True).start()
+
+    def _bg_render_noxp(self, volume, sweep, field, generation):
+        from ui.map.noxp_overlay import render_noxp_to_png
+        from ui.map.radar_overlay import RENDER_GRID_SIZE
+        try:
+            png, bounds, scan, metadata = render_noxp_to_png(volume, sweep, field, RENDER_GRID_SIZE)
+            result = {"png": png, "bounds": bounds, "scan": scan, "metadata": metadata}
+        except Exception as exc:
+            log.exception("NOXP render failed")
+            result = {"error": str(exc)}
+        self._noxp_render_ready.emit({**result, "generation": generation})
+
+    def _on_noxp_render_ready(self, result):
+        self._noxp_render_busy = False
+        pending = self._noxp_render_pending
+        self._noxp_render_pending = None
+        if pending is not None and pending[-1] == self._noxp_generation:
+            self._start_noxp_render(pending)
+        if result['generation'] != self._noxp_generation or not self._noxp_active:
+            return
+        if 'error' in result:
+            # Already logged (see _bg_render_noxp's log.exception) -- not
+            # worth interrupting the shared status line for.
+            return
+        if self._noxp_overlay is None:
+            self._noxp_overlay = RadarOverlay(self.map_widget, layer_id='noxp-overlay', source_id='noxp-image', use_scheme_handler=False)
+        self._noxp_overlay.inject(result['png'], result['bounds'])
+        scan = result['scan']
+        meta = result['metadata']
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_rendered_radar(scan)           # "NOXP · 23:20:53Z"
+            self._archive_controls.set_radar_status(
+                f"{scan.native_field} · {meta['vmin']:g} … {meta['vmax']:g} {meta['units']}"
+            )
+
+    # -- Doppler lidar: the lidar truck and the CLAMPS trailers (archive) --
+    # Chosen like a radar station: while LIDAR is open, every place a lidar
+    # scanned from this session is marked on the map (a trailer's site, or
+    # each of the truck's stops -- core/lidar_scans.locations). The lidars'
+    # files are surveyed in the background as soon as they're found, so the
+    # places are ready when LIDAR opens. Clicking one moves the clock to its
+    # first scan, and its PPI sweeps show on the map as the clock reaches
+    # them; outside them the map is blank, as with a radar that has no volume then.
+
+    def _on_raw_lidar_availability(self, available: bool) -> None:
+        self.btn_raw_lidar.setEnabled(available)
+        self.btn_raw_lidar.setToolTip(
+            "Doppler lidar: the lidar truck and the CLAMPS trailers" if available
+            else "No lidar data for this date")
+        if not available and self.btn_raw_lidar.isChecked():
+            self.btn_raw_lidar.setChecked(False)
+
+    def _on_archive_raw_lidar_assets_ready(self, assets_by_source: dict) -> None:
+        self.raw_lidar_controls.set_assets_for_all_sources(assets_by_source)
+        found = self.raw_lidar_controls.assets_by_instrument()
+        if found:
+            self._lidar_activity_begin("lidar-survey", "Loading Lidar…")
+            self._start_lidar_survey(found, time.monotonic())
+
+    def _start_lidar_survey(self, found: dict, since: float) -> None:
+        """Survey the lidars once the session's startup has settled -- the
+        first radar image drawn and the vehicle tracks loaded -- so their big
+        files don't load on top of the first radar decode (together they
+        passed 2.5 GB on an 8 GB machine). After 3 minutes it goes anyway."""
+        startup = hasattr(self, "_archive_loading") and self._archive_loading.startup_pending()
+        tracks = getattr(self, "_archive_vehicle_obs_started", False) and not getattr(
+            self, "_archive_vehicle_obs_loaded", False)
+        if (startup or tracks) and time.monotonic() - since < 180:
+            self._later(1000, lambda: self._start_lidar_survey(found, since))
+            return
+        self._archive_raw_lidar.survey(found)
+
+    def _case_radar_site(self):
+        station = getattr(getattr(self, "_archive_radar", None), "station", None)
+        return next((i for i in (self._radar_station_sites or []) if i.get("site_id") == station), None)
+
+    def _distance_from_case(self, lat: float, lon: float) -> str:
+        import math
+        radar = self._case_radar_site()
+        if radar is None:
+            return ""
+        dlat = math.radians(lat - radar["lat"])
+        dlon = math.radians(lon - radar["lon"]) * math.cos(math.radians(radar["lat"]))
+        return f", {6371.0 * math.hypot(dlat, dlon):.0f} km from {radar['site_id']}"
+
+    def _on_raw_lidar_sites_ready(self, sites: dict) -> None:
+        self._lidar_sites = dict(sites)
+        for instrument in sites:
+            self._rebuild_lidar_locations(instrument)
+
+    def _lidar_session_span(self):
+        """The lidar scans that belong to this session: from 12Z on the
+        session day (earlier ones are the previous evening's, as for every
+        other archive feed -- archive/session.py) to the end of the timeline."""
+        from archive.session import SESSION_DAY_ACTIVITY_FROM, session_bounds
+        start, end = self._time_ctrl.window
+        return max(start, session_bounds(self._archive_time)[0] + SESSION_DAY_ACTIVITY_FROM), end
+
+    # ---- the survey: where and when each lidar scanned ---------------------------
+    def _on_lidar_file_ready(self, instrument: str, rays) -> None:
+        self._lidar_files_by.setdefault(instrument, []).append(rays)
+        self._rebuild_lidar_locations(instrument)
+
+    def _on_lidar_large_file(self, instrument: str, asset, size: int) -> None:
+        self._lidar_large_by.setdefault(instrument, []).append(asset)
+        if self._lidar_location is not None and self._lidar_location.instrument == instrument:
+            self._load_lidar_large(instrument)
+
+    def _load_lidar_large(self, instrument: str) -> None:
+        """The chosen lidar's larger PPI/CSM files, held back from the survey:
+        loaded right after it's chosen, without asking."""
+        assets = self._lidar_large_by.pop(instrument, [])
+        if assets:
+            self._lidar_large_loading.add(instrument)
+            self._archive_raw_lidar.load_files(instrument, assets)
+
+    def _on_lidar_instrument_loaded(self, instrument: str, files: int) -> None:
+        perf_log.event("lidar.instrument_loaded", instrument=instrument, files=files)
+        self._lidar_large_loading.discard(instrument)
+        self._maybe_end_lidar_location_loading()
+        if self._lidar_survey_done:
+            self._show_lidar_status()
+
+    def _on_lidar_survey_done(self) -> None:
+        self._lidar_survey_done = True
+        perf_log.event("lidar.survey_done")
+        self._lidar_activity_end("lidar-survey")
+        self._show_lidar_status()
+
+    def _show_lidar_status(self) -> None:
+        """Short, on the lidar button while nothing is chosen."""
+        if not self._lidar_survey_done:
+            return
+        if not self._lidar_locations:
+            self.raw_lidar_controls.set_status("No lidar PPI scans this session")
+        else:
+            n = len(self._lidar_locations)
+            self.raw_lidar_controls.set_status(f"Pick a lidar on the map ({n} location{'s' if n != 1 else ''})")
+
+    def _rebuild_lidar_locations(self, instrument: str) -> None:
+        from core import lidar_scans
+        scans = lidar_scans.timeline(self._lidar_files_by.get(instrument, []), *self._lidar_session_span())
+        site = self._lidar_sites.get(instrument)
+        found, unplaced = lidar_scans.locations(instrument, scans, site)
+        self._lidar_unplaced[instrument] = unplaced
+        self._lidar_locations = [loc for loc in self._lidar_locations if loc.instrument != instrument] + found
+        chosen = self._lidar_location
+        if chosen is not None and chosen.instrument == instrument:
+            # the same place, now with whatever the new file added
+            same = next((loc for loc in found if chosen.scans and chosen.scans[0] in loc.scans), None)
+            if same is not None:
+                self._lidar_location = same
+                self._lidar_scans = same.scans
+                self._show_lidar_location_details()
+        self._show_lidar_locations(self.btn_raw_lidar.isChecked())
+        self._show_lidar_status()
+
+    # ---- the location markers --------------------------------------------------------
+    def _lidar_location_text(self, loc, with_distance: bool = True) -> str:
+        from ui.controls.raw_lidar_controls import instrument_name
+        name = instrument_name(loc.instrument)
+        total = sum(1 for other in self._lidar_locations if other.instrument == loc.instrument)
+        where = loc.place or f"stop {loc.number} of {total}"
+        text = f"{name} · {where} ({loc.lat:.3f}, {loc.lon:.3f})"
+        return text + (self._distance_from_case(loc.lat, loc.lon) if with_distance else "")
+
+    def _show_lidar_locations(self, shown: bool) -> None:
+        """Every lidar location on the map while LIDAR is open, like the radar
+        station picker; the chosen one ringed in white. Hovering one shows
+        when it scanned and how its scan directions were set."""
+        from core import lidar_scans
+        from ui.controls.raw_lidar_controls import instrument_name
+        wanted = {}
+        if shown:
+            for loc in self._lidar_locations:
+                wanted[f"lidarloc-{loc.key}"] = loc
+        for marker_id in self._lidar_marker_ids - set(wanted):
+            self.map_widget.remove_platform_marker(marker_id)
+        for marker_id, loc in wanted.items():
+            chosen = loc is self._lidar_location
+            total = sum(1 for other in self._lidar_locations if other.instrument == loc.instrument)
+            title = (f"{instrument_name(loc.instrument)} · "
+                     + (loc.place or f"stop {loc.number} of {total}"))
+            hover = (f"{title}\n{lidar_scans.describe_periods(lidar_scans.periods(loc.scans))}"
+                     f" · {len(loc.scans)} PPI scan{'s' if len(loc.scans) != 1 else ''}\n"
+                     f"{self._lidar_heading_text(loc)}"
+                     + ("\nShowing its scans" if chosen else "\nClick to show its scans"))
+            self.map_widget.set_platform_marker(marker_id, loc.lat, loc.lon, "#00CFFF", "lidar", hover,
+                                                selected=chosen)
+        self._lidar_marker_ids = set(wanted)
+
+    @staticmethod
+    def _lidar_heading_text(loc) -> str:
+        """How this location's scan directions were set: a trailer's are
+        north-referenced; the truck's come from the heading recorded in its
+        files, or are estimated from its compass when a file has none."""
+        sources = list({id(s.source): s.source for s in loc.scans}.values())
+        if not any(getattr(getattr(r, "source", None), "mobile", False) for r in sources):
+            return "Heading: fixed site (north-referenced)"
+        prov = [r.provenance for r in sources]
+        if any(p.get("north_referenced") is False for p in prov):
+            return "Heading: unknown (no recorded heading or compass) — not mapped"
+        estimated = [p["truck_heading_estimate_deg"] for p in prov
+                     if p.get("heading_missing_in_file") and p.get("truck_heading_estimate_deg") is not None]
+        if estimated:
+            return f"Heading: estimated from the truck compass (~{estimated[0]:.0f}°) — not in the file"
+        recorded = [p["truck_heading_deg"] for p in prov if p.get("truck_heading_deg") is not None]
+        return f"Heading: recorded in the file ({recorded[0]:.0f}°)" if recorded else "Heading: recorded in the file"
+
+    def _on_lidar_location_clicked(self, key: str) -> None:
+        loc = next((l for l in self._lidar_locations if l.key == key), None)
+        if loc is None:
+            return
+        self._lidar_location = loc
+        self._lidar_instrument = loc.instrument
+        self._lidar_scans = loc.scans
+        self._lidar_overlay_generation += 1
+        self._lidar_overlay_key = None
+        if self._lidar_overlay is not None:
+            self._lidar_overlay.clear()
+        if not self.raw_lidar_controls.data_is_on():
+            self.raw_lidar_controls.set_data_on(True)   # picking a lidar means showing it
+        self.map_widget.set_radar_visible(self.raw_lidar_controls.radar_is_on())
+        self._show_lidar_location_details()
+        self._show_lidar_locations(self.btn_raw_lidar.isChecked())
+        self._show_lidar_status()
+        # to the start of its first scan, so what was happening then is on screen
+        total = sum(1 for other in self._lidar_locations if other.instrument == loc.instrument)
+        from ui.controls.raw_lidar_controls import instrument_name
+        self._lidar_activity_begin("lidar-location", f"Loading {instrument_name(loc.instrument)} · "
+                                                     f"{loc.place or f'stop {loc.number} of {total}'}…")
+        self._lidar_awaiting_first_render = True
+        self._load_lidar_large(loc.instrument)      # any larger files follow in the background
+        self._time_ctrl.pause()
+        self._time_ctrl.set_time(loc.start)
+        self._render_lidar_overlay()                # even if the clock was already there
+        self.status_msg_label.setText(f"Lidar: {self._lidar_location_text(loc, False)}, "
+                                      f"first scan {loc.start:%H:%M:%S} UTC")
+
+    def _show_lidar_location_details(self) -> None:
+        from core import lidar_scans
+        from ui.controls.raw_lidar_controls import instrument_name
+        loc = self._lidar_location
+        if loc is None:
+            self.raw_lidar_controls.set_location(None)
+            self._archive_controls.set_coverage([])
+            return
+        total = sum(1 for other in self._lidar_locations if other.instrument == loc.instrument)
+        title = f"{instrument_name(loc.instrument)} · {loc.place or f'stop {loc.number} of {total}'}"
+        spans = lidar_scans.periods(loc.scans)
+        details = (f"{self._lidar_location_text(loc)}\n{lidar_scans.describe_periods(spans)} · "
+                   f"{len(loc.scans)} PPI scan{'s' if len(loc.scans) != 1 else ''}\n"
+                   f"{self._lidar_heading_text(loc)}\nClick to center the map on it")
+        self.raw_lidar_controls.set_location(title, details)
+        sources = {id(s.source): s.source for s in loc.scans}.values()
+        fields = {}
+        for rays in sources:
+            for name, field in rays.fields.items():
+                fields.setdefault(name, field.get("units", ""))
+        self.raw_lidar_controls.set_fields(fields)
+        self.raw_lidar_controls.set_heading_notice(next(
+            (r.provenance for r in sources
+             if r.provenance.get("heading_missing_in_file") or r.provenance.get("north_referenced") is False), None))
+        self._archive_controls.set_coverage(spans, "#00CFFF", self._lidar_location_text(loc, False))
+
+    def _center_on_lidar_location(self) -> None:
+        loc = self._lidar_location
+        if loc is not None:
+            self.map_widget.fly_to(loc.lat, loc.lon)
+
+    def _on_lidar_data_toggled(self, on: bool) -> None:
+        """Hide or show the lidar's scans on the map (the chosen lidar stays
+        chosen); with them hidden the radar shows as usual."""
+        self._lidar_overlay_generation += 1
+        self._lidar_overlay_key = None
+        if not on:
+            if self._lidar_overlay is not None:
+                self._lidar_overlay.hide()
+            self.map_widget.set_radar_visible(True)
+            return
+        if self._lidar_location is not None:
+            self.map_widget.set_radar_visible(self.raw_lidar_controls.radar_is_on())
+        self._render_lidar_overlay()
+
+    def _on_raw_lidar_field_selected(self, field):
+        self._lidar_overlay_field = field
+        self._lidar_overlay_generation += 1
+        self._lidar_overlay_key = None
+        self._render_lidar_overlay()
+
+    @staticmethod
+    def _prune_download_caches() -> None:
+        from archive.fetchers.noxp_archive_fetcher import (
+            NOXP_CACHE_MAX_BYTES, RAW_LIDAR_CACHE_MAX_BYTES, prune_download_cache,
+        )
+        from archive.fetchers.noxp_radar_archive_fetcher import _NOXP_CACHE_DIR
+        from archive.fetchers.raw_lidar_quicklook_fetcher import _RAW_LIDAR_CACHE_DIR
+        for folder, cap in ((_RAW_LIDAR_CACHE_DIR, RAW_LIDAR_CACHE_MAX_BYTES), (_NOXP_CACHE_DIR, NOXP_CACHE_MAX_BYTES)):
+            try:
+                freed = prune_download_cache(folder, cap)
+                if freed:
+                    log.info("Download cache %s: removed %.0f MB of least recently used files", folder, freed / 1e6)
+            except Exception as exc:  # noqa: BLE001 - a cache is an optimization only
+                log.warning("Download cache %s not pruned: %s", folder, exc)
+
+    def _on_lidar_min_intensity_changed(self, value) -> None:
+        self._lidar_min_intensity = value
+        self._lidar_overlay_generation += 1
+        self._lidar_overlay_key = None
+        self._render_lidar_overlay()
+
+    def _on_time_changed_update_lidar_overlay(self, _t) -> None:
+        if not self._lidar_instrument:
+            return
+        self._render_lidar_overlay()
+
+    def _render_lidar_overlay(self) -> None:
+        """Draw the sweep at the clock -- but only when that's a different
+        sweep (or field) from the one on the map: a sweep is held for minutes,
+        and re-rendering and re-sending it on every clock tick only churned
+        memory in the map's web view."""
+        from core.lidar_scans import scan_at
+        if not self._lidar_scans or not self.raw_lidar_controls.data_is_on():
+            self._lidar_awaiting_first_render = False
+            self._maybe_end_lidar_location_loading()
+            return
+        scan = scan_at(self._lidar_scans, self._time_ctrl.current_time)
+        key = (id(scan) if scan is not None else None, self._lidar_overlay_field or "velocity",
+               self._lidar_min_intensity)
+        if key == self._lidar_overlay_key:
+            return
+        self._lidar_overlay_generation += 1
+        if self._lidar_overlay_render_in_flight:
+            self._lidar_overlay_pending = True
+            return
+        self._lidar_overlay_key = key
+        self._lidar_overlay_render_in_flight = True
+        threading.Thread(
+            target=self._bg_render_lidar_overlay,
+            args=(scan, self._time_ctrl.current_time,
+                  self._lidar_overlay_field or "velocity", self._lidar_overlay_generation,
+                  self._lidar_min_intensity),
+            daemon=True,
+        ).start()
+
+    def _bg_render_lidar_overlay(self, scan, when, field: str, generation: int, min_intensity=None) -> None:
+        """Runs in a background thread — NOT on the main thread. Draws one
+        PPI / CSM sweep (core/lidar_scans.scan_at), or reports there's none."""
+        from ui.map.lidar_overlay import render_lidar_to_png
+        from ui.map.radar_overlay import RENDER_GRID_SIZE
+        if scan is None:
+            self._lidar_overlay_render_ready.emit({"error": "no PPI scan now", "generation": generation, "quiet": True})
+            return
+        rays = scan.source
+        if field not in rays.fields:
+            field = "velocity" if "velocity" in rays.fields else next(iter(rays.fields))
+        try:
+            with perf_log.timed("lidar.render", rays=len(scan.indices), field=field, min_intensity=min_intensity):
+                png, bounds, metadata = render_lidar_to_png(rays, when, field, RENDER_GRID_SIZE,
+                                                            ray_indices=scan.indices, min_intensity=min_intensity)
+        except ValueError as exc:
+            self._lidar_overlay_render_ready.emit({"error": str(exc), "generation": generation})
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.error("Lidar overlay render failed: %s", exc)
+            self._lidar_overlay_render_ready.emit({"error": str(exc), "generation": generation})
+            return
+        metadata["scan"] = scan.describe()
+        self._lidar_overlay_render_ready.emit({"png": png, "bounds": bounds, "generation": generation, "metadata": metadata})
+
+    # ---- "Loading …" in the top-left indicator, as at startup ----------------
+    def _lidar_activity_begin(self, key: str, text: str) -> None:
+        if hasattr(self, "_archive_loading"):
+            self._archive_loading.begin(key, text)
+            self._layout_overlays()
+
+    def _lidar_activity_end(self, key: str) -> None:
+        if hasattr(self, "_archive_loading"):
+            self._archive_loading.end(key)
+
+    def _maybe_end_lidar_location_loading(self) -> None:
+        """The chosen lidar is ready once its held-back files have loaded
+        and its first sweep (or 'no sweep at this time') has come back."""
+        loc = self._lidar_location
+        if loc is None or (not self._lidar_awaiting_first_render and loc.instrument not in self._lidar_large_loading):
+            self._lidar_activity_end("lidar-location")
+
+    def _on_lidar_overlay_render_ready(self, result: dict) -> None:
+        self._lidar_overlay_render_in_flight = False
+        if result["generation"] == self._lidar_overlay_generation:
+            self._lidar_awaiting_first_render = False
+            self._maybe_end_lidar_location_loading()
+        if (not self._lidar_instrument or result["generation"] != self._lidar_overlay_generation
+                or not self.raw_lidar_controls.data_is_on()):
+            pass  # superseded lidar or time, or switched off while rendering
+        elif "error" in result:
+            if not result.get("quiet"):
+                self.status_msg_label.setText(f"Lidar map: {result['error']}")
+            if self._lidar_overlay is not None:
+                self._lidar_overlay.hide()
+        else:
+            if self._lidar_overlay is None:
+                self._lidar_overlay = RadarOverlay(
+                    self.map_widget, layer_id="lidar-overlay", source_id="lidar-image",
+                    use_scheme_handler=False,
+                )
+            self._lidar_overlay.inject(result["png"], result["bounds"])
+        if self._lidar_overlay_pending:
+            self._lidar_overlay_pending = False
+            self._lidar_overlay_key = None         # what's drawn may be stale: check again
+            self._render_lidar_overlay()
+
+    # -- ASOS historical surface observations (archive) -----------------
+
+    def _on_archive_asos_toggled(self, checked: bool) -> None:
+        """No drawer -- checking enters bbox-draw mode (unless something is
+        already showing); unchecking clears everything and exits draw mode.
+        Toggling off then on again is how the user redraws a box."""
+        if checked:
+            if not self._archive_asos_station_ids:
+                self.status_msg_label.setText("ASOS: draw a bounding box")
+                self.map_widget.set_asos_bbox_mode(True, ASOS_BOX_HINT)
+            return
+        self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
+        if self._archive_asos is not None:
+            self._archive_asos.clear()
+        self._clear_archive_asos_plots()
+
+    def _on_archive_box_cancelled(self) -> None:
+        """Esc / right-click while drawing: un-press whichever button was
+        waiting for a box, so it doesn't stay lit with nothing to show."""
+        btn = getattr(self, "btn_archive_asos", None)
+        if btn is not None and btn.isChecked() and not getattr(self, "_archive_asos_station_ids", None):
+            btn.setChecked(False)
+            self.status_msg_label.setText("ASOS: box canceled")
+        btn = getattr(self, "btn_damage_paths", None)
+        if btn is not None and btn.isChecked() and not getattr(self, "_archive_damage_paths_showing", False):
+            btn.setChecked(False)
+            self.status_msg_label.setText("Damage paths: box canceled")
+
+    def _clear_archive_asos_plots(self) -> None:
+        self._archive_asos_render_generation += 1
+        self._archive_asos_pending = {}
+        if self._archive_asos_station_ids:
+            self.map_widget.remove_surface_station_plots_batch(list(self._archive_asos_station_ids))
+        self._archive_asos_station_ids = set()
+        self._archive_asos_cache = {}
+
+    def _on_archive_asos_bbox_selected(self, west: float, south: float, east: float, north: float) -> None:
+        """asos_bbox_selected is shared with live mode's own handler on the
+        same signal -- only act on it when our button is the one that put
+        the map into draw mode (live mode's handler never runs in archive
+        mode at all, since it's only connected during the live-only startup
+        path, but this guard also covers the archive ASOS button itself
+        being off, e.g. a stray box drawn some other way)."""
+        if self._archive_asos is None or not self.btn_archive_asos.isChecked():
+            return
+        self.status_msg_label.setText("ASOS: fetching history…")
+        self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
+        self._clear_archive_asos_plots()
+        self._archive_asos.set_bbox(west, south, east, north)
+
+    def _on_archive_asos_load_finished(self, count: int) -> None:
+        if count:
+            self.status_msg_label.setText(f"ASOS: {count} station(s) loaded")
+            self._archive_asos.on_time_changed(self._time_ctrl.current_time)
+        else:
+            self.status_msg_label.setText("ASOS: no stations found in this box")
+
+    def _on_archive_asos_stations_cleared(self) -> None:
+        self._clear_archive_asos_plots()
+
+    def _on_archive_asos_station_updated(self, station_id: str, name: str, obs) -> None:
+        self._archive_asos_pending[station_id] = (name, obs)
+        if not self._archive_asos_flush_scheduled:
+            self._archive_asos_flush_scheduled = True
+            QTimer.singleShot(0, self._flush_archive_asos_render_queue)
+
+    def _flush_archive_asos_render_queue(self) -> None:
+        """Coalesces every station_updated emitted within one on_time_changed
+        tick (an archive-clock scrub can move many stations' bisected index
+        at once) into a single chunked background render, mirroring
+        _on_surface_observations_updated's live-mode pattern but with its
+        own cache/generation state rather than self._surface_layer, which
+        doesn't exist in archive mode."""
+        self._archive_asos_flush_scheduled = False
+        if not self._archive_asos_pending:
+            return
+        pending = self._archive_asos_pending
+        self._archive_asos_pending = {}
+        self._archive_asos_render_generation += 1
+        render_generation = self._archive_asos_render_generation
+        archive_time = self._time_ctrl.current_time
+        cache_snapshot = dict(self._archive_asos_cache)
+        self._archive_asos_station_ids |= set(pending)
+
+        class _AsosRenderSignals(QObject):
+            ready = pyqtSignal(list)
+
+        signals = _AsosRenderSignals()
+
+        def _push(rendered):
+            if render_generation != self._archive_asos_render_generation:
+                return
+            batch = []
+            for sid, lat, lon, fp, png, name in rendered:
+                self._archive_asos_cache[sid] = (fp, png)
+                batch.append((sid, lat, lon, png, name))
+            if batch:
+                self.map_widget.add_surface_station_plots_batch(batch)
+
+        signals.ready.connect(_push, Qt.ConnectionType.QueuedConnection)
+
+        def _render_worker():
+            from ui.layers.station_plot_layer import _render
+            from ui.layers.surface_plot_layer import SurfacePlotLayer, _surface_obs_fingerprint
+
+            rendered = []
+            items = list(pending.items())
+            chunk_size = 24
+            for i, (sid, (name, obs)) in enumerate(items):
+                if render_generation != self._archive_asos_render_generation:
+                    return
+                fp = _surface_obs_fingerprint(obs)
+                cached = cache_snapshot.get(sid)
+                if cached and cached[0] == fp:
+                    continue
+                try:
+                    color = SurfacePlotLayer._obs_age_color(obs, sid, reference_time=archive_time)
+                    png = _render(obs, center_color=color)
+                    rendered.append((sid, obs.lat, obs.lon, fp, png, name))
+                except Exception as exc:
+                    log.error("archive ASOS render failed for %s: %s", sid, exc)
+                if len(rendered) >= chunk_size or i == len(items) - 1:
+                    if render_generation != self._archive_asos_render_generation:
+                        return
+                    signals.ready.emit(rendered)
+                    rendered = []
+                    time.sleep(0.015)
+
+        threading.Thread(target=_render_worker, daemon=True).start()
+
+    # -- Damage-survey paths (archive) -----------------------------------
+
+    def _on_damage_paths_toggled(self, checked: bool) -> None:
+        """Same shape as _on_archive_asos_toggled: no drawer, checking
+        enters bbox-draw mode (unless already showing something), unchecking
+        clears everything and exits draw mode."""
+        if checked:
+            if not self._archive_damage_paths_showing:
+                self.status_msg_label.setText("Damage paths: draw a bounding box")
+                self.map_widget.set_asos_bbox_mode(True, DAMAGE_BOX_HINT)
+            return
+        self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
+        self.map_widget.clear_damage_paths()
+        self._archive_damage_paths_showing = False
+
+    def _on_archive_damage_paths_bbox_selected(self, west: float, south: float, east: float, north: float) -> None:
+        """asos_bbox_selected is shared with ASOS's own archive handler (and
+        live mode's, which never runs in archive mode) on the same signal --
+        only act on it when our button is the one that put the map into
+        draw mode."""
+        if self._archive_damage_paths is None or not self.btn_damage_paths.isChecked():
+            return
+        self.status_msg_label.setText("Damage paths: searching…")
+        self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
+        self.map_widget.clear_damage_paths()
+        self._archive_damage_paths_showing = False
+        self._archive_damage_paths.set_bbox(west, south, east, north)
+
+    def _on_archive_damage_paths_ready(self, fc: dict) -> None:
+        count = len(fc.get("features", []))
+        if count:
+            source = (fc["features"][0].get("properties", {}) or {}).get("damage_source", "damage path")
+            self.status_msg_label.setText(f"Damage paths: {count} found ({source})")
+        else:
+            self.status_msg_label.setText("Damage paths: none found in this box")
+        self._archive_damage_paths_showing = True
+        self.map_widget.set_damage_paths(json.dumps(fc))
+
+    # -- Storm track (archive) --------------------------------------------
+    # Subjective mesocyclone/storm-track points, hand-placed while reviewing
+    # archive radar -- ported from MESO-VIEW's inline track-editing feature.
+    # See core/storm_track.py for the data model and file writers.
+
+    def _init_track_state(self) -> None:
+        # No track until the user places a point or loads a file.
+        self._track_points: list[TrackPoint] = []
+        self._track_next_id = 1
+        self._track_selected_id = None
+        self._track_saved_path = None      # where edits autosave
+        self._track_edit_active = False
+        self._track_loaded_path = None     # file the track was loaded from, if any
+        self._track_original: list[TrackPoint] = []  # as loaded, for Reset to Original
+        self._track_origin = ""            # file an imported track was copied from
+        self._track_undo: list[list[TrackPoint]] = []
+        self._track_redo: list[list[TrackPoint]] = []
+        if not hasattr(self, "_track_table"):
+            self._track_table = None       # TrackTableDialog, created on first open
+
+    def _on_track_edit_toggled(self, checked: bool) -> None:
+        self._track_edit_active = checked
+        self.map_widget.set_track_edit_mode(checked)
+        self._set_track_letter_keys(checked)
+        if checked and not self._track_session_opened:
+            self._track_session_opened = True
+            self._open_session_track()
+        self._apply_track_visibility()
+
+    def _apply_track_visibility(self) -> None:
+        """The track is drawn while TRACK is open (Line / Points as chosen),
+        or always with Keep on map; otherwise it stays loaded but hidden."""
+        if not hasattr(self, "track_controls"):
+            return
+        shown = self.btn_track.isChecked() or self.track_controls.keep_on_map()
+        line, points = self.track_controls._chk_line.isChecked(), self.track_controls._chk_points.isChecked()
+        self.map_widget.set_track_layers_visible(line and shown, points and shown)
+
+    def _open_session_track_at_start(self) -> None:
+        """Load the date's saved track when the session opens, so storm
+        motion (storm-relative velocity, time-to-space, ...) is there without
+        opening TRACK first; it stays hidden until TRACK is opened."""
+        if not hasattr(self, "track_controls") or self._track_session_opened:
+            return
+        self._track_session_opened = True
+        self._apply_track_visibility()
+        self._open_session_track()
+        if self._track_points:
+            mean = self.track_storm_motion()
+            self.status_msg_label.setText(
+                f"Storm track loaded ({len(self._track_points)} points"
+                + (f", motion {mean.short()}" if mean else "") + ") — open TRACK to see it")
+            perf_log.event("note", what="session track loaded at start", points=len(self._track_points))
+
+    def _session_tracks(self) -> list[dict]:
+        """The date's tracks from every workspace, the active one's first, in
+        time order (file names start with the first point's time). A
+        track the active workspace already has a copy of (same file name) is
+        left out -- the copy is the one being worked on."""
+        from core.workspace import tracks_for_date
+        active = self._track_workspace().name
+        found = tracks_for_date(self._track_session_day())
+        mine = {t["path"].name for t in found if t["workspace"] == active}
+        found = [t for t in found if t["workspace"] == active or t["path"].name not in mine]
+        found.sort(key=lambda t: (t["workspace"] != active, t["path"].name))   # active first, then by time
+        return found
+
+    def _open_session_track(self) -> None:
+        """Open the date's saved track, if there is one -- nothing to pick or
+        load by hand. With several (a day with more than one storm), the one
+        nearest the current time. With none, TRACK starts empty for a new one."""
+        if self._track_points:
+            return
+        found = self._session_tracks()
+        if not found:
+            return
+        now = self._time_ctrl.current_time if hasattr(self, "_time_ctrl") else self._archive_time
+
+        def distance(track):
+            try:
+                times = [p.time for p in read_track_file(track["path"])]
+            except Exception:
+                return float("inf")
+            if not times:
+                return float("inf")
+            if min(times) <= now <= max(times):
+                return 0.0
+            return min(abs((min(times) - now).total_seconds()), abs((max(times) - now).total_seconds()))
+
+        best = min(found, key=distance)      # ties keep the order: active workspace, most recent
+        if distance(best) == float("inf"):
+            return
+        self._open_track(best["path"], confirmed=True)
+        self.track_controls.select_saved_track(str(best["path"]))
+
+    def _set_track_letter_keys(self, editing: bool) -> None:
+        """Hand D and A to the track editor while TRACK is on and back to
+        frame stepping otherwise. Qt fires neither of two shortcuts that
+        share a key, so only one owner may be enabled at a time."""
+        self._track_delete_shortcuts[0].setEnabled(editing)   # D
+        self._track_marker_point_shortcut.setEnabled(editing)  # A
+        if hasattr(self, "_archive_controls"):
+            self._archive_controls.set_letter_step_keys_enabled(not editing)
+
+    def _current_track_radar_context(self) -> tuple[str, str, str, float | None]:
+        """(radar_site, product, product_label, tilt_deg) for whichever radar
+        is on screen right now -- NOXP or the active WSR-88D station."""
+        product = self.radar_controls.current_product()
+        if self._noxp_active:
+            from core.noxp_radar_scan import field_meta
+            product_label = field_meta(product)["label"]
+            tilt_deg = None
+            if self._noxp_current_volume is not None:
+                from archive.fetchers.noxp_radar_archive_fetcher import noxp_sweep_elevations
+                elevations = noxp_sweep_elevations(self._noxp_current_volume)
+                idx = self.radar_controls.current_tilt_index()
+                if elevations and 0 <= idx < len(elevations):
+                    tilt_deg = elevations[idx]
+            return NOXP_SITE_ID, product, product_label, tilt_deg
+        from core.level2_radar_scan import L2_PRODUCTS
+        product_label = L2_PRODUCTS.get(product, {}).get("label", product)
+        tilt_deg = getattr(self._current_radar_scan, "tilt_deg", None)
+        # a point can be placed before any radar station has been chosen
+        radar = getattr(self, "_archive_radar", None)
+        return (radar.station if radar is not None else ""), product, product_label, tilt_deg
+
+    def _nearest_track_point_id(self, when: datetime) -> int | None:
+        if not self._track_points:
+            return None
+        return min(
+            self._track_points, key=lambda p: abs((p.time - when).total_seconds())
+        ).point_id
+
+    def _push_track_geojson(self) -> None:
+        current_id = self._nearest_track_point_id(self._time_ctrl.current_time)
+        coords = []
+        features = []
+        total = len(self._track_points)
+        for n, p in enumerate(self._track_points, start=1):
+            coords.append([p.lon, p.lat])
+            if p.point_id == self._track_selected_id:
+                state = "selected"
+            elif p.point_id == current_id:
+                state = "current"
+            else:
+                state = "normal"
+            radar = " ".join(x for x in (
+                p.radar_site, p.product_label or p.product,
+                f"{p.tilt_deg:.1f}°" if p.tilt_deg is not None else "") if x)
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [p.lon, p.lat]},
+                "properties": {    # the hover label shows these
+                    "point_id": p.point_id, "state": state,
+                    "time": p.time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "order": f"Point {n} of {total}", "radar": radar,
+                },
+            })
+        if len(coords) >= 2:
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coords},
+                "properties": {},
+            })
+        self.map_widget.set_track_geojson(json.dumps({"type": "FeatureCollection", "features": features}))
+
+    def _track_workspace(self):
+        """Where this user's tracks and edits go. Never the shared
+        Pardun_Tracks: it stays exactly as it came with STORM."""
+        from core.workspace import DEFAULT_WORKSPACE, SHARED_WORKSPACE, Workspace
+        name = QSettings("NSSL", "STORM").value("track/workspace", DEFAULT_WORKSPACE, type=str)
+        workspace = Workspace(name or DEFAULT_WORKSPACE)
+        return Workspace(DEFAULT_WORKSPACE) if workspace.name == SHARED_WORKSPACE else workspace
+
+    def _track_session_day(self):
+        return self._archive_time.astimezone(timezone.utc).date()
+
+    def _autosave_track(self) -> None:
+        """Save after every edit, atomically, into the active workspace's
+        folder for this session date: a new track gets a new file named from
+        its first point (never overwriting one); an imported track becomes a
+        workspace copy on its first edit, leaving the original file as it was."""
+        if not self._track_points:
+            return
+        workspace, day = self._track_workspace(), self._track_session_day()
+        first_save = self._track_saved_path is None
+        if first_save:
+            folder = workspace.root
+            if self._track_origin:
+                self._track_saved_path = unused_path(folder / f"{Path(self._track_origin).stem}.csv")
+            else:
+                self._track_saved_path = new_track_path(min(p.time for p in self._track_points), folder)
+        try:
+            if self._track_saved_path.suffix.lower() == ".xlsx":
+                write_track_excel(self._track_points, self._track_saved_path)
+            else:
+                write_track_csv(self._track_points, self._track_saved_path)
+            if workspace.contains(self._track_saved_path):
+                workspace.record_track(day, self._track_saved_path, len(self._track_points))
+                self._refresh_track_workspace_lists()
+            if first_save:
+                self._notify_track_saved(self._track_saved_path)
+        except Exception as exc:
+            log.error("Track autosave failed: %s", exc)
+            self.status_msg_label.setText(f"Track autosave failed: {exc}")
+
+    def _refresh_track_workspace_lists(self) -> None:
+        """The date's tracks from every workspace -- the active one first --
+        so the shared Pardun_Tracks show up next to the user's own.
+        Opening one from another workspace edits a copy in the active one."""
+        from core.workspace import editable_workspaces
+        if not hasattr(self, "track_controls"):
+            return
+        workspace = self._track_workspace()
+        self.track_controls.set_workspaces(editable_workspaces(), workspace.name)
+        tracks = []
+        for t in self._session_tracks():
+            where = "" if t["workspace"] == workspace.name else f"[{t['workspace']}] "
+            count = f"  ({t['points']} pts)" if t["points"] is not None else ""
+            tracks.append((f"{where}{t['path'].name}{count}", str(t["path"])))
+        self.track_controls.set_saved_tracks(tracks)
+        if self._track_loaded_path is not None or self._track_saved_path is not None:
+            self.track_controls.select_saved_track(str(self._track_saved_path or self._track_loaded_path))
+
+    def _open_track_folder(self) -> None:
+        """The folder of the track being edited, else this date's folder in
+        the active workspace, else the track root."""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from core.workspace import workspaces_root
+        folder = (self._track_saved_path.parent if self._track_saved_path is not None
+                  else self._track_workspace().root)
+        if not folder.is_dir():
+            folder = workspaces_root()
+            folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _notify_track_saved(self, path, what: str = "saved") -> None:
+        """Tell the user exactly where a track went (first save of each file,
+        and exports)."""
+        from core.workspace import workspaces_root
+        path = Path(path)
+        self._notify_saved(path, f"Storm track {what}",
+                           f"All storm tracks are kept in STORM's track folder\n"
+                           f"{workspaces_root()}\n(one folder per workspace). "
+                           "Further edits save to this same file automatically.")
+
+    def _notify_saved(self, path, title: str, detail: str) -> None:
+        """Non-blocking notice giving the file's full path, with an Open Folder button."""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtWidgets import QMessageBox
+        path = Path(path)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(title)
+        box.setText(f"{title}:\n{path}")           # the full location, every time
+        box.setInformativeText(detail)
+        open_btn = box.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))))
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.show()
+        self._track_saved_notice = box
+
+    def _switch_track_workspace(self, name: str) -> None:
+        """Every edit is already saved, so switching just starts empty in the
+        other workspace, whose tracks for this date are listed to resume."""
+        from core.workspace import Workspace
+        if name == self._track_workspace().name:
+            return
+        QSettings("NSSL", "STORM").setValue("track/workspace", Workspace(name).name)
+        self._init_track_state()
+        self._track_edit_active = self.btn_track.isChecked()
+        self._push_track_geojson()
+        self._refresh_track_controls()
+        self._refresh_track_workspace_lists()
+        self.status_msg_label.setText(f"Track workspace: {name}")
+
+    def _new_track_workspace(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        from core.workspace import clean_name
+        text, ok = QInputDialog.getText(self, "New Workspace", "Name for the new workspace:")
+        from core.workspace import SHARED_WORKSPACE
+        name = clean_name(text) if ok else ""
+        if name == SHARED_WORKSPACE or name == "MESO-VIEW":
+            self.status_msg_label.setText(f"{SHARED_WORKSPACE} holds the shared tracks; pick another name")
+            name = ""
+        if not name:
+            self._refresh_track_workspace_lists()   # put the combo back
+            return
+        self._track_workspace().root.parent.joinpath(name).mkdir(parents=True, exist_ok=True)
+        self._switch_track_workspace(name)
+
+    def _refresh_track_controls(self) -> None:
+        if not hasattr(self, "track_controls"):
+            return
+        self.track_controls.set_point_count(len(self._track_points))
+        if self._track_saved_path is not None:
+            from core.workspace import workspaces_root
+            try:
+                shown = self._track_saved_path.relative_to(workspaces_root())
+            except ValueError:
+                shown = self._track_saved_path
+            self.track_controls.set_file(f"Saving to {shown}", str(self._track_saved_path))
+        else:
+            self.track_controls.set_file("New track — nothing saved yet")
+        self.track_controls.set_edit_state(
+            loaded=self._track_loaded_path is not None,
+            can_undo=bool(self._track_undo), can_redo=bool(self._track_redo),
+        )
+        self._refresh_track_motion()
+        if self._track_table is not None:
+            self._track_table.load(self._track_points)
+            self._track_table.select_point(self._track_selected_id)
+
+    def _open_track_table(self) -> None:
+        from ui.dialogs.track_table_dialog import TrackTableDialog
+        if self._track_table is None:
+            self._track_table = TrackTableDialog(self._track_session_day(), self)
+            self._track_table.apply_requested.connect(self._apply_track_table)
+            self._track_table.point_selected.connect(self._on_track_point_select)
+            self._track_table.jump_requested.connect(self._jump_to_track_point)
+        self._track_table.set_default_time(self._time_ctrl.current_time)
+        self._track_table.load(self._track_points, force=True)
+        self._track_table.select_point(self._track_selected_id)
+        self._track_table.show()
+        self._track_table.raise_()
+
+    def _apply_track_table(self, points: list) -> None:
+        if points == self._track_points:
+            return
+        self._set_track_points(points)
+        self.status_msg_label.setText(f"Track: table edits applied ({len(points)} points)")
+
+    def _jump_to_track_point(self, point_id: int) -> None:
+        point = next((p for p in self._track_points if p.point_id == point_id), None)
+        if point is None:
+            return
+        self._on_track_point_select(point_id)
+        self._time_ctrl.pause()
+        self._time_ctrl.set_time(point.time)
+
+    def track_storm_motion(self):
+        """The track's mean storm motion (core.storm_motion.StormMotion),
+        or None -- for anything that works relative to the storm."""
+        from core.storm_motion import mean_motion
+        return mean_motion(self._track_points)
+
+    def _refresh_track_motion(self) -> None:
+        from core.storm_motion import motion_at
+        if not hasattr(self, "track_controls"):
+            return
+        mean = self.track_storm_motion()
+        now = motion_at(self._track_points, self._time_ctrl.current_time) if self._track_points else None
+        self.track_controls.set_motion(mean.short() if mean else None,
+                                       now.short() if now else None)
+        if hasattr(self, "radar_controls"):
+            self.radar_controls.set_storm_relative_available(mean is not None,
+                                                             mean.describe() if mean else "")
+            self._apply_velocity_options()
+        if hasattr(self, "trail_controls"):
+            self.trail_controls.set_track_available(mean is not None)
+            self._schedule_trails()
+        if getattr(self, "_sounding_dialog", None) is not None:
+            self._sounding_dialog.set_observed_storm_motion(mean)
+
+    def _set_track_points(self, points: list[TrackPoint], *, record_undo: bool = True) -> None:
+        """Replace the track with `points` as one undoable edit, then redraw,
+        autosave and refresh the panel."""
+        if record_undo:
+            self._track_undo.append(list(self._track_points))
+            self._track_redo.clear()
+        self._track_points = sorted(points, key=lambda p: p.time)
+        self._track_next_id = max((p.point_id for p in self._track_points), default=0) + 1
+        if self._track_selected_id not in {p.point_id for p in self._track_points}:
+            self._track_selected_id = None
+        self._push_track_geojson()
+        self._autosave_track()
+        self._refresh_track_controls()
+
+    def _on_track_point_add(self, lat: float, lon: float) -> None:
+        """Place the storm center at the current time. If a point already
+        sits at this time (to the second -- stepping frames lands exactly on
+        scan times), that point moves here instead, as in MESO-VIEW: step
+        back to a point's frame and click to refine it."""
+        now = self._time_ctrl.current_time.replace(microsecond=0)
+        existing = [p for p in self._track_points if p.time.replace(microsecond=0) == now]
+        if existing:
+            from dataclasses import replace
+            target = existing[-1].point_id
+            self._track_selected_id = target
+            self._set_track_points([
+                replace(p, lat=lat, lon=lon, source="manual") if p.point_id == target else p
+                for p in self._track_points
+            ])
+            self.status_msg_label.setText(f"Track: moved point {target} at {now:%H:%M:%S} UTC")
+            return
+        radar_site, product, product_label, tilt_deg = self._current_track_radar_context()
+        point = TrackPoint(
+            point_id=self._track_next_id,
+            time=self._time_ctrl.current_time,
+            lat=lat, lon=lon,
+            radar_site=radar_site, product=product, product_label=product_label,
+            tilt_deg=tilt_deg,
+        )
+        is_first_point = self._track_saved_path is None
+        self._set_track_points(self._track_points + [point])
+        if is_first_point and self._track_saved_path is not None:
+            self.status_msg_label.setText(f"Track saved to {self._track_saved_path}")
+
+    def _on_track_point_moved(self, point_id: int, lat: float, lon: float, keep_time: bool) -> None:
+        """A dragged point takes the new position and, unless Alt/Option was
+        held, the current archive time -- MESO-VIEW's "the storm center is
+        here, now" (source moved_retimed / moved_position_only)."""
+        if not self._track_edit_active:
+            return
+        from dataclasses import replace
+        moved = []
+        for p in self._track_points:
+            if p.point_id == point_id:
+                p = replace(p, lat=lat, lon=lon,
+                            time=p.time if keep_time else self._time_ctrl.current_time,
+                            source="moved_position_only" if keep_time else "moved_retimed")
+            moved.append(p)
+        self._set_track_points(moved)
+
+    def _on_track_point_select(self, point_id: int) -> None:
+        self._track_selected_id = point_id
+        self._push_track_geojson()
+        if self._track_table is not None:
+            self._track_table.select_point(point_id)
+
+    def _delete_selected_track_point(self) -> None:
+        if self._shortcut_focus_is_text_entry():
+            return
+        if not self._track_edit_active or self._track_selected_id is None:
+            return
+        self._set_track_points([p for p in self._track_points if p.point_id != self._track_selected_id])
+
+    def _delete_track_point(self, point_id: int) -> None:
+        """Right-click "Delete track point"."""
+        if not self._track_edit_active:
+            return
+        self._set_track_points([p for p in self._track_points if p.point_id != point_id])
+
+    def _on_track_marker_add(self, lat: float, lon: float) -> None:
+        """Place the reference marker, replacing any existing one -- there
+        is only ever one, as in MESO-VIEW. It lasts for this session only."""
+        label = self._track_marker["label"] if self._track_marker else "M1"
+        self._track_marker = {"lat": lat, "lon": lon, "label": label}
+        self.map_widget.set_track_marker(self._track_marker)
+
+    def _on_track_marker_rename(self) -> None:
+        if not self._track_marker:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(
+            self, "Rename Marker", "New label for the marker:", text=self._track_marker["label"]
+        )
+        if ok:
+            self._track_marker["label"] = text.strip() or "M1"
+            self.map_widget.set_track_marker(self._track_marker)
+
+    def _on_track_marker_remove(self) -> None:
+        self._track_marker = None
+        self.map_widget.set_track_marker(None)
+
+    def _add_track_point_at_marker(self) -> None:
+        """A: put the storm center on the marker at the current time."""
+        if self._shortcut_focus_is_text_entry() or not self._track_edit_active:
+            return
+        if not self._track_marker:
+            self.status_msg_label.setText("Track: no marker -- right-click the map to add one")
+            return
+        self._on_track_point_add(self._track_marker["lat"], self._track_marker["lon"])
+
+    def _undo_track_edit(self) -> None:
+        if self._shortcut_focus_is_text_entry() or not self._track_undo:
+            return
+        self._track_redo.append(list(self._track_points))
+        self._set_track_points(self._track_undo.pop(), record_undo=False)
+
+    def _redo_track_edit(self) -> None:
+        if self._shortcut_focus_is_text_entry() or not self._track_redo:
+            return
+        self._track_undo.append(list(self._track_points))
+        self._set_track_points(self._track_redo.pop(), record_undo=False)
+
+    def _load_track_file(self) -> None:
+        """Pick a track file to open (see _open_track)."""
+        from PyQt6.QtWidgets import QMessageBox
+        folder = self._track_workspace().root
+        start_dir = folder if folder.is_dir() else default_track_dir()
+        if self._track_points:
+            reply = QMessageBox.question(
+                self, "Load Track",
+                "Replace the current track with one from a file? The current track stays saved "
+                f"in {self._track_saved_path}." if self._track_saved_path else
+                "Replace the current track with one from a file?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Track", str(start_dir), "Track files (*.csv *.xlsx);;All files (*)"
+        )
+        if path:
+            self._open_track(Path(path), confirmed=True)
+
+    def _open_track(self, path: Path, *, confirmed: bool = False) -> None:
+        """Open a track (STORM or MESO-VIEW, CSV or Excel). One already in the
+        active workspace is edited in place; one from anywhere else is
+        imported -- edits go to a workspace copy and the original file is
+        never changed. Reset to Original returns to the file as loaded."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._track_points and not confirmed and path != self._track_saved_path:
+            reply = QMessageBox.question(
+                self, "Open Track",
+                f"Switch to {path.name}? The current track stays saved in {self._track_saved_path}.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            points = read_track_file(Path(path))
+        except Exception as exc:
+            QMessageBox.warning(self, "Load Track", f"Couldn't read a track from {Path(path).name}:\n{exc}")
+            return
+        if not points:
+            QMessageBox.warning(self, "Load Track", f"{Path(path).name} has no usable track points.")
+            return
+        in_workspace = self._track_workspace().contains(path)
+        self._track_loaded_path = Path(path)
+        self._track_saved_path = Path(path) if in_workspace else None
+        self._track_origin = "" if in_workspace else str(path)
+        self._track_original = list(points)
+        self._track_undo.clear()
+        self._track_redo.clear()
+        self._track_selected_id = None
+        self._track_points = sorted(points, key=lambda p: p.time)
+        self._track_next_id = max(p.point_id for p in points) + 1
+        self._push_track_geojson()
+        self._refresh_track_controls()
+        start, end = self._time_ctrl.window
+        inside = [p for p in points if start <= p.time < end]
+        message = f"Loaded {len(points)} track points from {Path(path).name}"
+        if not in_workspace:
+            message += " (edits go to a copy in your workspace; the original is unchanged)"
+        if not inside:
+            first = min(p.time for p in points)
+            message += f" -- none fall in this session ({first:%Y-%m-%d} track); open that date to review it"
+        elif len(inside) < len(points):
+            message += f" ({len(points) - len(inside)} outside this session)"
+        self.status_msg_label.setText(message)
+
+    def _reset_track_to_original(self) -> None:
+        if self._track_loaded_path is None:
+            return
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Reset Track",
+            f"Return the track to how it was when loaded from {self._track_loaded_path.name}? "
+            "This can be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._set_track_points(list(self._track_original))
+
+    def _shortcut_focus_is_text_entry(self) -> bool:
+        w = QApplication.focusWidget()
+        if isinstance(w, (QLineEdit, QTextEdit)):
+            return True
+        if isinstance(w, QComboBox) and w.isEditable():
+            return True
+        return False
+
+    def _toggle_radar_product_shortcut(self) -> None:
+        """R and V both flip whichever product (reflectivity/velocity) is
+        currently shown -- matches MESO-VIEW's own redundant R/V binding."""
+        if self._shortcut_focus_is_text_entry():
+            return
+        if not hasattr(self, "radar_controls"):
+            return
+        # archive WSR-88D uses field names, NOXP its native fields, live the NWS codes
+        pairs = {"reflectivity": "velocity", "DBZ": "VEL", "N0B": "N0U"}
+        pairs.update({vel: ref for ref, vel in list(pairs.items())})
+        current = self.radar_controls.current_product()
+        if current in pairs:
+            self.radar_controls.set_current_product(pairs[current])
+        else:  # another product (e.g. ZDR) is up: go to reflectivity
+            for code in ("reflectivity", "DBZ", "N0B"):
+                self.radar_controls.set_current_product(code)
+                if self.radar_controls.current_product() == code:
+                    break
+
+    def _on_time_changed_update_track_highlight(self, when: datetime) -> None:
+        if self._track_points:
+            self._push_track_geojson()
+            self._refresh_track_motion()
+        if self._track_table is not None:
+            self._track_table.set_default_time(when)
+
+    def _export_track_as(self) -> None:
+        if not self._track_points:
+            self.status_msg_label.setText("Track: no points to export")
+            return
+        folder = self._track_workspace().root
+        folder.mkdir(parents=True, exist_ok=True)
+        default_path = str(unused_path(folder / track_filename(self._track_points[0].time)))
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Track", default_path, "CSV (*.csv);;Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        p = Path(path)
+        if p.suffix.lower() not in (".csv", ".xlsx"):
+            p = p.with_suffix(".xlsx" if "xlsx" in selected_filter else ".csv")
+        if p.suffix.lower() == ".xlsx":
+            write_track_excel(self._track_points, p)
+        else:
+            write_track_csv(self._track_points, p)
+        self.status_msg_label.setText(f"Track exported to {p}")
+        self._notify_track_saved(p, "exported")
+
+    def _on_clear_track_requested(self) -> None:
+        if self._track_points:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "Clear Track",
+                (f"Start a new track? The current one stays saved in {self._track_saved_path}."
+                 if self._track_saved_path else "Remove all track points? This cannot be undone."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        # a fresh start: the saved file stays on disk; the next point begins a new one
+        self._init_track_state()
+        self._track_edit_active = self.btn_track.isChecked()
+        self._push_track_geojson()
+        self._refresh_track_controls()
+        self.track_controls.set_status("")
+        self.status_msg_label.setText("Track cleared")
 
     def _toggle_radar_station_picker(self):
         self._set_radar_station_picker_visible(not self._radar_station_picker_visible)
@@ -3758,9 +6738,16 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_radar_station_clicked(self, site: str):
         # js already called stormSetRadarStationsVisible(false) and set
         self._radar_station_picker_visible = False
+        if self._archive and site == NOXP_SITE_ID:
+            # NOXP is archive-only -- never reachable from the live picker,
+            # which only ever lists NEXRAD_SITES.
+            self._activate_noxp_radar()
+            return
         if self._archive:
+            if self._noxp_active:
+                self._deactivate_noxp_radar()
             # in archive mode, start fetching from the selected station.
-            self._archive_session.radar_station = site
+            self._radar_station_user_picked = True
             self._start_archive_radar(site)
             return
         self._site_change_from_map_click = True
@@ -4188,7 +7175,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # annotation marker click → edit/delete dialog
         self.map_widget.annotation_clicked.connect(self._on_annotation_clicked)
         self.map_widget.annotation_drag_ended.connect(self._on_annotation_drag_end)
-        self._moving_annotation_id = None
 
         # remote annotations arriving over MQTT — update map without re-publishing
         self._annotation_sync.annotation_received.connect(self._recv_remote_annotation)
@@ -4200,7 +7186,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._drawings: dict[str, DrawingAnnotation] = {}
         self._active_drawing_type: str = ""
         self._drawing_points: list = []
-        self._moving_drawing_id: str | None = None
         self._moving_drawing_original_coordinates: list | None = None
         self._drawing_sync = DrawingSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
@@ -4324,7 +7309,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 annotation.label = dlg.result_label()
                 self._update_annotation(annotation)
             elif dlg.action() == "move":
-                self._moving_annotation_id = annotation_id
                 self.map_widget.set_annotation_draggable(annotation_id, True)
                 self.status_msg_label.setText("  ▶  Drag the annotation to its new location")
                 self.status_msg_label.setStyleSheet(
@@ -4336,7 +7320,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if annotation is None:
             return
         self.map_widget.set_annotation_draggable(annotation_id, False)
-        self._moving_annotation_id = None
         self.status_msg_label.setText("")
 
         dlg = AnnotationMoveConfirmDialog(annotation, lat, lon, parent=self)
@@ -4462,6 +7445,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_escape_pressed(self):
         if not getattr(self, "_active_drawing_type", ""):
+            if self._studio_open():
+                self._close_studio()
             return
         self._cancel_drawing()
         if hasattr(self, "annotation_tools"):
@@ -4484,7 +7469,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             drawing.flipped = not drawing.flipped
             self._update_drawing(drawing)
         elif action == "move":
-            self._moving_drawing_id = drawing_id
             self._moving_drawing_original_coordinates = [pt[:] for pt in drawing.coordinates]
             self.map_widget.set_drawing_draggable(drawing_id, True)
             self._set_placement_prompt("drag the drawing to its new location", needs_click=False)
@@ -4499,7 +7483,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if drawing is None:
             return
         self.map_widget.set_drawing_draggable(drawing_id, False)
-        self._moving_drawing_id = None
         try:
             new_coordinates = json.loads(coordinates_json)
         except json.JSONDecodeError:
@@ -4556,7 +7539,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._storm_cones: dict[str, StormCone] = {}
         self._pending_cone_params: dict | None = None
         self._pending_cone_motion_fix: dict | None = None
-        self._moving_cone_id: str | None = None
         self._moving_cone_original_location: tuple[float, float] | None = None
 
         # cone placed via ANNOTATE drawer — map cone-click → edit dialog
@@ -4688,7 +7670,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 cone.created_at = datetime.now(timezone.utc)
                 self._update_storm_cone(cone)
             elif dlg.action() == "move":
-                self._moving_cone_id = cone_id
                 self._moving_cone_original_location = (cone.lat, cone.lon)
                 self.map_widget.set_storm_cone_draggable(cone_id, True)
                 self._set_placement_prompt("drag the storm cone to its new location", needs_click=False)
@@ -4698,7 +7679,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if cone is None:
             return
         self.map_widget.set_storm_cone_draggable(cone_id, False)
-        self._moving_cone_id = None
         dlg = StormConeMoveConfirmDialog(
             self._moving_cone_original_location[0] if self._moving_cone_original_location else cone.lat,
             self._moving_cone_original_location[1] if self._moving_cone_original_location else cone.lon,
@@ -4863,7 +7843,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
         self.map_widget.user_dragged.connect(self._on_user_dragged)
         # station plots on by default — delayed until map is ready
-        QTimer.singleShot(1200, lambda: self._station_layer.set_visible(
+        self._later(1200, lambda: self._station_layer.set_visible(
             self._chk_station_plots.isChecked()
         ))
 
@@ -4990,10 +7970,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._update_local_scan_from_vehicle(obs)
 
     def _archive_vehicle_hover_text(self, vehicle_id: str) -> str:
-        """Build the admin vehicle name and ground-speed tooltip (archive or live)."""
-        if not runtime_flags.FLAGS.admin_mode:
-            return vehicle_id
-
+        """The vehicle hover tooltip: its name and how fast it was driving
+        (ground speed from its GPS track, archive or live)."""
         if self._archive:
             if not hasattr(self, "_time_ctrl"):
                 return vehicle_id
@@ -5046,7 +8024,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_screenshot = QToolButton(self._map_container)
         self.btn_screenshot.setIcon(_make_camera_icon(18))
         self.btn_screenshot.setIconSize(QSize(18, 18))
-        self.btn_screenshot.setToolTip("Save a screenshot of the map")
+        self.btn_screenshot.setToolTip("Save map screenshot")
         self.btn_screenshot.setFixedSize(32, 32)
         self.btn_screenshot.setStyleSheet("""
             QToolButton {
@@ -5068,7 +8046,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _init_scan_button(self) -> None:
         self.btn_scan = QToolButton(self._map_container)
         self.btn_scan.setText("SCAN")
-        self.btn_scan.setToolTip("Start or stop current data collection footprint")
+        self.btn_scan.setToolTip("Start or stop sampling footprint")
         self.btn_scan.setFixedSize(58, 32)
         self.btn_scan.setStyleSheet("""
             QToolButton {
@@ -5188,7 +8166,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 desc += f" {scan.range_m / 1000:.1f} km"
             self.btn_scan.setToolTip(f"Current sampling: {desc}")
         else:
-            self.btn_scan.setToolTip("Start or stop current data collection footprint")
+            self.btn_scan.setToolTip("Start or stop sampling footprint")
         self.btn_scan.style().unpolish(self.btn_scan)
         self.btn_scan.style().polish(self.btn_scan)
         self.btn_scan.adjustSize()
@@ -5219,6 +8197,43 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._deactivate_local_scan("Scan stopped: vehicle moved away from the collection point")
 
     def _on_screenshot_clicked(self) -> None:
+        """Archive mode: the map alone, captured once complete, with the
+        studio's captions (ui/studio/capture.py). Live mode: the window."""
+        if self._archive and hasattr(self, "_archive_controls"):
+            self._archive_screenshot()
+            return
+        self._window_screenshot()
+
+    def _archive_screenshot(self) -> None:
+        from core.studio import Overlays
+        from ui.studio.capture import MapCapture
+        studio = getattr(self, "_studio", None)
+        overlays = studio.project.overlays if studio is not None else Overlays()
+        capture = MapCapture(self, self)
+        t = self._time_ctrl.current_time
+        default = studio.folder() if studio is not None else Path.home() / "Pictures"
+
+        def got(image):
+            capture.end()
+            default.mkdir(parents=True, exist_ok=True)
+            path, _ = QFileDialog.getSaveFileName(self, "Save Map Screenshot",
+                                                  str(default / f"storm_{t:%Y%m%d_%H%M%S}Z.png"), "PNG Image (*.png)")
+            if not path:
+                return
+            path = path if path.lower().endswith(".png") else path + ".png"
+            if image.save(path, "PNG"):
+                self.status_msg_label.setText(f"Screenshot saved: {Path(path).name}")
+                if self._studio_open():
+                    self._studio.flash(f"Frame saved: {Path(path).name}")
+            else:
+                log.warning("Screenshot: failed to save to %s", path)
+        capture.frame_ready.connect(got)
+        self.status_msg_label.setText("Screenshot: waiting for the map to finish drawing…")
+        if self._studio_open():
+            studio.flash("Saving frame…", 30)
+        capture.begin(None, overlays, capture.capture_when_ready)
+
+    def _window_screenshot(self) -> None:
         """Hide the floating toolbar, capture the window, then prompt to save."""
         to_hide = [self.btn_screenshot]
         if hasattr(self, "_floating_toolbar"):
@@ -5460,7 +8475,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         name_btn = QPushButton(v.id)
         name_btn.setFlat(True)
-        name_btn.setToolTip(v.id)
         name_btn.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
@@ -5539,6 +8553,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
             return []
 
+        surface = getattr(self, "_archive_clamps_surface", None)
+        if surface is not None and vehicle_id in surface.rows:
+            return surface.history(vehicle_id, self._time_ctrl.current_time)
         dense_obs = getattr(self, "_archive_vehicle_obs", None)
         if (
             dense_obs is not None

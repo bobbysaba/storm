@@ -182,7 +182,6 @@ class StormConeInputDialog(QDialog):
             btn_row.addWidget(btn_delete)
 
             btn_move = QPushButton("Move")
-            btn_move.setToolTip("Drag this cone to a new location")
             btn_move.clicked.connect(self._on_move)
             btn_row.addWidget(btn_move)
 

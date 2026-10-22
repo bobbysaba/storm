@@ -4,7 +4,8 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import requests
+
+from core import package_sources
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.sounding import Sounding, SoundingSet, PRESSURE_LEVELS
@@ -14,10 +15,11 @@ from data.fetchers.obs_sounding_fetcher import (
     _parse_profile,
 )
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
-_OPEN_METEO_ARCHIVE_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
-_IEM_RAOB_URL     = "https://mesonet.agron.iastate.edu/json/raob.py"
+_OPEN_METEO_ARCHIVE_URL = endpoints.OPEN_METEO_HISTORICAL
+_IEM_RAOB_URL     = endpoints.IEM_RAOB
 _ARCHIVE_MODEL = "ncep_hrrr_conus"
 _REQUEST_TIMEOUT = 30
 _LEVEL_VARS = (
@@ -42,6 +44,7 @@ class ArchiveSoundingFetcher(QObject):
     fetch_error(str)
     """
 
+    coptersondes_ready = pyqtSignal(object)
     sounding_ready = pyqtSignal(object)   # SoundingSet
     fetch_error    = pyqtSignal(str)
 
@@ -90,6 +93,20 @@ class ArchiveSoundingFetcher(QObject):
         ).start()
 
 
+    def fetch_coptersondes(self):
+        t = self._current_archive_time
+        if t is not None:
+            threading.Thread(target=self._do_fetch_coptersondes, args=(t,), daemon=True).start()
+
+    def _do_fetch_coptersondes(self, t):
+        from archive.fetchers.coptersonde_archive_fetcher import fetch_coptersonde_soundings
+        try:
+            sets = fetch_coptersonde_soundings(t)
+            if self._current_archive_time is not None and self._current_archive_time.date() == t.date():
+                self.coptersondes_ready.emit(sets)
+        except Exception as exc:
+            self.fetch_error.emit(f"CopterSonde: {exc}")
+
     def _do_fetch_model(self, lat: float, lon: float, t: datetime) -> None:
         try:
             params = {
@@ -102,7 +119,7 @@ class ArchiveSoundingFetcher(QObject):
                 "wind_speed_unit": "ms",
                 "timezone": "UTC",
             }
-            resp = requests.get(_OPEN_METEO_ARCHIVE_URL, params=params, timeout=_REQUEST_TIMEOUT)
+            resp = package_sources.requests_get("soundings", _OPEN_METEO_ARCHIVE_URL, params=params, timeout=_REQUEST_TIMEOUT)
             resp.raise_for_status()
             sounding, elevation = _parse_open_meteo_archive(resp.json(), lat, lon, t)
             if sounding is None:
@@ -112,7 +129,7 @@ class ArchiveSoundingFetcher(QObject):
                 lat=lat, lon=lon, elevation=elevation,
                 fetch_time=t,
                 soundings=[sounding],
-                source="ruc_rap",
+                source="hrrr",
             )
             self.sounding_ready.emit(sset)
         except Exception as exc:
@@ -186,42 +203,60 @@ class ArchiveSoundingFetcher(QObject):
 
 
     def _do_fetch_nssl(self, t: datetime) -> None:
-        """Fetch all NSSL soundings from the same UTC day as t, up to and including t."""
-        try:
-            from data.fetchers.clamps_sounding_fetcher import (
-                _api_sonde_entries,
-                _fetch_and_parse_url,
-                _soundings_to_set,
-            )
+        """Try archived launches, the API, then clearly labeled TROPoe retrievals.
 
-            day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
-            entries = [
-                entry for entry in _api_sonde_entries()
-                if day_start <= entry.file_time <= t
-            ]
-            if not entries:
-                raise ValueError("No NSSL soundings available for this archive time")
+        Provider failures cannot short-circuit another provider. Every result
+        is limited to the selected UTC day and archive time, including TROPoe.
+        """
+        from archive.fetchers.clamps_sonde_archive_fetcher import fetch_clamps_sonde_soundings
+        from archive.fetchers.clamps_tropoe_archive_fetcher import fetch_clamps_tropoe_soundings
+        from data.fetchers.clamps_sounding_fetcher import (
+            _api_sonde_entries, _fetch_and_parse_url, _soundings_to_set,
+        )
 
-            entries.sort(key=lambda entry: entry.file_time)
+        day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def api_soundings():
             soundings = []
-            for idx, entry in enumerate(entries):
+            for idx, entry in enumerate(sorted(_api_sonde_entries(), key=lambda e: e.file_time)):
+                if not day_start <= entry.file_time <= t:
+                    continue
                 try:
-                    snd = _fetch_and_parse_url(
-                        entry.skewt_url,
-                        entry.file_time,
-                        idx,
-                        entry.raw_url,
-                    )
+                    snd = _fetch_and_parse_url(entry.skewt_url, entry.file_time, idx, entry.raw_url)
                     if snd is not None:
                         soundings.append(snd)
-                except Exception as e:
-                    log.warning("ArchiveSoundingFetcher: failed to fetch NSSL API file %s: %s", entry.skewt_url, e)
+                except Exception as exc:
+                    log.warning("Archive sonde file failed: %s: %s", entry.skewt_url, exc)
+            return _soundings_to_set(soundings, t) if soundings else None
 
-            sset = _soundings_to_set(soundings, t)
-            self.sounding_ready.emit(sset)
-        except Exception as exc:
-            log.error("ArchiveSoundingFetcher: NSSL API sounding failed: %s", exc)
-            self.fetch_error.emit(f"NSSL sounding error: {exc}")
+        errors = []
+        for name, fetch in (
+            ("THREDDS sonde", lambda: fetch_clamps_sonde_soundings(t)),
+            ("NSSL API", api_soundings),
+            ("CLAMPS TROPoe", lambda: fetch_clamps_tropoe_soundings(t)),
+        ):
+            try:
+                sset = fetch()
+                if sset is None:
+                    continue
+                sset.soundings = sorted(
+                    (s for s in sset.soundings if day_start <= s.valid_time <= t),
+                    key=lambda s: s.valid_time,
+                )
+                if not sset.soundings:
+                    continue
+                latest = sset.soundings[-1]
+                if latest.location_source is not None or (latest.lat, latest.lon) != (0, 0):
+                    sset.lat, sset.lon = latest.lat, latest.lon
+                if latest.height.size:
+                    sset.elevation = float(latest.height[0])
+                self.sounding_ready.emit(sset)
+                return
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+                log.warning("Archive sounding provider failed: %s: %s", name, exc)
+        detail = "; ".join(errors) if errors else "No profiles at or before the selected archive time"
+        self.fetch_error.emit(f"NSSL/CLAMPS sounding unavailable: {detail}")
 
 
 
@@ -240,6 +275,7 @@ def _parse_open_meteo_archive(
 
     hourly = data.get("hourly") or {}
     times = hourly.get("time") or []
+    valid_time = valid_time.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
     target_key = valid_time.strftime("%Y-%m-%dT%H:00")
     if target_key not in times:
         return None, float(data.get("elevation", 0.0))
@@ -268,7 +304,7 @@ def _parse_open_meteo_archive(
         u_val = values["u"][t_idx]
         v_val = values["v"][t_idx]
         z_val = values["z"][t_idx]
-        if any(v is None for v in (t_val, td_val, u_val, v_val, z_val)):
+        if any(v is None or not np.isfinite(v) for v in (t_val, td_val, u_val, v_val, z_val)):
             continue
         if z_val < site_elevation - 10:
             continue
@@ -288,91 +324,24 @@ def _parse_open_meteo_archive(
         lon=lon,
         valid_time=valid_time,
         slot_offset=0,
-        label="Archive Analysis",
+        label=f"HRRR {valid_time:%H:%M} UTC",
         pressure=np.array(pressures, dtype=np.float32),
         temperature=np.array(temps, dtype=np.float32),
         dewpoint=np.array(dewpts, dtype=np.float32),
         u_wind=np.array(u_winds, dtype=np.float32),
         v_wind=np.array(v_winds, dtype=np.float32),
         height=np.array(heights, dtype=np.float32),
+        provenance={
+            "provider": "Open-Meteo historical forecast", "model": _ARCHIVE_MODEL,
+            "source_url": _OPEN_METEO_ARCHIVE_URL,
+            "model_run_time": None, "forecast_lead_hours": None,
+            "time_semantics": "Continuous series stitched from early forecast hours; run and lead are not returned",
+            "grid_latitude": data.get("latitude"), "grid_longitude": data.get("longitude"),
+        },
     )
     return sounding, site_elevation
 
 
-
-def _parse_iem_raob(data: dict, station_id: str, lat: float, lon: float, elev: float) -> list:
-    """Parse IEM RAOB JSON response into a list of Sounding objects."""
-    import numpy as np
-
-    soundings = []
-    profiles = data.get("profiles", [data]) if "profiles" in data else [data]
-
-    for profile in profiles:
-        valid_str = profile.get("valid_at") or profile.get("valid")
-        valid_time = _parse_iso(valid_str)
-        if valid_time is None:
-            continue
-
-        levels = profile.get("levels") or profile.get("profile") or []
-        if not levels:
-            continue
-
-        pressures, heights, temps, dewpts, wdir, wspd = [], [], [], [], [], []
-        for lvl in levels:
-            try:
-                p  = float(lvl.get("pressure", lvl.get("pres", 0)))
-                z  = float(lvl.get("height", lvl.get("hght", -9999)))
-                tc = float(lvl.get("tmpc", lvl.get("temperature", lvl.get("tmpf", -9999))))
-                td = float(lvl.get("dwpc", lvl.get("dewpoint", lvl.get("dwpf", -9999))))
-                wd_v = lvl.get("drct") or lvl.get("wind_dir")
-                ws_v = lvl.get("sknt") or lvl.get("wind_speed")
-                wd = float(wd_v) if wd_v is not None else 0.0
-                ws = float(ws_v) if ws_v is not None else 0.0
-                if p > 0 and tc > -999:
-                    pressures.append(p)
-                    heights.append(z if z > -9990 else 0.0)
-                    temps.append(tc)
-                    dewpts.append(td if td > -999 else float("nan"))
-                    wdir.append(wd)
-                    wspd.append(ws)
-            except (TypeError, ValueError):
-                continue
-
-        if len(pressures) < 5:
-            continue
-
-        p  = np.array(pressures, dtype=np.float32)
-        z  = np.array(heights,   dtype=np.float32)
-        tc = np.array(temps,     dtype=np.float32)
-        td = np.array(dewpts,    dtype=np.float32)
-        wd = np.array(wdir,      dtype=np.float32)
-        ws = np.array(wspd,      dtype=np.float32)
-
-        u = -ws * np.sin(np.radians(wd))
-        v = -ws * np.cos(np.radians(wd))
-
-        soundings.append(Sounding(
-            lat=lat,
-            lon=lon,
-            valid_time=valid_time,
-            slot_offset=0,
-            label=valid_time.strftime("%HZ %d %b"),
-            pressure=p,
-            temperature=tc,
-            dewpoint=td,
-            u_wind=u,
-            v_wind=v,
-            height=z,
-        ))
-
-    return soundings
-
-
-
-def _nearest_synoptic_time(t: datetime) -> datetime:
-    """Return the most recent synoptic time (00Z, 06Z, 12Z, 18Z) at or before t."""
-    hour = (t.hour // 6) * 6
-    return t.replace(hour=hour, minute=0, second=0, microsecond=0)
 
 
 def _archive_timestamps_to_query(t: datetime) -> list[str]:

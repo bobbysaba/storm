@@ -54,7 +54,7 @@ STORM is a standalone desktop application purpose-built for severe weather storm
 |-----------|-----------|
 | UI Framework | PyQt6 (QMainWindow + QWebEngineView) |
 | Map Renderer | MapLibre GL JS (embedded in browser engine) |
-| Vector Tiles | Offline MBTiles served via custom `storm://` URL scheme |
+| Vector Tiles | Offline MBTiles served via custom `storm://` URL scheme; online OpenFreeMap tiles when `tiles/storm.mbtiles` is absent |
 | Optional Base Layers | Offline NLCD and USGS satellite MBTiles |
 | Radar Decoding | MetPy + matplotlib (Level 3, Unidata THREDDS) |
 | Satellite Imagery | IEM WMS (GOES-East, GOES-West) |
@@ -81,7 +81,7 @@ python main.py
 ### Prerequisites
 - Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm` (created via `python setup.py` or `conda env create -f envs/storm.yml`)
-- The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately)
+- The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately). Optional when online: without it the base map loads from OpenFreeMap over the network
 - Optional offline base-layer MBTiles files: `storm_nlcd.mbtiles` for NLCD land cover and `satellite.mbtiles` for USGS imagery
 
 **Quick Setup:**
@@ -583,6 +583,7 @@ The MAP drawer groups map-context tools and optional offline base layers:
 |--------|-------------|
 | **ROUTE** | Opens turn-by-turn routing controls. Hidden in VIEWER mode. |
 | **MEASURE** | Starts the distance measurement tool. |
+| **ANNOTATIONS** | Shows or hides the annotations: fronts, boundaries and other drawings, annotation markers, and storm-motion cones with their time labels. On by default; anything recorded while it is off stays hidden until you turn it back on. |
 | **LANDCOVER** | Toggles the offline NLCD land-cover raster when `tiles/storm_nlcd.mbtiles` is installed. |
 | **SAT** | Toggles the offline USGS satellite basemap when `tiles/satellite.mbtiles` is installed. |
 
@@ -1021,52 +1022,93 @@ The window title and status pill display the current archive timestamp while in 
 
 ---
 
+### Menu Bar
+
+The main window has a menu bar (at the top of the screen on macOS):
+
+- **File**: Open Case Package…, Export Case Package…, Show Case Packages Folder (archive mode); Save Map Screenshot…; Exit Session and Change Day… (archive mode, same as EXIT).
+- **Edit**: Undo and Redo, for storm-track edits or the text field you're typing in.
+- **View**: Error Log and Debug Panel.
+- **Help**: this user guide and About STORM (on macOS, About is in the STORM menu).
+
+### Archive Header
+
+In archive mode the header reads **RADAR · LIDAR | VEHICLES | HAZARDS | SATELLITE | TRACK | SURFACE | SOUNDING | MAP**:
+
+- **VEHICLES** — the vehicle list, and the observation-trail controls under it (*show trails*, quantity, window, time-to-space, wind barbs).
+- **HAZARDS** — SPC outlooks, watches and MDs, NWS warnings and CWAs, and **DAMAGE PATHS** (NWS damage surveys; checking it starts drawing a box).
+- **TRACK** — the storm track editor (trails' time-to-space and storm-relative velocity use it).
+- **SURFACE** — ASOS stations, chosen by drawing a box (live mode's SURFACE drawer of mesonet networks isn't available for past cases).
+
+### Video Studio and Screenshots
+
+**File > Video Studio** (Cmd+Shift+V) makes a movie of the case. Its panel, laid out like a video editor, takes the archive bar's place. Leave it with **✕ Close Studio** at its top right, **Esc**, or File > Video Studio again; the movie stays in the studio while STORM is open (**Save** keeps it).
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│ ● VIDEO STUDIO [movie      ] Open… Save Save As… New │ Undo Redo   movie · 3 keyframes · 0:13.5 · … [✕ Close Studio] │
+│ CASE  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄━━◆━━◆━━●┄┄┄┄┄┄┄┄┄┄┄┄┄┄  [Session]  ◀ scan  −1m [17 May 21:14:00 UTC] +1m  scan ▶  │
+│ CLOCK 00Z     06Z     12Z     18Z     00Z                                                      │
+│ [◆ Add Keyframe] │ ⏮ ◆◀ [▶ Play] ▶◆ ⏭  0:04.2 / 0:13.5  ☐ loop  messages  Movie ½× 2× [13.5 s]  Zoom − Fit + │
+│ 0:00      0:02      0:04 ▼    0:06      0:08      0:10      0:12                              │
+│ ◆[▒ KOAX · 21:00 → 21:10Z · 300× ▒▒▒▒▒▒▒▒▒▒▒▒▒▒]◆[hold]◆[▒ 21:10 → 21:14Z ▒]◆                  │
+│ ┌ KEYFRAME 1 OF 3  [17 May 21:19:31 UTC]   Retake from clock + map  Delete ┐ ┌ MP4  1080p  30 fps     [Save Frame…]  ┐ │
+│ │ [img]  TO 2 [300× ▾] 4.0 s                                                   │ │ clock [every minute ▾]                   │ │
+│ │        Use for all · camera [smooth ▾] · pause [0.0 s]                     │ │ ☑ time ☑ data ☐ legend [Export Movie…]   │ │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **The case clock** (top strip) covers the whole session, 00Z to its end. Click or drag anywhere to set the case time; scroll for the previous / next radar scan (Shift+scroll: a minute); type an exact time in the box; or use **◀ scan / scan ▶** and **−1m / +1m**. The dropdown zooms the strip to 6 h, 2 h or 30 min around the clock (it follows the clock). Tick marks show radar scans; orange diamonds show where the movie's keyframes sit in the case.
+- **Keyframes** record the case clock and the map view (center, zoom, rotation, tilt) at the playhead. Set the clock and the map, then **◆ Add Keyframe** (K). At the end of the movie it's added after the last keyframe, spaced so the case plays at 300× (about one radar scan a second) (or 2 s for a camera move with the clock still); on an existing keyframe it replaces that one; anywhere else it splits the move there.
+- **The movie timeline** is in seconds of video. Each move between keyframes is a clip showing its case span, speed and easing (orange: time moves forward; blue: camera move with the clock still; purple: time runs backward); holds are gray. Drag the red playhead (or click the ruler) to scrub: the map shows that moment of the movie. Drag a keyframe ◆ to retime it; the later ones move along (Alt-drag moves only that one). Double-click a keyframe to go there; right-click for Go to, Update, Duplicate, Easing, Delete, and Delete and close the gap. Scroll to pan the timeline, ⌘-scroll or **− Fit +** to zoom.
+- **The keyframe box** (bottom left) shows the keyframe selected on the timeline, in plain words: **when** in the case it is (type a time and press Return; the moves either side speed up or slow down to match), **Retake from clock + map** (make it the clock and map as they are now) and **Delete**. Then how the movie gets to the next keyframe: a speed (*TO 2 [300×]*) (60× = a minute of the case each second of video; pick one or type one, and **Use for all** gives every move that speed), the **camera**'s motion (smooth, steady, speeds up, slows down; the clock always runs at a steady rate) and an optional **pause** first. A move with the clock still (two keyframes at the same case time) takes a length in seconds instead. Changing a speed, length or pause moves the later keyframes along. The thumbnail shows the map at the keyframe (hover it for the exact view).
+- **Making the movie faster or slower.** **2× speed** / **½× speed** (next to Zoom) halve or double the whole movie, and the **length** box beside them fits it to any length you type; every move and pause keeps its proportion. For one move only, change its speed in the keyframe box (presets 30× to 2400×, or type one; **Use for all** applies it everywhere). Hover the move's length in the keyframe box to see how long each radar scan stays on screen at that speed. Frames per second don't change the speed, only smoothness: 30 fps is plenty for a radar loop.
+- **Radars.** Each keyframe records the radar on screen (station, product, tilt; *radar KOAX REF* in the keyframe box), and the movie shows it from that keyframe on, so a movie can move from KOAX to KUEX, or from reflectivity to velocity, partway through. To change a keyframe's radar, pick another station or product in the RADAR tab (the studio stays open), then **Use current radar** in the keyframe box (or **Retake from clock + map**, which takes the radar too). Scrubbing, Play and Export switch radars as the movie does, and Export puts your radar back afterwards. Movies saved before this have no radar per keyframe and use whichever radar is on screen.
+- **▶ Play** previews the movie on the map from the playhead (Space), looping if **loop** is checked. The map draws as fast as data arrives, so a preview can skip; Export doesn't.
+- **Export Movie…** renders it exactly: every frame waits until the radar's full-resolution image, the lidar sweep, trails and satellite for that moment are drawn. Formats: **MP4** (H.264), **GIF** (at most 960 px wide) or **PNG frames** (a numbered image per frame). Sizes: the map's own size, 720p, 1080p or **4K**. The map is rendered at that size, not scaled up, and shows the same area as on screen. 24, 30 or 60 frames per second. **Frames per second set smoothness, not speed**: to make the case play faster, raise the moves' speed (×). **clock** sets how often the case time (and the data drawn) changes in the movie: **every minute** (the default), **every 5 min**, **each radar scan** (a classic radar loop) or **smooth** (every frame; trails and vehicles glide). A frame identical to the one before is reused rather than drawn again, so a stepped clock with the camera still exports far faster; the header shows how many frames have to be drawn. Captions burned in: **time** (UTC), **data** (radar site, product and volume time; the chosen lidar) and the map **legend**. Cancel stops it at once and removes the partial file; when it's done, the studio says where the file was saved. **Save Frame…** saves the map as it is now as a PNG, with the same captions.
+- **Save / Save As… / Open… / New** keep a movie's keyframes and settings (`data/studio/<date>/<name>.json`) so it can be changed and exported again later; a • after the name means unsaved changes. **Undo / Redo** (Cmd+Z / Shift+Cmd+Z) cover every edit.
+
+| Keys (while the studio is open) | Action |
+|---|---|
+| Space | Play / pause the preview |
+| K | Add keyframe at the playhead |
+| [ / ] | Previous / next keyframe |
+| Left / Right (Shift: a second) | Move the playhead a frame |
+| Home / End | Start / end of the movie |
+| `,` / `.` | Previous / next radar scan (the case clock) |
+| Delete | Delete the selected keyframe |
+| Esc | Close the studio |
+
+**Screenshots** in archive mode (the camera button, or File > Save Map Screenshot…, Cmd+Shift+S) capture the map alone — no toolbar or bars — once it has finished drawing, with the studio's caption settings. Live mode still captures the window.
+
 ### Archive Controls Bar
 
-A controls bar appears at the top of the map window in archive mode (it is not visible in live modes).
+In archive mode one bar runs across the bottom of the map; it replaces the status panel that live modes show at the bottom left. It holds the archive clock (large, in UTC, with the date and Central/Mountain time), what's on screen (the radar site and volume time, e.g. *KOAX · 19:55:55Z*, then its product and tilt; satellite and mobile mesonet as status dots — hover the satellite dot for its state), the timeline with hour labels, and the playback controls. On the right of the controls row: status messages, the cursor's latitude/longitude, the vehicle count and the network state. The STORM version is under Help > About; the computer's own clock isn't shown, since a replayed case runs on the archive clock. The map's zoom buttons, scale and legend sit just above the bar.
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  ⏮  ⏪  ▶  ⏩  ⏭   ──────── scrubber ────────   1×▾   Radar: OK  Sat: OK │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ ● ARCHIVE  20:00:00 UTC  Sun 17 May 2026  15:00 CDT / 14:00 MDT   KOAX · 19:55:55Z REF 0.7° │ ● Sat ● Mesonet 3/7 │
+│ ──────────────────────────────────────●───────────────────────────────────────────── │
+│ 00Z      03Z      06Z      09Z      12Z      15Z      18Z      21Z      00Z           │
+│ [▶ Play]  SPEED 1×  │  -10  ⏮  ⏭  +10                 LAT … LON … │ VEHICLES 4 │ ● NET OK │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Playback Buttons
+#### Moving through time
 
-| Button | Action |
-|--------|--------|
-| ⏮ | Jump to the session start time |
-| ⏪ | Step back 30 seconds of archive time |
-| ▶ / ⏸ | Start / pause automatic playback |
-| ⏩ | Step forward 30 seconds of archive time |
-| ⏭ | Jump to the current real-world time (end of archive) |
+Drag the slider to any time in the session and fine-tune with the buttons or keys:
 
-#### Timeline Scrubber
+| Button | Keys | Action |
+|--------|------|--------|
+| -10 / +10 | Home / End | Step 10 seconds (1 minute when the session has no one-second observations; the buttons then read -1m / +1m) |
+| ⏮ / ⏭ | Left / Right, `,` / `.` (also `<` / `>`), A / D when TRACK is off | Previous / next radar scan |
+| ▶ Play / ⏸ Pause | Space | Play / pause |
 
-Drag the slider to jump to any time within the archive session. The scrubber position represents seconds elapsed since midnight UTC of the session date.
+When the session has no one-second observations, a **SPEED** dropdown (1× to 300×) sets how fast playback runs; with one-second observations, playback steps through them and the dropdown is hidden.
 
-#### Speed Selector
+Case packages are opened and exported from the **File** menu (see Case packages below).
 
-A dropdown next to the scrubber controls the playback speed multiplier:
-
-| Setting | Meaning |
-|---------|---------|
-| 1× | Real-time (1 second of wall clock = 1 second of archive time) |
-| 5× | 5 seconds of archive time per wall-clock second |
-| 10× | — |
-| 30× | — |
-| 60× | — |
-| 120× | — |
-| 300× | 5 minutes of archive time per wall-clock second |
-
-#### Layer Status Indicators
-
-| Indicator | What It Shows |
-|-----------|---------------|
-| **Radar:** | Current radar fetch status ("OK", "waiting", "no data") |
-| **Sat:** | Current satellite fetch status |
-
-These update as each fetcher resolves data for the current archive timestamp.
+**EXIT** sits on its own at the top right of the map. It asks first, then closes the session and returns to the launch screen to pick another day.
 
 ---
 
@@ -1079,8 +1121,15 @@ These update as each fetcher resolves data for the current archive timestamp.
 | SPC/NWS Hazards | Archived GeoJSON products | Fetched once at session start for the session date |
 | Soundings | open-meteo HRRR archive | Fetched on demand (map click), using archive time as valid time |
 | Vehicle Positions | MQTT message log | Historical vehicle obs replayed in time order |
+| Annotations, fronts/boundaries, storm cones | MQTT message log | Each appears when it was issued, in its latest edit as of the current time, and disappears when it was deleted or expired (storm cones last one hour) |
 
 Each layer updates automatically as the archive clock advances. Data fetches are triggered when the clock crosses boundaries (e.g., every radar scan interval).
+
+**Hover readouts.** Everything you can hover over — vehicles, trails, wind barbs, hazards, CWAs, stations, damage paths, track points, annotation markers — shows the same compact dark readout: a bold first line, the reading, then details. Button descriptions use the same look, and long ones wrap.
+
+**Hovering over a vehicle** shows its name and how fast the vehicle itself was driving, worked out from its GPS track: over the last second and averaged over 15 s (10 s and 30 s in live mode). This is the vehicle's ground speed, not wind; the wind is in the vehicle's station plot.
+
+The map opens centered on the case: the radar chosen for the session (the one nearest the vehicles at the start time), zoomed to its coverage.
 
 ---
 
@@ -1448,9 +1497,64 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 | Key | Action |
 |-----|--------|
 | **Escape** | Cancel active drawing / annotation placement / measurement mode |
-| **Ctrl+D** | Toggle debug panel |
-| **Ctrl+E** | Toggle error log panel |
+| **Ctrl+D** (Cmd+D on macOS) | Toggle debug panel (View > Debug Panel) |
+| **Ctrl+E** (Cmd+E on macOS) | Toggle error log panel (View > Error Log) |
+| **Ctrl+O** / **Ctrl+Shift+E** | Open / export a case package (File menu, archive mode) |
+| **Ctrl+Shift+S** | Save a map screenshot (File menu) |
+| **Ctrl+Z** / **Ctrl+Shift+Z** | Undo / redo (Edit menu: track edits, or the text field you're typing in) |
 | **Right-click** | Finish drawing or measurement in progress |
+
+**Archive playback**
+
+| Key | Action |
+|-----|--------|
+| **Space** | Play / pause |
+| **← / →**, **, / .**, **< / >** | Previous / next radar frame |
+| **A / D** | Previous / next radar frame (except while TRACK is on; see below) |
+| **Home / End** | Step back / forward one minute (10 s in precision mode) |
+| **R** or **V** | Switch between reflectivity and velocity |
+
+**Storm tracking (TRACK on)**
+
+| Key / action | Action |
+|-----|--------|
+| **Click** | Place the storm center at the current time; if a point already exists at this frame, it moves there instead (step back with **,** to refine an earlier point) |
+| **Drag a point** | Move it and give it the current time; hold **Alt/Option** to keep its time |
+| **Right-click** | Add or move the reference marker; on the marker, rename or remove it; on a point, select or delete it |
+| **Shift** + click/drag | Don't snap onto the reference marker |
+| **A** | Add a point at the reference marker |
+| **D**, **Delete**, **Backspace** | Delete the selected point |
+| **Ctrl+Z / Ctrl+Shift+Z** | Undo / redo |
+
+The reference marker (one at a time, like MESO-VIEW's review marker) is a precision aid: points clicked or dragged within about 20 px of it snap exactly onto it. It is not saved with the track.
+
+**Where tracks are saved.** Every storm track lives in STORM's own folder, `data/storm_tracks/`, as `<workspace>/storm_YYYYMMDD_HHMM_track.csv`, named from the track's first point (see `data/storm_tracks/README.md`). The first time a track is saved — and after every export — STORM shows exactly which file and folder it went to, with an *Open Folder* button; **OPEN FOLDER** in the TRACK panel does the same at any time. The shared tracks (109, from MESO-VIEW) are in the *Pardun_Tracks* workspace. **Clicking TRACK opens the date's saved track automatically**: your own copy if you have one, otherwise the shared one; on a date with several, the one nearest the current time (the rest are in the panel's list, tagged `[Pardun_Tracks]`). On a date with no saved track, TRACK starts empty for a new one. New tracks and edits go to your workspace (default *My work*; pick or create one at the top of the panel). The shared tracks are never changed: the first edit to one saves the whole track to your workspace as a copy of the same name, and from then on your copy is the one that opens. **Hovering over a track point** shows its time, its place in the track (e.g. *Point 6 of 44*), its position and, when recorded, the radar and tilt it was placed on. Track files hold only what STORM uses (point, time, position, how the point was placed, and the radar it was placed on). Opening a track from anywhere else on disk likewise edits a copy in your workspace. **Export As…** writes a copy anywhere you choose.
+
+**Storm motion.** The TRACK panel shows the mean motion (first point to last, as in MESO-VIEW) and the motion of the track segment at the current time, as the direction the storm moves from and its speed. Nothing is extrapolated beyond the first or last point.
+
+**Track table.** **Table…** lists every point for exact editing. Edits apply as one undoable step when you click **Apply**; invalid cells, or two points at the same second, are highlighted and nothing is applied. Selecting a row selects the point on the map; double-clicking goes to its time.
+
+**Observation trails (VEHICLES > show trails).** VEHICLES opens the vehicle list and, under it, the trail controls; *show trails* (off until you turn it on) adds each platform's recent path, colored by one quantity: measured (temperature, dewpoint, RH, pressure, wind speed), thermodynamic (θ, θv, θe, θw, mixing ratio, from each observation's own pressure — left blank if pressure wasn't measured), or kinematic (u, v, and with a storm track: storm-relative wind, radial wind + outward and tangential wind + cyclonic about the storm center). Choose how far back (5–60 min); the color bar shows the range on screen (symmetric about zero for signed winds). Trail colors never resemble the roads underneath: most quantities run dark violet (low) to pale lavender (high); signed winds run blue (negative) through pale gray (zero) to magenta (positive). Hover a trail for its value, time and platform. Gaps in the data break the line rather than bridging it.
+
+**Time-to-space.** With a storm track, *Time-to-space* draws every trail observation at its offset from the storm center at the time it was taken, around the storm's position now, with 5-km range rings. Values and times are unchanged; observations outside the track's time span are hidden in this mode. ASOS stations drawn with the ASOS box join the trails here (a fixed station only makes a path relative to the storm); ASOS reports sea-level pressure, not station pressure, so pressure and θ-type quantities are left blank for them.
+
+**Wind barbs.** *Wind barbs* (next to Time-to-space) draws each platform's measured wind along its trail: about 15 barbs per trail, evenly spaced in time, in knots (half barb 5, full 10, flag 50), pointing toward where the wind comes from. They follow the trail in time-to-space mode too. With a storm track, *Storm-relative* (next to Wind barbs) draws them storm-relative instead: the wind minus the track's mean storm motion, the same definition as the storm-relative wind quantity, shown only where the track covers the time. Hover over a barb for its time, direction and speed (marked storm-relative when it is). TRACK sits before TRAILS in the header because time-to-space and the storm-relative quantities use the storm track.
+
+**LIDAR (next to RADAR).** Doppler lidar, from two kinds of instrument kept apart and named plainly: the **lidar truck** (DLTRUCK1, which moves with the deployment) and the **CLAMPS1 / CLAMPS2 trailers** (each parked at a site recorded in its files, often at home in Norman rather than deployed). The button opens once the date is known to have lidar data and stays greyed out when it has none.
+
+STORM shows the lidars' **PPI scans** only — azimuth sweeps at low elevation, from their PPI files and the sector sweeps in their CSM (continuous scan mode) files — drawn on the map like radar. Those are the only lidar files STORM reads: fixed-point (vertical stare) and RHI files are not part of STORM.
+
+A lidar is chosen the way a radar station is — on the map. STORM looks through the lidars' PPI files in the background as soon as the date's data is found (the top-left line reads *Loading Lidar…* meanwhile, as for radar and satellite at startup), so when you open LIDAR every place a lidar ran PPI scans from this session is already marked (cyan lidar icons): each CLAMPS trailer at its site, and the lidar truck at each **stop** — consecutive scans within about 250 m of the stop's first scan. Hover a marker for its scanning times, how many PPI scans it made, and how its scan directions were set: a trailer's are north-referenced; the truck's use the heading recorded in its files, or say *estimated from the truck compass* (with the estimate) when a file has none. The markers show while LIDAR is open, like the radar station picker; the chosen lidar's data stays up when you close it.
+
+The LIDAR panel is one row, like the radar's: the chosen lidar (*Lidar truck · stop 1 of 2*; before one is chosen, it says how many locations there are), a small **⚠** when the truck's heading had to be estimated (hover it for the details), the **field** (velocity, intensity, backscatter) and **radar** (the radar under the lidar, on by default). Hover the lidar's name for its position, distance from the case's radar, scanning times and number of PPI scans; click it to center the map on it.
+
+**Click a location** and it gets a white ring (it stays cyan: on these icons color means data age, as for vehicles), the top-left line shows *Loading Lidar truck · stop 2 of 2…* until its files are in and its first sweep is drawn, the clock moves to the **start of its first scan**, and its PPI sweeps show on the map as the clock reaches them, each held until the next (for up to 10 minutes), as radar volumes are. Its scanning periods are marked as a cyan strip under the time slider. Outside them the lidar layer is blank until the clock is back in them or you click another location. A session's lidar scans run from 12Z on the session day (earlier ones are the evening before), as for the other archive feeds.
+
+**LiDAR Truck scan orientation.** The truck's lidar files store scan directions relative to the truck, so STORM turns them to true north using the truck heading recorded in each file. When a file has no heading (all 2026 files so far), STORM estimates it from the truck's own compass in the mesonet data and the LIDAR panel shows an amber ⚠ (hover for the estimate); if no compass reading covers the scan either, it isn't drawn on the map and the ⚠ is red. `scripts/report_missing_truck_heading.py` lists every affected file with the estimate, for the data to be fixed at the source.
+
+**Case packages (File menu).** *File > Export Case Package…* (Cmd+Shift+E) first asks what to include: storm tracks and each type of data the session loaded (radar volumes, mobile mesonet, recorded vehicles/annotations, CLAMPS, raw lidar, NOXP, soundings, satellite, ASOS, hazards, damage paths…), each with its file count and size — all ticked by default. It also asks for a **time frame** (UTC): radar volumes, raw lidar scans, NOXP and satellite images are packed only for that span, while daily files (mobile mesonet, CLAMPS) and everything else are packed whole. The default is the storm track's span with 30 minutes either side, or the hour either side of the clock when the date has no track; *Whole session* packs everything. Counts and sizes update as you change it. *Include scans not yet loaded* (on by default) adds the scans the session's catalogs list for the time frame but that you hadn't played through, so the case opens offline with nothing missing; its count and size are shown. The package (a ZIP, saved by default in `data/case_packages/<session date>/`, with a notice showing where) always holds the case settings (date, window, clock, radar station/product/tilt, velocity options), the STORM version and the list of every source file with its checksum. *File > Open Case Package…* (Cmd+O) imports the tracks, restores the case and loads the included data straight from the package; anything that was left out is downloaded from its source automatically, and a short notice names the tracks imported and the time span the package holds. A package for another date reopens STORM on that date. *File > Show Case Packages Folder* opens `data/case_packages/` in Finder. You can also open a case from the launch window: choose ARCHIVE, click *Open case…*, pick the package and launch. The date and time move to the case, and choosing a different date clears it. If an upstream file has changed since the case was viewed, the package keeps the new copy and records both checksums.
+
+**Velocity processing (archive WSR-88D).** With velocity shown, the radar panel offers **Dealias** (Py-ART region-based, as in MESO-VIEW) and **Storm-relative** (subtracts the track's mean motion along each beam; needs two track points at different times). The status line says `dealiased`, or `not dealiased` when a sweep couldn't be; raw velocity is never labeled as dealiased. Dealiasing takes a few seconds per sweep.
 
 ---
 
@@ -1527,7 +1631,7 @@ STORM uses an internal TCP port (19876) as a process lock. If a second instance 
 | "MQTT disconnected" in status bar | Certificate missing or endpoint unreachable | Verify `/aws/` certificate files exist |
 | Station plots missing | `--disable-annotations` passed | Relaunch without that flag |
 | MESO-1/2 buttons grayed out | Sectors not currently available | Wait — buttons enable automatically when sectors are active |
-| Map tiles blank/gray | `storm.mbtiles` missing or corrupted | Verify the MBTiles file is present and not zero-byte |
+| Map tiles blank/gray | No `storm.mbtiles` and no internet connection (the map says so), or a corrupted file | Connect to the internet (the map retries every 20 s), or put a valid `storm.mbtiles` in `tiles/` |
 | Slow/choppy radar rendering | Grid size too large for hardware | Use `--render-grid-size 256` |
 | Hatch patterns not visible | WebGL limitation | Known quirk; patterns are built as pixel data, not canvas — should render in all supported modes |
 
@@ -1542,7 +1646,7 @@ MapLibre GL running inside QWebEngineView cannot reliably read back canvas pixel
 The `bridge` object that connects Python and JavaScript is initialized asynchronously after the map loads. All JavaScript API functions are stubbed as no-ops (`_stormNoop`) until the bridge is ready. In practice this is transparent to the user, but very rapid actions in the first second after launch may be silently dropped.
 
 **MBTiles Files Not Included in Repository**
-The offline vector tile database (`storm.mbtiles`) is large (500 MB–1 GB) and is not included in the git repository. Optional NLCD and satellite-basemap caches are also distributed outside git. Place MBTiles files in the `tiles/` folder.
+The offline vector tile database (`storm.mbtiles`) is large (500 MB–1 GB) and is not included in the git repository. Optional NLCD and satellite-basemap caches are also distributed outside git. Place MBTiles files in the `tiles/` folder. Without `storm.mbtiles` the base map is loaded online from OpenFreeMap (same map style, OpenStreetMap data; the credit appears at the map's top right and the status line notes it), in every mode, archive included. With no connection either, the map shows a notice and keeps retrying; radar, observations and other data layers still draw.
 
 **SPC Text Product Latency**
 IEM AFOS sometimes responds slowly (up to 20 seconds per request). STORM waits patiently rather than timing out aggressively. This is normal behavior during high-traffic SPC issuance periods.
@@ -1562,7 +1666,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 
 | Feature | Default | Disabled By |
 |---------|---------|-------------|
-| Offline vector base map | ✅ Always | n/a (requires storm.mbtiles) |
+| Vector base map | ✅ Always | Offline from `tiles/storm.mbtiles`; otherwise online (OpenFreeMap) |
 | Offline NLCD land cover | ✅ Enabled when installed | Requires `tiles/storm_nlcd.mbtiles` |
 | Offline USGS satellite basemap | ✅ Enabled when installed | Requires `tiles/satellite.mbtiles` |
 | NEXRAD Radar overlay | ✅ Enabled | `--disable-radar` |

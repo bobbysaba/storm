@@ -16,12 +16,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 import config
 from core.sounding import Sounding, SoundingSet
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 20
 _LOOKBACK_HOURS  = 12
 _RAW_HEADER_BYTES = 4096
-_API_INDEX_PATH = "data/sonde/index.json"
+_API_INDEX_PATH = endpoints.NSSL_SONDE_INDEX
 
 _TEST_FILE_URL = None
 
@@ -109,7 +110,7 @@ def _fetch_sounding_set() -> SoundingSet:
         return SoundingSet(
             lat=0.0, lon=0.0, elevation=surface_elev, fetch_time=now_utc,
             soundings=soundings, station_id="CLAMPS",
-            station_name="NSSL CLAMPS DL Truck", source="nssl",
+            station_name="NSSL lidar truck (DLTRUCK1) sonde", source="nssl",
         )
 
     return _fetch_sounding_set_from_api(now_utc)
@@ -158,7 +159,7 @@ def _soundings_to_set(soundings: list[Sounding], now_utc: datetime) -> SoundingS
         fetch_time   = now_utc,
         soundings    = soundings,
         station_id   = "CLAMPS",
-        station_name = "NSSL CLAMPS DL Truck",
+        station_name = "NSSL lidar truck (DLTRUCK1) sonde",
         source       = "nssl",
     )
 

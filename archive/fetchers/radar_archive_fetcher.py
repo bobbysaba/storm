@@ -1,24 +1,32 @@
 
 import atexit
+import gzip
+import gc
 import io
 import logging
 import os
 import shutil
 import tempfile
 import threading
+import time as _time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from core import perf_log
 from core.level2_radar_scan import Level2RadarScan, L2_PRODUCTS, DEFAULT_L2_PRODUCT
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
-_S3_BASE = "https://unidata-nexrad-level2.s3.amazonaws.com"
+_S3_BASE = endpoints.NEXRAD_LEVEL2_BUCKET
 _S3_NS   = "http://s3.amazonaws.com/doc/2006-03-01/"
 
 # maps L2_PRODUCTS keys → MetPy Level2File moment name (plain ASCII string).
@@ -33,6 +41,18 @@ _MOMENT_MAP: dict[str, str] = {
     "clutter_filter_power_removed": "CFP",
 }
 
+@dataclass(frozen=True)
+class VelocityOptions:
+    """Optional velocity processing (core/velocity_processing.py). Part of
+    each decode request and cache key, so switching reuses earlier results
+    and a result can't be shown under the wrong options."""
+    dealias: bool = False
+    storm_motion: Optional[tuple[float, float]] = None   # (u, v) m/s, for storm-relative
+
+    def __bool__(self) -> bool:
+        return self.dealias or self.storm_motion is not None
+
+
 # stations not archived in the Unidata/NOAA Level-2 S3 bucket.
 ARCHIVE_UNAVAILABLE_STATIONS: frozenset[str] = frozenset({
     "KOUN",   # NSSL research WSR-88D, Norman OK — not in public archive
@@ -40,6 +60,18 @@ ARCHIVE_UNAVAILABLE_STATIONS: frozenset[str] = frozenset({
 
 BUFFER_BEFORE = 4
 BUFFER_AFTER  = 4
+# A parsed Level-2 volume holds ~465 MB of Python objects for a 10 MB file
+# (MetPy keeps every tilt and moment; measured KDDC 2026-05-17), and the buffer
+# used to keep one per scan in a +/-8 window -- several GB. Only the scan on
+# screen keeps its parse (so switching its product or tilt is instant);
+# prefetched neighbors are decoded for the current product and their parse
+# dropped, and re-parsed from the raw file on disk if ever needed again.
+PARSED_KEEP = 1
+# The kept parse makes a product/tilt switch on the scan on screen instant,
+# but it is big -- 465 MB to 840 MB depending on the radar and VCP -- so it
+# is let go once it hasn't been used for this long (a later switch re-parses
+# the scan, 1-4 s).
+PARSED_IDLE_S = 45.0
 
 
 class ArchiveRadarFetcher(QObject):
@@ -75,52 +107,125 @@ class ArchiveRadarFetcher(QObject):
             UTC datetime of the archive session (only the date portion is used).
         """
         super().__init__(parent)
+        self._closed = threading.Event()
+        self._signal_lock = threading.Lock()
+        self._parse_lock = threading.Lock()
+        self._decode_lock = threading.Lock()
+        self._parsed_used = _time.monotonic()
+        threading.Thread(target=self._release_idle_parse, daemon=True, name="radar-parse-reaper").start()
         self._station     = station.upper()
         self._date        = session_date
         self._product     = DEFAULT_L2_PRODUCT
         self._tilt_idx    = 0          # index into available tilts list
+        self._velocity    = VelocityOptions()
 
         # raw Level-2 files are written to a per-session tmp directory (~30 MB
         self._tmpdir = tempfile.mkdtemp(prefix="storm_radar_")
         atexit.register(shutil.rmtree, self._tmpdir, True)
+
+        # bounded pool for fetch+decode -- _maintain_buffer can want up to
+        # BUFFER_BEFORE+BUFFER_AFTER+1 (9) scans fetched at once when the
+        # buffer first fills or shifts; each fetch+decode was measured
+        # pushing peak process RSS by 400MB-1GB (MetPy parses every tilt/
+        # moment in the file, not just the one being displayed), so letting
+        # all 9 run concurrently was the dominant driver of the archive-mode
+        # memory blowup. Capping this bounds the worst-case overlap instead.
+        self._fetch_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="wsr88d-fetch-decode"
+        )
 
         # maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
         self._raw_cache: dict[datetime, Optional[str]] = {}
         # maps scan_time → parsed metpy Level2File (binary structure only,
         # independent of product/tilt) so switching product/tilt on an
         # already-fetched scan doesn't re-parse the raw bytes.
-        self._parsed_cache: dict[datetime, object] = {}
-        self._decoded_cache: dict[tuple[datetime, str, int], Level2RadarScan] = {}
+        self._parsed_cache: "OrderedDict[datetime, object]" = OrderedDict()   # LRU, PARSED_KEEP
+        self._decoded_cache: dict[tuple, Level2RadarScan] = {}
         # sorted list of all known scan times for the date.
         self._index: list[datetime] = []
+        self._index_keys: dict[datetime, str] = {}   # scan time -> its S3 object name
+        self.index_loading = False          # True from load_index() until the listing is in (or failed)
         self._index_lock = threading.Lock()
 
         self._current_archive_time: Optional[datetime] = None
         self._last_emitted_key: Optional[tuple] = None  # suppress re-render of same scan
-        self._fetch_lock = threading.Lock()
+        # re-entrant: canceling a queued Future runs its done-callback
+        # (_forget_work, which takes this lock) in the canceling thread
+        self._fetch_lock = threading.RLock()
         self._pending_fetches: set[datetime] = set()
-        self._pending_decodes: set[tuple[datetime, str, int]] = set()
+        self._pending_decodes: set[tuple] = set()
+        # queued-but-maybe-not-started work, so a seek can drop what's stale:
+        # ("fetch", scan_time) or ("decode", cache_key) -> Future
+        self._queued: dict[tuple, object] = {}
+        self._target_scan: Optional[datetime] = None
 
 
     @property
     def station(self) -> str:
         return self._station
 
-    def set_station(self, station: str) -> None:
-        self._station = station.upper()
-        for path in self._raw_cache.values():
-            if path and os.path.exists(path):
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        self._raw_cache.clear()
+    def _emit(self, signal, *args):
+        # Serialize shutdown with signal delivery; no queued updates after close.
+        with self._signal_lock:
+            if not self._closed.is_set():
+                signal.emit(*args)
+
+    def _submit(self, work_key, task, *args):
+        try:
+            future = self._fetch_executor.submit(task, *args)
+        except RuntimeError:
+            if not self._closed.is_set():
+                raise
+            return
+        with self._fetch_lock:
+            if not future.done():
+                self._queued[work_key] = future
+        future.add_done_callback(lambda f, k=work_key: self._forget_work(k, f))
+
+    def _forget_work(self, work_key, future) -> None:
+        with self._fetch_lock:
+            if self._queued.get(work_key) is future:
+                del self._queued[work_key]
+
+    def _drop_stale_work(self, scan_time: datetime) -> None:
+        """After a seek, cancel queued work that hasn't started for any scan
+        but the one now wanted, so it isn't stuck behind the old position's
+        downloads. Running work finishes. The buffer is then re-queued
+        around the new position, nearest first."""
+        with self._fetch_lock:
+            for work_key, future in list(self._queued.items()):
+                target = work_key[1] if work_key[0] == "fetch" else work_key[1][0]
+                if target == scan_time or not future.cancel():
+                    continue
+                self._queued.pop(work_key, None)   # the cancel callback may have removed it
+                if work_key[0] == "fetch":
+                    self._pending_fetches.discard(target)
+                    if self._raw_cache.get(target, 0) is None:   # never fetched
+                        del self._raw_cache[target]
+                else:
+                    self._pending_decodes.discard(work_key[1])
+            self._update_loading_state()
+
+    def shutdown(self) -> None:
+        with self._signal_lock:
+            if self._closed.is_set():
+                return
+            self._closed.set()
+        self._fetch_executor.shutdown(wait=False, cancel_futures=True)
+        # Let go of the volumes now: a parsed volume is ~465 MB, and a station
+        # switch (the RADAR picker, or a movie changing radars) would otherwise
+        # keep the old station's alive alongside the new one's.
         self._parsed_cache.clear()
         self._decoded_cache.clear()
-        self._index = []
-        self._pending_fetches.clear()
         self._pending_decodes.clear()
-        self.load_index()
+        self._pending_fetches.clear()
+        # Running downloads may still own these files. Finish cleanup off the
+        # GUI thread, after the executor releases them.
+        def finish():
+            self._fetch_executor.shutdown(wait=True, cancel_futures=True)
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+        threading.Thread(target=finish, daemon=True, name="radar-cleanup").start()
+
 
     def set_product(self, pyart_field: str) -> None:
         """Switch the rendered product and reuse cached raw/decoded volumes."""
@@ -131,6 +236,16 @@ class ArchiveRadarFetcher(QObject):
         if self._current_archive_time is not None:
             self.on_time_changed(self._current_archive_time)
 
+    def set_velocity_options(self, options: VelocityOptions) -> None:
+        """Dealias and/or storm-relative velocity; raw velocity stays cached."""
+        if options == self._velocity:
+            return
+        self._velocity = options
+        if self._product == "velocity":
+            self._last_emitted_key = None
+            if self._current_archive_time is not None:
+                self.on_time_changed(self._current_archive_time)
+
     def set_tilt_index(self, idx: int) -> None:
         """Switch the elevation tilt and reuse cached raw/decoded volumes."""
         self._tilt_idx = idx
@@ -140,6 +255,9 @@ class ArchiveRadarFetcher(QObject):
 
     def load_index(self) -> None:
         """Fetch the list of available scans from AWS (background thread)."""
+        if self._closed.is_set():
+            return
+        self.index_loading = True
         t = threading.Thread(target=self._fetch_index, daemon=True)
         t.start()
 
@@ -149,35 +267,43 @@ class ArchiveRadarFetcher(QObject):
         Finds the correct scan for the given time, emits it if cached,
         or triggers a background fetch if not.
         """
+        if self._closed.is_set():
+            return
         self._current_archive_time = archive_time
         scan_time = self._nearest_scan_before(archive_time)
         if scan_time is None:
             return
+        if scan_time != self._target_scan:
+            self._target_scan = scan_time
+            self._drop_stale_work(scan_time)
         cache_key = self._decode_key(scan_time)
         scan = self._decoded_cache.get(cache_key)
         if scan is not None:
             if cache_key != self._last_emitted_key:
                 self._last_emitted_key = cache_key
-                self.scan_ready.emit(scan)
+                self._emit(self.scan_ready, scan)
         elif self._raw_cache.get(scan_time) is not None:
             self._ensure_decoded(scan_time)
         else:
             self._ensure_fetched(scan_time)
 
-        # maintain buffer: pre-fetch neighbouring scans.
+        # maintain buffer: pre-fetch neighboring scans.
         self._maintain_buffer(scan_time)
 
 
     def _fetch_index(self) -> None:
-        """List all files for the station/date from the AWS S3 bucket."""
-        prefix = (
-            f"{self._date.strftime('%Y/%m/%d')}/{self._station}/"
-        )
-        url = f"{_S3_BASE}/?prefix={prefix}&list-type=2"
+        """List the station's files for the session's span from the AWS S3
+        bucket -- its UTC day and the next morning (archive/session.py)."""
+        from archive.session import session_bounds
+        start, cap = session_bounds(self._date)
         try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            times = self._parse_s3_listing(resp.text)
+            times = []
+            for day in (start, start + timedelta(days=1)):
+                prefix = f"{day.strftime('%Y/%m/%d')}/{self._station}/"
+                from core import package_sources
+                resp = package_sources.requests_get("radar", f"{_S3_BASE}/?prefix={prefix}&list-type=2", timeout=15)
+                resp.raise_for_status()
+                times += [t for t in self._parse_s3_listing(resp.text) if start <= t <= cap]
             with self._index_lock:
                 self._index = sorted(times)
             log.info(
@@ -185,13 +311,13 @@ class ArchiveRadarFetcher(QObject):
                 len(self._index), self._station, self._date.strftime("%Y-%m-%d"),
             )
             if not times:
-                self.error.emit(
+                self._emit(self.error,
                     f"No archive data found for {self._station} on "
                     f"{self._date.strftime('%Y-%m-%d')} — "
                     f"station may not be in the public archive"
                 )
                 return
-            self.index_loaded.emit(
+            self._emit(self.index_loaded,
                 [t.strftime("%Y-%m-%dT%H:%M:%SZ") for t in self._index]
             )
             # pre-fetch the scan nearest to the current archive time.
@@ -199,7 +325,9 @@ class ArchiveRadarFetcher(QObject):
                 self.on_time_changed(self._current_archive_time)
         except Exception as exc:
             log.error("ArchiveRadarFetcher: index fetch failed: %s", exc)
-            self.error.emit(f"Radar index failed for {self._station}: {exc}")
+            self._emit(self.error, f"Radar index failed for {self._station}: {exc}")
+        finally:
+            self.index_loading = False
 
     def _parse_s3_listing(self, xml_text: str) -> list:
         """Parse S3 XML listing and extract scan datetimes."""
@@ -216,10 +344,19 @@ class ArchiveRadarFetcher(QObject):
                 dt = _parse_l2_filename_time(fname, self._station)
                 if dt:
                     times.append(dt)
+                    self._index_keys[dt] = key     # the exact object name, for _download_scan
         except Exception as exc:
             log.warning("ArchiveRadarFetcher: S3 parse error: %s", exc)
         return times
 
+
+    def next_scan_after(self, t: datetime) -> Optional[datetime]:
+        """The first indexed scan time after t, if any."""
+        with self._index_lock:
+            idx = self._index
+        import bisect
+        i = bisect.bisect_right(idx, t)
+        return idx[i] if i < len(idx) else None
 
     def _nearest_scan_before(self, t: datetime) -> Optional[datetime]:
         """Return the latest scan_time <= t from the index."""
@@ -246,14 +383,13 @@ class ArchiveRadarFetcher(QObject):
                 return
             if self._raw_cache.get(scan_time) is not None:
                 return
+            if self._closed.is_set():
+                return
             self._pending_fetches.add(scan_time)
             self._raw_cache[scan_time] = None
 
-        self.loading_changed.emit(True)
-        t = threading.Thread(
-            target=self._fetch_raw_then_decode, args=(scan_time,), daemon=True
-        )
-        t.start()
+        self._emit(self.loading_changed, True)
+        self._submit(("fetch", scan_time), self._fetch_raw_then_decode, scan_time)
 
     def _ensure_decoded(self, scan_time: datetime) -> None:
         cache_key = self._decode_key(scan_time)
@@ -262,16 +398,18 @@ class ArchiveRadarFetcher(QObject):
                 return
             if self._raw_cache.get(scan_time) is None:
                 return
+            if self._closed.is_set():
+                return
             self._pending_decodes.add(cache_key)
-        self.loading_changed.emit(True)
-        threading.Thread(target=self._decode_cached_scan, args=(scan_time,), daemon=True).start()
+        self._emit(self.loading_changed, True)
+        self._submit(("decode", cache_key), self._decode_cached_scan, scan_time, cache_key)
 
     def _fetch_raw_then_decode(self, scan_time: datetime) -> None:
         cache_key = self._decode_key(scan_time)
         decoding = False
         try:
             file_bytes = self._download_scan(scan_time)
-            if file_bytes is None:
+            if file_bytes is None or self._closed.is_set():
                 return
             # persist raw bytes to tmp file so later product/tilt switches
             # (after this call returns) can still find the raw scan on disk.
@@ -282,6 +420,8 @@ class ArchiveRadarFetcher(QObject):
             with open(path, "wb") as fh:
                 fh.write(file_bytes)
             self._raw_cache[scan_time] = path
+            if scan_time == self._target_scan:
+                self._maintain_buffer(scan_time)    # the scan on screen is in: now its neighbors
 
             with self._fetch_lock:
                 if cache_key in self._decoded_cache or cache_key in self._pending_decodes:
@@ -293,7 +433,7 @@ class ArchiveRadarFetcher(QObject):
             self._decode_and_cache(scan_time, file_bytes, cache_key)
         except Exception as exc:
             log.error("ArchiveRadarFetcher: fetch failed for %s: %s", scan_time, exc)
-            self.error.emit(f"Radar fetch error: {exc}")
+            self._emit(self.error, f"Radar fetch error: {exc}")
         finally:
             with self._fetch_lock:
                 self._pending_fetches.discard(scan_time)
@@ -301,8 +441,7 @@ class ArchiveRadarFetcher(QObject):
                     self._pending_decodes.discard(cache_key)
                 self._update_loading_state()
 
-    def _decode_cached_scan(self, scan_time: datetime) -> None:
-        cache_key = self._decode_key(scan_time)
+    def _decode_cached_scan(self, scan_time: datetime, cache_key: tuple) -> None:
         try:
             path = self._raw_cache.get(scan_time)
             if not path or not os.path.exists(path):
@@ -317,50 +456,93 @@ class ArchiveRadarFetcher(QObject):
 
     def _decode_and_cache(self, scan_time: datetime, file_bytes: bytes, cache_key: tuple) -> None:
         try:
-            scan = self._decode(scan_time, file_bytes)
+            if self._closed.is_set():
+                return
+            # one volume parsed and decoded at a time: a parse is ~465 MB, and two
+            # workers decoding at once doubled the peak (the downloads still overlap)
+            with self._decode_lock:
+                if self._closed.is_set():
+                    return
+                scan = self._decode(scan_time, file_bytes, product=cache_key[1], tilt_idx=cache_key[2],
+                                    velocity=cache_key[3])
+                gc.collect()                 # MetPy's parse holds reference cycles; free it now, not later
+            if self._closed.is_set():
+                return
             self._decoded_cache[cache_key] = scan
             if (
                 self._current_archive_time is not None
                 and self._nearest_scan_before(self._current_archive_time) == scan_time
                 and self._decode_key(scan_time) == cache_key
             ):
-                self.scan_ready.emit(scan)
+                self._emit(self.scan_ready, scan)
         except Exception as exc:
             log.error("ArchiveRadarFetcher: decode failed for %s: %s", scan_time, exc)
-            self.error.emit(f"Radar decode error: {exc}")
+            self._emit(self.error, f"Radar decode error: {exc}")
 
     def _update_loading_state(self) -> None:
         if not self._pending_fetches and not self._pending_decodes:
-            self.loading_changed.emit(False)
+            self._emit(self.loading_changed, False)
 
-    def _decode_key(self, scan_time: datetime) -> tuple[datetime, str, int]:
-        return (scan_time, self._product, self._tilt_idx)
+    def _decode_key(self, scan_time: datetime) -> tuple:
+        velocity = self._velocity if self._product == "velocity" and self._velocity else None
+        return (scan_time, self._product, self._tilt_idx, velocity)
 
     def _download_scan(self, scan_time: datetime) -> Optional[bytes]:
         """Fetch the raw Level-2 file bytes from AWS S3."""
-        with self._index_lock:
-            idx = self._index
         # find a matching filename in the index for this exact scan time.
         prefix = (
             f"{scan_time.strftime('%Y/%m/%d')}/{self._station}/"
             f"{self._station}{scan_time.strftime('%Y%m%d_%H%M%S')}"
         )
-        # try V06 first, then V03.
-        for suffix in ("_V06", "_V03", ""):
-            url = f"{_S3_BASE}/{prefix}{suffix}"
+        # try V06 first, then V03; the bucket was reorganized in 2025 to
+        # store objects gzip-compressed with a ".gz" suffix on the key, so
+        # also try gzip-suffixed variants of each.
+        suffixes = ("_V06", "_V03", "", "_V06.gz", "_V03.gz", ".gz")
+        # the bucket listing's exact name first: guessing cost up to three
+        # failed requests per scan (each a round trip -- slow on cellular)
+        listed = self._index_keys.get(scan_time)
+        urls = [f"{_S3_BASE}/{listed}"] if listed else []
+        urls += [u for u in (f"{_S3_BASE}/{prefix}{suffix}" for suffix in suffixes) if u not in urls]
+        from core import package_sources
+        for url in urls:                      # an opened case package's copy first, no network
+            data = package_sources.get(url)
+            if data is not None:
+                return gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+        for attempt, url in enumerate(urls, 1):
+            if self._closed.is_set():
+                return None
+            t0 = _time.perf_counter()
             try:
                 resp = requests.get(url, timeout=60, stream=True)
                 if resp.status_code == 200:
                     data = resp.content
-                    log.debug(
-                        "ArchiveRadarFetcher: downloaded %s (%.1f MB)",
-                        url.split("/")[-1], len(data) / 1e6,
+                    from core import provenance
+                    provenance.record("radar", url, data)
+                    # S3 doesn't set Content-Encoding for these objects, so
+                    # requests won't auto-decompress -- detect gzip by magic
+                    # bytes regardless of which suffix matched.
+                    if data[:2] == b"\x1f\x8b":
+                        data = gzip.decompress(data)
+                    log.info(
+                        "ArchiveRadarFetcher: download %s %.1f MB in %.0f ms",
+                        url.split("/")[-1], len(data) / 1e6, (_time.perf_counter() - t0) * 1000,
                     )
+                    perf_log.event("radar.download", file=url.split("/")[-1], mb=round(len(resp.content) / 1e6, 2),
+                                   ms=round((_time.perf_counter() - t0) * 1000), attempt=attempt)
                     return data
             except Exception:
                 continue
         log.warning("ArchiveRadarFetcher: could not download scan %s", scan_time)
         return None
+
+    def _release_idle_parse(self) -> None:
+        """Drop the kept parse once it has sat unused for PARSED_IDLE_S."""
+        while not self._closed.wait(5.0):
+            if self._parsed_cache and _time.monotonic() - self._parsed_used > PARSED_IDLE_S:
+                with self._parse_lock:
+                    if _time.monotonic() - self._parsed_used > PARSED_IDLE_S:
+                        self._parsed_cache.clear()
+                gc.collect()
 
     def _get_parsed(self, scan_time: datetime, file_bytes: bytes):
         """Parse the raw Level-2 bytes with MetPy, reusing a cached parse.
@@ -369,55 +551,69 @@ class ArchiveRadarFetcher(QObject):
         was already fetched only needs to be parsed once even if the user
         switches products or tilts repeatedly.
         """
-        f = self._parsed_cache.get(scan_time)
-        if f is None:
+        with self._parse_lock:
+            self._parsed_used = _time.monotonic()
+            f = self._parsed_cache.get(scan_time)
+            if f is not None:
+                self._parsed_cache.move_to_end(scan_time)
+                return f
             from metpy.io import Level2File
+            t0 = _time.perf_counter()
             f = Level2File(io.BytesIO(file_bytes))
-            self._parsed_cache[scan_time] = f
-        return f
+            log.info("ArchiveRadarFetcher: parse %s %s in %.0f ms", self._station,
+                     scan_time.strftime("%H:%M:%S"), (_time.perf_counter() - t0) * 1000)
+            if scan_time == getattr(self, "_target_scan", None):     # only the scan on screen
+                self._parsed_cache[scan_time] = f
+                while len(self._parsed_cache) > PARSED_KEEP:
+                    self._parsed_cache.popitem(last=False)
+            return f
 
-    def _decode(self, scan_time: datetime, file_bytes: bytes) -> Optional[Level2RadarScan]:
+    def _decode(self, scan_time: datetime, file_bytes: bytes, *, product=None, tilt_idx=None,
+                velocity: Optional[VelocityOptions] = None) -> Optional[Level2RadarScan]:
         """Decode a Level-2 file with MetPy and return a Level2RadarScan."""
-        from pyproj import Proj, Transformer
+        from core.mem_probe import peak_rss_mb, log_delta
+        import time as _time
+        _t0 = _time.perf_counter()
+        _rss_before = peak_rss_mb()
 
+        requested_product = self._product if product is None else product
+        requested_tilt = self._tilt_idx if tilt_idx is None else tilt_idx
         f = self._get_parsed(scan_time, file_bytes)
 
         if not f.sweeps:
             raise RuntimeError("No sweeps found in Level-2 file")
 
-        available_tilts = []
-        for sweep in f.sweeps:
-            if sweep:
-                rad0 = sweep[0]
-                # msg31: Radial namedtuple with .header; MSG1: plain (hdr, data) tuple
-                hdr = rad0.header if hasattr(rad0, "header") else rad0[0]
-                available_tilts.append(round(float(hdr.el_angle), 1))
-
-        if not available_tilts:
+        sweeps = [sweep for sweep in f.sweeps if sweep]
+        if not sweeps:
             raise RuntimeError("No valid sweeps in Level-2 file")
-
-        tilt_idx = min(self._tilt_idx, len(f.sweeps) - 1)
+        available_tilts = []
+        sweep_products = []
+        # the scan strategy's (VCP) intended angle for each cut: the first
+        # ray's measured angle wobbles (0.6/0.5 for the two 0.48 deg cuts),
+        # which showed up as near-duplicate entries in the tilt list
+        cuts = getattr(getattr(f, "vcp_info", None), "els", None) or []
+        for sweep in sweeps:
+            rad0 = sweep[0]
+            hdr = rad0.header if hasattr(rad0, "header") else rad0[0]
+            cut = getattr(hdr, "el_num", 0)
+            angle = cuts[cut - 1].el_angle if 0 < cut <= len(cuts) else hdr.el_angle
+            available_tilts.append(round(float(angle), 1))
+            present = set()
+            for rad in sweep:
+                moments = rad.moments if hasattr(rad, "moments") else rad[1]
+                present.update((k.decode() if isinstance(k, bytes) else k).strip() for k in moments)
+            sweep_products.append({p for p in L2_PRODUCTS if _MOMENT_MAP[p] in present})
+        available_products = [p for p in L2_PRODUCTS if any(p in fields for fields in sweep_products)]
+        compatible = [i for i, fields in enumerate(sweep_products) if requested_product in fields]
+        if not compatible:
+            raise RuntimeError(f"No {requested_product} data in this radar volume")
+        preferred = max(0, min(requested_tilt, len(sweeps) - 1))
+        tilt_idx = min(compatible, key=lambda i: (abs(available_tilts[i] - available_tilts[preferred]), abs(i - preferred)))
         tilt_deg = available_tilts[tilt_idx]
-        sweep    = f.sweeps[tilt_idx]
-        rad0 = sweep[0]
-        is_msg31 = hasattr(rad0, "moments")
-
-        present: set[str] = set()
-        for rad in sweep:
-            moments = rad.moments if is_msg31 else rad[1]
-            present.update(
-                (k.decode() if isinstance(k, bytes) else k).strip()
-                for k in moments.keys()
-            )
-
-        available_products = [p for p in L2_PRODUCTS if _MOMENT_MAP[p] in present]
-        if not available_products:
-            raise RuntimeError(
-                f"No recognised moments in sweep {tilt_idx} (found: {sorted(present)})"
-            )
-
-        product  = self._product if self._product in available_products else available_products[0]
-        moment   = _MOMENT_MAP[product]
+        sweep = sweeps[tilt_idx]
+        is_msg31 = hasattr(sweep[0], "moments")
+        product = requested_product
+        moment = _MOMENT_MAP[product]
 
         radar_lat = radar_lon = None
         for rad in sweep:
@@ -472,28 +668,35 @@ class ArchiveRadarFetcher(QObject):
             ng = len(row)
             data[i, :ng] = row  # already NaN for MISSING/RANGE_FOLD
 
+        ranges   = first_gate_km + np.arange(n_gates, dtype=np.float64) * gate_width_km
+        processing = []
+        if product == "velocity" and velocity:
+            data, processing = _process_velocity(data, sweep, azimuths, ranges, tilt_deg, velocity)
+
         # velocity is in m/s from MetPy — convert to knots.
-        if product == "velocity":
+        if product in ("velocity", "spectrum_width"):
             data *= 1.94384
 
-        az_rad   = np.deg2rad(np.array(azimuths, dtype=np.float64))
-        ranges   = first_gate_km + np.arange(n_gates, dtype=np.float64) * gate_width_km
-        # [n_rays, n_gates] east/north offsets in km
-        x_km = np.outer(np.sin(az_rad), ranges)
-        y_km = np.outer(np.cos(az_rad), ranges)
-
-        aeqd = Proj(proj="aeqd", lat_0=radar_lat, lon_0=radar_lon, datum="WGS84", units="km")
-        xform = Transformer.from_proj(aeqd, Proj("epsg:4326"), always_xy=True)
-        lons, lats = xform.transform(x_km, y_km)
-
+        # Gate positions are not computed here: converting all ~1.3 M gates
+        # to lat/lon took ~0.3 s of a 0.8 s decode (M2) and ~10 MB per cached
+        # scan, and the renderer needs only a few rings/rays of them
+        # (Level2RadarScan.first_ring etc.); the full grids are computed on
+        # first use if anything asks for scan.lats / scan.lons.
         meta = L2_PRODUCTS[product]
-        return Level2RadarScan(
+        log_delta(f"ArchiveRadarFetcher._decode {self._station} {scan_time}",
+                   _rss_before, peak_rss_mb(), (_time.perf_counter() - _t0) * 1000.0)
+        perf_log.event("radar.decode", station=self._station, scan=scan_time.isoformat(), product=product,
+                       tilt=tilt_idx, ms=round((_time.perf_counter() - _t0) * 1000.0),
+                       rays=int(data.shape[0]), gates=int(data.shape[1]),
+                       processing="; ".join(processing), peak_mb=round(peak_rss_mb()))
+        scan = Level2RadarScan(
             site=self._station,
             product=meta["label"].split("(")[-1].rstrip(")"),
             scan_time=scan_time,
             data=data,
-            lats=lats.astype(np.float32),
-            lons=lons.astype(np.float32),
+            lats=None,
+            lons=None,
+            gate_geometry=(radar_lat, radar_lon, np.asarray(azimuths, dtype=np.float64), ranges),
             vmin=meta["vmin"],
             vmax=meta["vmax"],
             units=meta["units"],
@@ -502,7 +705,23 @@ class ArchiveRadarFetcher(QObject):
             available_tilts=available_tilts,
             available_products=available_products,
             pyart_field=product,
+            # _sample_scan_to_grid (ui/map/radar_overlay.py) maps ray index
+            # -> azimuth by uniform division of 360 deg, assuming row 0 sits
+            # at az_offset. Rows here are sorted by azimuth above, so
+            # azimuths[0] is whatever the *smallest* azimuth in this
+            # particular scan happens to be -- not reliably 0 deg. A scan
+            # missing its near-0 deg ray (or any other completeness quirk)
+            # then renders rotated by that gap until the next, more-complete
+            # scan resets it. The live decoder (data/radar/radar_decoder.py)
+            # already sets this correctly; the archive path never did.
+            az_offset=float(azimuths[0]),
         )
+        scan.tilt_index = tilt_idx
+        scan.velocity_processing = "; ".join(processing)
+        if velocity is not None and velocity.storm_motion is not None:
+            scan.product = "SRV"
+        return scan
+
 
 
     def _maintain_buffer(self, current_scan_time: datetime) -> None:
@@ -511,10 +730,17 @@ class ArchiveRadarFetcher(QObject):
             idx = self._index
         if not idx or current_scan_time not in idx:
             return
+        if self._raw_cache.get(current_scan_time) is None:
+            # the scan on screen first: on a field laptop's slow link, a
+            # neighbor downloading alongside it halved its speed (two 18 MB
+            # volumes took 63 and 76 s); _fetch_raw_then_decode calls back
+            # here once it has arrived
+            return
         pos = idx.index(current_scan_time)
         lo = max(0, pos - BUFFER_BEFORE)
         hi = min(len(idx) - 1, pos + BUFFER_AFTER)
-        for i in range(lo, hi + 1):
+        # nearest first, and ahead before behind (playback runs forward)
+        for i in sorted(range(lo, hi + 1), key=lambda i: (abs(i - pos), i < pos)):
             t = idx[i]
             if self._raw_cache.get(t) is None and t not in self._pending_fetches:
                 self._ensure_fetched(t)
@@ -532,9 +758,36 @@ class ArchiveRadarFetcher(QObject):
                     except OSError:
                         pass
                 self._parsed_cache.pop(t, None)
-                for key in [k for k in self._decoded_cache if k[0] == t]:
-                    del self._decoded_cache[key]
+        # decoded scans by time, too: ones whose raw file had already gone
+        # (an earlier seek) were never reached above and piled up, ~16 MB each
+        keep = set(idx[evict_lo:evict_hi + 1])
+        for key in [k for k in list(self._decoded_cache) if k[0] not in keep]:
+            self._decoded_cache.pop(key, None)
 
+
+
+def _process_velocity(data_ms, sweep, azimuths, ranges_km, tilt_deg, options: VelocityOptions):
+    """Apply the requested velocity processing to one sweep (m/s), returning
+    the field and a description of what was actually done."""
+    from core.storm_motion import StormMotion
+    from core.velocity_processing import dealias, storm_relative, sweep_nyquist
+    notes = []
+    if options.dealias:
+        nyquist = sweep_nyquist(sweep)
+        if nyquist is None:
+            notes.append("raw: no Nyquist velocity recorded, not dealiased")
+        else:
+            try:
+                data_ms = dealias(data_ms, azimuths, ranges_km, tilt_deg, nyquist)
+                notes.append(f"dealiased (Py-ART region-based, Nyquist {nyquist:.1f} m/s)")
+            except Exception as exc:
+                log.warning("ArchiveRadarFetcher: dealiasing failed, showing raw velocity: %s", exc)
+                notes.append("raw: dealiasing failed")
+    if options.storm_motion is not None:
+        u, v = options.storm_motion
+        data_ms = storm_relative(data_ms, azimuths, tilt_deg, u, v)
+        notes.append(f"storm-relative to track motion {StormMotion(u, v).describe()}")
+    return data_ms, notes
 
 
 def _parse_l2_filename_time(fname: str, station: str) -> Optional[datetime]:

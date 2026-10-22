@@ -1,11 +1,9 @@
 
 import io
-import base64
 import logging
 import math
 from time import perf_counter
 import numpy as np
-from typing import Optional
 
 from PyQt6.QtCore import QObject
 import matplotlib
@@ -16,8 +14,22 @@ import matplotlib.image as mimg
 from scipy.ndimage import map_coordinates
 
 from core.radar_scan import RadarScan
+from core import perf_log
+from core.mem_probe import peak_rss_mb, log_delta
 
 log = logging.getLogger(__name__)
+
+# --- memory safety gate (temporary diagnostic instrumentation) -------------
+# On an 8 GB machine, ARCHIVE_SUPERRES_GRID_SIZE (4096px) renders are the
+# prime suspect for the reported ~8 GB session that forced a restart: a
+# 4096x4096 grid is ~28x the cells of the normal 768px playback grid, and
+# each render allocates several float64 arrays that size. Tier-1/live/NOXP
+# renders (<=1536px) are never gated -- only the super-res tier is, and only
+# once peak RSS actually gets close to the ceiling. Once tripped, stays
+# tripped for the rest of the process (no cooldown/reset logic to get wrong).
+_SUPERRES_SAFETY_RSS_CEILING_MB = 6144.0   # ~75% of this machine's 8 GB
+_SUPERRES_GATE_MIN_GRID = 2048             # only gates render calls at/above this size
+_superres_gate_tripped = False
 
 # output grid resolution for polar→Cartesian reprojection.
 RENDER_GRID_SIZE = 768
@@ -28,6 +40,29 @@ ADAPTIVE_DOWN_MS = 280.0
 ADAPTIVE_UP_MS = 130.0
 ADAPTIVE_DOWN_SCANS = 2
 ADAPTIVE_UP_SCANS = 4
+
+# Archive-only "super-res" tier (see ui/app/main_window.py's debounced Tier-2
+# render). Deliberately separate from RENDER_GRID_SIZE/MAX_RENDER_GRID_SIZE
+# above, which live mode's adaptive algorithm owns — these constants must
+# never feed back into that path.
+ARCHIVE_SUPERRES_GRID_SIZE = 4096       # matches MESO-VIEW's default output_size_px
+ARCHIVE_SUPERRES_CROP_RADIUS_M = 300_000.0  # 300 km half-width; ~146 m/px at 4096px
+# On a slower computer the sharp render steps down a size when one takes
+# longer than ARCHIVE_SUPERRES_SLOW_S, for the rest of the session. Measured
+# on an M2 (KTLX 2013-05-31 23:23, 0.5 deg): 4096 px 1.8 s / +273 MB, 3072
+# px 1.0 s / +99 MB, 2048 px 0.48 s / +47 MB; an i5-7300U Toughbook (about
+# 2.4x slower single-core) would take ~4.3 s at 4096 px. 2048 px (293 m/px)
+# is still close to the super-res gate spacing (250 m).
+ARCHIVE_SUPERRES_SIZES = (4096, 3072, 2048)
+ARCHIVE_SUPERRES_SLOW_S = 2.5
+
+
+def next_superres_size(size: int, seconds: float) -> int:
+    """The size to use after a render of `size` took `seconds`."""
+    if seconds <= ARCHIVE_SUPERRES_SLOW_S:
+        return size
+    smaller = [s for s in ARCHIVE_SUPERRES_SIZES if s < size]
+    return smaller[0] if smaller else size
 
 
 # function to set the render grid size (used on startup)
@@ -320,6 +355,51 @@ def _haversine_inverse_polar(
 
 
 
+def _scan_sampler(sample_scan: RadarScan):
+    """A function (lat_grid, lon_grid) -> values, sampling the scan by nearest
+    gate. The scan's gate geometry is worked out once here, so a big image
+    can be sampled a strip at a time."""
+    num_az, num_rng = sample_scan.data.shape
+
+    ring_lats, ring_lons = sample_scan.first_ring()
+    radar_lat = float(ring_lats.mean())
+    radar_lon = float(ring_lons.mean())
+
+    # recover gate-center spacing from the scan's own polar grid (spherical
+    ray_lats, ray_lons = sample_scan.spacing_rays()
+    gate_range_m, _ = _haversine_inverse_polar(radar_lat, radar_lon, ray_lats, ray_lons)
+    gate_centers_m = np.median(gate_range_m, axis=0)
+    # the first gate from every ray (first_ring), so a scan that measured
+    # spacing on a subset of rays still places its gates exactly as from
+    # the full grid
+    first_gate_m   = float(np.median(_haversine_inverse_polar(radar_lat, radar_lon, ring_lats, ring_lons)[0]))
+    if num_rng > 1:
+        gate_width_m = float(np.median(np.diff(gate_centers_m)))
+    else:
+        gate_width_m = float(np.nanmax(gate_range_m) or 1.0)
+    if not np.isfinite(gate_width_m) or gate_width_m <= 0:
+        gate_width_m = float(np.nanmax(gate_range_m)) / max(num_rng, 1)
+    del gate_range_m
+
+    far_edge_m = first_gate_m + (num_rng - 0.5) * gate_width_m
+    near_edge_m = max(0.0, first_gate_m - 0.5 * gate_width_m)
+    sentinel = sample_scan.vmin - 999.0
+    data_filled = np.where(np.isnan(sample_scan.data), sentinel, sample_scan.data)
+
+    def sample(lat_grid: np.ndarray, lon_grid: np.ndarray) -> np.ndarray:
+        range_m, az_deg = _haversine_inverse_polar(radar_lat, radar_lon, lat_grid, lon_grid)
+        az_idx  = ((az_deg - sample_scan.az_offset) % 360.0) * num_az / 360.0
+        rng_idx = (range_m - first_gate_m) / gate_width_m
+        outside = (range_m > far_edge_m) | (range_m < near_edge_m)
+        coords = np.array([az_idx.ravel(), rng_idx.ravel()])
+        sampled = map_coordinates(
+            data_filled, coords, order=0, prefilter=False, mode="constant", cval=sentinel
+        ).reshape(lat_grid.shape)
+        sampled[outside | (sampled <= sentinel + 1.0)] = np.nan
+        return sampled
+    return sample
+
+
 def _sample_scan_to_grid(
     sample_scan: RadarScan,
     lat_grid: np.ndarray,
@@ -333,83 +413,101 @@ def _sample_scan_to_grid(
     arrays so the index mapping is consistent with the gate-center
     convention used by the decoder.
     """
-    num_az, num_rng = sample_scan.data.shape
+    return _scan_sampler(sample_scan)(lat_grid, lon_grid)
 
-    radar_lat = float(sample_scan.lats[:, 0].mean())
-    radar_lon = float(sample_scan.lons[:, 0].mean())
 
-    range_m, az_deg = _haversine_inverse_polar(radar_lat, radar_lon, lat_grid, lon_grid)
-
-    # recover gate-center spacing from the scan's own polar grid (spherical
-    gate_range_m, _ = _haversine_inverse_polar(
-        radar_lat, radar_lon, sample_scan.lats, sample_scan.lons
-    )
-    gate_centers_m = np.median(gate_range_m, axis=0)
-    first_gate_m   = float(gate_centers_m[0])
-    if num_rng > 1:
-        gate_width_m = float(np.median(np.diff(gate_centers_m)))
-    else:
-        gate_width_m = float(np.nanmax(gate_range_m) or 1.0)
-    if not np.isfinite(gate_width_m) or gate_width_m <= 0:
-        gate_width_m = float(np.nanmax(gate_range_m)) / max(num_rng, 1)
-
-    az_idx  = ((az_deg - sample_scan.az_offset) % 360.0) * num_az / 360.0
-    rng_idx = (range_m - first_gate_m) / gate_width_m
-
-    far_edge_m = first_gate_m + (num_rng - 0.5) * gate_width_m
-    near_edge_m = max(0.0, first_gate_m - 0.5 * gate_width_m)
-    outside = (range_m > far_edge_m) | (range_m < near_edge_m)
-
-    sentinel = sample_scan.vmin - 999.0
-    data_filled = np.where(np.isnan(sample_scan.data), sentinel, sample_scan.data)
-    coords = np.array([az_idx.ravel(), rng_idx.ravel()])
-    sampled = map_coordinates(
-        data_filled, coords, order=0, prefilter=False, mode="constant", cval=sentinel
-    ).reshape(lat_grid.shape)
-    sampled[outside | (sampled <= sentinel + 1.0)] = np.nan
-    return sampled
+# Rows per strip when rendering: the image is built a strip at a time so a
+# 4096 px render needs tens of MB at once instead of most of a GB (whole-grid
+# float64 coordinates, samples and RGBA). The result is identical.
+RENDER_STRIP_ROWS = 256
 
 
 def render_scan_to_png(
     scan: RadarScan,
     grid_size: int,
     mask_scan: RadarScan | None = None,
+    crop_radius_m: float | None = None,
 ) -> tuple[bytes, list, float]:
     """
     Convert a RadarScan to a PNG.  Fully thread-safe — takes all inputs
     as parameters and creates its own ScalarMappable; never touches shared state.
 
+    crop_radius_m: when given, the output covers a fixed square of this
+    half-width (in Web Mercator meters) centered on the scan's own radar
+    lat/lon, instead of the full scan extent. None (default) preserves the
+    original full-extent behavior for every existing caller.
+
     Returns:
         (png_bytes, [west, south, east, north], elapsed_ms)
     """
+    global _superres_gate_tripped
     IMG = grid_size
     t0 = perf_counter()
+    rss_before = peak_rss_mb()
+
+    if IMG >= _SUPERRES_GATE_MIN_GRID:
+        if _superres_gate_tripped:
+            raise RuntimeError(
+                f"super-res render skipped: memory safety gate already tripped "
+                f"this session (grid={IMG})"
+            )
+        if rss_before >= _SUPERRES_SAFETY_RSS_CEILING_MB:
+            _superres_gate_tripped = True
+            log.warning(
+                "[memprobe] SAFETY GATE TRIPPED: peak RSS %.0f MB >= %.0f MB ceiling -- "
+                "disabling the %dpx super-res tier for the rest of this session",
+                rss_before, _SUPERRES_SAFETY_RSS_CEILING_MB, IMG,
+            )
+            raise RuntimeError(
+                f"super-res render skipped: peak RSS {rss_before:.0f} MB >= "
+                f"{_SUPERRES_SAFETY_RSS_CEILING_MB:.0f} MB safety ceiling"
+            )
 
     # build the output PNG grid uniform in Web Mercator so MapLibre's image
-    all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
-    x_min = float(np.nanmin(all_x))
-    x_max = float(np.nanmax(all_x))
-    y_min = float(np.nanmin(all_y))
-    y_max = float(np.nanmax(all_y))
+    if crop_radius_m is not None:
+        ring_lats, ring_lons = scan.first_ring()
+        radar_lat = float(ring_lats.mean())
+        radar_lon = float(ring_lons.mean())
+        cx, cy = _lonlat_to_merc(radar_lon, radar_lat)
+        cx = float(cx)
+        cy = float(cy)
+        x_min = cx - crop_radius_m
+        x_max = cx + crop_radius_m
+        y_min = cy - crop_radius_m
+        y_max = cy + crop_radius_m
+    else:
+        edge_lats, edge_lons = scan.extent_points()
+        all_x, all_y = _lonlat_to_merc(edge_lons, edge_lats)
+        x_min = float(np.nanmin(all_x))
+        x_max = float(np.nanmax(all_x))
+        y_min = float(np.nanmin(all_y))
+        y_max = float(np.nanmax(all_y))
 
     out_x = np.linspace(x_min, x_max, IMG)
     out_y = np.linspace(y_max, y_min, IMG)   # rows top→bottom
-    x_grid, y_grid = np.meshgrid(out_x, out_y)
-    lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
-
-    data_out = _sample_scan_to_grid(scan, lat_grid, lon_grid)
-    if scan.colormap == "nws_ref":
-        data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
-    elif scan.colormap in ("nws_vel", "nws_cc", "nws_kdp") and mask_scan is not None:
-        ref_out = _sample_scan_to_grid(mask_scan, lat_grid, lon_grid)
-        data_out[np.isnan(ref_out) | (ref_out < 8.0)] = np.nan
 
     cmap   = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
     norm   = mcolors.Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
     mapper = mcm.ScalarMappable(norm=norm, cmap=cmap)
+    sample = _scan_sampler(scan)
+    sample_mask = (_scan_sampler(mask_scan)
+                   if scan.colormap in ("nws_vel", "nws_cc", "nws_kdp") and mask_scan is not None else None)
 
-    rgba = mapper.to_rgba(data_out, bytes=True)
-    rgba[np.isnan(data_out), 3] = 0
+    rgba = np.empty((IMG, IMG, 4), dtype=np.uint8)
+    for r0 in range(0, IMG, RENDER_STRIP_ROWS):
+        r1 = min(IMG, r0 + RENDER_STRIP_ROWS)
+        x_grid, y_grid = np.meshgrid(out_x, out_y[r0:r1])
+        lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
+        del x_grid, y_grid
+        data_out = sample(lat_grid, lon_grid)
+        if scan.colormap == "nws_ref":
+            data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
+        elif sample_mask is not None:
+            ref_out = sample_mask(lat_grid, lon_grid)
+            data_out[np.isnan(ref_out) | (ref_out < 8.0)] = np.nan
+        strip = mapper.to_rgba(data_out, bytes=True)
+        strip[np.isnan(data_out), 3] = 0
+        rgba[r0:r1] = strip
 
     buf = io.BytesIO()
     mimg.imsave(buf, rgba, format="png")
@@ -422,6 +520,13 @@ def render_scan_to_png(
         elapsed_ms,
         IMG,
     )
+    log_delta(
+        f"render_scan_to_png grid={IMG} site={getattr(scan, 'site', '?')} "
+        f"t={getattr(scan, 'scan_time', '?')}",
+        rss_before, peak_rss_mb(), elapsed_ms,
+    )
+    perf_log.event("radar.render", size=IMG, cropped=crop_radius_m is not None, ms=round(elapsed_ms),
+                   product=getattr(scan, "product", None), kb=round(len(png_bytes) / 1024))
 
     lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
     lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
@@ -446,12 +551,25 @@ class RadarOverlay(QObject):
     LAYER_ID  = "radar-overlay"
     SOURCE_ID = "radar-image"
 
-    def __init__(self, map_widget, parent=None):
+    def __init__(self, map_widget, parent=None, layer_id: str | None = None,
+                 source_id: str | None = None, use_scheme_handler: bool = True):
+        """layer_id/source_id let a second, independent overlay (e.g. a
+        CLAMPS lidar layer) coexist with the primary radar one instead of
+        fighting over the same MapLibre source. use_scheme_handler=False
+        keeps this instance off the scheme handler's single shared PNG slot
+        (storm://app/radar/overlay.png) -- that slot is radar's; a second
+        overlay writing to it would have each overlay's hide()/inject()
+        clobber the other's image, so a secondary overlay always injects
+        via a plain base64 data URL instead."""
         super().__init__(parent)
         self._map = map_widget
+        if layer_id is not None:
+            self.LAYER_ID = layer_id
+        if source_id is not None:
+            self.SOURCE_ID = source_id
+        self._use_scheme_handler = use_scheme_handler
         self._active = False
         self._hidden = False
-        self._current_scan: Optional[RadarScan] = None
         self._grid_size = int(RENDER_GRID_SIZE)
         self._adaptive_grid = ADAPTIVE_RENDER_GRID
         self._fast_render_streak = 0
@@ -463,7 +581,6 @@ class RadarOverlay(QObject):
 
     def update(self, scan: RadarScan, mask_scan: RadarScan | None = None):
         """render and display a new radar scan (synchronous, for loop playback)."""
-        self._current_scan = scan
 
         try:
             png_bytes, bounds = self._render_to_png(scan, mask_scan=mask_scan)
@@ -479,14 +596,12 @@ class RadarOverlay(QObject):
         self.hide(transient=False)
         self._active = False
         self._hidden = False
-        self._current_scan = None
 
     def hide(self, transient: bool = True):
         """
         Hide the overlay instantly by forcing 0 opacity and pushing a 1x1 transparent PNG.
         """
         self._hidden = True
-        self._current_scan = None
 
         # always force opacity 0 and inject a 1x1 PNG to clear the GPU pipeline
         js = f"""
@@ -499,7 +614,7 @@ class RadarOverlay(QObject):
                     var src = map.getSource("{self.SOURCE_ID}");
                     if (src && src.updateImage) {{
                         var tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
-                        var coords = window._radar_last_coords || [[0,0],[0,0],[0,0],[0,0]];
+                        var coords = (window._stormLastCoords && window._stormLastCoords["{self.SOURCE_ID}"]) || [[0,0],[0,0],[0,0],[0,0]];
                         src.updateImage({{url: tinyPng, coordinates: coords}});
                     }}
                 }}
@@ -510,7 +625,7 @@ class RadarOverlay(QObject):
 
         # clear the Python-side scheme handler
         try:
-            scheme_handler = getattr(self._map, "scheme_handler", None)
+            scheme_handler = getattr(self._map, "scheme_handler", None) if self._use_scheme_handler else None
             if scheme_handler is not None:
                 import base64
                 tiny = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
@@ -520,14 +635,18 @@ class RadarOverlay(QObject):
 
         if transient:
             try:
-                self._map.run_js("if (typeof window !== 'undefined') window._stormRadarSuspend = true;")
+                self._map.run_js(
+                    "if (typeof window !== 'undefined') { "
+                    "window._stormRadarSuspend = window._stormRadarSuspend || {}; "
+                    f'window._stormRadarSuspend["{self.SOURCE_ID}"] = true; }}'
+                )
             except Exception:
                 pass
 
     def inject(self, png_bytes: bytes, bounds: list):
         """Inject a pre-rendered PNG into the map."""
         import time
-        scheme_handler = getattr(self._map, "scheme_handler", None)
+        scheme_handler = getattr(self._map, "scheme_handler", None) if self._use_scheme_handler else None
         if scheme_handler is not None:
             scheme_handler.set_radar_png(png_bytes)
             ts = int(time.monotonic() * 1000) & 0xFFFFFF  # cache-bust token
@@ -562,7 +681,8 @@ class RadarOverlay(QObject):
         )
 
         # build the output grid uniform in Web Mercator (see render_scan_to_png
-        all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
+        edge_lats, edge_lons = scan.extent_points()
+        all_x, all_y = _lonlat_to_merc(edge_lons, edge_lats)
         x_min = float(np.nanmin(all_x))
         x_max = float(np.nanmax(all_x))
         y_min = float(np.nanmin(all_y))
@@ -601,6 +721,7 @@ class RadarOverlay(QObject):
         png_bytes = buf.getvalue()
 
         elapsed_ms = (perf_counter() - t0) * 1000.0
+        perf_log.event("radar.render_live", size=IMG, ms=round(elapsed_ms), product=getattr(scan, "product", None))
         self._maybe_adjust_grid(elapsed_ms)
         log.debug(
             "render complete: %.0f KB PNG in %.1f ms (grid=%d)",
@@ -668,12 +789,14 @@ class RadarOverlay(QObject):
           try {{
               const imageUrl = "{image_url}";
               const coords   = {coords_js};
-              window._radar_last_coords = coords;
+              window._stormLastCoords = window._stormLastCoords || {{}};
+              window._stormLastCoords["{self.SOURCE_ID}"] = coords;
+              window._stormRadarSuspend = window._stormRadarSuspend || {{}};
 
-              if (window._stormRadarSuspend && !{str(restore_opacity).lower()}) {{
+              if (window._stormRadarSuspend["{self.SOURCE_ID}"] && !{str(restore_opacity).lower()}) {{
                   return;
               }}
-              window._stormRadarSuspend = false;
+              window._stormRadarSuspend["{self.SOURCE_ID}"] = false;
 
               if (typeof map !== 'undefined') {{
                   if (map.getSource("{self.SOURCE_ID}")) {{
@@ -714,6 +837,10 @@ class RadarOverlay(QObject):
                           }});
                       }}
                   }}
+              }}
+              // a layer the user hid (e.g. the radar under a lidar scan) stays hidden
+              if (map.getLayer("{self.LAYER_ID}") && window._stormLayerHidden && window._stormLayerHidden["{self.LAYER_ID}"]) {{
+                  map.setLayoutProperty("{self.LAYER_ID}", "visibility", "none");
               }}
           }} catch(e) {{ console.error("STORM Inject error:", e); }}
         }})();

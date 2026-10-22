@@ -31,7 +31,7 @@ QToolButton:pressed {
 
 
 class MapControls(QWidget):
-    """Drawer for map-context tools: routing, measuring, and land cover."""
+    """Drawer for map-context tools: routing, measuring, annotations and land cover."""
 
     def __init__(
         self,
@@ -61,21 +61,29 @@ class MapControls(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
 
-        self.btn_route = self._btn("ROUTE", "Get turn-by-turn directions")
+        self.btn_route = self._btn("ROUTE", "")
         self.btn_route.setVisible(self._route_available)
         row.addWidget(self.btn_route)
 
-        self.btn_measure = self._btn("MEASURE", "Click two points to measure distance")
+        self.btn_measure = self._btn("MEASURE", "")
         row.addWidget(self.btn_measure)
 
+        self.btn_annotations = self._btn(
+            "ANNOTATIONS",
+            "Show or hide annotations: fronts, boundaries and other drawings, "
+            "annotation markers, and storm-motion cones",
+        )
+        self.btn_annotations.setChecked(True)
+        row.addWidget(self.btn_annotations)
+
         self.btn_landcover = self._btn(
-            "LANDCOVER", "Show/hide offline NLCD land-cover overlay"
+            "LANDCOVER", "NLCD land cover"
         )
         self.btn_landcover.setVisible(self._landcover_available)
         row.addWidget(self.btn_landcover)
 
         self.btn_satellite_basemap = self._btn(
-            "SAT", "Show/hide satellite basemap imagery"
+            "SAT", "Satellite basemap"
         )
         self.btn_satellite_basemap.setVisible(self._satellite_available)
         row.addWidget(self.btn_satellite_basemap)

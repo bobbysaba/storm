@@ -1,5 +1,5 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
@@ -40,6 +40,12 @@ class Sounding:
     u_wind:      np.ndarray  # m/s  (eastward component)
     v_wind:      np.ndarray  # m/s  (northward component)
     height:      np.ndarray  # m    (geopotential height MSL)
+
+    # None retains the existing set-location fallback; "unknown" explicitly
+    # prevents borrowing another mobile launch's coordinates.
+    location_source: str | None = None
+    location_time: datetime | None = None
+    provenance: dict = field(default_factory=dict)
 
     @property
     def wind_speed(self) -> np.ndarray:
@@ -82,6 +88,19 @@ class SoundingSet:
     def is_nssl(self) -> bool:
         """True when this set came from the NSSL CLAMPS DL Truck."""
         return self.source == "nssl"
+
+    @property
+    def is_coptersonde(self) -> bool:
+        return self.source == "coptersonde"
+
+    @property
+    def is_clamps_tropoe(self) -> bool:
+        """True when this set came from a CLAMPS AERI/MWR TROPoe thermodynamic
+        retrieval (a remote-sensing profile, not an in-situ radiosonde launch --
+        kept as a distinct source from is_nssl so the two can't collide as
+        comparison-overlay keys and so their real difference in measurement
+        technique stays visible rather than being silently conflated)."""
+        return self.source == "clamps_tropoe"
 
     def get(self, slot_offset: int):
         """Return the Sounding for a given hour offset, or None."""

@@ -16,9 +16,11 @@ class MapBridge(QObject):
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
+    platform_marker_clicked = pyqtSignal(str)
     sounding_clicked             = pyqtSignal(float, float)
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     asos_bbox_selected = pyqtSignal(float, float, float, float)
+    asos_box_cancelled = pyqtSignal()
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
     annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
@@ -26,6 +28,13 @@ class MapBridge(QObject):
     storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     storm_cone_place_drag_ended = pyqtSignal(float, float)
     private_pin_route_requested = pyqtSignal(float, float, str)
+    track_point_add_requested    = pyqtSignal(float, float)  # lat, lon
+    track_point_selected         = pyqtSignal(int)           # point_id
+    track_point_moved            = pyqtSignal(int, float, float, bool)  # point_id, lat, lon, keep_time
+    track_point_delete_requested = pyqtSignal(int)           # point_id
+    track_marker_add_requested   = pyqtSignal(float, float)  # lat, lon
+    track_marker_rename_requested = pyqtSignal()
+    track_marker_remove_requested = pyqtSignal()
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -75,6 +84,34 @@ class MapBridge(QObject):
         self.storm_cone_clicked.emit(cone_id)
 
     @pyqtSlot(float, float)
+    def on_track_point_add(self, lat: float, lon: float):
+        self.track_point_add_requested.emit(lat, lon)
+
+    @pyqtSlot(int)
+    def on_track_point_select(self, point_id: int):
+        self.track_point_selected.emit(point_id)
+
+    @pyqtSlot(int, float, float, bool)
+    def on_track_point_move(self, point_id: int, lat: float, lon: float, keep_time: bool):
+        self.track_point_moved.emit(point_id, lat, lon, keep_time)
+
+    @pyqtSlot(int)
+    def on_track_point_delete(self, point_id: int):
+        self.track_point_delete_requested.emit(point_id)
+
+    @pyqtSlot(float, float)
+    def on_track_marker_add(self, lat: float, lon: float):
+        self.track_marker_add_requested.emit(lat, lon)
+
+    @pyqtSlot()
+    def on_track_marker_rename(self):
+        self.track_marker_rename_requested.emit()
+
+    @pyqtSlot()
+    def on_track_marker_remove(self):
+        self.track_marker_remove_requested.emit()
+
+    @pyqtSlot(float, float)
     def on_map_dblclick(self, lat: float, lon: float):
         self.map_double_clicked.emit(lat, lon)
 
@@ -85,6 +122,10 @@ class MapBridge(QObject):
     @pyqtSlot(str)
     def on_radar_station_click(self, site_id: str):
         self.radar_station_clicked.emit(site_id)
+
+    @pyqtSlot(str)
+    def on_platform_marker_click(self, platform_id: str):
+        self.platform_marker_clicked.emit(platform_id)
 
     @pyqtSlot(str)
     def on_js_console(self, msg: str):
@@ -121,6 +162,11 @@ class MapBridge(QObject):
             )
         except Exception:
             pass
+
+    @pyqtSlot()
+    def on_asos_box_cancelled(self):
+        """Called from JS when the user backs out of drawing a box (Esc / right-click)."""
+        QTimer.singleShot(0, self.asos_box_cancelled.emit)
 
     @pyqtSlot()
     def on_user_drag(self):

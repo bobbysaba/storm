@@ -125,7 +125,7 @@ Typical steps:
 
 ### 3. Download the map tiles
 
-The MBTiles file is too large for git and is hosted separately.
+The MBTiles file is too large for git and is hosted separately. It is needed only to use the map with no internet connection: without `tiles/storm.mbtiles`, STORM loads the same base map from [OpenFreeMap](https://openfreemap.org) (OpenStreetMap data, no account or key) whenever the computer is online.
 
 **[Download tiles/ folder (Google Drive)](https://drive.google.com/drive/folders/1q4DJ-mg94tpDWHLEkQ_50oQ3uauQ77it?usp=sharing)**
 
@@ -198,7 +198,7 @@ storm/
 ├── envs/                    # Conda environment specs
 │   └── storm.yml            # Unified environment (all platforms)
 │
-├── scripts/                 # Build and utility scripts
+├── scripts/                 # Build, check and debugging tools (scripts/README.md says what each is for)
 │   ├── create_app.sh        # Builds STORM.app macOS bundle
 │   ├── create_desktop_entry.sh  # Creates Linux desktop entry and launcher
 │   ├── create_app_windows.bat  # Creates STORM desktop shortcut (Windows)
@@ -207,7 +207,8 @@ storm/
 │   └── make_satellite_mbtiles.py # Builds optional USGS satellite basemap cache
 │
 ├── archive/                 # Archive (replay) mode — session config, clock, fetchers
-│   ├── session.py           # ArchiveSession dataclass — holds start time, radar station
+│   ├── thredds_paths.py     # Every THREDDS host, folder and datastream STORM reads (edit here when THREDDS moves)
+│   ├── session.py           # ArchiveSession dataclass and the session's time span
 │   ├── time_controller.py   # Central archive clock (play/pause, speed, scrubber, signals)
 │   └── fetchers/            # Per-layer archive data fetchers (synchronized to clock)
 │       ├── radar_archive_fetcher.py     # Fetches historical NEXRAD Level 3 frames
@@ -229,6 +230,7 @@ storm/
 │   └── vehicle.py           # Vehicle dataclass
 │
 ├── data/                    # Background I/O and decoding
+│   ├── endpoints.py         # Every AWS bucket and web API STORM reads (edit here when one moves)
 │   ├── update_checker.py    # Git-based update check at launch
 │   ├── asos_stations.json   # ASOS/AWOS station metadata
 │   ├── fetchers/            # Network-backed data fetchers
@@ -364,6 +366,8 @@ storm/
 - **Surface obs** — `SurfaceFetcher` (`data/fetchers/surface_fetcher.py`) polls OK Mesonet, West Texas Mesonet (WTM), Kansas Mesonet, Colorado Mesonet, and Nebraska Mesonet from the NSSL API every 5 minutes and fetches ASOS/AWOS observations from IEM for a user-drawn bounding box. Station model PNGs are rendered via MetPy/matplotlib, served through the in-process `storm://` scheme, and displayed as map markers via `SurfacePlotLayer` (`ui/layers/surface_plot_layer.py`).
 - **SFCOA overlays** — `SfcoaOverlayFetcher` (`data/fetchers/sfcoa_overlay_fetcher.py`) reads the NSSL API SFCOA run index and per-run metadata, exposes grouped variables through `SfcoaControls`, and renders selected vector-tile contour products through the MapLibre bridge.
 - **Soundings** — Three independent sources: HRRR point soundings via open-meteo API (`SoundingFetcher`), observed radiosondes via IEM RAOB (`ObsSoundingFetcher`), and NSSL CLAMPS DL truck soundings via the NSSL API (`ClampsSoundingFetcher`) in `data/fetchers/`. Sounding UI lives in `ui/sounding/`.
+- **Testing many dates** — `python scripts/check_archive_days.py --preset` (or dates) opens archive sessions one at a time in separate processes, steps each through its active hours, exercises radar, satellite, lidar, NOXP and the Video Studio, and writes `case_data/day_checks/<run>/report.md` with screenshots. It respects the machine (memory watchdog) and THREDDS (one date at a time, rests between). Don't run it with STORM open.
+- **Data sources in two files** — `archive/thredds_paths.py` holds every THREDDS host, folder and datastream STORM reads (FOFS mobile mesonet and recordings, CLAMPS/lidar-truck winds, TROPoe, surface met, sondes, raw lidar, CopterSonde, NOXP, UCAR NEXRAD Level 3); `data/endpoints.py` holds the AWS buckets (NEXRAD Level 2, GOES) and every web API (NSSL API paths, IEM, SPC, NWS map services, damage surveys, open-meteo, mesonets, nowCOAST, routing, tiles). Every fetcher builds its URLs from them, and a test fails if an address is written anywhere else. `python scripts/check_data_sources.py` checks that each one still answers and, for a THREDDS folder that doesn't, lists what its parent now holds. THREDDS is fragile under load: the check asks one folder at a time, 1.5 s apart, and stops if THREDDS goes quiet.
 - **Routing** — `RoutingFetcher` (`data/fetchers/routing_fetcher.py`) geocodes addresses with Nominatim and fetches turn-by-turn directions from the public OSRM demo server. Auto-re-routing triggers when the vehicle drifts >100 m off-route for 3+ consecutive GPS fixes.
 
 ---

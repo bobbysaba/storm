@@ -148,55 +148,55 @@ QCalendarWidget QToolButton {
     padding: 3px 6px;
 }
 QCalendarWidget QToolButton:hover {
+    background-color: #0D1A2E;
     border-color: #00CFFF;
     color: #00CFFF;
 }
 QCalendarWidget QToolButton#qt_calendar_prevmonth,
 QCalendarWidget QToolButton#qt_calendar_nextmonth {
     min-width: 26px;
+    min-height: 22px;
     padding: 3px 4px;
+}
+QCalendarWidget QToolButton::menu-indicator {
+    /* the built-in month button draws a native drop-arrow glyph next to
+       its text by default -- suppress it so month/year controls read as
+       one consistent icon-free label style */
+    image: none;
 }
 QCalendarWidget QMenu {
     background-color: #0A0A0F;
     border: 1px solid #1E1E2E;
     color: #E8EAF0;
 }
+QCalendarWidget QMenu::item {
+    padding: 4px 20px;
+}
+QCalendarWidget QMenu::item:selected {
+    /* QMenu uses :selected (not :hover) for the item under the cursor or
+       keyboard focus -- this is the month popup's hover highlight. */
+    background-color: #123C50;
+    color: #9BE8FF;
+}
 QCalendarWidget QSpinBox {
+    /* Normally never shown -- the visible year control is
+       qt_calendar_yearbutton (a QToolButton, styled by the generic
+       QCalendarWidget QToolButton rule above); this only matters if
+       Qt's own reveal-an-editable-field behavior ever runs (see
+       _style_calendar_nav_icons for why that shouldn't happen). */
     background-color: #1A1A2E;
     border: 1px solid #1E1E2E;
     border-radius: 4px;
     color: #E8EAF0;
     font-size: 11px;
+    font-weight: 600;
     padding: 2px 4px;
-}
-QCalendarWidget QSpinBox::up-button {
-    subcontrol-origin: border;
-    subcontrol-position: top right;
-    width: 16px;
-    border-left: 1px solid #1E1E2E;
-    border-bottom: 1px solid #1E1E2E;
-    border-top-right-radius: 4px;
-    background-color: #1A1A2E;
-}
-QCalendarWidget QSpinBox::up-button:hover {
-    background-color: #0D1A2E;
-}
-QCalendarWidget QSpinBox::down-button {
-    subcontrol-origin: border;
-    subcontrol-position: bottom right;
-    width: 16px;
-    border-left: 1px solid #1E1E2E;
-    border-top: 1px solid #1E1E2E;
-    border-bottom-right-radius: 4px;
-    background-color: #1A1A2E;
-}
-QCalendarWidget QSpinBox::down-button:hover {
-    background-color: #0D1A2E;
 }
 QCalendarWidget QAbstractItemView {
     background-color: #0D0D1A;
     alternate-background-color: #0A0A0F;
     color: #E8EAF0;
+    font-size: 12px;
     selection-background-color: #00CFFF;
     selection-color: #0A0A0F;
     gridline-color: #1E1E2E;
@@ -255,7 +255,16 @@ QComboBox {
     color: #E8EAF0;
     font-size: 12px;
     padding: 5px 10px;
-    selection-background-color: #00CFFF;
+    /* Qt renders the dropdown list's own highlighted-item color from
+       these two properties on QComboBox itself, not from the descendant
+       QComboBox QAbstractItemView rule below -- both are kept in sync so
+       the popup matches the calendar month-popup's softer highlight. */
+    selection-background-color: #123C50;
+    selection-color: #9BE8FF;
+    /* A plain drop-down list below the field. macOS's default popup
+       opens over the field, centered on the current item, leaving blank
+       bands and scroll arrows in a height-capped list. */
+    combobox-popup: 0;
 }
 QComboBox:focus {
     border: 1px solid #00CFFF;
@@ -267,7 +276,11 @@ QComboBox::drop-down {
     border-left: 1px solid #1E1E2E;
     border-top-right-radius: 6px;
     border-bottom-right-radius: 6px;
-    background-color: #1A1A2E;
+    /* visibly darker than the field body at rest (not just on hover) --
+       a combo box should always read as "field + attached selector
+       button," not as a plain text field, even before the mouse is
+       anywhere near it */
+    background-color: #12121E;
 }
 QComboBox::drop-down:hover {
     background-color: #0D1A2E;
@@ -277,9 +290,117 @@ QComboBox QAbstractItemView {
     background-color: #1A1A2E;
     border: 1px solid #2A2A3E;
     color: #E8EAF0;
-    selection-background-color: #00CFFF;
-    selection-color: #0A0A0F;
+    /* Match the calendar's month-popup hover treatment (QCalendarWidget
+       QMenu::item:selected above) instead of a solid, harsher fill --
+       this is the same "item under the cursor/keyboard focus" role. */
+    selection-background-color: #123C50;
+    selection-color: #9BE8FF;
     outline: none;
+}
+QComboBox QAbstractItemView::item {
+    padding: 4px 8px;
+    min-height: 20px;
+}
+QProgressBar#coverageProgress {
+    background-color: #12121E;
+    border: none;
+    border-radius: 2px;
+}
+QProgressBar#coverageProgress::chunk {
+    background-color: #00CFFF;
+    border-radius: 2px;
+}
+QListWidget#browseDatesList {
+    background-color: #0D0D1A;
+    border: 1px solid #1E1E2E;
+    border-radius: 6px;
+    color: #E8EAF0;
+    font-size: 12px;
+    outline: none;
+    padding: 3px;
+}
+QListWidget#browseDatesList::item {
+    padding: 5px 8px;
+    border-radius: 4px;
+}
+QListWidget#browseDatesList::item:hover {
+    background-color: #12121E;
+}
+QListWidget#browseDatesList::item:selected {
+    background-color: #123C50;
+    color: #9BE8FF;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 9px;
+    margin: 2px 0px;
+}
+QScrollBar::handle:vertical {
+    background-color: #2A2A3E;
+    border-radius: 4px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background-color: #00CFFF;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+QWidget#launchForm, QScrollArea#launchFormScroll {
+    background-color: #0A0A0F;
+    border: none;
+}
+"""
+
+_YEAR_GRID_STYLE = """
+QWidget#yearGridPopup {
+    background-color: #0A0A0F;
+    border: 1px solid #2A2A3E;
+    border-radius: 10px;
+}
+QLabel#yearRangeLbl {
+    color: #8E97AB;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+QToolButton#yearNavBtn {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 4px;
+    min-width: 22px;
+    min-height: 20px;
+    padding: 2px;
+}
+QToolButton#yearNavBtn:hover {
+    background-color: #0D1A2E;
+    border-color: #00CFFF;
+}
+QPushButton#yearCell {
+    background-color: #1A1A2E;
+    border: 1px solid #1E1E2E;
+    border-radius: 5px;
+    color: #E8EAF0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 7px 4px;
+    min-width: 44px;
+}
+QPushButton#yearCell:hover {
+    border-color: #00CFFF;
+    color: #00CFFF;
+}
+QPushButton#yearCell[available="true"] {
+    color: #00CFFF;
+    border-color: #00CFFF;
+}
+QPushButton#yearCell[selected="true"] {
+    background-color: #0D1A2E;
+    border: 2px solid #00CFFF;
+    color: #00CFFF;
 }
 """
 

@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer, Qt
+from archive import thredds_paths as paths
 
 
 NEXRAD_SITES = [
@@ -80,7 +81,12 @@ NEXRAD_SITES = [
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
 OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0K", "SPEC DIFF PHASE")]
 ALL_PRODUCTS = PRODUCTS + OPTIONAL_PRODUCTS
-THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
+THREDDS_CATALOG_ROOT = f"{paths.catalog_root(paths.UCAR)}/{paths.UCAR_NEXRAD_LEVEL3}"
+
+# The mobile NOXP radar's site-picker/"Stations" entry -- not a real NEXRAD
+# ID, so set_selected_site short-circuits before any WSR-88D-specific
+# probing when it sees this value.
+NOXP_SITE_ID = "NOXP"
 class RadarControls(QWidget):
     """
     Toolbar widget containing:
@@ -108,7 +114,9 @@ class RadarControls(QWidget):
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
     speed_changed   = pyqtSignal(int)      # new interval in ms
+    track_requested = pyqtSignal()         # "track the storm" link: open the TRACK drawer
     vad_requested   = pyqtSignal()         # VAD hodograph dialog requested
+    velocity_options_changed = pyqtSignal(bool, bool)  # archive: dealias, storm-relative
 
     # internal — emitted from the _refresh_product_availability background thread
     _products_refreshed = pyqtSignal(dict)  # {code: bool} availability map
@@ -122,7 +130,6 @@ class RadarControls(QWidget):
         self._archive_mode       = False
         self._product_availability: dict[tuple[str, str], bool] = {}
         self._site               = "KTLX"
-        self._all_sites          = list(NEXRAD_SITES)
         self._animation          = None   # hold ref to prevent GC during animation
         self._expanded_height    = 0
         self._setup_ui()
@@ -153,7 +160,7 @@ class RadarControls(QWidget):
         self._stations_button.setFixedHeight(22)
         self._stations_button.setMinimumWidth(140)
         self._stations_button.setObjectName("radarStationsButton")
-        self._stations_button.setToolTip("Show radar station picker on the map")
+        self._stations_button.setToolTip("Choose radar station")
         self._stations_button.clicked.connect(self.stations_requested.emit)
         r1.addWidget(self._stations_button)
 
@@ -167,11 +174,11 @@ class RadarControls(QWidget):
         self._product_combo.currentIndexChanged.connect(self._on_product_changed)
         r1.addWidget(self._product_combo)
 
+        self._sweep_angles: list[float] = []      # every sweep's elevation (set_archive_tilts)
         self._tilt_combo = QComboBox()
         self._tilt_combo.setFixedHeight(22)
         self._tilt_combo.setFixedWidth(74)
         self._tilt_combo.setObjectName("radarTiltCombo")
-        self._tilt_combo.setToolTip("Radar tilt angle")
         self._tilt_combo.currentIndexChanged.connect(self._on_tilt_changed)
         self._tilt_combo.setVisible(False)
         r1.addWidget(self._tilt_combo)
@@ -180,7 +187,6 @@ class RadarControls(QWidget):
         self._chk_show_data = QCheckBox("show data")
         self._chk_show_data.setChecked(False)
         self._chk_show_data.setFixedHeight(22)
-        self._chk_show_data.setToolTip("enable or disable radar data fetch and display")
         self._chk_show_data.toggled.connect(self._on_data_enabled_toggled)
         r1.addWidget(self._chk_show_data)
 
@@ -189,7 +195,7 @@ class RadarControls(QWidget):
         self._btn_vad.setFixedHeight(22)
         self._btn_vad.setFixedWidth(48)
         self._btn_vad.setObjectName("radarVadButton")
-        self._btn_vad.setToolTip("View VAD wind profile hodograph")
+        self._btn_vad.setToolTip("VAD wind profile")
         self._btn_vad.clicked.connect(self.vad_requested.emit)
         r1.addWidget(self._btn_vad)
 
@@ -215,7 +221,6 @@ class RadarControls(QWidget):
         self._btn_back.setText("⏪")
         self._btn_back.setFixedSize(32, 26)
         self._btn_back.setEnabled(False)
-        self._btn_back.setToolTip("Step back one frame")
         self._btn_back.clicked.connect(self._on_step_back)
         r2.addWidget(self._btn_back)
 
@@ -224,7 +229,6 @@ class RadarControls(QWidget):
         self._btn_play.setCheckable(True)
         self._btn_play.setFixedSize(32, 26)
         self._btn_play.setEnabled(False)
-        self._btn_play.setToolTip("Play / Pause loop")
         self._btn_play.toggled.connect(self._on_play_toggled)
         r2.addWidget(self._btn_play)
 
@@ -232,7 +236,6 @@ class RadarControls(QWidget):
         self._btn_fwd.setText("⏩")
         self._btn_fwd.setFixedSize(32, 26)
         self._btn_fwd.setEnabled(False)
-        self._btn_fwd.setToolTip("Step forward one frame")
         self._btn_fwd.clicked.connect(self._on_step_forward)
         r2.addWidget(self._btn_fwd)
 
@@ -268,7 +271,6 @@ class RadarControls(QWidget):
         self._speed_combo = QComboBox()
         self._speed_combo.setFixedHeight(26)
         self._speed_combo.setMaximumWidth(5)
-        self._speed_combo.setToolTip("Playback speed")
         for label, ms in [("0.5×", 1000), ("1×", 500), ("2×", 250), ("3×", 167)]:
             self._speed_combo.addItem(label, userData=ms)
         self._speed_combo.setCurrentIndex(1)   # default 1×
@@ -276,6 +278,29 @@ class RadarControls(QWidget):
         r2.addWidget(self._speed_combo)
 
         drawer_layout.addWidget(row2)
+
+        # archive WSR-88D velocity processing; shown only while velocity is up
+        self._velocity_row = QWidget()
+        self._velocity_row.setObjectName("radarVelocityRow")
+        r3 = QHBoxLayout(self._velocity_row)
+        r3.setContentsMargins(0, 0, 0, 0)
+        r3.setSpacing(8)
+        self._chk_dealias = QCheckBox("Dealias")
+        self._chk_dealias.setToolTip(
+            "Unfold aliased velocities (Py-ART region-based, as in MESO-VIEW). "
+            "If a sweep can't be dealiased, raw velocity is shown and labeled raw.")
+        self._chk_storm_relative = QCheckBox("Storm-relative")
+        for chk in (self._chk_dealias, self._chk_storm_relative):
+            chk.setFixedHeight(22)
+            chk.toggled.connect(self._emit_velocity_options)
+            r3.addWidget(chk)
+        from ui.controls.trail_controls import needs_track_link
+        self._needs_track = needs_track_link(self.track_requested.emit)
+        r3.addWidget(self._needs_track)
+        r3.addStretch()
+        self.set_storm_relative_available(False)
+        self._velocity_row.setVisible(False)
+        drawer_layout.addWidget(self._velocity_row)
 
         layout.addWidget(self._drawer)
 
@@ -289,10 +314,44 @@ class RadarControls(QWidget):
     def current_product(self) -> str:
         return self._product
 
+    def current_tilt_index(self) -> int:
+        """The chosen sweep's index in the volume (each angle is listed once;
+        see set_archive_tilts), or -1."""
+        data = self._tilt_combo.currentData()
+        return int(data) if data is not None else self._tilt_combo.currentIndex()
+
+    def select_tilt(self, sweep_index: int) -> None:
+        """Select the entry for this sweep (or its angle), emitting tilt_changed."""
+        for i in range(self._tilt_combo.count()):
+            if self._tilt_combo.itemData(i) == sweep_index:
+                self._tilt_combo.setCurrentIndex(i)
+                return
+        angle = self._sweep_angles[sweep_index] if 0 <= sweep_index < len(self._sweep_angles) else None
+        for i in range(self._tilt_combo.count()):
+            if angle is not None and self._sweep_angles[self._tilt_combo.itemData(i)] == angle:
+                self._tilt_combo.setCurrentIndex(i)
+                return
+
+    def set_current_product(self, code: str) -> None:
+        """Select `code` in the product combo as if the user had clicked it,
+        so the existing currentIndexChanged -> product_changed wiring fires
+        and dispatches to WSR-88D/NOXP rendering exactly as a real click would."""
+        idx = self._product_combo.findData(code)
+        if idx >= 0:
+            self._product_combo.setCurrentIndex(idx)
+
     def set_selected_site(self, site_id: str, emit: bool = False):
         normalized = _normalize_site(site_id) or "KTLX"
         self._site = normalized
         self._stations_button.setText(f"Stations: {normalized}")
+        if normalized == NOXP_SITE_ID:
+            # Not a real NEXRAD site -- no WSR-88D product-availability
+            # probe (it would silently mis-report N0C/N0K availability for
+            # a station that doesn't exist), and no site_changed/
+            # fetch_requested (those would ask the WSR-88D fetcher to load
+            # a station named "NOXP"). Its own product/tilt lists come from
+            # set_archive_products/set_archive_tilts, called separately.
+            return
         # fetcher always fetches all 4; availability only drives combo disabled state
         self.products_available_changed.emit([code for code, _ in ALL_PRODUCTS])
         # apply any cached availability immediately so combo disables stale unavailable items
@@ -385,6 +444,37 @@ class RadarControls(QWidget):
                   self._btn_play, self._btn_jump_start, self._btn_jump_end):
             w.setEnabled(False)
 
+    def _emit_velocity_options(self, _checked: bool = False) -> None:
+        self.velocity_options_changed.emit(self._chk_dealias.isChecked(),
+                                           self._chk_storm_relative.isChecked())
+
+    def velocity_options(self) -> tuple[bool, bool]:
+        return self._chk_dealias.isChecked(), self._chk_storm_relative.isChecked()
+
+    def set_velocity_options_visible(self, visible: bool) -> None:
+        if self._velocity_row.isHidden() != visible:
+            return
+        self._velocity_row.setVisible(visible)
+        # the open drawer's height is pinned to a measured value; re-measure
+        self._drawer.adjustSize()
+        was = self.maximumHeight()
+        self.setMaximumHeight(16777215)
+        self._expanded_height = self.sizeHint().height()
+        self.setMaximumHeight(self._expanded_height if self._radar_on else was)
+
+    def set_storm_relative_available(self, available: bool, motion_text: str = "") -> None:
+        """Storm-relative needs a storm motion: the TRACK's mean motion."""
+        self._chk_storm_relative.setEnabled(available)
+        self._needs_track.setVisible(not available)
+        if available:
+            self._chk_storm_relative.setToolTip(
+                f"Subtract the storm track's mean motion ({motion_text}) along each beam")
+        else:
+            self._chk_storm_relative.setToolTip(
+                "Needs a storm motion: place at least two TRACK points at different times")
+            if self._chk_storm_relative.isChecked():
+                self._chk_storm_relative.setChecked(False)
+
     def configure_for_archive(self, enabled: bool) -> None:
         self._archive_mode = enabled
         self._chk_show_data.setVisible(not enabled)
@@ -400,14 +490,25 @@ class RadarControls(QWidget):
         self._set_product_items(products, preserve_code=current or products[0][0])
 
     def set_archive_tilts(self, tilts: list[float], current_index: int | None = None) -> None:
+        """tilts: every sweep's elevation, in volume order. Each angle is
+        listed once (split cuts and SAILS rescans repeat 0.5 deg etc.), as
+        its first sweep; the decoder then uses the sweep at that angle that
+        carries the chosen product (surveillance or Doppler cut)."""
+        self._sweep_angles = [round(float(deg), 1) for deg in tilts]
+        first_sweep = {}
+        for i, deg in enumerate(self._sweep_angles):
+            first_sweep.setdefault(deg, i)
         self._tilt_combo.blockSignals(True)
         self._tilt_combo.clear()
-        for deg in tilts:
-            self._tilt_combo.addItem(f"{deg:.1f}°")
+        for deg, sweep in sorted(first_sweep.items()):
+            self._tilt_combo.addItem(f"{deg:.1f}°", sweep)
         if self._tilt_combo.count():
-            idx = current_index if current_index is not None else 0
-            idx = max(0, min(idx, self._tilt_combo.count() - 1))
-            self._tilt_combo.setCurrentIndex(idx)
+            current = current_index if current_index is not None else 0
+            current = max(0, min(current, len(self._sweep_angles) - 1))
+            angle = self._sweep_angles[current] if self._sweep_angles else None
+            row = next((i for i in range(self._tilt_combo.count())
+                        if self._sweep_angles[self._tilt_combo.itemData(i)] == angle), 0)
+            self._tilt_combo.setCurrentIndex(row)
         self._tilt_combo.blockSignals(False)
         self._tilt_combo.setVisible(self._archive_mode and self._tilt_combo.count() > 0)
 
@@ -452,7 +553,7 @@ class RadarControls(QWidget):
             avail = bool(availability.get(code, True))
             item.setEnabled(avail)
             if not avail:
-                item.setToolTip(f"No {code} data available for {self._site}")
+                item.setToolTip(f"No {code} data at {self._site}")
             else:
                 item.setToolTip("")
 
@@ -467,7 +568,7 @@ class RadarControls(QWidget):
             with urlopen(url, timeout=6) as resp:
                 xml_text = resp.read().decode("utf-8", errors="replace")
             root = ET.fromstring(xml_text)
-            ns = {"cat": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
+            ns = {"cat": paths.THREDDS_NS}
             # site catalogs typically contain day subcatalog refs, not dataset
             for ds in root.findall(".//cat:dataset", ns):
                 if ds.attrib.get("urlPath"):
@@ -526,7 +627,8 @@ class RadarControls(QWidget):
 
     def _on_tilt_changed(self, index: int):
         if index >= 0:
-            self.tilt_changed.emit(index)
+            data = self._tilt_combo.itemData(index)
+            self.tilt_changed.emit(int(data) if data is not None else index)
 
     def _on_slider_released(self):
         # emit frame_requested only when user releases the slider handle

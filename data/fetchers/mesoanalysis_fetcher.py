@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,11 +13,12 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from data import endpoints
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 STORM/1.0"
-SATSQUATCH_BASE_URL = "https://tiledata.satsquatch.com/tilesdata"
+SATSQUATCH_BASE_URL = endpoints.SATSQUATCH_TILES
 _MBTILES_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "storm.mbtiles")
 )
@@ -213,20 +213,8 @@ def _source_layer(metadata: dict, product_id: str, time_id: str) -> str:
 
 @lru_cache(maxsize=1)
 def _load_mbtiles_bounds() -> tuple[float, float, float, float] | None:
-    try:
-        conn = sqlite3.connect(_MBTILES_PATH)
-        try:
-            row = conn.execute(
-                "SELECT value FROM metadata WHERE name='bounds'"
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row or not row[0]:
-            return None
-        west, south, east, north = (float(value) for value in str(row[0]).split(","))
-        return west, south, east, north
-    except Exception:
-        return None
+    from core import mbtiles      # read-only: never creates a missing file
+    return mbtiles.bounds(_MBTILES_PATH)
 
 
 def _clip_to_mbtiles_bounds(bounds: list[float]) -> list[float]:

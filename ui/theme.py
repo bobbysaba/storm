@@ -79,7 +79,8 @@ QMainWindow, QWidget {
 
 #floatingToolbar[wide="true"] QComboBox#radarSiteCombo,
 #floatingToolbar[wide="true"] QComboBox#radarProductCombo,
-#floatingToolbar[wide="true"] QToolButton#radarStationsButton {
+#floatingToolbar[wide="true"] QToolButton#radarStationsButton,
+#floatingToolbar[wide="true"] QToolButton#lidarLocationButton {
     min-height: 24px;
 }
 
@@ -92,7 +93,8 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#deployLocsDrawer,
 #floatingToolbar QWidget#routingDrawer,
 #floatingToolbar QWidget#soundingDrawer,
-#floatingToolbar QWidget#surfaceDrawer {
+#floatingToolbar QWidget#surfaceDrawer,
+#floatingToolbar QWidget#rawLidarDrawer {
     background: transparent;
     border: none;
     border-radius: 0;
@@ -108,20 +110,36 @@ QMainWindow, QWidget {
 #floatingToolbar QWidget#deployLocsDrawer > QWidget,
 #floatingToolbar QWidget#routingDrawer > QWidget,
 #floatingToolbar QWidget#soundingDrawer > QWidget,
-#floatingToolbar QWidget#surfaceDrawer > QWidget {
+#floatingToolbar QWidget#surfaceDrawer > QWidget,
+#floatingToolbar QWidget#rawLidarDrawer > QWidget {
+    background: transparent;
+}
+
+/* Plain containers, labels and checkboxes in any floating panel show the
+   panel's navy rather than the window's near-black (QWidget above) --
+   drawers not listed by name (TRACK, the VEHICLES trails row, ...) had a
+   blacker box inside the panel. ".QWidget" is exactly QWidget, so buttons,
+   combos and custom-painted widgets keep their own backgrounds. */
+#floatingToolbar .QWidget,
+#floatingToolbar QLabel,
+#floatingToolbar QCheckBox {
     background: transparent;
 }
 
 #floatingToolbar QComboBox#radarSiteCombo,
 #floatingToolbar QComboBox#radarProductCombo,
-#floatingToolbar QToolButton#radarStationsButton {
+#floatingToolbar QComboBox#lidarCombo,
+#floatingToolbar QToolButton#radarStationsButton,
+#floatingToolbar QToolButton#lidarLocationButton {
     background-color: rgba(32, 37, 58, 0.62);
     border: 1px solid rgba(74, 83, 108, 0.48);
 }
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
 #floatingToolbar QComboBox#radarProductCombo:hover,
-#floatingToolbar QToolButton#radarStationsButton:hover {
+#floatingToolbar QComboBox#lidarCombo:hover,
+#floatingToolbar QToolButton#radarStationsButton:hover,
+#floatingToolbar QToolButton#lidarLocationButton:hover {
     border-color: rgba(120, 138, 178, 0.72);
 }
 
@@ -388,6 +406,15 @@ QToolButton#spcDayPopupButton:checked {
     background: transparent;
     color: #B5BDCC;
     font-size: 10px;
+}
+#floatingToolbar QLabel#deployLocsSliderLabel:disabled {
+    color: #4A5064;
+}
+#floatingToolbar QSlider#deployLocsSlider::sub-page:horizontal:disabled {
+    background: #2E2E4E;
+}
+#floatingToolbar QSlider#deployLocsSlider::handle:horizontal:disabled {
+    background: #4A5064;
 }
 
 #floatingToolbar QWidget#deployLocsSizeRow {
@@ -732,7 +759,8 @@ QPushButton#dangerButton:hover {
     color: #0A0A0F;
 }
 
-QComboBox#radarProductCombo, QComboBox#radarSiteCombo, QToolButton#radarStationsButton {
+QComboBox#radarProductCombo, QComboBox#radarSiteCombo, QToolButton#radarStationsButton,
+QToolButton#lidarLocationButton {
     padding: 4px 8px;
 }
 
@@ -952,13 +980,16 @@ QWidget#satPlaybackRow QToolButton:pressed {
 }
 
 /* ── Tooltips ─────────────────────────────────────────── */
+/* Button descriptions: the same look as the map's hover readouts
+   (ui/map/map_template.html); long ones wrap (ui/tooltips.py). */
 QToolTip {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
-    border-radius: 4px;
-    color: #E8EAF0;
-    font-size: 10px;
-    padding: 4px 8px;
+    background-color: #0F0F1A;
+    border: 1px solid #49536F;
+    border-radius: 6px;
+    color: #E8EDF5;
+    font-size: 12px;
+    padding: 5px 9px;
+    qproperty-margin: 0;   /* Qt's own label margin (11 px on macOS) doubled the padding */
 }
 
 /* ── Toolbar checkboxes ──────────────────────────────── */
@@ -977,7 +1008,8 @@ QToolTip {
 #floatingToolbar QWidget#deployLocsDrawer QCheckBox,
 #floatingToolbar QWidget#routingDrawer QCheckBox,
 #floatingToolbar QWidget#soundingDrawer QCheckBox,
-#floatingToolbar QWidget#surfaceDrawer QCheckBox {
+#floatingToolbar QWidget#surfaceDrawer QCheckBox,
+#floatingToolbar QWidget#rawLidarDrawer QCheckBox {
     background: transparent;
 }
 #floatingToolbar QCheckBox::indicator {
@@ -989,6 +1021,27 @@ QToolTip {
 }
 #floatingToolbar QCheckBox::indicator:checked {
     image: url(static/indicator_on.svg);
+}
+/* unavailable (e.g. storm-relative options before there is a storm track):
+   clearly dimmed, with a dashed empty box */
+#floatingToolbar QCheckBox:disabled {
+    color: #4A5064;
+}
+#floatingToolbar QCheckBox::indicator:disabled {
+    image: url(static/indicator_disabled.svg);
+}
+/* "Needs storm motion: track the storm" links beside those options */
+#floatingToolbar QPushButton#needsTrackLink {
+    background: transparent;
+    border: none;
+    color: #00CFFF;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 2px;
+}
+#floatingToolbar QPushButton#needsTrackLink:hover {
+    color: #5CE1FF;
+    text-decoration: underline;
 }
 
 /* ── Separators ───────────────────────────────────────── */
@@ -1046,6 +1099,13 @@ QDialog#annotationDialog QLineEdit:focus {
     padding: 0;
 }
 
+/* the timeline slider and plain containers show the bar's navy, not a
+   near-black band (the window-wide QWidget background) */
+#archiveControls QSlider,
+#archiveControls .QWidget {
+    background: transparent;
+}
+
 #archiveControls QToolButton {
     background-color: rgba(26, 26, 46, 0.34);
     border: 1px solid transparent;
@@ -1066,6 +1126,26 @@ QDialog#annotationDialog QLineEdit:focus {
     background-color: #FF9F1C;
     border-color: #FF9F1C;
     color: #0A0A0F;
+}
+
+#archiveControls QPushButton#archivePlayButton {
+    background-color: #FF9F1C;
+    border: 1px solid #FF9F1C;
+    border-radius: 6px;
+    color: #0A0A0F;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 0 12px;
+}
+
+#archiveControls QPushButton#archivePlayButton:hover {
+    background-color: #FFB347;
+    border-color: #FFB347;
+}
+
+#archiveControls QPushButton#archivePlayButton:checked {
+    background-color: transparent;
+    color: #FF9F1C;
 }
 
 #archiveControls QSlider::groove:horizontal {

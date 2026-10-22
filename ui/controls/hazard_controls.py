@@ -262,6 +262,7 @@ class HazardControls(QWidget):
         self._btn_cwa = self._btn("NWS CWA")
         self._btn_cwa.toggled.connect(self._on_cwa_toggled)
         row.addWidget(self._btn_cwa)
+        self._hazard_row = row
 
         row.addStretch(1)
         col.addWidget(btn_row)
@@ -276,6 +277,18 @@ class HazardControls(QWidget):
         col.addWidget(self._legend_widget)
 
         outer.addWidget(self._drawer)
+
+    def add_damage_paths_button(self) -> QToolButton:
+        """Archive mode: DAMAGE PATHS (NWS damage surveys) after the NWS
+        buttons. Checking it starts drawing a box (MainWindow)."""
+        self._hazard_row.insertWidget(self._hazard_row.count() - 1, self._vdiv())
+        button = self._btn("DAMAGE PATHS")
+        button.setToolTip("Draw a box for NWS damage-survey paths")
+        self._hazard_row.insertWidget(self._hazard_row.count() - 1, button)
+        from ui.controls.drawer_hint import drawer_hint
+        self._drawer.layout().addWidget(drawer_hint(
+            "Damage paths: click DAMAGE PATHS, then drag a box on the map to find NWS damage surveys inside it."))
+        return button
 
     def _btn(self, label: str) -> QToolButton:
         b = QToolButton()
@@ -480,7 +493,6 @@ class HazardControls(QWidget):
         btn = QToolButton()
         btn.setCheckable(True)
         btn.setText(f"■ {label}")
-        btn.setToolTip(f"Toggle {label} (click to show/hide)")
         btn.setStyleSheet(f"""
             QToolButton {{
                 color: {color};
