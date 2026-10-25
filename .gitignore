@@ -44,3 +44,6 @@ locs/merge_locs.py
 locs/all_rounds052615.txt
 locs/sites.info
 locs/deployment_locations.json
+
+# pip build output for the headless package
+headless/build/

@@ -1,0 +1,33 @@
+# STORM headless publisher config.
+# Copy to storm-headless.toml next to your aws/ folder and edit.
+# Relative paths are resolved against this file's directory.
+
+# vehicle id as it should appear in STORM (lowercased, [a-z0-9-])
+vehicle_id = "probe1"
+
+# map icon: car, drone, mesonet, lidar, radar
+icon_type = "car"
+
+# directory the logger writes YYYYMMDD.txt files into
+data_dir = "/home/storm/mesonet"
+
+# true for the GPS Ka logger layout instead of FOFS
+gps_mode = false
+
+# seconds between file polls / between MQTT publishes
+poll_s = 1
+publish_s = 5
+
+[mqtt]
+host = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
+port = 8883
+
+# defaults to "<vehicle_id>-pi"; must differ from any STORM GUI using this vehicle id
+# client_id = "probe1-pi"
+
+# folder holding the shared AWS IoT certs (same files as STORM's aws/ folder)
+cert_dir = "aws"
+# override individual files if they are named differently:
+# ca_cert = "storm.pem"
+# cert_file = "storm.pem.crt"
+# key_file = "storm-private.pem.key"

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "storm-headless"
+description = "Headless STORM vehicle publisher: tails a logger file and publishes to the STORM MQTT broker"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["paho-mqtt>=2.0,<3"]
+dynamic = ["version"]
+
+[project.scripts]
+storm-headless = "storm_headless.__main__:main"
+
+[tool.setuptools]
+packages = ["storm_headless"]
+
+[tool.setuptools.dynamic]
+version = {attr = "storm_headless.__version__"}

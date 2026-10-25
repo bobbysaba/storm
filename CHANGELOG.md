@@ -11,9 +11,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CO Mesonet station plots use the NSSL API-hosted `co_mesonet.json` feed with station positions and names from `co_metadata.json`.
 - Nebraska Mesonet surface observations are now available to all users from the SURFACE drawer and launch dialog.
 - NE Mesonet station plots use the NSSL API-hosted `ne_mesonet.json` feed with embedded station metadata.
+- Headless publisher (`headless/`): a Qt-free `storm-headless` service for Raspberry Pis that tails a vehicle's mesonet logger file and publishes to MQTT exactly like VEHICLE mode, with a one-line installer, `--check`, and `--dry-run`.
 
 ### Changed
 - Surface observation diagnostics and layer ordering now include CO and NE Mesonet as independent 5-minute mesonet sources.
+- Obs file parsing and the vehicle MQTT payload now live in `headless/storm_headless` and are shared by the GUI and the headless publisher; behavior is unchanged.
 
 ---
 
