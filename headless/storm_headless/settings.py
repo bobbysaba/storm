@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # same broker the GUI uses (config.MQTT_HOST in the main app)
-DEFAULT_MQTT_HOST = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
+DEFAULT_MQTT_HOST = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
 DEFAULT_MQTT_PORT = 8883
 
 # file names the GUI expects inside its aws/ directory

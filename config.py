@@ -102,7 +102,7 @@ SFCOA_BASE_URL = os.environ.get(
 HOME_LAT, HOME_LON = 35.22, -97.44   # Norman, OK
 
 # mqtt endpoint
-MQTT_HOST = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
+MQTT_HOST = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
 
 # mqtt port
 MQTT_PORT = 8883

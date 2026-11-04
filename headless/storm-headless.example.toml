@@ -19,7 +19,7 @@ poll_s = 1
 publish_s = 5
 
 [mqtt]
-host = "a38pz70mp8mr8r-ats.iot.us-east-2.amazonaws.com"
+host = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
 port = 8883
 
 # defaults to "<vehicle_id>-pi"; must differ from any STORM GUI using this vehicle id
