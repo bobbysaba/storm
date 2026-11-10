@@ -4,11 +4,10 @@ import re
 import requests
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from xml.etree import ElementTree
 
 import numpy as np
-from metpy.io import Level3File
 
 from core.vad import VADProfile, VADSet
 
@@ -64,7 +63,11 @@ def _list_nvw_files(site: str, date_str: str) -> list[str]:
     return names
 
 
-def _parse_nvw_product(f: Level3File, site: str, timestamp: datetime) -> Optional[VADProfile]:
+if TYPE_CHECKING:
+    from metpy.io import Level3File
+
+
+def _parse_nvw_product(f: "Level3File", site: str, timestamp: datetime) -> Optional[VADProfile]:
     """Parse a MetPy Level3File NVW product into a VADProfile.
 
     The NVW product is a graphical chart.  Wind barbs are stored as symbology
@@ -181,6 +184,7 @@ def fetch_vad_profile(site: str, filename: str, date_str: str) -> Optional[VADPr
     ts = datetime.strptime(f"{date_str}{hhmm}", "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
 
     try:
+        from metpy.io import Level3File
         f = Level3File(BytesIO(resp.content))
         return _parse_nvw_product(f, site, ts)
     except Exception as e:

@@ -1,4 +1,6 @@
 
+import numpy as np
+
 from core.radar_scan import RadarScan
 
 
@@ -70,6 +72,9 @@ class Level2RadarScan(RadarScan):
     """
     A RadarScan produced from a NEXRAD Level-2 archive file.
 
+    Gates are placed on the WGS84 ellipsoid (true geodesic range and azimuth
+    from the radar) rather than the sphere used for Level 3.
+
     Extra attributes
     ----------------
     tilt_deg : float
@@ -82,41 +87,71 @@ class Level2RadarScan(RadarScan):
         The pyart field name that was rendered (e.g. "reflectivity").
     """
 
+    geodesy = "wgs84"
+
     def __init__(
         self,
         site,
         product,       # human-readable label, e.g. "REF"
         scan_time,
-        data,
-        lats,
-        lons,
+        raw,
         vmin,
         vmax,
         units,
         colormap,
+        radar_lat,
+        radar_lon,
+        azimuths_deg,
+        first_gate_m,
+        gate_width_m,
         tilt_deg: float,
         available_tilts: list,
         available_products: list,
         pyart_field: str,
-        az_offset: float = 0.0,
     ):
         super().__init__(
             site=site,
             product=product,
             scan_time=scan_time,
-            data=data,
-            lats=lats,
-            lons=lons,
+            raw=raw,
             vmin=vmin,
             vmax=vmax,
             units=units,
             colormap=colormap,
-            az_offset=az_offset,
+            radar_lat=radar_lat,
+            radar_lon=radar_lon,
+            azimuths_deg=azimuths_deg,
+            first_gate_m=first_gate_m,
+            gate_width_m=gate_width_m,
         )
         self.tilt_deg = tilt_deg
         self.available_tilts = sorted(available_tilts)
         self.available_products = available_products
         self.pyart_field = pyart_field
+
+    def gate_lonlat(self, az_deg, range_m):
+        from pyproj import Geod
+        az, rng = np.broadcast_arrays(
+            np.asarray(az_deg, dtype=np.float64), np.asarray(range_m, dtype=np.float64)
+        )
+        lon0 = np.full(az.shape, self.radar_lon)
+        lat0 = np.full(az.shape, self.radar_lat)
+        lons, lats, _ = Geod(ellps="WGS84").fwd(lon0, lat0, az, rng)
+        return lons, lats
+
+    def polar_from_lonlat(self, lon, lat):
+        from pyproj import Geod
+        lon, lat = np.broadcast_arrays(
+            np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+        )
+        lon0 = np.full(lon.shape, self.radar_lon)
+        lat0 = np.full(lon.shape, self.radar_lat)
+        az_deg, _, range_m = Geod(ellps="WGS84").inv(lon0, lat0, lon, lat)
+        return range_m, az_deg % 360.0
+
+    @property
+    def cache_key(self):
+        return super().cache_key + (self.pyart_field, self.tilt_deg)
 
     @property
     def label(self) -> str:

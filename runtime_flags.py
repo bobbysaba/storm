@@ -1,5 +1,12 @@
 
+import sys
 from dataclasses import dataclass
+
+# lite mode caps (PERFORMANCE_PLAN.md step 3)
+LITE_RENDER_GRID_START = 512
+LITE_RENDER_GRID_MAX = 768
+LITE_STATION_CELL_DEG = 0.25
+LITE_MIN_LOOP_MS = 1000
 
 
 # dataclass for runtime flags
@@ -16,6 +23,9 @@ class RuntimeFlags:
     disable_deploy_locs: bool = False
     disable_data_inputs: bool = False
     mqtt_no_tls: bool = False
+    lite_mode: bool = False
+    gpu_radar: bool = False
+    webengine_flags: str = ""
 
 # global flags
 FLAGS = RuntimeFlags()
@@ -93,3 +103,24 @@ def finalize_flags() -> None:
     if FLAGS.disable_mqtt:
         FLAGS.disable_annotations = True
         FLAGS.disable_data_inputs = True
+
+# function to build QTWEBENGINE_CHROMIUM_FLAGS for this platform and the current flags
+def chromium_flags(platform: str = sys.platform) -> str:
+    if platform == "win32":
+        if FLAGS.runtime_safe:
+            flags = ["--no-sandbox", "--disable-gpu", "--disable-gpu-compositing"]
+        else:
+            flags = ["--no-sandbox", "--in-process-gpu", "--ignore-gpu-blocklist"]
+    else:
+        flags = ["--no-sandbox", "--in-process-gpu"]
+
+    # one renderer process is enough for STORM's single page and saves memory
+    if FLAGS.lite_mode:
+        flags.append("--renderer-process-limit=1")
+
+    # user-supplied flags go last so they can be measured one at a time on target hardware
+    for flag in FLAGS.webengine_flags.split():
+        if flag not in flags:
+            flags.append(flag)
+
+    return " ".join(flags)

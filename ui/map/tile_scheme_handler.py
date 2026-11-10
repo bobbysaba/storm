@@ -23,6 +23,7 @@ _MIME_MAP = {
     ".png":   b"image/png",
     ".webp":  b"image/webp",
     ".json":  b"application/json",
+    ".geojson": b"application/geo+json",
     ".svg":   b"image/svg+xml",
     ".woff":  b"font/woff",
     ".woff2": b"font/woff2",
@@ -32,6 +33,9 @@ _MIME_MAP = {
 TRANSPARENT_PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
 )
+
+# live keeps 10 frames per mode and archive 24 in total, so this covers both.
+SAT_FRAMES_PER_MODE = 32
 
 
 def _mime_for(filename: str) -> bytes:
@@ -56,16 +60,26 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         # thread-safe buffer for the latest radar overlay PNG.
         self._radar_png_lock  = threading.Lock()
         self._radar_png_bytes = b""
+        # raw scan textures for the WebGL radar layer, keyed by name ("data", "az", "lut")
+        self._radar_gl: dict[str, bytes] = {}
         # in-memory store for station plot PNGs — keyed by station id.
         self._plots_lock = threading.Lock()
         self._plots: dict[str, bytes] = {}
         self._sfcoa_mbtiles_lock = threading.Lock()
         self._sfcoa_mbtiles: dict[str, str] = {}
+        # satellite frame PNGs keyed by (mode, frame id); oldest evicted per mode.
+        self._sat_lock = threading.Lock()
+        self._sat_frames: dict[tuple[str, str], bytes] = {}
 
     def set_radar_png(self, data: bytes) -> None:
         """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
         with self._radar_png_lock:
             self._radar_png_bytes = data
+
+    def set_radar_gl(self, textures: dict[str, bytes]) -> None:
+        """Store the WebGL radar textures.  Thread-safe; called from any thread."""
+        with self._radar_png_lock:
+            self._radar_gl = dict(textures)
 
     def set_station_plots(self, plots: dict[str, bytes]) -> None:
         """Bulk-update the station plot store.  Thread-safe; called from any thread."""
@@ -77,6 +91,15 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         with self._plots_lock:
             for sid in ids:
                 self._plots.pop(sid, None)
+
+    def set_satellite_frame(self, mode: str, frame_id: str, data: bytes) -> None:
+        """Store a satellite frame PNG.  Thread-safe; called from any thread."""
+        with self._sat_lock:
+            self._sat_frames.pop((mode, frame_id), None)
+            self._sat_frames[(mode, frame_id)] = data
+            same_mode = [k for k in self._sat_frames if k[0] == mode]
+            for key in same_mode[:max(0, len(same_mode) - SAT_FRAMES_PER_MODE)]:
+                del self._sat_frames[key]
 
     def set_sfcoa_mbtiles(self, key: str, path: str) -> None:
         key = str(key or "").strip()
@@ -102,6 +125,10 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_nlcd_tile(job, path)
         elif path.startswith("/satellitetiles/"):
             self._serve_satellite_tile(job, path)
+        elif path.startswith("/satellite/"):
+            self._serve_satellite_frame(job, path[len("/satellite/"):])
+        elif path.startswith("/radar/gl/"):
+            self._serve_radar_gl(job, path[len("/radar/gl/"):])
         elif path.startswith("/radar/overlay.png"):
             self._serve_radar_png(job)
         elif path.startswith("/sfcoatiles/"):
@@ -310,6 +337,30 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         with self._radar_png_lock:
             data = self._radar_png_bytes
         if not data:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, b"image/png", data)
+
+
+    def _serve_radar_gl(self, job: QWebEngineUrlRequestJob, name: str):
+        # name is "<texture>.png", optionally followed by a cache-bust query
+        name = name.split("?", 1)[0]
+        name = name[:-4] if name.endswith(".png") else name
+        with self._radar_png_lock:
+            data = self._radar_gl.get(name)
+        if data is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, b"image/png", data)
+
+
+    def _serve_satellite_frame(self, job: QWebEngineUrlRequestJob, rel: str):
+        # rel is "<mode>/<frame-id>.png"
+        mode, _, name = rel.partition("/")
+        frame_id = name[:-4] if name.endswith(".png") else name
+        with self._sat_lock:
+            data = self._sat_frames.get((mode, frame_id))
+        if data is None:
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
             return
         self._reply(job, b"image/png", data)

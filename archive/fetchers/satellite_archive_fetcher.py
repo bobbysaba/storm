@@ -1,17 +1,17 @@
-
-import base64
 import io
 import logging
-import os
+import math
 import re
-import tempfile
 import threading
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
+import numpy as np
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -40,6 +40,10 @@ _MODE_CONFIG = {
 }
 _MAX_CACHE = 24
 _REQUEST_TIMEOUT = 30
+_FETCH_WORKERS = 2
+# frames fetched ahead of the current one, in playback direction
+_PREFETCH_AHEAD = 2
+_OUTPUT_WIDTH = {"conus": 1500, "meso1": 1100, "meso2": 1100}
 
 
 @dataclass(frozen=True)
@@ -49,13 +53,17 @@ class _FrameRef:
 
 
 class SatFrame:
-    __slots__ = ("mode", "timestamp", "b64", "bbox")
+    __slots__ = ("mode", "timestamp", "png", "bbox")
 
-    def __init__(self, mode: str, timestamp: datetime, b64: str, bbox: list[float]):
+    def __init__(self, mode: str, timestamp: datetime, png: bytes, bbox: list[float]):
         self.mode = mode
         self.timestamp = timestamp
-        self.b64 = b64
+        self.png = png
         self.bbox = bbox
+
+    @property
+    def frame_id(self) -> str:
+        return self.timestamp.strftime("%Y%m%dT%H%M%S")
 
     @property
     def time_str(self) -> str:
@@ -91,10 +99,12 @@ class ArchiveSatelliteFetcher(QObject):
         self._indexes_ready = False
         self._indexed_modes: set[str] = set()
         self._indexing_modes: set[str] = set()
-        self._cache: dict[tuple[str, datetime], Optional[SatFrame]] = {}
+        self._cache: dict[tuple[str, datetime], SatFrame] = {}
         self._pending: set[tuple[str, datetime]] = set()
         self._fetch_lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=_FETCH_WORKERS, thread_name_prefix="sat-archive")
         self._current_archive_time: Optional[datetime] = None
+        self._direction = 1   # +1 playing forward, -1 scrubbing backward
         self._meso_bboxes: dict[int, Optional[dict]] = {1: None, 2: None}
 
 
@@ -114,17 +124,24 @@ class ArchiveSatelliteFetcher(QObject):
             self.on_time_changed(self._current_archive_time)
 
     def on_time_changed(self, archive_time: datetime) -> None:
-        self._current_archive_time = _ensure_utc(archive_time)
-        ref = self._nearest_ref(self._mode, self._current_archive_time)
-        if ref is None:
+        archive_time = _ensure_utc(archive_time)
+        if self._current_archive_time is not None and archive_time != self._current_archive_time:
+            self._direction = 1 if archive_time > self._current_archive_time else -1
+        self._current_archive_time = archive_time
+        refs = self._indexes.get(self._mode, [])
+        pos = self._nearest_pos(self._mode, archive_time)
+        if pos is None:
             return
-        cache_key = (self._mode, ref.timestamp)
-        frame = self._cache.get(cache_key)
+        ref = refs[pos]
+        frame = self._cache.get((self._mode, ref.timestamp))
         if frame is not None:
             self.frame_ready.emit(frame)
-            return
-        self._ensure_fetched(ref)
-
+        else:
+            self._ensure_fetched(self._mode, ref)
+        for step in range(1, _PREFETCH_AHEAD + 1):
+            ahead = pos + step * self._direction
+            if 0 <= ahead < len(refs):
+                self._ensure_fetched(self._mode, refs[ahead])
 
     def _ensure_mode_index(self, mode: str) -> None:
         if mode in self._indexed_modes or mode in self._indexing_modes:
@@ -167,12 +184,11 @@ class ArchiveSatelliteFetcher(QObject):
             self._indexing_modes.discard(mode)
 
     def _fetch_mode_bbox(self, mode: str, key: str) -> None:
-        """Background: download one file's bbox so the map hover preview works."""
-        idx = 1 if mode == "meso1" else 2
-        bbox = self._read_bbox_for_key(mode, key)
-        if bbox is not None:
-            self._meso_bboxes[idx] = bbox
-            self.meso_sectors_updated.emit(dict(self._meso_bboxes))
+        """Background: fetch the day's last frame so the map hover preview has
+        a bbox. The rendered frame is cached rather than thrown away."""
+        ref = next((r for r in reversed(self._indexes.get(mode, [])) if r.key == key), None)
+        if ref is not None:
+            self._ensure_fetched(mode, ref)
 
     def _list_day_refs(self, mode: str, product: str) -> list[_FrameRef]:
         refs: list[_FrameRef] = []
@@ -218,48 +234,58 @@ class ArchiveSatelliteFetcher(QObject):
             for ref in self._indexes.get(self._mode, [])
         ]
 
-    def _nearest_ref(self, mode: str, when: datetime) -> Optional[_FrameRef]:
+    def _nearest_pos(self, mode: str, when: datetime) -> Optional[int]:
+        """Index of the last frame at or before ``when`` (the first frame if none)."""
         refs = self._indexes.get(mode, [])
         if not refs:
             return None
         lo, hi = 0, len(refs) - 1
-        result = None
+        result = 0
         while lo <= hi:
             mid = (lo + hi) // 2
             if refs[mid].timestamp <= when:
-                result = refs[mid]
+                result = mid
                 lo = mid + 1
             else:
                 hi = mid - 1
-        return result or refs[0]
+        return result
 
+    def _is_wanted(self, mode: str, ref: _FrameRef) -> bool:
+        """True while ``ref`` is the current frame or inside the prefetch window."""
+        if self._current_archive_time is None:
+            return mode in ("meso1", "meso2")   # startup bbox fetch
+        if mode != self._mode:
+            return mode in ("meso1", "meso2") and self._meso_bboxes.get(int(mode[-1])) is None
+        refs = self._indexes.get(mode, [])
+        pos = self._nearest_pos(mode, self._current_archive_time)
+        if pos is None:
+            return False
+        lo, hi = sorted((pos, pos + _PREFETCH_AHEAD * self._direction))
+        return any(refs[i].timestamp == ref.timestamp for i in range(max(lo, 0), min(hi, len(refs) - 1) + 1))
 
-    def _ensure_fetched(self, ref: _FrameRef) -> None:
-        cache_key = (self._mode, ref.timestamp)
+    def _ensure_fetched(self, mode: str, ref: _FrameRef) -> None:
+        cache_key = (mode, ref.timestamp)
         with self._fetch_lock:
-            if cache_key in self._pending or self._cache.get(cache_key) is not None:
+            if cache_key in self._pending or cache_key in self._cache:
                 return
             self._pending.add(cache_key)
         self.loading_changed.emit(True)
-        threading.Thread(target=self._fetch_frame, args=(self._mode, ref), daemon=True).start()
+        self._pool.submit(self._fetch_frame, mode, ref)
 
     def _fetch_frame(self, mode: str, ref: _FrameRef) -> None:
         cache_key = (mode, ref.timestamp)
         try:
+            # the queue can fall behind fast scrubbing; skip frames no longer near.
+            if not self._is_wanted(mode, ref):
+                return
             url = f"{_S3_URL_TEMPLATE.format(bucket=self._bucket)}/{ref.key}"
             resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
             resp.raise_for_status()
             png_bytes, bbox = _render_goes_png(resp.content, mode, _MODE_CONFIG[mode].get("fixed_bbox"))
-            frame = SatFrame(
-                mode=mode,
-                timestamp=ref.timestamp,
-                b64=base64.b64encode(png_bytes).decode("ascii"),
-                bbox=bbox,
-            )
-            self._cache[cache_key] = frame
-            while len(self._cache) > _MAX_CACHE:
-                oldest_key = min(self._cache.keys(), key=lambda item: item[1])
-                del self._cache[oldest_key]
+            frame = SatFrame(mode=mode, timestamp=ref.timestamp, png=png_bytes, bbox=bbox)
+            with self._fetch_lock:
+                self._cache[cache_key] = frame
+                self._evict_locked()
 
             if mode in ("meso1", "meso2"):
                 idx = 1 if mode == "meso1" else 2
@@ -269,8 +295,8 @@ class ArchiveSatelliteFetcher(QObject):
                     self.meso_sectors_updated.emit(dict(self._meso_bboxes))
 
             if mode == self._mode and self._current_archive_time is not None:
-                nearest = self._nearest_ref(mode, self._current_archive_time)
-                if nearest is not None and nearest.timestamp == ref.timestamp:
+                pos = self._nearest_pos(mode, self._current_archive_time)
+                if pos is not None and self._indexes[mode][pos].timestamp == ref.timestamp:
                     self.frame_ready.emit(frame)
         except Exception as exc:
             log.error("ArchiveSatelliteFetcher: frame fetch failed %s %s: %s", mode, ref.timestamp, exc)
@@ -278,19 +304,19 @@ class ArchiveSatelliteFetcher(QObject):
         finally:
             with self._fetch_lock:
                 self._pending.discard(cache_key)
-                if not self._pending:
-                    self.loading_changed.emit(False)
+                idle = not self._pending
+            if idle:
+                self.loading_changed.emit(False)
 
-    def _read_bbox_for_key(self, mode: str, key: str) -> Optional[dict]:
-        try:
-            url = f"{_S3_URL_TEMPLATE.format(bucket=self._bucket)}/{key}"
-            resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            _, bbox = _render_goes_png(resp.content, mode, _MODE_CONFIG[mode].get("fixed_bbox"), image_only=False)
-            return _bbox_to_dict(bbox)
-        except Exception as exc:
-            log.warning("ArchiveSatelliteFetcher: could not read bbox for %s: %s", mode, exc)
-            return None
+    def _evict_locked(self) -> None:
+        """Drop the cached frames farthest in time from the current position."""
+        now = self._current_archive_time
+        while len(self._cache) > _MAX_CACHE:
+            if now is None:
+                victim = min(self._cache, key=lambda k: k[1])
+            else:
+                victim = max(self._cache, key=lambda k: (k[0] != self._mode, abs(k[1] - now)))
+            del self._cache[victim]
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -326,163 +352,217 @@ def _bbox_to_dict(bbox: list[float]) -> dict:
     }
 
 
+
+
+_MERC_R = 6378137.0
+# (mode, grid geometry, output size) -> (flat source index per output pixel, valid mask)
+_INDEX_CACHE: "OrderedDict[tuple, tuple[np.ndarray, np.ndarray]]" = OrderedDict()
+_INDEX_CACHE_SIZE = 4
+_INDEX_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _GoesGrid:
+    lon0: float        # radians
+    a: float           # semi-major axis, m
+    b: float           # semi-minor axis, m
+    H: float           # distance from earth centre to satellite, m
+    x0: float          # scan angle of column 0, radians
+    dx: float
+    nx: int
+    y0: float          # scan angle of row 0, radians
+    dy: float
+    ny: int
+
+
+def _attr(obj, name, default=None):
+    val = obj.attrs.get(name, default)
+    if isinstance(val, np.ndarray):
+        val = val.reshape(-1)[0]
+    if isinstance(val, bytes):
+        val = val.decode()
+    return val
+
+
+def _read_goes(nc_bytes: bytes) -> tuple[np.ndarray, _GoesGrid]:
+    """Read CMI (as reflectance in 0..1, NaN for fill) and the fixed-grid geometry."""
+    import h5py
+
+    with h5py.File(io.BytesIO(nc_bytes), "r") as f:
+        cmi = f["CMI"]
+        raw = cmi[()]
+        if str(_attr(cmi, "_Unsigned", "false")).lower() == "true":
+            raw = raw.view(np.uint16)
+            fill = np.int16(_attr(cmi, "_FillValue", -1)).view(np.uint16)
+        else:
+            fill = _attr(cmi, "_FillValue")
+        data = raw.astype(np.float32) * np.float32(_attr(cmi, "scale_factor", 1.0))
+        data += np.float32(_attr(cmi, "add_offset", 0.0))
+        if fill is not None:
+            data[raw == fill] = np.nan
+
+        proj = f["goes_imager_projection"]
+        a = float(_attr(proj, "semi_major_axis"))
+        xv, yv = f["x"], f["y"]
+        grid = _GoesGrid(
+            lon0=math.radians(float(_attr(proj, "longitude_of_projection_origin"))),
+            a=a,
+            b=float(_attr(proj, "semi_minor_axis")),
+            H=float(_attr(proj, "perspective_point_height")) + a,
+            x0=float(_attr(xv, "add_offset")) + float(xv[0]) * float(_attr(xv, "scale_factor")),
+            dx=float(_attr(xv, "scale_factor")),
+            nx=int(xv.shape[0]),
+            y0=float(_attr(yv, "add_offset")) + float(yv[0]) * float(_attr(yv, "scale_factor")),
+            dy=float(_attr(yv, "scale_factor")),
+            ny=int(yv.shape[0]),
+        )
+    return data, grid
+
+
+def _lonlat_to_scan(g: _GoesGrid, lon: np.ndarray, lat: np.ndarray):
+    """GOES-R PUG forward projection: geodetic lon/lat (radians) -> scan angles.
+    Returns (x, y, visible)."""
+    e2 = (g.a * g.a - g.b * g.b) / (g.a * g.a)
+    lat_c = np.arctan((g.b * g.b) / (g.a * g.a) * np.tan(lat))
+    cos_c = np.cos(lat_c)
+    rc = g.b / np.sqrt(1.0 - e2 * cos_c * cos_c)
+    dlon = lon - g.lon0
+    sx = g.H - rc * cos_c * np.cos(dlon)
+    sy = -rc * cos_c * np.sin(dlon)
+    sz = rc * np.sin(lat_c)
+    x = np.arcsin(-sy / np.sqrt(sx * sx + sy * sy + sz * sz))
+    y = np.arctan(sz / sx)
+    visible = g.H * (g.H - sx) >= sy * sy + (g.a * g.a) / (g.b * g.b) * sz * sz
+    return x, y, visible
+
+
+def _scan_to_lonlat(g: _GoesGrid, x: float, y: float) -> Optional[tuple[float, float]]:
+    """Inverse projection for one scan-angle pair; None when it misses the earth."""
+    ab2 = (g.a * g.a) / (g.b * g.b)
+    qa = math.sin(x) ** 2 + math.cos(x) ** 2 * (math.cos(y) ** 2 + ab2 * math.sin(y) ** 2)
+    qb = -2.0 * g.H * math.cos(x) * math.cos(y)
+    qc = g.H * g.H - g.a * g.a
+    disc = qb * qb - 4.0 * qa * qc
+    if disc < 0:
+        return None
+    rs = (-qb - math.sqrt(disc)) / (2.0 * qa)
+    sx = rs * math.cos(x) * math.cos(y)
+    sy = -rs * math.sin(x)
+    sz = rs * math.cos(x) * math.sin(y)
+    lat = math.atan(ab2 * sz / math.sqrt((g.H - sx) ** 2 + sy * sy))
+    lon = g.lon0 - math.atan(sy / (g.H - sx))
+    return math.degrees(lon), math.degrees(lat)
+
+
+def _grid_bbox(g: _GoesGrid) -> list[float]:
+    """Lon/lat bbox of the grid's corner pixels (meso files carry no geospatial_* attrs)."""
+    pts = [
+        _scan_to_lonlat(g, g.x0 + i * g.dx, g.y0 + j * g.dy)
+        for i in (0, g.nx - 1) for j in (0, g.ny - 1)
+    ]
+    pts = [p for p in pts if p is not None]
+    if not pts:
+        raise RuntimeError("GOES file is missing geospatial bounds")
+    lons, lats = zip(*pts)
+    return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _merc_y(lat_deg: float) -> float:
+    return _MERC_R * math.log(math.tan(math.pi / 4 + math.radians(lat_deg) / 2))
+
+
+def _output_size(mode: str, bbox: list[float]) -> tuple[int, int]:
+    west, south, east, north = bbox
+    width = _OUTPUT_WIDTH.get(mode, 1100)
+    x_span = math.radians(max(east - west, 1e-6)) * _MERC_R
+    y_span = max(_merc_y(north) - _merc_y(south), 1e-6)
+    return width, max(1, int(round(width * y_span / x_span)))
+
+
+def _block_factor(g: _GoesGrid, bbox: list[float], width: int) -> int:
+    """Source pixels per output pixel (rounded down), measured across the bbox centre.
+    The source is box-averaged by this factor so downsampling doesn't alias."""
+    west, south, east, north = bbox
+    lat = math.radians((south + north) / 2)
+    xs, _, _ = _lonlat_to_scan(
+        g, np.radians(np.array([west, east])), np.array([lat, lat])
+    )
+    src_cols = abs(float(xs[1] - xs[0])) / g.dx
+    return max(1, int(src_cols / width))
+
+
+def _resample_index(g: _GoesGrid, k: int, bbox: list[float], size: tuple[int, int], key: tuple):
+    with _INDEX_LOCK:
+        hit = _INDEX_CACHE.get(key)
+        if hit is not None:
+            _INDEX_CACHE.move_to_end(key)
+            return hit
+
+    west, south, east, north = bbox
+    width, height = size
+    # web mercator pixel centres: equal steps in x (lon) and in mercator y
+    lon = np.radians(west + (np.arange(width) + 0.5) * (east - west) / width)
+    my_top, my_bot = _merc_y(north), _merc_y(south)
+    my = my_top - (np.arange(height) + 0.5) * (my_top - my_bot) / height
+    lat = 2.0 * np.arctan(np.exp(my / _MERC_R)) - math.pi / 2
+    lon2, lat2 = np.meshgrid(lon, lat)
+    x, y, visible = _lonlat_to_scan(g, lon2, lat2)
+
+    nxk, nyk = g.nx // k, g.ny // k
+    # x0/y0 are pixel centres; block i spans source pixels [i*k, (i+1)*k)
+    col = np.floor((x - g.x0 + 0.5 * g.dx) / (g.dx * k)).astype(np.int64)
+    row = np.floor((y - g.y0 + 0.5 * g.dy) / (g.dy * k)).astype(np.int64)
+    valid = visible & (col >= 0) & (col < nxk) & (row >= 0) & (row < nyk)
+    flat = np.where(valid, row * nxk + col, 0).astype(np.int32).ravel()
+    result = (flat, valid.ravel())
+
+    with _INDEX_LOCK:
+        _INDEX_CACHE[key] = result
+        while len(_INDEX_CACHE) > _INDEX_CACHE_SIZE:
+            _INDEX_CACHE.popitem(last=False)
+    return result
+
+
+def _box_average(data: np.ndarray, k: int) -> np.ndarray:
+    """NaN-aware k x k block mean; trailing rows/cols that don't fill a block are dropped."""
+    if k == 1:
+        return data
+    ny, nx = (data.shape[0] // k) * k, (data.shape[1] // k) * k
+    blocks = data[:ny, :nx].reshape(ny // k, k, nx // k, k)
+    valid = np.isfinite(blocks)
+    total = np.where(valid, blocks, 0.0).sum(axis=(1, 3))
+    count = valid.sum(axis=(1, 3))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, total / count, np.nan).astype(np.float32)
+
+
+def _encode_grey_alpha(grey: np.ndarray, alpha: np.ndarray) -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.dstack([grey, alpha]), "LA").save(buf, format="PNG", compress_level=3)
+    return buf.getvalue()
+
+
 def _render_goes_png(
     nc_bytes: bytes,
     mode: str,
     fallback_bbox: Optional[list[float]] = None,
-    image_only: bool = True,
-) -> tuple[bytes, list[float]] | tuple[None, list[float]]:
-    try:
-        import cartopy.crs as ccrs
-        import matplotlib
-        matplotlib.use("Agg")
-        import numpy as np
-        import xarray as xr
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from matplotlib.figure import Figure
-        from matplotlib import colormaps
-    except ImportError as exc:
-        raise RuntimeError(
-            "Archive GOES rendering requires xarray, matplotlib, and cartopy in the STORM environment"
-        ) from exc
+) -> tuple[bytes, list[float]]:
+    """Resample a GOES CMI file onto a Web Mercator grid covering its bbox and
+    encode it as a grey + alpha PNG."""
+    data, g = _read_goes(nc_bytes)
+    bbox = list(fallback_bbox) if fallback_bbox else _grid_bbox(g)
+    size = _output_size(mode, bbox)
+    k = _block_factor(g, bbox, size[0])
+    key = (mode, g, k, tuple(round(v, 4) for v in bbox), size)
+    flat, valid = _resample_index(g, k, bbox, size, key)
 
-    tmp_path = None
-    ds = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
-            tmp.write(nc_bytes)
-            tmp_path = tmp.name
-
-        try:
-            ds = xr.open_dataset(tmp_path, engine="h5netcdf", mask_and_scale=True)
-        except Exception:
-            ds = xr.open_dataset(tmp_path, mask_and_scale=True)
-
-        data = np.asarray(ds["CMI"]).astype("float32")
-        fill = ds["CMI"].attrs.get("_FillValue")
-        if fill is not None:
-            data[data == fill] = np.nan
-        data[~np.isfinite(data)] = np.nan
-        data = np.clip(data, 0.0, 1.0)
-        # apply gamma correction to match the visual brightness of live WMS tiles.
-        data = np.where(np.isfinite(data), np.power(data, 0.5), np.nan)
-
-        proj_var = ds["goes_imager_projection"]
-        sat_height = float(proj_var.attrs["perspective_point_height"])
-        lon0 = float(proj_var.attrs["longitude_of_projection_origin"])
-        sweep = str(proj_var.attrs.get("sweep_angle_axis", "x"))
-        semi_major = float(proj_var.attrs["semi_major_axis"])
-        semi_minor = float(proj_var.attrs["semi_minor_axis"])
-        x = np.asarray(ds["x"], dtype="float64") * sat_height
-        y = np.asarray(ds["y"], dtype="float64") * sat_height
-
-        bbox = _dataset_bbox(ds, fallback_bbox)
-        if not image_only:
-            return None, bbox
-
-        west, south, east, north = bbox
-        lon_span = max(1.0, east - west)
-        lat_span = max(1.0, north - south)
-        width_px = 1500 if mode == "conus" else 1100
-        height_px = max(700, int(width_px * (lat_span / lon_span)))
-        dpi = 100
-
-        fig = Figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
-        fig.patch.set_alpha(0.0)
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.PlateCarree())
-        ax.set_extent([west, east, south, north], crs=ccrs.PlateCarree())
-        ax.set_axis_off()
-
-        cmap = colormaps["gray"].copy()
-        cmap.set_bad((0, 0, 0, 0))
-        globe = ccrs.Globe(
-            semimajor_axis=semi_major,
-            semiminor_axis=semi_minor,
-            ellipse=None,
-        )
-        geos = ccrs.Geostationary(
-            central_longitude=lon0,
-            satellite_height=sat_height,
-            sweep_axis=sweep,
-            globe=globe,
-        )
-        ax.imshow(
-            data,
-            origin="upper",
-            extent=[x.min(), x.max(), y.min(), y.max()],
-            transform=geos,
-            cmap=cmap,
-            vmin=0.0,
-            vmax=1.0,
-            interpolation="bilinear",
-        )
-
-        buf = io.BytesIO()
-        canvas.print_png(buf)
-        return buf.getvalue(), bbox
-    finally:
-        if ds is not None:
-            ds.close()
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
-def _dataset_bbox(ds, fallback_bbox: Optional[list[float]]) -> list[float]:
-    attrs = ds.attrs
-    keys = (
-        "geospatial_westbound_longitude",
-        "geospatial_southbound_latitude",
-        "geospatial_eastbound_longitude",
-        "geospatial_northbound_latitude",
-    )
-    if all(key in attrs for key in keys):
-        return [
-            float(attrs["geospatial_westbound_longitude"]),
-            float(attrs["geospatial_southbound_latitude"]),
-            float(attrs["geospatial_eastbound_longitude"]),
-            float(attrs["geospatial_northbound_latitude"]),
-        ]
-    if fallback_bbox:
-        return list(fallback_bbox)
-
-    # meso sector files don't carry geospatial_* attributes — derive the bbox
-    try:
-        import cartopy.crs as ccrs
-        import numpy as np
-        proj_var   = ds["goes_imager_projection"]
-        sat_height = float(proj_var.attrs["perspective_point_height"])
-        lon0       = float(proj_var.attrs["longitude_of_projection_origin"])
-        sweep      = str(proj_var.attrs.get("sweep_angle_axis", "x"))
-        semi_major = float(proj_var.attrs["semi_major_axis"])
-        semi_minor = float(proj_var.attrs["semi_minor_axis"])
-        x = np.asarray(ds["x"], dtype="float64") * sat_height
-        y = np.asarray(ds["y"], dtype="float64") * sat_height
-
-        globe = ccrs.Globe(semimajor_axis=semi_major, semiminor_axis=semi_minor, ellipse=None)
-        geos  = ccrs.Geostationary(
-            central_longitude=lon0,
-            satellite_height=sat_height,
-            sweep_axis=sweep,
-            globe=globe,
-        )
-        pc = ccrs.PlateCarree()
-        lons, lats = [], []
-        for xi in (x.min(), x.max()):
-            for yi in (y.min(), y.max()):
-                try:
-                    pt = pc.transform_point(xi, yi, geos)
-                    if np.isfinite(pt[0]) and np.isfinite(pt[1]):
-                        lons.append(pt[0])
-                        lats.append(pt[1])
-                except Exception:
-                    pass
-        if lons and lats:
-            return [min(lons), min(lats), max(lons), max(lats)]
-    except Exception as exc:
-        log.warning("_dataset_bbox: projection fallback failed: %s", exc)
-
-    raise RuntimeError("GOES file is missing geospatial bounds")
+    src = _box_average(data, k).ravel()
+    vals = src[flat]
+    valid = valid & np.isfinite(vals)
+    # gamma 0.5 to match the visual brightness of the live WMS tiles.
+    grey = np.sqrt(np.clip(np.where(valid, vals, 0.0), 0.0, 1.0))
+    grey = (grey * 255.0 + 0.5).astype(np.uint8).reshape(size[1], size[0])
+    alpha = np.where(valid, 255, 0).astype(np.uint8).reshape(size[1], size[0])
+    return _encode_grey_alpha(grey, alpha), bbox

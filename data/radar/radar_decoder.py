@@ -1,14 +1,15 @@
 
 import io
 import logging
-import math
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from metpy.io import Level3File
 from core.radar_scan import RadarScan, PRODUCT_META
+
+if TYPE_CHECKING:
+    from metpy.io import Level3File
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
         RadarScan on success, None on failure.
     """
     try:
+        # metpy is heavy; import on first decode, normally on a fetch thread
+        from metpy.io import Level3File
         f = Level3File(io.BytesIO(raw_bytes))
     except Exception as e:
         log.error("[Decoder] Failed to open Level3File for %s/%s: %s", site, product, e)
@@ -51,25 +54,28 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
 
         # apply scale/offset from MetPy (requires integer input)
         if hasattr(f, "map_data"):
-            data = np.array(f.map_data(raw), dtype=float)
+            data = np.array(f.map_data(raw), dtype=np.float32)
             # MetPy's DigitalVelMapper returns m/s; convert to knots to match
             # the kt-based vmin/vmax and colormap stops (mirrors L2 archive path).
             if getattr(f.map_data, "units", None) == "m/s" and meta.get("units") == "kt":
                 data *= 1.94384
         else:
-            data = raw.astype(float)
+            data = raw.astype(np.float32)
 
         # replace missing/masked values with NaN
         if np.ma.is_masked(data):
             data = np.ma.filled(data, np.nan)
 
-        # convert polar to lat/lon
-        lats, lons = _polar_to_latlon(
-            azimuths,
-            ranges_m,
-            f.lat,
-            f.lon
-        )
+        # Level 3 is 8-bit on the wire and MetPy's mappers are pure per-code
+        # lookups, so keep the packed codes plus a 256-entry value table
+        # instead of a float per gate (lossless, 1 byte per gate).
+        if raw.dtype == np.uint8:
+            value_table = np.full(256, np.nan, dtype=np.float32)
+            value_table[raw] = data
+            stored = raw
+        else:
+            value_table = None
+            stored = data.astype(np.float16)
 
         # scan time
         scan_time = _parse_scan_time(f)
@@ -78,59 +84,22 @@ def decode_nexrad_l3(site: str, product: str, raw_bytes: bytes) -> Optional[Rada
             site=site,
             product=product,
             scan_time=scan_time,
-            data=data,
-            lats=lats,
-            lons=lons,
+            raw=stored,
             vmin=meta["vmin"],
             vmax=meta["vmax"],
             units=meta["units"],
             colormap=meta["colormap"],
-            az_offset=float(azimuths[0]),
+            radar_lat=f.lat,
+            radar_lon=f.lon,
+            azimuths_deg=azimuths,
+            first_gate_m=float(ranges_m[0]),
+            gate_width_m=float(ranges_m[1] - ranges_m[0]) if ranges_m.size > 1 else float(ranges_m[0]) * 2.0,
+            value_table=value_table,
         )
 
     except Exception as e:
         log.error("[Decoder] Failed to decode %s/%s: %s", site, product, e, exc_info=True)
         return None
-
-
-def _polar_to_latlon(
-    azimuths_deg: np.ndarray,
-    ranges_m: np.ndarray,
-    center_lat: float,
-    center_lon: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Convert polar radar coordinates (azimuth, range) to lat/lon arrays via the
-    spherical forward-geodesic formula. This matches what py-art / GR2Analyst
-    use and avoids the few-km drift the previous flat-earth + cos(center_lat)
-    approximation introduced at long range.
-
-    Returns:
-        (lats, lons) each shaped (num_azimuths, num_gates)
-    """
-    R_EARTH_M = 6371000.0
-
-    az_rad = np.deg2rad(azimuths_deg)
-    lat1   = math.radians(center_lat)
-    lon1   = math.radians(center_lon)
-
-    # meshgrid: rows = azimuths, cols = range gates
-    az2d, rng2d = np.meshgrid(az_rad, ranges_m, indexing="ij")
-
-    delta = rng2d / R_EARTH_M  # angular distance (rad)
-    sin_d = np.sin(delta)
-    cos_d = np.cos(delta)
-    sin_l1 = math.sin(lat1)
-    cos_l1 = math.cos(lat1)
-
-    sin_lat2 = sin_l1 * cos_d + cos_l1 * sin_d * np.cos(az2d)
-    lat2 = np.arcsin(np.clip(sin_lat2, -1.0, 1.0))
-    lon2 = lon1 + np.arctan2(
-        np.sin(az2d) * sin_d * cos_l1,
-        cos_d - sin_l1 * sin_lat2,
-    )
-
-    return np.rad2deg(lat2), np.rad2deg(lon2)
 
 
 def _estimate_beam_width(start_az_deg: np.ndarray) -> float:
@@ -149,7 +118,7 @@ def _estimate_beam_width(start_az_deg: np.ndarray) -> float:
     return bw
 
 
-def _extract_ranges_m(pdata: dict, num_gates: int, f: Level3File) -> np.ndarray:
+def _extract_ranges_m(pdata: dict, num_gates: int, f: "Level3File") -> np.ndarray:
     """
     Build range array in meters across multiple Level 3 packet variants,
     returning the **center** of each gate (so polar→latlon places samples
@@ -194,7 +163,7 @@ def _extract_ranges_m(pdata: dict, num_gates: int, f: Level3File) -> np.ndarray:
     return (np.arange(num_gates, dtype=float) + 0.5) * gw_m
 
 
-def _parse_scan_time(f: Level3File) -> datetime:
+def _parse_scan_time(f: "Level3File") -> datetime:
     """Extract scan time from Level3File, falling back to UTC now."""
     try:
         # metPy stores time as a datetime on the file object

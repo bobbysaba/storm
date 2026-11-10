@@ -1,5 +1,4 @@
 
-import base64
 import logging
 import math
 import threading
@@ -35,8 +34,12 @@ MESO_W, MESO_H = 2048, 2048
 @dataclass
 class SatFrame:
     timestamp: datetime
-    b64:       str          # empty string for CONUS (tile-based); PNG for MESO
+    png:       bytes        # empty for CONUS (tile-based); PNG for MESO
     bbox:      list         # [west, south, east, north]
+
+    @property
+    def frame_id(self) -> str:
+        return self.timestamp.strftime("%Y%m%dT%H%M%S")
 
     @property
     def time_str(self) -> str:
@@ -58,9 +61,10 @@ class SatelliteFetcher(QObject):
                                         changes for that mode.
             mode is one of "conus", "meso1", "meso2".
 
-    CONUS frames have b64='' — the map uses a MapLibre raster tile source
+    CONUS frames have png=b'' — the map uses a MapLibre raster tile source
     pointed at nowCOAST WMS with the frame's TIME value.
-    MESO frames have b64 set to the PNG data.
+    MESO frames have png set to the image bytes. Only the sector set with
+    set_active_mode() is polled.
     """
 
     meso_sectors_updated = pyqtSignal(object)        # dict
@@ -72,6 +76,7 @@ class SatelliteFetcher(QObject):
 
         self._meso_bboxes: dict[int, dict | None] = {1: None, 2: None}
         self._frames:      dict[str, list]         = {"conus": [], "meso1": [], "meso2": []}
+        self._active_mode = ""
         self._lock = threading.Lock()
 
         # per-key inflight guard so parallel polls don't stack up
@@ -98,6 +103,11 @@ class SatelliteFetcher(QObject):
     def stop(self):
         for t in (self._caps_timer, self._meso_timer):
             t.stop()
+
+    def set_active_mode(self, mode: str):
+        """Mode currently shown on the map ("" when the layer is off). MESO
+        polling only runs for the active sector; caps polling always runs."""
+        self._active_mode = (mode or "").strip().lower()
 
     def fetch_now(self, mode: str = ""):
         """Trigger an immediate fetch — pass mode="conus"/"meso1"/"meso2" or
@@ -134,8 +144,10 @@ class SatelliteFetcher(QObject):
         self._spawn("caps", self._worker_caps)
 
     def _poll_meso(self):
-        self._spawn("meso1", lambda: self._worker_meso(1))
-        self._spawn("meso2", lambda: self._worker_meso(2))
+        if self._active_mode == "meso1":
+            self._spawn("meso1", lambda: self._worker_meso(1))
+        elif self._active_mode == "meso2":
+            self._spawn("meso2", lambda: self._worker_meso(2))
 
     def _spawn(self, key: str, fn):
         with self._lock:
@@ -177,7 +189,7 @@ class SatelliteFetcher(QObject):
             times   = _parse_nowcoast_times(nc_root)
             if times:
                 frames = [
-                    SatFrame(timestamp=_parse_time(t), b64="", bbox=list(CONUS_BBOX))
+                    SatFrame(timestamp=_parse_time(t), png=b"", bbox=list(CONUS_BBOX))
                     for t in times[-MAX_FRAMES:]
                 ]
                 with self._lock:
@@ -198,11 +210,11 @@ class SatelliteFetcher(QObject):
         w = bbox["west"]; s = bbox["south"]; e = bbox["east"]; n = bbox["north"]
         layer = f"mesoscale-{idx}_ch02"
         url = _iem_wms_url(layer, w, s, e, n, MESO_W, MESO_H)
-        b64 = self._fetch_image(url)
-        if b64:
+        png = self._fetch_image(url)
+        if png:
             self._push_frame(f"meso{idx}", SatFrame(
                 timestamp=datetime.now(timezone.utc),
-                b64=b64,
+                png=png,
                 bbox=[w, s, e, n],
             ))
 
@@ -228,20 +240,19 @@ class SatelliteFetcher(QObject):
         # iem has no TIME dimension, so just fetch the latest frame as a fallback.
         self._worker_meso(idx)
 
-    def _fetch_image(self, url: str) -> str:
-        """Download a WMS GetMap PNG and return it base64-encoded, or "" on error."""
+    def _fetch_image(self, url: str) -> bytes:
+        """Download a WMS GetMap PNG and return its bytes, or b"" on error."""
         try:
             req = Request(url, headers={"User-Agent": "STORM/1.0"})
             with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 ct = resp.headers.get("Content-Type", "")
                 if "image" not in ct:
                     log.warning("SatelliteFetcher: unexpected Content-Type: %s", ct)
-                    return ""
-                data = resp.read()
-            return base64.b64encode(data).decode("ascii")
+                    return b""
+                return resp.read()
         except Exception as exc:
             log.warning("SatelliteFetcher: image fetch error: %s", exc)
-            return ""
+            return b""
 
     def _push_frame(self, mode: str, frame: SatFrame):
         with self._lock:

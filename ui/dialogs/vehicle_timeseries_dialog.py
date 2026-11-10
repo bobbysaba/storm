@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from core.observation import Observation
+from core.vehicle_history import VehicleHistory
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ _VEHICLE_PALETTE = [
 ]
 
 _GAP_S = 30  # NaN gap-break threshold (seconds)
+_REDRAW_INTERVAL_MS = 1000  # live updates redraw at most this often
 
 
 def _force_bg(widget):
@@ -79,12 +81,56 @@ def _force_bg(widget):
     widget.setAutoFillBackground(True)
 
 
-def _build_arrays(obs_list: list) -> tuple:
+class _HistoryIndex:
+    """Plot-array index -> Observation, built on demand from a VehicleHistory."""
+
+    def __init__(self, history: VehicleHistory, plot_to_row: np.ndarray):
+        self._history = history
+        self._plot_to_row = plot_to_row  # -1 for gap-break rows
+
+    def __contains__(self, idx: int) -> bool:
+        return 0 <= idx < len(self._plot_to_row) and self._plot_to_row[idx] >= 0
+
+    def __getitem__(self, idx: int) -> Observation:
+        if idx not in self:
+            raise KeyError(idx)
+        return self._history.observation(int(self._plot_to_row[idx]))
+
+
+def _build_history_arrays(history: VehicleHistory) -> tuple:
+    """Vectorised _build_arrays for the compact column store."""
+    from datetime import datetime, timezone
+
+    t = history.times.copy()
+    cols = [
+        history.column("temperature_c") * 9/5 + 32,
+        history.column("dewpoint_c") * 9/5 + 32,
+        history.column("wind_speed_ms") * 1.94384,
+        history.column("wind_dir_deg"),
+        history.column("pressure_mb"),
+    ]
+    rows = np.arange(len(t))
+    gaps = np.nonzero(np.diff(t) > _GAP_S)[0] + 1
+    if len(gaps):
+        t = np.insert(t, gaps, t[gaps - 1] + 1)
+        cols = [np.insert(c.astype(np.float64), gaps, np.nan) for c in cols]
+        rows = np.insert(rows, gaps, -1)
+    times = np.array(
+        [datetime.fromtimestamp(v, timezone.utc) for v in t.tolist()], dtype=object
+    )
+    return (times, *(np.asarray(c, dtype=np.float64) for c in cols),
+            _HistoryIndex(history, rows))
+
+
+def _build_arrays(obs_list) -> tuple:
     """Convert an observation list to numpy arrays with NaN gap-breaks.
 
     Returns (times, temp_f, dewp_f, wspd_kt, wdir_deg, pres_mb, idx_to_obs).
     idx_to_obs maps plot-array index → original Observation (NaN rows omitted).
     """
+    if isinstance(obs_list, VehicleHistory):
+        return _build_history_arrays(obs_list)
+
     from datetime import timedelta
 
     times_l, temp_l, dewp_l, wspd_l, wdir_l, pres_l = [], [], [], [], [], []
@@ -152,6 +198,12 @@ class VehicleTimeseriesDialog(QDialog):
         self._zoom_start = None
         self._zoom_rect_patches: list = []
 
+        # live updates mark the plot dirty; this timer coalesces them into one redraw
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(_REDRAW_INTERVAL_MS)
+        self._redraw_timer.timeout.connect(self._draw)
+
         self._build_ui()
 
 
@@ -171,13 +223,13 @@ class VehicleTimeseriesDialog(QDialog):
         self.raise_()
 
     def update_vehicle(self, vehicle_id: str, observations: list[Observation]):
-        """Update one vehicle's data; redraws only if that vehicle is enabled."""
+        """Update one vehicle's data; schedules a redraw if that vehicle is enabled."""
         self._vehicles[vehicle_id] = observations
         if vehicle_id not in self._vehicle_colors:
             self._assign_colors()
             self._rebuild_toggle_row()
-        if vehicle_id in self._enabled_vehicles:
-            self._draw()
+        if vehicle_id in self._enabled_vehicles and not self._redraw_timer.isActive():
+            self._redraw_timer.start()
 
 
     def _build_ui(self):

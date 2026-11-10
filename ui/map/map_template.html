@@ -419,6 +419,7 @@
     window.stormRemoveStormCone = _stormNoop;
     window.stormAddStationPlot = _stormNoop;
     window.stormRemoveStationPlot = _stormNoop;
+    window.stormMoveStationPlot = _stormNoop;
     window.stormSetStationPlotsVisible = _stormNoop;
     window.stormAddSurfaceStationPlot = _stormNoop;
     window.stormAddSurfaceStationPlotBatch = _stormNoop;
@@ -444,6 +445,8 @@
     window.stormSetSpcMdsGeoJSON = _stormNoop;
     window.stormSetSpcMdsVisible = _stormNoop;
     window.stormSetSatelliteFrame = _stormNoop;
+    window.stormSetRadarGL = _stormNoop;
+    window.stormHideRadarGL = _stormNoop;
     window.stormSetSatelliteTime = _stormNoop;
     window.stormSetSatelliteVisible = _stormNoop;
     window.stormSetSatelliteMode = _stormNoop;
@@ -462,7 +465,6 @@
     window.stormSetRoutePickMode = _stormNoop;
     window.stormSetPrivatePinOwnLocation = _stormNoop;
     // cwa overlay hooks (populated when the map loads)
-    window.stormSetCwaGeoJSON = _stormNoop;
     window.stormSetCwaVisible = _stormNoop;
     window.stormSetDestinationMarker = _stormNoop;
     window._radarStationsVisible = false;
@@ -1504,7 +1506,9 @@
         }
       });
 
+      // boundaries are fetched by URL the first time the layer is shown
       map.addSource('cwa', {type:'geojson', data:{type:'FeatureCollection',features:[]}});
+      window._cwaDataRequested = false;
       map.addLayer({
         id: 'cwa-fill',
         type: 'fill',
@@ -1536,11 +1540,6 @@
         paint: { 'text-color': '#E8EDF5', 'text-halo-color': '#0A0A0F', 'text-halo-width': 2 }
       });
 
-      // restore any CWA data queued before the map was ready (but do NOT auto-show)
-      if (window._cwaData) { 
-        try { map.getSource('cwa').setData(JSON.parse(window._cwaData)); } catch(e) {} 
-        window._cwaData = null; 
-      }
       // explicitly keep CWA hidden on initial load
       window.stormSetCwaVisible(false);
 
@@ -1570,14 +1569,14 @@
         });
       });
 
-      // js bridge functions for CWA data
-      window.stormSetCwaGeoJSON = function(geojsonStr) {
-        var src = map.getSource('cwa');
-        if (!src) { window._cwaData = geojsonStr; return; }
-        try { src.setData(JSON.parse(geojsonStr)); } catch(e) { console.warn('CWA setData failed', e); }
-      };
+      // js bridge function for the CWA layer
       window.stormSetCwaVisible = function(visible) {
         var v = visible ? 'visible' : 'none';
+        var src = map.getSource('cwa');
+        if (visible && src && !window._cwaDataRequested) {
+          window._cwaDataRequested = true;
+          src.setData('storm://app/static/cwa_boundaries.geojson');
+        }
         ['cwa-fill','cwa-line','cwa-label'].forEach(function(lid) { if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', v); });
         if (!visible) { var tip = document.getElementById('hazard-tooltip'); if (tip) tip.style.display = 'none'; }
       };
@@ -3380,6 +3379,11 @@
       window._stormStationPlots[id] = marker;
     };
 
+    window.stormMoveStationPlot = function(id, lat, lon) {
+      const marker = window._stormStationPlots[id];
+      if (marker) marker.setLngLat([lon, lat]);
+    };
+
     window.stormRemoveStationPlot = function(id) {
       if (window._stormStationPlots[id]) {
         window._stormStationPlots[id].remove();
@@ -3759,24 +3763,219 @@
       }
     };
 
-    window.stormSetSatelliteFrame = function(b64, west, south, east, north) {
+    window.stormSetSatelliteFrame = function(url, west, south, east, north) {
       // mapLibre image source coordinates: NW, NE, SE, SW corners
       var coords = [[west, north], [east, north], [east, south], [west, south]];
-      var dataUrl = 'data:image/png;base64,' + b64;
       try {
-        if (dataUrl === _satLastUrl) return;
-        _satLastUrl = dataUrl;
-        var img = new Image();
-        img.onload = function() {
-          _updateSatSource(dataUrl, coords);
-        };
-        img.onerror = function() {
-          _updateSatSource(dataUrl, coords);
-        };
-        img.src = dataUrl;
+        if (url === _satLastUrl) return;
+        _satLastUrl = url;
+        _updateSatSource(url, coords);
       } catch(e) {
         console.error('[STORM] satellite frame inject error:', e.message || e);
       }
+    };
+
+    // ── GPU radar (PERFORMANCE_PLAN.md step 4, prototype) ──────────────────────
+    // draws a scan from raw gate codes: per pixel, mercator -> lon/lat -> range and
+    // azimuth from the radar -> gate -> colour table.  Mirrors radar_overlay's PNG path.
+    var RADAR_GL_LYR = 'radar-gl';
+    var _radarGL = { meta: null, textures: null, pending: 0, visible: false };
+
+    var _RADAR_GL_VS = [
+      'attribute vec2 a_merc;',
+      'attribute vec2 a_off;',            // (dlon, dy) from the radar in mercator radians
+      'uniform mat4 u_matrix;',
+      'varying vec2 v_off;',
+      'void main() { v_off = a_off; gl_Position = u_matrix * vec4(a_merc, 0.0, 1.0); }'
+    ].join('\n');
+
+    // float32 cannot hold absolute lat/lon finely enough for 250 m gates at 460 km,
+    // so everything is worked from small offsets: dlat comes from the mercator offset
+    // through the tanh addition formula, without subtracting two large numbers.
+    var _RADAR_GL_FS = [
+      'precision highp float;',
+      'varying vec2 v_off;',
+      'uniform sampler2D u_data; uniform sampler2D u_az; uniform sampler2D u_lut;',
+      'uniform vec3 u_radar;',            // radar lat (radians), tanh(radar mercator y / 2), unused
+      'uniform vec4 u_gates;',            // first gate m, gate width m, far edge m, n gates
+      'uniform vec3 u_dims;',             // n azimuths, az texture w, az texture h
+      'uniform float u_opacity;',
+      'const float R = 6371000.0;',
+      'float tanh_small(float x) {',      // |x| < 0.1 here; series error < 1e-12
+      '  float x2 = x * x;',
+      '  return x * (1.0 - x2 * (1.0 / 3.0 - x2 * (2.0 / 15.0 - x2 * (17.0 / 315.0))));',
+      '}',
+      'void main() {',
+      '  float dlam = v_off.x;',
+      '  float t = tanh_small(0.5 * v_off.y);',
+      '  float tr = u_radar.y;',
+      '  float T = (tr + t) / (1.0 + tr * t);',
+      '  float dphi = 2.0 * atan(t * (1.0 - tr * tr) / ((1.0 + tr * t) * (1.0 + T * tr)));',
+      '  float lat1 = u_radar.x;',
+      '  float lat = lat1 + dphi;',
+      '  float sp = sin(0.5 * dphi); float sl = sin(0.5 * dlam);',
+      '  float a = clamp(sp * sp + cos(lat1) * cos(lat) * sl * sl, 0.0, 1.0);',
+      '  float range = 2.0 * R * asin(sqrt(a));',
+      // cos(lat1)sin(lat) - sin(lat1)cos(lat)cos(dlam), rewritten without cancellation
+      '  float ax = sin(dphi) + 2.0 * sin(lat1) * cos(lat) * sl * sl;',
+      '  float az = mod(degrees(atan(sin(dlam) * cos(lat), ax)) + 360.0, 360.0);',
+      // same 10 m range bins and 0.01 degree azimuth bins as the CPU lookup tables
+      '  float center = (floor(range / 10.0) + 0.5) * 10.0;',
+      '  float gate = floor((center - u_gates.x) / u_gates.y + 0.5);',
+      '  float nearEdge = max(0.0, u_gates.x - 0.5 * u_gates.y);',
+      '  if (center > u_gates.z || center < nearEdge || gate < 0.0 || gate >= u_gates.w) discard;',
+      '  float bin = mod(floor(az * 100.0), 36000.0);',
+      '  float bx = mod(bin, u_dims.y); float by = floor(bin / u_dims.y);',
+      '  vec4 azt = texture2D(u_az, vec2((bx + 0.5) / u_dims.y, (by + 0.5) / u_dims.z));',
+      '  if (azt.b < 0.5) discard;',
+      '  float row = floor(azt.r * 255.0 + 0.5) + 256.0 * floor(azt.g * 255.0 + 0.5);',
+      '  float code = floor(texture2D(u_data, vec2((gate + 0.5) / u_gates.w, (row + 0.5) / u_dims.x)).r * 255.0 + 0.5);',
+      '  vec4 c = texture2D(u_lut, vec2((code + 0.5) / 256.0, 0.5));',
+      '  float alpha = c.a * u_opacity;',
+      '  if (alpha <= 0.0) discard;',
+      '  gl_FragColor = vec4(c.rgb * alpha, alpha);',   // premultiplied, as MapLibre blends
+      '}'
+    ].join('\n');
+
+    // (dlon, dy) offsets from the radar for a mercator corner, in double precision
+    function _radarGLOffset(m, meta) {
+      var r = maplibregl.MercatorCoordinate.fromLngLat([meta.radarLon, meta.radarLat]);
+      return [2 * Math.PI * (m.x - r.x), -2 * Math.PI * (m.y - r.y)];
+    }
+
+    function _radarGLUniformRadar(meta) {
+      var lat = meta.radarLat * Math.PI / 180;
+      var yr = Math.log(Math.tan(Math.PI / 4 + lat / 2));
+      return [lat, Math.tanh(yr / 2), 0];
+    }
+
+    function _radarGLCompile(gl, type, src) {
+      var sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        throw new Error('radar GL shader: ' + gl.getShaderInfoLog(sh));
+      }
+      return sh;
+    }
+
+    function _radarGLTexture(gl, img, format) {
+      var tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      // the textures are data, not pictures: no premultiply, no colour management
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, format, format, gl.UNSIGNED_BYTE, img);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+
+    var _radarGLLayer = {
+      id: RADAR_GL_LYR,
+      type: 'custom',
+      renderingMode: '2d',
+      onAdd: function(m, gl) {
+        this.gl = gl;
+        var prog = gl.createProgram();
+        gl.attachShader(prog, _radarGLCompile(gl, gl.VERTEX_SHADER, _RADAR_GL_VS));
+        gl.attachShader(prog, _radarGLCompile(gl, gl.FRAGMENT_SHADER, _RADAR_GL_FS));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+          throw new Error('radar GL link: ' + gl.getProgramInfoLog(prog));
+        }
+        this.prog = prog;
+        this.buf = gl.createBuffer();
+        this.loc = {
+          merc: gl.getAttribLocation(prog, 'a_merc'),
+          off: gl.getAttribLocation(prog, 'a_off'),
+          matrix: gl.getUniformLocation(prog, 'u_matrix'),
+          data: gl.getUniformLocation(prog, 'u_data'),
+          az: gl.getUniformLocation(prog, 'u_az'),
+          lut: gl.getUniformLocation(prog, 'u_lut'),
+          radar: gl.getUniformLocation(prog, 'u_radar'),
+          gates: gl.getUniformLocation(prog, 'u_gates'),
+          dims: gl.getUniformLocation(prog, 'u_dims'),
+          opacity: gl.getUniformLocation(prog, 'u_opacity')
+        };
+      },
+      render: function(gl, matrix) {
+        var meta = _radarGL.meta, t = _radarGL.textures;
+        if (!_radarGL.visible || !meta || !t) return;
+        var b = meta.bounds;
+        var nw = maplibregl.MercatorCoordinate.fromLngLat([b[0], b[3]]);
+        var se = maplibregl.MercatorCoordinate.fromLngLat([b[2], b[1]]);
+        gl.useProgram(this.prog);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+        var ne = {x: se.x, y: nw.y}, sw = {x: nw.x, y: se.y};
+        var verts = [];
+        [nw, ne, sw, se].forEach(function(m) {
+          var o = _radarGLOffset(m, meta);
+          verts.push(m.x, m.y, o[0], o[1]);
+        });
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+        gl.enableVertexAttribArray(this.loc.merc);
+        gl.vertexAttribPointer(this.loc.merc, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(this.loc.off);
+        gl.vertexAttribPointer(this.loc.off, 2, gl.FLOAT, false, 16, 8);
+        gl.uniformMatrix4fv(this.loc.matrix, false, matrix);
+        var units = [t.data, t.az, t.lut];
+        for (var i = 0; i < 3; i++) {
+          gl.activeTexture(gl.TEXTURE0 + i);
+          gl.bindTexture(gl.TEXTURE_2D, units[i]);
+        }
+        gl.uniform1i(this.loc.data, 0);
+        gl.uniform1i(this.loc.az, 1);
+        gl.uniform1i(this.loc.lut, 2);
+        gl.uniform3fv(this.loc.radar, _radarGLUniformRadar(meta));
+        gl.uniform4f(this.loc.gates, meta.firstGateM, meta.gateWidthM, meta.farEdgeM, meta.nGates);
+        gl.uniform3f(this.loc.dims, meta.nAz, meta.azTexW, meta.azTexH);
+        gl.uniform1f(this.loc.opacity, 0.75);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    };
+
+    window.stormSetRadarGL = function(meta, token) {
+      // same slot as the PNG radar layer; onAdd runs inside addLayer and keeps the context
+      if (!map.getLayer(RADAR_GL_LYR)) {
+        try { map.addLayer(_radarGLLayer, 'road-unpaved'); }
+        catch(e) { map.addLayer(_radarGLLayer); }
+      }
+      var gl = _radarGLLayer.gl;
+      var names = ['data', 'az', 'lut'];
+      var imgs = {}, left = names.length, req = ++_radarGL.pending;
+      names.forEach(function(name) {
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function() {
+          imgs[name] = img;
+          if (--left > 0 || req !== _radarGL.pending) return;   // a newer scan won
+          var old = _radarGL.textures;
+          _radarGL.textures = {
+            data: _radarGLTexture(gl, imgs.data, gl.LUMINANCE),
+            az: _radarGLTexture(gl, imgs.az, gl.RGBA),
+            lut: _radarGLTexture(gl, imgs.lut, gl.RGBA)
+          };
+          if (old) { gl.deleteTexture(old.data); gl.deleteTexture(old.az); gl.deleteTexture(old.lut); }
+          _radarGL.meta = meta;
+          _radarGL.visible = true;
+          map.triggerRepaint();
+        };
+        img.onerror = function() { console.error('[STORM] radar GL texture failed:', name); };
+        img.src = 'storm://app/radar/gl/' + name + '.png?t=' + token;
+      });
+    };
+
+    window.stormHideRadarGL = function() {
+      _radarGL.pending++;
+      _radarGL.visible = false;
+      map.triggerRepaint();
     };
 
     window.stormSetSatelliteVisible = function(visible) {

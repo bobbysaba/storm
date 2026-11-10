@@ -3,21 +3,26 @@ import io
 import base64
 import logging
 import math
+import threading
+from collections import OrderedDict
 from time import perf_counter
 import numpy as np
 from typing import Optional
 
+from functools import lru_cache
 from PyQt6.QtCore import QObject
-import matplotlib
-matplotlib.use("Agg")   # non-interactive backend — no display needed
-import matplotlib.cm as mcm
-import matplotlib.colors as mcolors
-import matplotlib.image as mimg
-from scipy.ndimage import map_coordinates
 
 from core.radar_scan import RadarScan
 
 log = logging.getLogger(__name__)
+
+
+# matplotlib costs ~0.4 s to import, so it loads on the first render, not at startup
+def _mpl_colors():
+    import matplotlib  # noqa: PLC0415
+    matplotlib.use("Agg")   # non-interactive backend — no display needed
+    import matplotlib.colors as mcolors  # noqa: PLC0415
+    return mcolors
 
 # output grid resolution for polar→Cartesian reprojection.
 RENDER_GRID_SIZE = 768
@@ -40,6 +45,18 @@ def set_render_grid_size(n: int) -> None:
 
     # log it
     log.info("RENDER_GRID_SIZE set to %d", RENDER_GRID_SIZE)
+
+
+def apply_lite_mode() -> None:
+    """Cap the render grid for weak hardware. Call before MainWindow is created."""
+    # pylint: disable=global-statement
+    global RENDER_GRID_SIZE, MAX_RENDER_GRID_SIZE, ADAPTIVE_GRID_STEPS
+    import runtime_flags  # noqa: PLC0415
+
+    MAX_RENDER_GRID_SIZE = runtime_flags.LITE_RENDER_GRID_MAX
+    ADAPTIVE_GRID_STEPS = tuple(s for s in ADAPTIVE_GRID_STEPS if s <= MAX_RENDER_GRID_SIZE)
+    RENDER_GRID_SIZE = min(RENDER_GRID_SIZE, runtime_flags.LITE_RENDER_GRID_START)
+    log.info("lite mode: radar grid starts at %d, max %d", RENDER_GRID_SIZE, MAX_RENDER_GRID_SIZE)
 
 
 def set_adaptive_render_grid(enabled: bool) -> None:
@@ -86,7 +103,7 @@ def _make_nws_ref_cmap():
         (max(0.0, min(1.0, (value - vmin) / (vmax - vmin))), rgba)
         for value, rgba in stops
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_ref",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -123,7 +140,7 @@ def _make_nws_vel_cmap():
         for value, rgba in stops
     ]
 
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_vel",
         colors,
         N=1024
@@ -148,7 +165,7 @@ def _make_nws_cc_cmap():
         (0.99, (0.545, 0.118, 0.302, 1.00)),  # dark magenta
         (1.00, (1.000, 0.706, 0.843, 1.00)),  # pink
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_cc",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -167,7 +184,7 @@ def _make_nws_zdr_cmap():
         (0.75, (1.00, 0.50, 0.00, 1.00)),   # orange
         (1.00, (1.00, 0.00, 0.00, 1.00)),   # red (high positive ZDR)
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_zdr",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -186,7 +203,7 @@ def _make_nws_sw_cmap():
         (0.85, (1.00, 1.00, 0.00, 1.00)),   # yellow
         (1.00, (1.00, 0.00, 0.00, 1.00)),   # red
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_sw",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -203,7 +220,7 @@ def _make_nws_phi_cmap():
         (0.75, (1.00, 0.90, 0.00, 1.00)),
         (1.00, (1.00, 0.20, 0.00, 1.00)),
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_phi",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -228,7 +245,7 @@ def _make_nws_kdp_cmap():
         (0.83, (1.000, 1.000, 1.000, 1.00)),  #  7.5: white
         (1.00, (0.663, 0.663, 0.663, 1.00)),  # 10.0: gray
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_kdp",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -245,7 +262,7 @@ def _make_nws_cfp_cmap():
         (0.75, (0.82, 0.82, 0.86, 0.95)),
         (1.00, (1.00, 1.00, 1.00, 1.00)),
     ]
-    cmap = mcolors.LinearSegmentedColormap.from_list(
+    cmap = _mpl_colors().LinearSegmentedColormap.from_list(
         "nws_cfp",
         [(pos, rgba) for pos, rgba in colors]
     )
@@ -253,32 +270,37 @@ def _make_nws_cfp_cmap():
     return cmap
 
 
-NWS_REF_CMAP = _make_nws_ref_cmap()
-NWS_VEL_CMAP = _make_nws_vel_cmap()
-NWS_CC_CMAP  = _make_nws_cc_cmap()
-NWS_ZDR_CMAP = _make_nws_zdr_cmap()
-NWS_SW_CMAP  = _make_nws_sw_cmap()
-NWS_PHI_CMAP = _make_nws_phi_cmap()
-NWS_KDP_CMAP = _make_nws_kdp_cmap()
-NWS_CFP_CMAP = _make_nws_cfp_cmap()
+# built on first use (see _mpl_colors)
+@lru_cache(maxsize=1)
+def _colormaps() -> dict:
+    return {
+        "nws_ref": _make_nws_ref_cmap(),
+        "nws_vel": _make_nws_vel_cmap(),
+        "nws_cc":  _make_nws_cc_cmap(),
+        "nws_zdr": _make_nws_zdr_cmap(),
+        "nws_sw":  _make_nws_sw_cmap(),
+        "nws_phi": _make_nws_phi_cmap(),
+        "nws_kdp": _make_nws_kdp_cmap(),
+        "nws_cfp": _make_nws_cfp_cmap(),
+    }
 
-COLORMAPS = {
-    "nws_ref": NWS_REF_CMAP,
-    "nws_vel": NWS_VEL_CMAP,
-    "nws_cc":  NWS_CC_CMAP,
-    "nws_zdr": NWS_ZDR_CMAP,
-    "nws_sw":  NWS_SW_CMAP,
-    "nws_phi": NWS_PHI_CMAP,
-    "nws_kdp": NWS_KDP_CMAP,
-    "nws_cfp": NWS_CFP_CMAP,
-}
-
-
-# two corrections live here:
 
 _MERC_R = 6378137.0
 _MERC_LAT_LIMIT = 85.05112878
-_R_SPHERE_M = 6371000.0
+
+# azimuth resolution of the cached pixel index (0.01 degree bins)
+_AZ_BINS = 36000
+# range resolution of the cached pixel index; uint16 bins reach 655 km
+_RANGE_BIN_M = 10.0
+_RANGE_BINS = 65536
+_PIXEL_INDEX_CACHE_MAX = 4
+_LUT_CACHE_MAX = 32
+# rendered frames kept for loop playback / scrubbing
+_PNG_CACHE_MAX_BYTES = 32 * 1024 * 1024
+# reflectivity below this is not drawn (~8 dBZ matches RadarScope)
+_MIN_REF_DBZ = 8.0
+# products drawn only where the reflectivity scan shows precipitation
+_REF_MASKED_COLORMAPS = ("nws_vel", "nws_cc", "nws_kdp")
 
 
 def _lonlat_to_merc(lon, lat):
@@ -294,125 +316,273 @@ def _merc_to_lonlat(x, y):
     return lon, lat
 
 
-def _haversine_inverse_polar(
-    radar_lat: float,
-    radar_lon: float,
-    lat_grid: np.ndarray,
-    lon_grid: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Spherical inverse: from (radar_lat, radar_lon) to each grid cell,
-    return (range_m, azimuth_deg) where azimuth is degrees clockwise from
-    true north (NEXRAD convention)."""
-    phi1 = math.radians(radar_lat)
-    lam1 = math.radians(radar_lon)
-    phi2 = np.deg2rad(lat_grid)
-    lam2 = np.deg2rad(lon_grid)
-    dphi = phi2 - phi1
-    dlam = lam2 - lam1
+class _PixelIndex:
+    """Where each output pixel falls in polar space around one radar.
 
-    a = np.sin(dphi / 2.0) ** 2 + math.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2.0) ** 2
-    range_m = 2.0 * _R_SPHERE_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-
-    y = np.sin(dlam) * np.cos(phi2)
-    x = math.cos(phi1) * np.sin(phi2) - math.sin(phi1) * np.cos(phi2) * np.cos(dlam)
-    az_deg = (np.rad2deg(np.arctan2(y, x))) % 360.0
-    return range_m, az_deg
-
-
-
-def _sample_scan_to_grid(
-    sample_scan: RadarScan,
-    lat_grid: np.ndarray,
-    lon_grid: np.ndarray,
-) -> np.ndarray:
-    """Sample a scan onto an arbitrary lat/lon grid using nearest-neighbor.
-
-    Polar lookup is spherical (haversine distance + true bearing) so it
-    matches the spherical forward formula in data/radar_decoder.py.  Gate
-    width and first-gate offset are recovered from the scan's own lat/lon
-    arrays so the index mapping is consistent with the gate-center
-    convention used by the decoder.
+    Depends only on the radar location, the scan's maximum range and the
+    output grid size, so it is shared by every frame (and every product with
+    the same reach) from a site.
     """
-    num_az, num_rng = sample_scan.data.shape
 
-    radar_lat = float(sample_scan.lats[:, 0].mean())
-    radar_lon = float(sample_scan.lons[:, 0].mean())
+    __slots__ = ("bounds", "az_bin", "range_bin")
 
-    range_m, az_deg = _haversine_inverse_polar(radar_lat, radar_lon, lat_grid, lon_grid)
+    def __init__(self, bounds, az_bin, range_bin):
+        self.bounds = bounds          # [west, south, east, north]
+        self.az_bin = az_bin          # uint16, flat (grid*grid)
+        self.range_bin = range_bin    # uint16, flat (grid*grid)
 
-    # recover gate-center spacing from the scan's own polar grid (spherical
-    gate_range_m, _ = _haversine_inverse_polar(
-        radar_lat, radar_lon, sample_scan.lats, sample_scan.lons
+
+_cache_lock = threading.Lock()
+_pixel_index_cache: "OrderedDict[tuple, _PixelIndex]" = OrderedDict()
+_lut_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_png_cache: "OrderedDict[tuple, tuple[bytes, list]]" = OrderedDict()
+_png_cache_bytes = 0
+
+
+def _far_edge_m(scan: RadarScan) -> float:
+    return scan.first_gate_m + (scan.raw.shape[1] - 0.5) * scan.gate_width_m
+
+
+def _footprint_merc(scan: RadarScan) -> tuple[float, float, float, float]:
+    """Web Mercator box (x_min, y_min, x_max, y_max) around the scan's far-edge circle."""
+    ring_lon, ring_lat = scan.gate_lonlat(np.arange(0.0, 360.0, 0.1), _far_edge_m(scan))
+    ring_x, ring_y = _lonlat_to_merc(ring_lon, ring_lat)
+    return float(ring_x.min()), float(ring_y.min()), float(ring_x.max()), float(ring_y.max())
+
+
+def footprint_bounds(scan: RadarScan) -> list:
+    """[west, south, east, north] of the scan's footprint, as the PNG path uses."""
+    x_min, y_min, x_max, y_max = _footprint_merc(scan)
+    lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
+    lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
+    return [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
+
+
+def _pixel_index(scan: RadarScan, grid_size: int) -> _PixelIndex:
+    """Return the (cached) pixel index for scan's footprint at grid_size.
+
+    The output grid is uniform in Web Mercator so MapLibre's image source
+    lines up with the basemap; its extent is the circle at the scan's far edge.
+    """
+    far_edge_m = _far_edge_m(scan)
+    key = (
+        scan.geodesy,
+        round(scan.radar_lat, 5),
+        round(scan.radar_lon, 5),
+        round(far_edge_m, 1),
+        int(grid_size),
     )
-    gate_centers_m = np.median(gate_range_m, axis=0)
-    first_gate_m   = float(gate_centers_m[0])
-    if num_rng > 1:
-        gate_width_m = float(np.median(np.diff(gate_centers_m)))
+    with _cache_lock:
+        index = _pixel_index_cache.get(key)
+        if index is not None:
+            _pixel_index_cache.move_to_end(key)
+            return index
+
+    x_min, y_min, x_max, y_max = _footprint_merc(scan)
+
+    out_x = np.linspace(x_min, x_max, grid_size)
+    out_y = np.linspace(y_max, y_min, grid_size)   # rows top→bottom
+    x_grid, y_grid = np.meshgrid(out_x, out_y)
+    lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
+
+    # polar lookup uses the scan's own earth model, so it is the exact
+    # inverse of where the decoder placed the gates
+    range_m, az_deg = scan.polar_from_lonlat(lon_grid, lat_grid)
+    az_bin = (az_deg.ravel() * (_AZ_BINS / 360.0)).astype(np.int32) % _AZ_BINS
+    range_bin = np.minimum(range_m.ravel() / _RANGE_BIN_M, _RANGE_BINS - 1)
+
+    lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
+    lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
+    index = _PixelIndex(
+        bounds=[float(lon_w), float(lat_s), float(lon_e), float(lat_n)],
+        az_bin=az_bin.astype(np.uint16),
+        range_bin=range_bin.astype(np.uint16),
+    )
+    with _cache_lock:
+        _pixel_index_cache[key] = index
+        while len(_pixel_index_cache) > _PIXEL_INDEX_CACHE_MAX:
+            _pixel_index_cache.popitem(last=False)
+    return index
+
+
+def _range_gate_table(scan: RadarScan) -> np.ndarray:
+    """Gate number for each range bin (int32, -1 outside the scan)."""
+    num_rng = scan.raw.shape[1]
+    centers_m = (np.arange(_RANGE_BINS) + 0.5) * _RANGE_BIN_M
+    gates = np.rint((centers_m - scan.first_gate_m) / scan.gate_width_m).astype(np.int32)
+    near_edge_m = max(0.0, scan.first_gate_m - 0.5 * scan.gate_width_m)
+    gates[(centers_m > _far_edge_m(scan)) | (centers_m < near_edge_m)] = -1
+    gates[gates >= num_rng] = -1
+    return gates
+
+
+def _az_row_table(azimuths_deg: np.ndarray) -> np.ndarray:
+    """Radial (row) number for each azimuth bin (int32, -1 where no radial).
+
+    Picks the radial whose center is nearest, so radials may start anywhere,
+    arrive in any order and be unevenly spaced.  Bins further than one radial
+    spacing from any radial (sector scans) are left empty.
+    """
+    az = np.asarray(azimuths_deg, dtype=np.float64) % 360.0
+    num_az = az.size
+    order = np.argsort(az, kind="stable")
+    az_sorted = az[order]
+    centers = (np.arange(_AZ_BINS) + 0.5) * (360.0 / _AZ_BINS)
+
+    pos = np.searchsorted(az_sorted, centers)
+    lo = (pos - 1) % num_az
+    hi = pos % num_az
+    d_lo = (centers - az_sorted[lo]) % 360.0
+    d_hi = (az_sorted[hi] - centers) % 360.0
+    use_hi = d_hi < d_lo
+    rows = np.where(use_hi, order[hi], order[lo]).astype(np.int32)
+
+    if num_az > 1:
+        gaps = np.diff(az_sorted, append=az_sorted[0] + 360.0)
+        spacing = float(np.median(gaps))
+        rows[np.where(use_hi, d_hi, d_lo) > spacing] = -1
+    return rows
+
+
+def _sample_scan(scan: RadarScan, index: _PixelIndex) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest-gate sample of scan.raw for every output pixel.
+
+    Returns (samples, invalid): flat arrays of length grid*grid.  Samples at
+    invalid pixels are meaningless.
+    """
+    gates = _range_gate_table(scan)[index.range_bin]
+    rows = _az_row_table(scan.azimuths_deg)[index.az_bin]
+    invalid = (rows < 0) | (gates < 0)
+    flat = rows * scan.raw.shape[1] + gates
+    flat[invalid] = 0
+    return scan.raw.reshape(-1)[flat], invalid
+
+
+def _sample_scan_values(scan: RadarScan, index: _PixelIndex) -> np.ndarray:
+    """Like _sample_scan but as physical float32 values, NaN where invalid."""
+    samples, invalid = _sample_scan(scan, index)
+    if scan.value_table is not None:
+        values = scan.value_table[samples]
     else:
-        gate_width_m = float(np.nanmax(gate_range_m) or 1.0)
-    if not np.isfinite(gate_width_m) or gate_width_m <= 0:
-        gate_width_m = float(np.nanmax(gate_range_m)) / max(num_rng, 1)
+        values = samples.astype(np.float32)
+    values[invalid] = np.nan
+    return values
 
-    az_idx  = ((az_deg - sample_scan.az_offset) % 360.0) * num_az / 360.0
-    rng_idx = (range_m - first_gate_m) / gate_width_m
 
-    far_edge_m = first_gate_m + (num_rng - 0.5) * gate_width_m
-    near_edge_m = max(0.0, first_gate_m - 0.5 * gate_width_m)
-    outside = (range_m > far_edge_m) | (range_m < near_edge_m)
+def _to_rgba(scan: RadarScan, values: np.ndarray) -> np.ndarray:
+    """Colormap physical values to uint8 RGBA; NaN becomes fully transparent."""
+    if scan.colormap == "nws_ref":
+        # NaN compares False, so missing gates stay NaN
+        values = np.where(values < _MIN_REF_DBZ, np.nan, values)
+    import matplotlib.cm as mcm  # noqa: PLC0415
+    cmaps = _colormaps()
+    cmap = cmaps.get(scan.colormap, cmaps["nws_ref"])
+    norm = _mpl_colors().Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
+    rgba = mcm.ScalarMappable(norm=norm, cmap=cmap).to_rgba(values, bytes=True)
+    rgba[np.isnan(values)] = 0
+    return rgba
 
-    sentinel = sample_scan.vmin - 999.0
-    data_filled = np.where(np.isnan(sample_scan.data), sentinel, sample_scan.data)
-    coords = np.array([az_idx.ravel(), rng_idx.ravel()])
-    sampled = map_coordinates(
-        data_filled, coords, order=0, prefilter=False, mode="constant", cval=sentinel
-    ).reshape(lat_grid.shape)
-    sampled[outside | (sampled <= sentinel + 1.0)] = np.nan
-    return sampled
+
+def _code_lut(scan: RadarScan) -> np.ndarray:
+    """256-entry RGBA table for a packed-code scan (cached)."""
+    key = (scan.colormap, scan.vmin, scan.vmax, scan.value_table.tobytes())
+    with _cache_lock:
+        lut = _lut_cache.get(key)
+        if lut is not None:
+            _lut_cache.move_to_end(key)
+            return lut
+    lut = _to_rgba(scan, scan.value_table)
+    with _cache_lock:
+        _lut_cache[key] = lut
+        while len(_lut_cache) > _LUT_CACHE_MAX:
+            _lut_cache.popitem(last=False)
+    return lut
+
+
+def _mask_applies(scan: RadarScan, mask_scan: RadarScan | None) -> bool:
+    """True if mask_scan should gate scan.  The pixel index stores absolute
+    range and azimuth, so it serves any scan from the same radar — a mask
+    from a different radar cannot be aligned and is ignored."""
+    return (
+        mask_scan is not None
+        and scan.colormap in _REF_MASKED_COLORMAPS
+        and abs(mask_scan.radar_lat - scan.radar_lat) < 1e-4
+        and abs(mask_scan.radar_lon - scan.radar_lon) < 1e-4
+    )
+
+
+def _png_cache_key(scan: RadarScan, grid_size: int, mask_scan: RadarScan | None) -> tuple:
+    masked = _mask_applies(scan, mask_scan)
+    return (scan.cache_key, int(grid_size), mask_scan.cache_key if masked else None)
+
+
+def cached_scan_png(
+    scan: RadarScan,
+    grid_size: int,
+    mask_scan: RadarScan | None = None,
+) -> tuple[bytes, list] | None:
+    """Return (png_bytes, bounds) if this frame was already rendered, else None."""
+    key = _png_cache_key(scan, grid_size, mask_scan)
+    with _cache_lock:
+        hit = _png_cache.get(key)
+        if hit is not None:
+            _png_cache.move_to_end(key)
+        return hit
+
+
+def _store_png(key: tuple, png_bytes: bytes, bounds: list) -> None:
+    # pylint: disable=global-statement
+    global _png_cache_bytes
+    with _cache_lock:
+        old = _png_cache.pop(key, None)
+        if old is not None:
+            _png_cache_bytes -= len(old[0])
+        _png_cache[key] = (png_bytes, bounds)
+        _png_cache_bytes += len(png_bytes)
+        while _png_cache_bytes > _PNG_CACHE_MAX_BYTES and len(_png_cache) > 1:
+            _, (evicted, _) = _png_cache.popitem(last=False)
+            _png_cache_bytes -= len(evicted)
 
 
 def render_scan_to_png(
     scan: RadarScan,
     grid_size: int,
     mask_scan: RadarScan | None = None,
-) -> tuple[bytes, list, float]:
+) -> tuple[bytes, list, float | None]:
     """
-    Convert a RadarScan to a PNG.  Fully thread-safe — takes all inputs
-    as parameters and creates its own ScalarMappable; never touches shared state.
+    Convert a RadarScan to a PNG.  Thread-safe.
+
+    Frames are cached, so replaying a loop or scrubbing back to a scan that
+    was already drawn costs nothing.
 
     Returns:
         (png_bytes, [west, south, east, north], elapsed_ms)
+        elapsed_ms is None when the frame came from the cache.
     """
-    IMG = grid_size
+    cache_key = _png_cache_key(scan, grid_size, mask_scan)
+    hit = cached_scan_png(scan, grid_size, mask_scan)
+    if hit is not None:
+        return hit[0], hit[1], None
+
     t0 = perf_counter()
+    index = _pixel_index(scan, grid_size)
 
-    # build the output PNG grid uniform in Web Mercator so MapLibre's image
-    all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
-    x_min = float(np.nanmin(all_x))
-    x_max = float(np.nanmax(all_x))
-    y_min = float(np.nanmin(all_y))
-    y_max = float(np.nanmax(all_y))
+    samples, invalid = _sample_scan(scan, index)
+    if scan.value_table is not None:
+        rgba = _code_lut(scan)[samples]
+    else:
+        rgba = _to_rgba(scan, samples.astype(np.float32))
+    rgba[invalid] = 0
 
-    out_x = np.linspace(x_min, x_max, IMG)
-    out_y = np.linspace(y_max, y_min, IMG)   # rows top→bottom
-    x_grid, y_grid = np.meshgrid(out_x, out_y)
-    lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
+    if _mask_applies(scan, mask_scan):
+        ref = _sample_scan_values(mask_scan, index)
+        # NaN compares False against the threshold, hence the explicit isnan
+        rgba[np.isnan(ref) | (ref < _MIN_REF_DBZ)] = 0
 
-    data_out = _sample_scan_to_grid(scan, lat_grid, lon_grid)
-    if scan.colormap == "nws_ref":
-        data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
-    elif scan.colormap in ("nws_vel", "nws_cc", "nws_kdp") and mask_scan is not None:
-        ref_out = _sample_scan_to_grid(mask_scan, lat_grid, lon_grid)
-        data_out[np.isnan(ref_out) | (ref_out < 8.0)] = np.nan
-
-    cmap   = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
-    norm   = mcolors.Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
-    mapper = mcm.ScalarMappable(norm=norm, cmap=cmap)
-
-    rgba = mapper.to_rgba(data_out, bytes=True)
-    rgba[np.isnan(data_out), 3] = 0
-
+    _mpl_colors()   # makes sure the Agg backend is selected
+    import matplotlib.image as mimg  # noqa: PLC0415
     buf = io.BytesIO()
-    mimg.imsave(buf, rgba, format="png")
+    mimg.imsave(buf, rgba.reshape(grid_size, grid_size, 4), format="png")
     png_bytes = buf.getvalue()
 
     elapsed_ms = (perf_counter() - t0) * 1000.0
@@ -420,13 +590,11 @@ def render_scan_to_png(
         "render_scan_to_png: %.0f KB PNG in %.1f ms (grid=%d)",
         len(png_bytes) / 1024,
         elapsed_ms,
-        IMG,
+        grid_size,
     )
 
-    lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
-    lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
-    bounds = [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
-    return png_bytes, bounds, elapsed_ms
+    _store_png(cache_key, png_bytes, index.bounds)
+    return png_bytes, index.bounds, elapsed_ms
 
 
 
@@ -435,8 +603,8 @@ class RadarOverlay(QObject):
     Manages the radar image overlay on the MapLibre map.
 
     Works by:
-    1. Converting RadarScan data → RGBA PNG via matplotlib
-    2. Encoding PNG as base64
+    1. Converting RadarScan data → RGBA PNG (render_scan_to_png)
+    2. Handing the PNG to the storm:// scheme handler (base64 fallback)
     3. Injecting into MapLibre as an image source with known lat/lon bounds
     4. Adding a raster layer that displays the image
 
@@ -454,24 +622,32 @@ class RadarOverlay(QObject):
         self._current_scan: Optional[RadarScan] = None
         self._grid_size = int(RENDER_GRID_SIZE)
         self._adaptive_grid = ADAPTIVE_RENDER_GRID
+        self._gl_active = False
         self._fast_render_streak = 0
         self._slow_render_streak = 0
-        # cache ScalarMappable objects keyed by (colormap, vmin, vmax)
-        _MAPPER_CACHE_MAX = 32
-        self._mapper_cache_max = _MAPPER_CACHE_MAX
-        self._mapper_cache: dict[tuple, mcm.ScalarMappable] = {}
 
     def update(self, scan: RadarScan, mask_scan: RadarScan | None = None):
         """render and display a new radar scan (synchronous, for loop playback)."""
         self._current_scan = scan
 
+        from ui.map import radar_gl  # noqa: PLC0415
+        if radar_gl.enabled() and radar_gl.supports(scan, mask_scan):
+            try:
+                self.inject_gl(radar_gl.build_payload(scan))
+                return
+            except Exception as e:
+                log.error("[RadarOverlay] GPU payload failed, using PNG: %s", e, exc_info=True)
+
         try:
-            png_bytes, bounds = self._render_to_png(scan, mask_scan=mask_scan)
+            png_bytes, bounds, elapsed_ms = render_scan_to_png(
+                scan, self._grid_size, mask_scan=mask_scan
+            )
         except Exception as e:
             log.error("[RadarOverlay] render failed: %s", e, exc_info=True)
             return
 
         self.inject(png_bytes, bounds)
+        self._maybe_adjust_grid(elapsed_ms)
         log.info("[RadarOverlay] updated with %s (grid=%d)", scan.label, self._grid_size)
 
     def clear(self):
@@ -487,6 +663,7 @@ class RadarOverlay(QObject):
         """
         self._hidden = True
         self._current_scan = None
+        self._hide_gl()
 
         # always force opacity 0 and inject a 1x1 PNG to clear the GPU pipeline
         js = f"""
@@ -537,86 +714,46 @@ class RadarOverlay(QObject):
             image_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
         
         restoring = self._hidden
+        self._hide_gl()
         self._inject_into_map(image_url, bounds, restore_opacity=restoring)
         self._hidden = False
         self._active = True
 
 
-    def _render_to_png(
-        self,
-        scan: RadarScan,
-        mask_scan: RadarScan | None = None,
-    ) -> tuple[bytes, list]:
-        """
-        Convert scan data to a PNG using proper polar→Cartesian reprojection.
-
-        Returns:
-            (png_bytes, [west, south, east, north])
-        """
-        IMG = self._grid_size   # adaptive configurable — lower = faster render
-        t0 = perf_counter()
-
-        log.debug(
-            "rendering %s — grid=%dx%d, colormap=%s, vmin=%.1f vmax=%.1f",
-            scan.label, IMG, IMG, scan.colormap, scan.vmin, scan.vmax
+    def inject_gl(self, payload: dict):
+        """Draw a scan with the WebGL layer (see radar_gl).  The PNG layer is faded out."""
+        import json
+        import time
+        scheme_handler = getattr(self._map, "scheme_handler", None)
+        if scheme_handler is None:
+            raise RuntimeError("GPU radar needs the storm:// scheme handler")
+        scheme_handler.set_radar_gl({
+            "data": payload["data_png"],
+            "az": payload["az_png"],
+            "lut": payload["lut_png"],
+        })
+        token = int(time.monotonic() * 1000) & 0xFFFFFF
+        self._map.run_js(
+            f"""
+            window._stormRadarSuspend = false;
+            if (typeof map !== 'undefined' && map.getLayer("{self.LAYER_ID}")) {{
+                map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0);
+            }}
+            if (window.stormSetRadarGL) window.stormSetRadarGL({json.dumps(payload["meta"])}, {token});
+            """
         )
+        self._gl_active = True
+        self._hidden = False
+        self._active = True
 
-        # build the output grid uniform in Web Mercator (see render_scan_to_png
-        all_x, all_y = _lonlat_to_merc(scan.lons, scan.lats)
-        x_min = float(np.nanmin(all_x))
-        x_max = float(np.nanmax(all_x))
-        y_min = float(np.nanmin(all_y))
-        y_max = float(np.nanmax(all_y))
+    def _hide_gl(self):
+        if getattr(self, "_gl_active", False):
+            self._map.run_js("if (window.stormHideRadarGL) window.stormHideRadarGL();")
+            self._gl_active = False
 
-        out_x = np.linspace(x_min, x_max, IMG)
-        out_y = np.linspace(y_max, y_min, IMG)   # rows top→bottom
-        x_grid, y_grid = np.meshgrid(out_x, out_y)
-        lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
-
-        data_out = _sample_scan_to_grid(scan, lat_grid, lon_grid)
-        # for reflectivity only: mask sub-threshold pixels (~8 dBZ matches RadarScope)
-        if scan.colormap == "nws_ref":
-            data_out[~np.isnan(data_out) & (data_out < 8.0)] = np.nan
-        elif scan.colormap in ("nws_vel", "nws_cc", "nws_kdp") and mask_scan is not None:
-            ref_out = _sample_scan_to_grid(mask_scan, lat_grid, lon_grid)
-            data_out[np.isnan(ref_out) | (ref_out < 8.0)] = np.nan
-
-        # reuse cached ScalarMappable — recreating norm+cmap every frame is wasteful
-        cache_key = (scan.colormap, scan.vmin, scan.vmax)
-        if cache_key not in self._mapper_cache:
-            if len(self._mapper_cache) >= self._mapper_cache_max:
-                self._mapper_cache.pop(next(iter(self._mapper_cache)))
-            cmap = COLORMAPS.get(scan.colormap, NWS_REF_CMAP)
-            norm = mcolors.Normalize(vmin=scan.vmin, vmax=scan.vmax, clip=False)
-            self._mapper_cache[cache_key] = mcm.ScalarMappable(norm=norm, cmap=cmap)
-            log.debug("created new ScalarMappable for key %s", cache_key)
-        mapper = self._mapper_cache[cache_key]
-
-        rgba = mapper.to_rgba(data_out, bytes=True)   # (IMG, IMG, 4) uint8
-        rgba[np.isnan(data_out), 3] = 0               # transparent for no-data pixels
-
-        # encode as PNG
-        buf = io.BytesIO()
-        mimg.imsave(buf, rgba, format="png")
-        png_bytes = buf.getvalue()
-
-        elapsed_ms = (perf_counter() - t0) * 1000.0
-        self._maybe_adjust_grid(elapsed_ms)
-        log.debug(
-            "render complete: %.0f KB PNG in %.1f ms (grid=%d)",
-            len(png_bytes) / 1024,
-            elapsed_ms,
-            IMG,
-        )
-
-        # lat/lon corners corresponding to the mercator extent corners.
-        lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
-        lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
-        bounds = [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
-        return png_bytes, bounds
-
-    def _maybe_adjust_grid(self, elapsed_ms: float) -> None:
-        if not self._adaptive_grid:
+    def _maybe_adjust_grid(self, elapsed_ms: float | None) -> None:
+        # None means the frame came from the render cache — nothing to learn
+        if not self._adaptive_grid or elapsed_ms is None:
             return
 
         steps = ADAPTIVE_GRID_STEPS
@@ -630,6 +767,13 @@ class RadarOverlay(QObject):
         if elapsed_ms > ADAPTIVE_DOWN_MS:
             self._slow_render_streak += 1
             self._fast_render_streak = 0
+            # already at the smallest grid and still slow: this machine wants lite mode
+            if idx == 0 and self._slow_render_streak == ADAPTIVE_DOWN_SCANS:
+                log.warning(
+                    "[RadarOverlay] radar render still %.0f ms at the smallest grid; "
+                    "try starting STORM with --lite",
+                    elapsed_ms,
+                )
             if self._slow_render_streak >= ADAPTIVE_DOWN_SCANS and idx > 0:
                 self._grid_size = steps[idx - 1]
                 self._slow_render_streak = 0

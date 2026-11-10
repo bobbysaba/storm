@@ -12,7 +12,6 @@ import runtime_flags
 from dataclasses import replace
 from datetime import datetime, timezone
 from ui.launch.dialog import LaunchDialog
-from ui.map.radar_overlay import set_render_grid_size, set_adaptive_render_grid
 from data.ingest.truck_replay import load_truck_observations
 
 # try to import PyQt packages
@@ -149,6 +148,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-data-inputs", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--mqtt-no-tls", action=argparse.BooleanOptionalAction, default=None)
 
+    # performance options for weak hardware
+    parser.add_argument(
+        "--lite",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="lite mode: lower radar resolution, fewer surface plots, slower loops",
+    )
+    parser.add_argument(
+        "--gpu-radar",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="experimental: draw live reflectivity with WebGL instead of Python (off in safe/lite mode)",
+    )
+    parser.add_argument(
+        "--webengine-flags",
+        default=None,
+        metavar="FLAGS",
+        help=(
+            "extra Chromium flags for the map, e.g. \"--disable-gpu-compositing\" or "
+            "\"--renderer-process-limit=1\""
+        ),
+    )
+
     # return the parsed arguments
     return parser
 
@@ -174,23 +196,17 @@ def _register_storm_scheme() -> None:
 
 # function to configure qt webengine
 def _configure_qt_webengine_env() -> None:
-    # if the platform is windows, force software rendering
+    # if the platform is windows, runtime-safe forces software rendering
     if sys.platform == "win32":
-        runtime_safe = runtime_flags.FLAGS.runtime_safe
-        if runtime_safe:
+        if runtime_flags.FLAGS.runtime_safe:
             os.environ["QMLSCENE_DEVICE"] = "softwarecontext"
             os.environ["QT_QUICK_BACKEND"] = "software"
             os.environ["QT_OPENGL"] = "software"
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-gpu-compositing"
         else:
             os.environ.pop("QMLSCENE_DEVICE", None)
             os.environ.pop("QT_QUICK_BACKEND", None)
             os.environ.pop("QT_OPENGL", None)
-            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu --ignore-gpu-blocklist"
-    # otherwise, use mac/linux defaults
-    else:
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --in-process-gpu"
-
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = runtime_flags.chromium_flags()
 
 def _configure_qt_application_attributes() -> None:
     """Set Qt attributes that must be configured before QApplication exists."""
@@ -352,6 +368,9 @@ def main() -> None:
         disable_deploy_locs = args.disable_deploy_locs,
         disable_data_inputs = args.disable_data_inputs,
         mqtt_no_tls = args.mqtt_no_tls,
+        lite_mode = args.lite,
+        gpu_radar = args.gpu_radar,
+        webengine_flags = args.webengine_flags,
     )
 
     # finalize flags
@@ -375,13 +394,19 @@ def main() -> None:
     # set Qt application attributes required before QApplication exists
     _configure_qt_application_attributes()
 
+    # lite mode lowers the radar grid before any overlay is created
+    if runtime_flags.FLAGS.lite_mode:
+        from ui.map.radar_overlay import apply_lite_mode  # noqa: PLC0415
+        apply_lite_mode()
+
     # register storm:// URL scheme — must happen before QApplication
     if not runtime_flags.FLAGS.safe_map_mode:
         _register_storm_scheme()
 
     # set the render grid size for radar overlays
     if args.render_grid_size > 0:
-        # set the render grid size
+        # set the render grid size (radar_overlay loads matplotlib, so import it only here)
+        from ui.map.radar_overlay import set_render_grid_size  # noqa: PLC0415
         set_render_grid_size(args.render_grid_size)
 
     # create the application
@@ -436,6 +461,7 @@ def main() -> None:
     # apply radar render resolution from the launch dialog
     _dlg_res = dialog.radar_resolution()
     if _dlg_res > 0:
+        from ui.map.radar_overlay import set_render_grid_size, set_adaptive_render_grid  # noqa: PLC0415
         set_render_grid_size(_dlg_res)
         set_adaptive_render_grid(False)
 

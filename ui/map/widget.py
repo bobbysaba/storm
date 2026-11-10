@@ -45,8 +45,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     asos_bbox_selected    = pyqtSignal(float, float, float, float)  # west, south, east, north
     user_dragged          = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
-    cwa_loaded            = pyqtSignal()
-    _cwa_parsed           = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,7 +108,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         # queue for JS calls that arrive before MapLibre has fully loaded.
         self._map_ready = False
         self._js_queue: list[str] = []
-        self._cwa_parsed.connect(self._on_cwa_parsed)
         self.bridge.map_loaded.connect(self._on_map_loaded_from_js)
         self.loadFinished.connect(self._on_page_load_finished)
 
@@ -175,11 +172,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def remove_vehicle(self, vehicle_id: str):
         self.run_js(f"stormRemoveVehicle('{vehicle_id}');")
 
-    def set_satellite_frame(self, b64: str, west: float, south: float,
-                            east: float, north: float):
+    def set_satellite_frame(self, mode: str, frame_id: str, png: bytes,
+                            west: float, south: float, east: float, north: float):
+        """Hand the PNG to the scheme handler and point the map at its URL."""
+        self.scheme_handler.set_satellite_frame(mode, frame_id, png)
+        url = f"storm://app/satellite/{mode}/{frame_id}.png"
         self.run_js(
             f"if(window.stormSetSatelliteFrame) "
-            f"stormSetSatelliteFrame({repr(b64)},{west},{south},{east},{north});"
+            f"stormSetSatelliteFrame({json.dumps(url)},{west},{south},{east},{north});"
         )
 
     def set_satellite_time(self, time_iso: str):
@@ -347,150 +347,12 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetRadarStationsVisible) stormSetRadarStationsVisible({flag});"
         )
 
-    def set_cwa_geojson(self, geojson: dict):
-        """Set the CWA GeoJSON on the map (expects a FeatureCollection dict)."""
-        self.run_js(
-            f"if(window.stormSetCwaGeoJSON) stormSetCwaGeoJSON({json.dumps(json.dumps(geojson))});"
-        )
-
     def set_cwa_visible(self, visible: bool):
-        """Toggle CWA overlay visibility."""
+        """Toggle CWA overlay visibility; the map fetches static/cwa_boundaries.geojson on first show."""
         flag = "true" if visible else "false"
         self.run_js(
             f"if(window.stormSetCwaVisible) stormSetCwaVisible({flag});"
         )
-
-    def load_cwa_shapefile(self, shp_base: str | None = None):
-        """Load a local CWA shapefile (shp + dbf) and push it to the map as GeoJSON.
-
-        shp_base may be a basename (without extension) or a full .shp path. If
-        omitted, defaults to the bundled cwa_shp/w_16ap26 shapefile.
-
-        Parsing runs on a background thread; cwa_loaded is emitted on the main
-        thread when the data is visible on the map.
-        """
-        import os, struct, threading as _threading
-
-        if shp_base is None:
-            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'cwa_shp', 'w_16ap26'))
-        else:
-            base = shp_base
-        shp_path = base if base.lower().endswith('.shp') else base + '.shp'
-        dbf_path = shp_path[:-4] + '.dbf'
-
-        def _worker():
-            try:
-                with open(shp_path, 'rb') as f:
-                    shp_data = f.read()
-                with open(dbf_path, 'rb') as f:
-                    dbf_data = f.read()
-            except Exception:
-                return
-
-            # minimal SHP parser (Polygon type 5) — adapted from archive fetcher.
-            def _parse_shp(data: bytes):
-                if len(data) < 100:
-                    return []
-                pos = 100
-                geometries = []
-                while pos < len(data):
-                    if pos + 12 > len(data):
-                        break
-                    _rec_num, content_words = struct.unpack_from('>ii', data, pos)
-                    pos += 8
-                    content_bytes = content_words * 2
-                    if content_bytes < 4 or pos + content_bytes > len(data):
-                        break
-                    shape_type = struct.unpack_from('<i', data, pos)[0]
-                    if shape_type == 0:
-                        geometries.append(None)
-                        pos += content_bytes
-                        continue
-                    if shape_type != 5:
-                        geometries.append(None)
-                        pos += content_bytes
-                        continue
-                    offset = pos + 4
-                    if offset + 32 + 8 > len(data):
-                        geometries.append(None)
-                        pos += content_bytes
-                        continue
-                    offset += 32
-                    num_parts, num_points = struct.unpack_from('<ii', data, offset)
-                    offset += 8
-                    if num_parts <= 0 or num_points <= 0:
-                        geometries.append(None)
-                        pos += content_bytes
-                        continue
-                    part_starts = list(struct.unpack_from(f'<{num_parts}i', data, offset))
-                    offset += num_parts * 4
-                    pts_raw = struct.unpack_from(f'<{num_points * 2}d', data, offset)
-                    points = [(pts_raw[i * 2], pts_raw[i * 2 + 1]) for i in range(num_points)]
-                    rings = []
-                    for idx_r, start in enumerate(part_starts):
-                        end = part_starts[idx_r + 1] if idx_r + 1 < num_parts else num_points
-                        ring = [list(pt) for pt in points[start:end]]
-                        rings.append(ring)
-                    geometries.append({'type': 'Polygon', 'coordinates': rings})
-                    pos += content_bytes
-                return geometries
-
-            # minimal DBF parser — adapted from archive fetcher.
-            def _parse_dbf(data: bytes):
-                if len(data) < 32:
-                    return []
-                num_records = struct.unpack_from('<I', data, 4)[0]
-                header_bytes = struct.unpack_from('<H', data, 8)[0]
-                record_bytes = struct.unpack_from('<H', data, 10)[0]
-                fields = []
-                pos = 32
-                while pos < header_bytes - 1 and data[pos] != 0x0D:
-                    raw_name = data[pos:pos + 11]
-                    name = raw_name.split(b"\x00")[0].decode('ascii', errors='replace').strip()
-                    ftype = chr(data[pos + 11])
-                    flen = data[pos + 16]
-                    fields.append((name, ftype, flen))
-                    pos += 32
-                records = []
-                rec_pos = header_bytes
-                for _ in range(num_records):
-                    if rec_pos + record_bytes > len(data):
-                        break
-                    deletion_flag = data[rec_pos]
-                    if deletion_flag == 0x2A:  # '*' = deleted
-                        rec_pos += record_bytes
-                        continue
-                    field_pos = rec_pos + 1
-                    rec = {}
-                    for name, ftype, flen in fields:
-                        raw = data[field_pos:field_pos + flen].decode('ascii', errors='replace').strip()
-                        if ftype == 'N':
-                            try:
-                                rec[name] = float(raw) if raw else None
-                            except ValueError:
-                                rec[name] = None
-                        else:
-                            rec[name] = raw
-                        field_pos += flen
-                    records.append(rec)
-                    rec_pos += record_bytes
-                return records
-
-            geoms = _parse_shp(shp_data)
-            recs = _parse_dbf(dbf_data)
-            features = []
-            for geom, rec in zip(geoms, recs):
-                if geom is None:
-                    continue
-                features.append({'type': 'Feature', 'geometry': geom, 'properties': rec})
-            geojson = {'type': 'FeatureCollection', 'features': features}
-            self._cwa_parsed.emit(geojson)
-
-        _threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_cwa_parsed(self, geojson: dict):
-        self.set_cwa_geojson(geojson)
-        self.cwa_loaded.emit()
 
     def set_route(self, geojson_str: str, dest_lon: float, dest_lat: float):
         """Draw a route polyline on the map and place a destination marker."""
@@ -664,6 +526,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         import base64
         b64 = base64.b64encode(png_bytes).decode("ascii")
         self.run_js(f"stormAddStationPlot('{vehicle_id}', {lat}, {lon}, '{b64}');")
+
+    def move_station_plot(self, vehicle_id: str, lat: float, lon: float) -> None:
+        self.run_js(f"stormMoveStationPlot('{vehicle_id}', {lat}, {lon});")
 
     def remove_station_plot(self, vehicle_id: str) -> None:
         self.run_js(f"stormRemoveStationPlot('{vehicle_id}');")

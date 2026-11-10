@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -40,6 +41,8 @@ ARCHIVE_UNAVAILABLE_STATIONS: frozenset[str] = frozenset({
 
 BUFFER_BEFORE = 4
 BUFFER_AFTER  = 4
+# concurrent downloads; parsing is serialized separately (see _parse_lock)
+FETCH_WORKERS = 2
 
 
 class ArchiveRadarFetcher(QObject):
@@ -86,13 +89,20 @@ class ArchiveRadarFetcher(QObject):
 
         # maps scan_time → path of the raw .dat file in _tmpdir (None = fetch pending).
         self._raw_cache: dict[datetime, Optional[str]] = {}
-        # maps scan_time → parsed metpy Level2File (binary structure only,
-        # independent of product/tilt) so switching product/tilt on an
-        # already-fetched scan doesn't re-parse the raw bytes.
+        # parsed metpy Level2File for the displayed scan only, so switching
+        # product/tilt on it doesn't re-parse.  A parsed volume holds ~0.5 GB,
+        # so neighbours are parsed, decoded and dropped.
         self._parsed_cache: dict[datetime, object] = {}
+        # one parse at a time bounds peak memory to ~2 parsed volumes
+        self._parse_lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(
+            max_workers=FETCH_WORKERS, thread_name_prefix="archive-radar"
+        )
         self._decoded_cache: dict[tuple[datetime, str, int], Level2RadarScan] = {}
         # sorted list of all known scan times for the date.
         self._index: list[datetime] = []
+        # scan_time → position in _index
+        self._index_pos: dict[datetime, int] = {}
         self._index_lock = threading.Lock()
 
         self._current_archive_time: Optional[datetime] = None
@@ -117,7 +127,9 @@ class ArchiveRadarFetcher(QObject):
         self._raw_cache.clear()
         self._parsed_cache.clear()
         self._decoded_cache.clear()
-        self._index = []
+        with self._index_lock:
+            self._index = []
+            self._index_pos = {}
         self._pending_fetches.clear()
         self._pending_decodes.clear()
         self.load_index()
@@ -180,6 +192,7 @@ class ArchiveRadarFetcher(QObject):
             times = self._parse_s3_listing(resp.text)
             with self._index_lock:
                 self._index = sorted(times)
+                self._index_pos = {t: i for i, t in enumerate(self._index)}
             log.info(
                 "ArchiveRadarFetcher: %d scans indexed for %s on %s",
                 len(self._index), self._station, self._date.strftime("%Y-%m-%d"),
@@ -250,10 +263,7 @@ class ArchiveRadarFetcher(QObject):
             self._raw_cache[scan_time] = None
 
         self.loading_changed.emit(True)
-        t = threading.Thread(
-            target=self._fetch_raw_then_decode, args=(scan_time,), daemon=True
-        )
-        t.start()
+        self._pool.submit(self._fetch_raw_then_decode, scan_time)
 
     def _ensure_decoded(self, scan_time: datetime) -> None:
         cache_key = self._decode_key(scan_time)
@@ -264,7 +274,7 @@ class ArchiveRadarFetcher(QObject):
                 return
             self._pending_decodes.add(cache_key)
         self.loading_changed.emit(True)
-        threading.Thread(target=self._decode_cached_scan, args=(scan_time,), daemon=True).start()
+        self._pool.submit(self._decode_cached_scan, scan_time)
 
     def _fetch_raw_then_decode(self, scan_time: datetime) -> None:
         cache_key = self._decode_key(scan_time)
@@ -373,15 +383,22 @@ class ArchiveRadarFetcher(QObject):
         if f is None:
             from metpy.io import Level2File
             f = Level2File(io.BytesIO(file_bytes))
-            self._parsed_cache[scan_time] = f
+            if self._is_displayed_scan(scan_time):
+                self._parsed_cache = {scan_time: f}
         return f
+
+    def _is_displayed_scan(self, scan_time: datetime) -> bool:
+        return (
+            self._current_archive_time is not None
+            and self._nearest_scan_before(self._current_archive_time) == scan_time
+        )
 
     def _decode(self, scan_time: datetime, file_bytes: bytes) -> Optional[Level2RadarScan]:
         """Decode a Level-2 file with MetPy and return a Level2RadarScan."""
-        from pyproj import Proj, Transformer
+        with self._parse_lock:
+            return self._decode_parsed(scan_time, self._get_parsed(scan_time, file_bytes))
 
-        f = self._get_parsed(scan_time, file_bytes)
-
+    def _decode_parsed(self, scan_time: datetime, f) -> Optional[Level2RadarScan]:
         if not f.sweeps:
             raise RuntimeError("No sweeps found in Level-2 file")
 
@@ -476,28 +493,22 @@ class ArchiveRadarFetcher(QObject):
         if product == "velocity":
             data *= 1.94384
 
-        az_rad   = np.deg2rad(np.array(azimuths, dtype=np.float64))
-        ranges   = first_gate_km + np.arange(n_gates, dtype=np.float64) * gate_width_km
-        # [n_rays, n_gates] east/north offsets in km
-        x_km = np.outer(np.sin(az_rad), ranges)
-        y_km = np.outer(np.cos(az_rad), ranges)
-
-        aeqd = Proj(proj="aeqd", lat_0=radar_lat, lon_0=radar_lon, datum="WGS84", units="km")
-        xform = Transformer.from_proj(aeqd, Proj("epsg:4326"), always_xy=True)
-        lons, lats = xform.transform(x_km, y_km)
-
         meta = L2_PRODUCTS[product]
         return Level2RadarScan(
             site=self._station,
             product=meta["label"].split("(")[-1].rstrip(")"),
             scan_time=scan_time,
-            data=data,
-            lats=lats.astype(np.float32),
-            lons=lons.astype(np.float32),
+            # half precision is ample for display (~0.01 at these magnitudes)
+            raw=data.astype(np.float16),
             vmin=meta["vmin"],
             vmax=meta["vmax"],
             units=meta["units"],
             colormap=meta["colormap"],
+            radar_lat=radar_lat,
+            radar_lon=radar_lon,
+            azimuths_deg=azimuths,
+            first_gate_m=first_gate_km * 1000.0,
+            gate_width_m=gate_width_km * 1000.0,
             tilt_deg=tilt_deg,
             available_tilts=available_tilts,
             available_products=available_products,
@@ -509,21 +520,33 @@ class ArchiveRadarFetcher(QObject):
         """Pre-fetch BUFFER_BEFORE + BUFFER_AFTER scans around current_scan_time."""
         with self._index_lock:
             idx = self._index
-        if not idx or current_scan_time not in idx:
+            index_pos = self._index_pos
+        pos = index_pos.get(current_scan_time)
+        if pos is None:
             return
-        pos = idx.index(current_scan_time)
-        lo = max(0, pos - BUFFER_BEFORE)
-        hi = min(len(idx) - 1, pos + BUFFER_AFTER)
-        for i in range(lo, hi + 1):
+        # nearest first, upcoming scans before earlier ones, so playback
+        # reaches a ready frame sooner (the pool runs jobs in submit order)
+        order = [pos]
+        for step in range(1, max(BUFFER_BEFORE, BUFFER_AFTER) + 1):
+            if step <= BUFFER_AFTER and pos + step < len(idx):
+                order.append(pos + step)
+            if step <= BUFFER_BEFORE and pos - step >= 0:
+                order.append(pos - step)
+        for i in order:
             t = idx[i]
             if self._raw_cache.get(t) is None and t not in self._pending_fetches:
                 self._ensure_fetched(t)
 
-        # evict scans far outside the buffer to keep memory manageable.
-        evict_lo = max(0, pos - BUFFER_BEFORE - 4)
-        evict_hi = min(len(idx) - 1, pos + BUFFER_AFTER + 4)
+        # the parsed volume is only kept for the displayed scan
+        for t in list(self._parsed_cache):
+            if t != current_scan_time:
+                self._parsed_cache.pop(t, None)
+
+        # evict scans far outside the buffer to keep disk and memory manageable.
+        evict_lo = pos - BUFFER_BEFORE - 4
+        evict_hi = pos + BUFFER_AFTER + 4
         for t in list(self._raw_cache.keys()):
-            i = idx.index(t) if t in idx else -1
+            i = index_pos.get(t, -1)
             if i == -1 or i < evict_lo or i > evict_hi:
                 path = self._raw_cache.pop(t, None)
                 if path and os.path.exists(path):
@@ -531,7 +554,6 @@ class ArchiveRadarFetcher(QObject):
                         os.unlink(path)
                     except OSError:
                         pass
-                self._parsed_cache.pop(t, None)
                 for key in [k for k in self._decoded_cache if k[0] == t]:
                     del self._decoded_cache[key]
 

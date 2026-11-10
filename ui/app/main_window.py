@@ -7,8 +7,8 @@ import threading
 import time
 import feature_flags
 import runtime_flags
-from collections import deque
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout,
     QFileDialog, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize, QStandardPaths
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QIcon, QPixmap, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -34,10 +34,12 @@ from ui.controls.mesoanalysis_controls import MesoanalysisControls
 from ui.controls.sfcoa_controls import SfcoaControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
-from ui.map.radar_overlay import RadarOverlay, render_scan_to_png as _render_scan_to_png
-from ui.sounding.dialog import SoundingDialog
+from ui.map.radar_overlay import (
+    RadarOverlay,
+    cached_scan_png as _cached_scan_png,
+    render_scan_to_png as _render_scan_to_png,
+)
 from ui.sounding.controls import SoundingControls
-from ui.dialogs.vehicle_timeseries_dialog import VehicleTimeseriesDialog
 from archive.vehicle_speed import calculate_vehicle_speed, format_vehicle_speed
 from ui.app.overlay_geometry import bottom_left_y_avoiding
 from ui.widgets.annotation_tools import AnnotationTools
@@ -70,6 +72,7 @@ from core.storm_cone import StormCone, motion_from_fixes
 from core.scan_sector import ScanSector, feature_collection
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from core.observation import Observation
+from core.vehicle_history import VehicleHistoryStore
 from core.vehicle import Vehicle
 from network.mqtt_client import MQTTClient
 from network.annotation_sync import AnnotationSync
@@ -130,6 +133,13 @@ def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
     QSvgRenderer(svg.encode()).render(painter)
     painter.end()
     return QIcon(px)
+
+
+def _loop_interval_ms(ms: int) -> int:
+    """Loop frame interval, slowed to LITE_MIN_LOOP_MS in lite mode."""
+    if runtime_flags.FLAGS.lite_mode:
+        return max(int(ms), runtime_flags.LITE_MIN_LOOP_MS)
+    return int(ms)
 
 
 def _coords_close(a, b, tol: float = 1e-4) -> bool:
@@ -229,8 +239,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._startup_local_pending = False
         self._startup_mqtt_pending = False
         self._post_startup_fetchers_started = False
-        # track whether CWA shapefile has been loaded into the map
-        self._cwa_loaded = False
         self._local_startup_timer = QTimer(self)
         self._local_startup_timer.setSingleShot(True)
         self._local_startup_timer.timeout.connect(self._complete_local_startup_phase)
@@ -419,8 +427,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._archive_satellite.frame_ready.connect(self._on_archive_satellite_frame)
         self._archive_satellite.meso_sectors_updated.connect(self._on_meso_sectors_updated)
 
-        # sounding dialog and archive fetcher (on-demand).
-        self._sounding_dialog = SoundingDialog(self)
+        # sounding dialog (built on first use) and archive fetcher (on-demand).
+        self._sounding_dialog_obj = None
         self._archive_sounding = ArchiveSoundingFetcher(parent=self)
         self._archive_sounding.sounding_ready.connect(self._on_sounding_ready)
         self._archive_sounding.fetch_error.connect(
@@ -783,7 +791,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_archive_satellite_frame(self, frame) -> None:
         """Update the archive satellite frame; only show if the user has toggled it on."""
         w, s, e, n = frame.bbox
-        self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+        self.map_widget.set_satellite_frame(frame.mode, frame.frame_id, frame.png, w, s, e, n)
         self._archive_sat_has_data = True
         self.satellite_controls.set_scan_time(frame.time_str)
         if hasattr(self, "_archive_controls"):
@@ -1515,6 +1523,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # stop all background workers before closing so threads don't outlive
         self._clock_timer.stop()
+        if hasattr(self, "_vehicle_history"):
+            self._vehicle_history.close()
         if hasattr(self, "_update_check_timer"):
             self._update_check_timer.stop()
         if hasattr(self, "_time_ctrl"):
@@ -2030,7 +2040,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # 500 ms between loop frames — fast enough to feel animated, slow enough to read
         self._loop_timer = QTimer()
-        self._loop_timer.setInterval(500)
+        self._loop_timer.setInterval(_loop_interval_ms(500))
         self._loop_timer.timeout.connect(self._advance_loop_frame)
 
         # pending render scan — latest scan waiting to be rendered.
@@ -2085,7 +2095,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._sounding_fetcher        = SoundingFetcher(self)
         self._obs_sounding_fetcher    = ObsSoundingFetcher(self)
         self._clamps_sounding_fetcher = ClampsSoundingFetcher(self)
-        self._sounding_dialog         = SoundingDialog(self)
+        self._sounding_dialog_obj     = None   # built on first use
         self._nssl_sounding_refresh_timer = QTimer(self)
         self._nssl_sounding_refresh_timer.setInterval(5 * 60 * 1000)
         self._nssl_sounding_refresh_timer.timeout.connect(
@@ -2112,8 +2122,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._comp_obs_fetcher.fetch_error.connect(self._on_sounding_error)
         self._comp_nssl_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
         self._comp_nssl_fetcher.fetch_error.connect(self._on_sounding_error)
-
-        self._sounding_dialog.source_requested.connect(self._on_comparison_source_requested)
 
         self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
         self.map_widget.obs_sounding_station_clicked.connect(self._on_obs_station_click)
@@ -2197,7 +2205,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._satellite_fetcher  = SatelliteFetcher(parent=self)
         self._satellite_cache: dict[str, list] = {"conus": [], "meso1": [], "meso2": []}
         self._satellite_loop_timer = QTimer(self)
-        self._satellite_loop_timer.setInterval(600)   # ms per frame during loop
+        self._satellite_loop_timer.setInterval(_loop_interval_ms(600))   # ms per frame during loop
         self._satellite_loop_timer.timeout.connect(self._satellite_loop_tick)
 
         # control signals → handlers
@@ -2359,6 +2367,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             item for item in items
             if self._surface_source_enabled(item.get("source", ""))
         ]
+        if runtime_flags.FLAGS.lite_mode:
+            from ui.layers.surface_plot_layer import thin_stations  # noqa: PLC0415
+            items = thin_stations(items, runtime_flags.LITE_STATION_CELL_DEG)
         self._surface_render_generation += 1
         render_generation = self._surface_render_generation
         incoming: set[str] = {item["id"] for item in items}
@@ -2398,8 +2409,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         signals.status.connect(self.status_msg_label.setText, Qt.ConnectionType.QueuedConnection)
 
         def _render_worker():
-            from ui.layers.station_plot_layer import _render
-            from ui.layers.surface_plot_layer import _surface_obs_fingerprint
+            from ui.layers.surface_plot_layer import _surface_obs_fingerprint, render_surface
             import time
 
             _gone_to_emit = gone
@@ -2421,7 +2431,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 obs  = item["obs"]
                 sid  = item["id"]
                 name = item.get("name", sid)
-                fp   = _surface_obs_fingerprint(obs)
+                fp   = _surface_obs_fingerprint(obs, sid)
                 cached = cache_snapshot.get(sid)
                 if cached and cached[0] == fp:
                     continue
@@ -2437,8 +2447,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 if render_generation != self._surface_render_generation:
                     return
                 try:
-                    color = layer._obs_age_color(obs, sid)
-                    png   = _render(obs, center_color=color)
+                    png   = render_surface(fp)
                     rendered_chunk.append((sid, obs.lat, obs.lon, fp, png, name))
                 except Exception as exc:
                     log.error("surface render failed for %s: %s", sid, exc)
@@ -2879,6 +2888,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._satellite_loop_timer.stop()
         self.satellite_controls.stop_loop()
         self.satellite_controls.reset_cache_ui()
+        self._satellite_fetcher.set_active_mode(mode)
 
         if not mode:
             self.map_widget.set_satellite_visible(False)
@@ -2927,7 +2937,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.satellite_controls.set_scan_time(frame.time_str)
 
     def _on_satellite_speed_changed(self, ms: int):
-        self._satellite_loop_timer.setInterval(ms)
+        self._satellite_loop_timer.setInterval(_loop_interval_ms(ms))
 
     def _on_satellite_loop_toggled(self, looping: bool):
         if looping:
@@ -2947,9 +2957,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.satellite_controls.set_scan_time(frames[nxt].time_str)
 
     def _render_satellite_frame(self, frame):
-        if frame.b64:
+        if frame.png:
             w, s, e, n = frame.bbox
-            self.map_widget.set_satellite_frame(frame.b64, w, s, e, n)
+            mode = self.satellite_controls.current_mode()
+            self.map_widget.set_satellite_frame(mode, frame.frame_id, frame.png, w, s, e, n)
         else:
             self.map_widget.set_satellite_time(frame.time_iso)
 
@@ -3449,27 +3460,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._update_hazard_legend()
 
     def _on_cwa_toggled(self, enabled: bool):
-        """Toggle the CWA overlay visibility and mark the layer active.
-
-        If the shapefile hasn't been loaded yet, kick off the background load
-        and show a status message until cwa_loaded fires.
-        """
+        """Toggle the CWA overlay; the map loads the static GeoJSON on first show."""
         self._set_layer_active("cwa", enabled)
-        if enabled and not self._cwa_loaded:
-            self.status_msg_label.setText("Loading CWA boundaries…")
-            self.map_widget.cwa_loaded.connect(self._on_cwa_load_complete)
-            self.map_widget.load_cwa_shapefile()
-        else:
-            self.map_widget.set_cwa_visible(enabled)
-
-    def _on_cwa_load_complete(self):
-        try:
-            self.map_widget.cwa_loaded.disconnect(self._on_cwa_load_complete)
-        except Exception:
-            pass
-        self._cwa_loaded = True
-        self.map_widget.set_cwa_visible(True)
-        self.status_msg_label.setText("")
+        self.map_widget.set_cwa_visible(enabled)
 
     def _on_radar_site_changed(self, site: str):
         # increment generation so any in-flight decodes/renders for old site are discarded
@@ -3727,13 +3720,27 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_sounding_error(self, msg: str):
         self.status_msg_label.setText(f"Sounding error: {msg}")
 
+    @property
+    def _sounding_dialog(self):
+        """Sounding dialog, built on first use so metpy loads only when needed."""
+        if self._sounding_dialog_obj is None:
+            from ui.sounding.dialog import SoundingDialog  # noqa: PLC0415
+            self._sounding_dialog_obj = SoundingDialog(self)
+            if not self._archive:
+                self._sounding_dialog_obj.source_requested.connect(
+                    self._on_comparison_source_requested
+                )
+        return self._sounding_dialog_obj
+
     def _refresh_nssl_sounding_if_visible(self):
         if self._archive:
             self._nssl_sounding_refresh_timer.stop()
             return
-        sset = getattr(self._sounding_dialog, "_sset", None)
+        dlg = self._sounding_dialog_obj
+        sset = getattr(dlg, "_sset", None)
         if (
-            not self._sounding_dialog.isVisible()
+            dlg is None
+            or not dlg.isVisible()
             or sset is None
             or not sset.is_nssl
         ):
@@ -3923,6 +3930,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         try:
             mask_scan = self._velocity_mask_scan(scan)
+            from ui.map import radar_gl  # noqa: PLC0415
+            if radar_gl.enabled() and radar_gl.supports(scan, mask_scan):
+                gl_payload = radar_gl.build_payload(scan)
+                if gen == self._render_generation:
+                    self._render_ready.emit({"gen": gen, "scan": scan, "gl": gl_payload})
+                return
             png_bytes, bounds, elapsed_ms = self._render_scan_to_png(
                 scan, grid_size, mask_scan=mask_scan
             )
@@ -3995,9 +4008,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         import time as _time
         scan = result["scan"]
         self._current_radar_scan = scan
-        self._radar_overlay.inject(result["png_bytes"], result["bounds"])
+        if "gl" in result:
+            self._radar_overlay.inject_gl(result["gl"])
+        else:
+            self._radar_overlay.inject(result["png_bytes"], result["bounds"])
+            self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
         self._last_inject_time = _time.monotonic()
-        self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
         if not self._pending_cone_motion_fix:
@@ -4007,8 +4023,17 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _show_scan(self, scan):
         if not self._radar_data_enabled():
             return
+        cached = _cached_scan_png(
+            scan, self._radar_overlay._grid_size, self._velocity_mask_scan(scan)
+        )
+        if cached is None:
+            # not drawn yet at this grid size — render off the main thread;
+            # _do_inject updates the labels when it lands
+            self._pending_render_scan = scan
+            self._submit_pending_render()
+            return
         self._current_radar_scan = scan
-        self._radar_overlay.update(scan, mask_scan=self._velocity_mask_scan(scan))
+        self._radar_overlay.inject(*cached)
         self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
         self._radar_error_clear_timer.stop()
         if not self._pending_cone_motion_fix:
@@ -4040,7 +4065,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._show_scan(cache[idx])
 
     def _on_radar_speed_changed(self, ms: int):
-        self._loop_timer.setInterval(ms)
+        self._loop_timer.setInterval(_loop_interval_ms(ms))
 
     def _on_loop_toggled(self, looping: bool):
         if looping and not self._radar_data_enabled():
@@ -4853,7 +4878,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _init_stations(self):
         self._vehicles: dict[str, Vehicle] = {}
-        self._vehicle_history: dict[str, deque] = {}  # vehicle_id → deque[Observation]
+        # archive playback replays old data, so only live sessions persist history
+        history_dir = None if self._archive else Path(
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        ) / "vehicle_history"
+        self._vehicle_history = VehicleHistoryStore(history_dir)
         self._vehicle_timeseries_dlg: "VehicleTimeseriesDialog | None" = None
         self._scan_sectors: dict[str, ScanSector] = {}
         self._scan_move_count = 0
@@ -4949,15 +4978,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 obs.pressure_mb is not None,
             ])
             if has_met_data:
-                if obs.vehicle_id not in self._vehicle_history:
-                    self._vehicle_history[obs.vehicle_id] = deque()
-                self._vehicle_history[obs.vehicle_id].append(obs)
-                # live-update timeseries dialog if open
+                history = self._vehicle_history.append(obs)
+                # live-update timeseries dialog if open (it throttles redraws)
                 if (self._vehicle_timeseries_dlg is not None
                         and self._vehicle_timeseries_dlg.isVisible()):
                     self._vehicle_timeseries_dlg.update_vehicle(
-                        obs.vehicle_id,
-                        list(self._vehicle_history[obs.vehicle_id]))
+                        obs.vehicle_id, history)
 
         marker_color = self._obs_age_color(obs)
         age_label = self._obs_age_label(obs)
@@ -5014,7 +5040,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 return vehicle_id
             now = datetime.now(tz=timezone.utc)
             speed = calculate_vehicle_speed(
-                list(history), now, short_seconds=10, average_seconds=30
+                history.recent(30, now), now, short_seconds=10, average_seconds=30
             )
 
         return f"{vehicle_id}\n{format_vehicle_speed(speed)}"
@@ -5518,7 +5544,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             }
         else:
             all_vehicles = {
-                vid: list(hist)
+                vid: hist
                 for vid, hist in self._vehicle_history.items()
                 if hist
             }
@@ -5530,6 +5556,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
 
         if self._vehicle_timeseries_dlg is None:
+            from ui.dialogs.vehicle_timeseries_dialog import VehicleTimeseriesDialog  # noqa: PLC0415
             self._vehicle_timeseries_dlg = VehicleTimeseriesDialog(self)
 
         self._vehicle_timeseries_dlg.load(vehicle_id, all_vehicles)
@@ -5641,7 +5668,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         top.addWidget(age_lbl)
         
         # timeseries button — only shown if vehicle has met data history
-        has_history = vid in self._vehicle_history and len(self._vehicle_history[vid]) > 0
+        has_history = bool(self._vehicle_history.get(vid))
         if has_history:
             ts_btn = QPushButton("TIMESERIES")
             ts_btn.setFlat(True)
