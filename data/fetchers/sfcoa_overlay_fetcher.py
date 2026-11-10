@@ -7,6 +7,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,8 @@ log = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 STORM/1.0"
 _CACHE_DIR = Path(tempfile.gettempdir()) / "storm_sfcoa_mbtiles"
+_CACHE_MAX_AGE_S = 24 * 3600
+_CACHE_MAX_BYTES = 500 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,7 @@ class SfcoaOverlayFetcher(QObject):
         self._base_url = _clean_base_url(base_url)
         self._times: list[SfcoaTime] = []
         self._variables_by_time: dict[str, list[SfcoaVariable]] = {}
+        _prune_cache()
 
     @property
     def base_url(self) -> str:
@@ -285,6 +289,8 @@ def _download_mbtiles(url: str, time_id: str, variable_id: str) -> Path:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _CACHE_DIR / f"{_sfcoa_tile_key(time_id, variable_id)}.mbtiles"
     if path.exists() and path.stat().st_size > 0:
+        # mark as recently used so pruning keeps overlays that are still shown
+        os.utime(path)
         return path
 
     tmp_path = path.with_suffix(".tmp")
@@ -296,7 +302,50 @@ def _download_mbtiles(url: str, time_id: str, variable_id: str) -> Path:
     with open(tmp_path, "wb") as fh:
         fh.write(data)
     os.replace(tmp_path, path)
+    _prune_cache(keep=path)
     return path
+
+
+def _prune_cache(keep: Path | None = None, now: float | None = None) -> None:
+    """Delete cached tile files older than 24 h, then the oldest until under the size cap.
+
+    The scheme handler reopens a file on every tile request, so *keep* (the
+    overlay just requested) is never removed.
+    """
+    if not _CACHE_DIR.is_dir():
+        return
+    now = time.time() if now is None else now
+    entries = []
+    for path in _CACHE_DIR.iterdir():
+        if not path.is_file() or path == keep:
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if now - st.st_mtime > _CACHE_MAX_AGE_S:
+            _remove_cache_file(path)
+        else:
+            entries.append((st.st_mtime, st.st_size, path))
+
+    total = sum(size for _, size, _ in entries)
+    if keep is not None and keep.exists():
+        total += keep.stat().st_size
+    for _, size, path in sorted(entries):
+        if total <= _CACHE_MAX_BYTES:
+            break
+        if _remove_cache_file(path):
+            total -= size
+
+
+def _remove_cache_file(path: Path) -> bool:
+    try:
+        path.unlink()
+        return True
+    except OSError as exc:
+        # windows refuses to delete a file the tile handler has open; retry next time
+        log.debug("SFCOA cache: could not remove %s: %s", path.name, exc)
+        return False
 
 
 def _read_mbtiles_metadata(path: Path) -> dict[str, str]:
