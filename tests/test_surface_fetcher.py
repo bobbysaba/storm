@@ -77,9 +77,11 @@ def test_fetch_iem_batch_uses_utc_valid_timestamp():
 def test_fetch_ok_mesonet_uses_configured_api_headers():
     assert sf.OK_API_URL.endswith("/data/mesonet/ok_mesonet.json")
     fetcher = SurfaceFetcher()
-    fetcher._ok_meta = {
-        "acme": {"lat": 34.80833, "lon": -98.02325, "name": "Acme"},
-    }
+    # station metadata and MSLP come from the CSV the fetcher reloads every cycle
+    fetcher._fetch_ok_metadata = lambda: (
+        {"acme": {"lat": 34.80833, "lon": -98.02325, "name": "Acme"}},
+        {"acme": 1008.4},
+    )
     captured: dict[str, object] = {}
 
     def _http_get(url, ssl_ctx=None, headers=None):
@@ -106,6 +108,7 @@ def test_fetch_ok_mesonet_uses_configured_api_headers():
     assert len(rows) == 1
     assert rows[0]["id"] == "surface:ok:acme"
     assert rows[0]["obs"].timestamp == datetime(2026, 4, 23, 19, 25, tzinfo=timezone.utc)
+    assert rows[0]["obs"].pressure_mb == 1008.4
 
 
 def test_fetch_wtm_uses_configured_api_headers():
@@ -160,6 +163,7 @@ def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
             "TEMP2MAVG": "22.1",
             "RELHUM2MAVG": "50.0",
             "PRESSUREAVG": "96.32",
+            "SLPAVG": "101.32",
             "WDIR10M": "212.74",
             "WSPD10MAVG": "9.54",
             "WSPD10MMAX": "12.58",
@@ -190,7 +194,8 @@ def test_fetch_ks_mesonet_uses_configured_api_headers_and_embedded_metadata():
     assert round(obs.dewpoint_c, 1) == 11.2
     assert obs.wind_speed_ms == 9.54
     assert obs.wind_dir_deg == 212.74
-    assert round(obs.pressure_mb, 1) == 963.2
+    # sea-level pressure, not station pressure
+    assert round(obs.pressure_mb, 1) == 1013.2
 
 
 def test_fetch_co_mesonet_uses_configured_api_headers_and_metadata_file():
