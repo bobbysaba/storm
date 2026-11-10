@@ -1,7 +1,8 @@
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QComboBox, QGridLayout
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QSize
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import pyqtSignal, Qt, QSize
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
 class _SpcDayComboBox(QComboBox):
@@ -9,32 +10,32 @@ class _SpcDayComboBox(QComboBox):
 
     _ITEM_SIZE = QSize(76, 24)
     _POPUP_SIZE = QSize(_ITEM_SIZE.width() * 2 + 4, _ITEM_SIZE.height() * 4 + 4)
-    _POPUP_STYLE = """
+    _POPUP_STYLE = P.qss("""
         QFrame#spcDayPopup {
-            background-color: #1A1A2E;
-            border: 1px solid #2E2E4E;
+            background-color: $bg_elevated;
+            border: 1px solid $border;
             border-radius: 6px;
         }
         QToolButton#spcDayPopupButton {
             background-color: transparent;
             border: none;
             border-radius: 4px;
-            color: #E8EAF0;
+            color: $text;
             font-size: 11px;
             font-weight: 500;
             letter-spacing: 0px;
             padding: 0px;
         }
         QToolButton#spcDayPopupButton:hover {
-            background-color: #20253A;
-            color: #EFF3FF;
+            background-color: $bg_hover;
+            color: $text_bright;
         }
         QToolButton#spcDayPopupButton:checked {
-            background-color: rgba(74, 158, 255, 0.18);
-            color: #4A9EFF;
+            background-color: $info@0.18;
+            color: $info;
             font-weight: 600;
         }
-    """
+    """)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,7 +88,7 @@ class _SpcDayComboBox(QComboBox):
         self.hidePopup()
 
 
-class HazardControls(QWidget):
+class HazardControls(Drawer):
     """
     Floating drawer for hazard layer toggles with an inline color legend.
 
@@ -104,7 +105,6 @@ class HazardControls(QWidget):
     nws_filter_changed   = pyqtSignal(object)
     cwa_toggled          = pyqtSignal(bool)
     fetch_requested      = pyqtSignal()
-    content_resized      = pyqtSignal()      # triggers layout pulse in main_window
 
     # colored-swatch entries per product layer.  Each entry is (hex_color, short_label).
     PRODUCT_LEGENDS: dict[str, list[tuple[str, str]]] = {
@@ -179,7 +179,6 @@ class HazardControls(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
         self._updating_spc_mode = False
         self._current_spc_day = 1
         # new members for the toggleable legend (Step 1)
@@ -192,7 +191,6 @@ class HazardControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(0)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -284,62 +282,39 @@ class HazardControls(QWidget):
         b.setCheckable(True)
         b.setChecked(False)
         b.setFixedHeight(24)
-        b.setStyleSheet("""
+        b.setStyleSheet(P.qss("""
             QToolButton {
                 background: transparent;
                 background-color: transparent;
-                border: 1px solid #2E2E4E;
+                border: 1px solid $border;
                 border-radius: 6px;
-                color: #B8BFCD;
+                color: $text_secondary;
                 font-size: 11px;
                 font-weight: 500;
                 letter-spacing: 0px;
                 padding: 3px 8px;
             }
             QToolButton:hover {
-                background-color: rgba(74, 158, 255, 0.08);
-                border-color: #4A9EFF;
-                color: #EFF3FF;
+                background-color: $info@0.08;
+                border-color: $info;
+                color: $text_bright;
             }
             QToolButton:checked,
             QToolButton:pressed {
-                background-color: rgba(74, 158, 255, 0.18);
-                border-color: #4A9EFF;
-                color: #4A9EFF;
+                background-color: $info@0.18;
+                border-color: $info;
+                color: $info;
                 font-weight: 600;
             }
-        """)
+        """))
         return b
 
     def _vdiv(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        div.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         return div
 
-
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
     def update_legend(self, active_products: list[str], nws_phenoms: set[str] | None = None):
         """Rebuild the legend. SPC entries are static; NWS warning entries are now toggleable buttons."""
@@ -358,12 +333,11 @@ class HazardControls(QWidget):
                 for color, label in self.PRODUCT_LEGENDS.get(product, []):
                     lbl = QLabel()
                     lbl.setText(
-                        f'<span style="color:{color}; font-size:11px;">■</span>'
-                        f'&thinsp;<span style="font-size:9px;">{label}</span>'
+                        f'<span style="color:{color};">■</span>'
+                        f'&thinsp;{label}'
                     )
-                    lbl.setFont(QFont("Helvetica Neue", 9))
                     lbl.setStyleSheet(
-                        "color: #B5BDCC; background: transparent; padding: 1px 4px 2px 4px;"
+                        f"font-size: 11px; color: {P.TEXT_SECONDARY}; background: transparent; padding: 1px 4px 2px 4px;"
                     )
                     self._legend_layout.addWidget(lbl)
 
@@ -372,7 +346,7 @@ class HazardControls(QWidget):
             if self._legend_layout.count() > 0:
                 # add subtle separator only if something was already added (SPC)
                 sep = QLabel("│")
-                sep.setStyleSheet("color: #4A4A5E; padding: 0 6px;")
+                sep.setStyleSheet(f"color: {P.DIVIDER_2}; padding: 0 6px;")
                 self._legend_layout.addWidget(sep)
 
             for code, color, label in self.NWS_PHENOM_LEGEND:
@@ -384,23 +358,7 @@ class HazardControls(QWidget):
         # show legend only if we added at least one item
         self._legend_widget.setVisible(self._legend_layout.count() > 0)
 
-        # auto-resize animation if the drawer is open
-        if self.maximumHeight() > 0:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            current = self.height()
-            if target != current:
-                if self._animation:
-                    self._animation.stop()
-                anim = QPropertyAnimation(self, b"maximumHeight")
-                anim.setDuration(120)
-                anim.setStartValue(current)
-                anim.setEndValue(target)
-                anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-                anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-                anim.start()
-                self._animation = anim
-                self.content_resized.emit()
+        self.content_changed()
 
 
     def _set_spc_mode(self, mode: str):
@@ -413,6 +371,30 @@ class HazardControls(QWidget):
 
     def current_spc_day(self) -> int:
         return self._current_spc_day
+
+    def save_state(self) -> dict:
+        return {
+            "day": self._current_spc_day,
+            "spc_mode": self._active_spc_mode(),
+            "watches": self._btn_watches.isChecked(),
+            "mds": self._btn_mds.isChecked(),
+            "nws_warnings": self._btn_nws_warnings.isChecked(),
+            "cwa": self._btn_cwa.isChecked(),
+        }
+
+    def restore_state(self, state: dict, spc_mode: bool = True) -> None:
+        """Turn saved layers back on through their buttons. Only turns things on,
+        so layers the launch dialog enabled stay on."""
+        idx = self._day_combo.findData(state.get("day"))
+        if idx >= 0:
+            self._day_combo.setCurrentIndex(idx)
+        btn = self._spc_buttons.get(state.get("spc_mode") or "")
+        if spc_mode and btn is not None and btn.isEnabled():
+            btn.setChecked(True)
+        for key, btn in (("watches", self._btn_watches), ("mds", self._btn_mds),
+                         ("nws_warnings", self._btn_nws_warnings), ("cwa", self._btn_cwa)):
+            if state.get(key):
+                btn.setChecked(True)
 
     def _active_spc_mode(self) -> str:
         for key, btn in self._spc_buttons.items():
@@ -429,9 +411,7 @@ class HazardControls(QWidget):
         if active and active not in allowed:
             self._set_spc_mode("")
             self.spc_mode_changed.emit("")
-        if self.maximumHeight() > 0:
-            self.setMaximumHeight(16777215)
-            self.content_resized.emit()
+        self.content_changed()
 
     def _on_day_changed(self, *_args):
         day = int(self._day_combo.currentData() or 1)
@@ -484,18 +464,18 @@ class HazardControls(QWidget):
         btn.setStyleSheet(f"""
             QToolButton {{
                 color: {color};
-                font-size: 9px;
+                font-size: 11px;
                 padding: 2px 6px;
                 background: transparent;
                 border: none;
                 border-radius: 3px;
             }}
             QToolButton:checked {{
-                background: rgba(255, 255, 255, 0.12);
+                background: {P.alpha(P.WHITE, 0.12)};
                 font-weight: 600;
             }}
             QToolButton:hover {{
-                background: rgba(255, 255, 255, 0.06);
+                background: {P.alpha(P.WHITE, 0.06)};
             }}
         """)
 

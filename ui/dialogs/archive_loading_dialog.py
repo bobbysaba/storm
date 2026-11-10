@@ -3,39 +3,40 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QWidget, QPushButton,
 )
 from PyQt6.QtCore import Qt, QTimer
+from ui import palette as P
 
-_STYLE = """
+_STYLE = P.qss("""
 QDialog {
-    background-color: #0A0A0F;
-    border: 1px solid rgba(74, 83, 108, 0.55);
+    background-color: $bg_base;
+    border: 1px solid $border_soft@0.55;
     border-radius: 12px;
 }
 QLabel#title {
-    color: #00CFFF;
+    color: $accent;
     font-size: 15px;
     font-weight: 700;
     letter-spacing: 2px;
 }
 QLabel#subtitle {
-    color: #5A5B6A;
+    color: $text_muted;
     font-size: 10px;
     letter-spacing: 1px;
 }
 QLabel#status {
-    color: #8E97AB;
+    color: $text_label;
     font-size: 11px;
 }
 QLabel#check {
-    color: #39D98A;
+    color: $ok;
     font-size: 12px;
     font-weight: 700;
 }
 QLabel#pending {
-    color: #3A3B4A;
+    color: $text_disabled;
     font-size: 12px;
 }
 QProgressBar {
-    background-color: #1A1A2E;
+    background-color: $bg_elevated;
     border: none;
     border-radius: 3px;
     height: 4px;
@@ -43,21 +44,21 @@ QProgressBar {
     color: transparent;
 }
 QProgressBar::chunk {
-    background-color: #00CFFF;
+    background-color: $accent;
     border-radius: 3px;
 }
 QPushButton#abort {
     background-color: transparent;
-    color: #F87171;
-    border: 1px solid rgba(248, 113, 113, 0.4);
+    color: $error_soft;
+    border: 1px solid $error_soft@0.4;
     border-radius: 6px;
     font-size: 11px;
     padding: 5px 16px;
 }
 QPushButton#abort:hover {
-    background-color: rgba(248, 113, 113, 0.12);
+    background-color: $error_soft@0.12;
 }
-"""
+""")
 
 
 class ArchiveLoadingDialog(QDialog):
@@ -168,7 +169,7 @@ class ArchiveLoadingDialog(QDialog):
         if indicator:
             indicator.setObjectName("check")
             indicator.setText("✓")
-            indicator.setStyleSheet("color: #39D98A; font-size: 12px; font-weight: 700;")
+            indicator.setStyleSheet(f"color: {P.OK}; font-size: 12px; font-weight: 700;")
         self._progress.setValue(len(self._done))
         if len(self._done) >= len(self._tasks):
             QTimer.singleShot(400, self.accept)
@@ -184,7 +185,7 @@ class ArchiveLoadingDialog(QDialog):
         if indicator:
             indicator.setObjectName("")
             indicator.setText("✗")
-            indicator.setStyleSheet("color: #F87171; font-size: 12px; font-weight: 700;")
+            indicator.setStyleSheet(f"color: {P.ERROR_SOFT}; font-size: 12px; font-weight: 700;")
         self._progress.setValue(len(self._done))
         if len(self._done) >= len(self._tasks):
             QTimer.singleShot(600, self.accept)

@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from config import ACCENT_COLOR
 from ui.map.bridge import MapBridge
 from ui.map.html import STATIC_PATH, TILES_PATH, build_map_html
+from ui import palette as P
 
 # optional Windows fallback: disable WebGL map rendering only when explicitly
 SAFE_MAP_MODE = (
@@ -56,7 +57,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
                 "Safe Map Mode: WebEngine disabled on this Windows device to avoid GPU crashes."
             )
             msg.setWordWrap(True)
-            msg.setStyleSheet("color: #B5BDCC; font-size: 13px;")
+            msg.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 13px;")
             layout.addWidget(msg)
             self._map_ready = True
             self._js_queue = []
@@ -191,6 +192,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def set_satellite_mode(self, mode: str):
         self.run_js(f"if(window.stormSetSatelliteMode) stormSetSatelliteMode('{mode}');")
+
+    def set_radar_opacity(self, opacity: float) -> None:
+        self.run_js(f"if(window.stormSetRadarOpacity) stormSetRadarOpacity({opacity:.3f});")
 
     def set_satellite_opacity(self, opacity: float):
         self.run_js(f"if(window.stormSetSatelliteOpacity) stormSetSatelliteOpacity({opacity:.3f});")

@@ -1,11 +1,13 @@
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QToolButton, QFrame
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer, Qt, QPointF, QSize
+from PyQt6.QtCore import pyqtSignal, Qt, QPointF, QSize
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QPainterPath, QIcon
 
 from config import ACCENT_COLOR
 from core.annotation import ANNOTATION_TYPES, ANNOTATION_TYPE_MAP
 from core.drawing import FRONT_TYPES, CUSTOM_TYPES
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
 def _make_front_icon(key: str, color_hex: str, w: int = 56, h: int = 20) -> QIcon:
@@ -20,11 +22,11 @@ def _make_front_icon(key: str, color_hex: str, w: int = 56, h: int = 20) -> QIco
 
     if key == "stationary_front":
         # when rendering the active (dark) icon, use color_hex for both halves
-        _forced = (color_hex == "#0A0A0F")
+        _forced = (color_hex == P.BG_BASE)
         mid = w / 2.0
-        p.setPen(QPen(QColor(color_hex if _forced else "#4A9EFF"), lw))
+        p.setPen(QPen(QColor(color_hex if _forced else P.INFO), lw))
         p.drawLine(QPointF(2, y), QPointF(mid, y))
-        p.setPen(QPen(QColor(color_hex if _forced else "#E53935"), lw))
+        p.setPen(QPen(QColor(color_hex if _forced else P.ERROR), lw))
         p.drawLine(QPointF(mid, y), QPointF(w - 2, y))
     else:
         p.setPen(QPen(QColor(color_hex), lw))
@@ -53,9 +55,9 @@ def _make_front_icon(key: str, color_hex: str, w: int = 56, h: int = 20) -> QIco
             p.drawPath(path)
 
     elif key == "stationary_front":
-        _forced = (color_hex == "#0A0A0F")
+        _forced = (color_hex == P.BG_BASE)
         # one blue triangle on the left side of the line.
-        p.setBrush(QBrush(QColor(color_hex if _forced else "#4A9EFF")))
+        p.setBrush(QBrush(QColor(color_hex if _forced else P.INFO)))
         cx = 16.0
         path = QPainterPath()
         path.moveTo(cx - 6, y)
@@ -64,7 +66,7 @@ def _make_front_icon(key: str, color_hex: str, w: int = 56, h: int = 20) -> QIco
         path.closeSubpath()
         p.drawPath(path)
         # one red semicircle on the right side of the line.
-        p.setBrush(QBrush(QColor(color_hex if _forced else "#E53935")))
+        p.setBrush(QBrush(QColor(color_hex if _forced else P.ERROR)))
         r = 6.0
         cx = 42.0
         path = QPainterPath()
@@ -115,7 +117,7 @@ class AnnotationButton(QToolButton):
         self.setText(f"{symbol}\n{label}")
         self.setToolTip(label)
         self.setCheckable(False)   # active state managed manually
-        self.setFixedHeight(38)
+        self.setMinimumHeight(40)
         self.setMinimumWidth(64)
         self._set_style(False)
 
@@ -133,8 +135,8 @@ class AnnotationButton(QToolButton):
                     background-color: {self._color};
                     border: 1px solid {self._color};
                     border-radius: 6px;
-                    color: #0A0A0F;
-                    font-size: 9px;
+                    color: {P.BG_BASE};
+                    font-size: 11px;
                     font-weight: 700;
                     padding: 2px 6px;
                 }}
@@ -143,15 +145,15 @@ class AnnotationButton(QToolButton):
             self.setStyleSheet(f"""
                 QToolButton {{
                     background-color: transparent;
-                    border: 1px solid #2E2E4E;
+                    border: 1px solid {P.BORDER};
                     border-radius: 6px;
                     color: {self._color};
-                    font-size: 9px;
+                    font-size: 11px;
                     font-weight: 600;
                     padding: 2px 6px;
                 }}
                 QToolButton:hover {{
-                    background-color: #1A1A2E;
+                    background-color: {P.BG_ELEVATED};
                     border-color: {self._color};
                 }}
             """)
@@ -165,7 +167,7 @@ class FrontAnnotationButton(AnnotationButton):
     def __init__(self, type_key: str, label: str, color: str, parent=None):
         super().__init__(type_key, "", label, color, parent)
         self._icon_off = _make_front_icon(type_key, color)
-        self._icon_on  = _make_front_icon(type_key, "#0A0A0F")  # dark for active bg
+        self._icon_on  = _make_front_icon(type_key, P.BG_BASE)  # dark for active bg
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIconSize(self._ICON_SIZE)
         self.setIcon(self._icon_off)
@@ -176,7 +178,7 @@ class FrontAnnotationButton(AnnotationButton):
         self.setIcon(self._icon_on if active else self._icon_off)
 
 
-class AnnotationTools(QWidget):
+class AnnotationTools(Drawer):
     """
     Collapsible toolbar drawer for annotation type selection.
 
@@ -193,8 +195,6 @@ class AnnotationTools(QWidget):
         super().__init__(parent)
         self._active_type: str = ""
         self._buttons: list[AnnotationButton] = []
-        self._animation = None
-        self._expanded_height = 0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -202,7 +202,6 @@ class AnnotationTools(QWidget):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(0)
 
-        self.setMaximumHeight(0)  # starts collapsed (dropdown opens downward)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -232,7 +231,7 @@ class AnnotationTools(QWidget):
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        sep.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         row1_layout.addWidget(sep)
 
         btn_storm = AnnotationButton(
@@ -247,7 +246,7 @@ class AnnotationTools(QWidget):
 
         sep_fork = QFrame()
         sep_fork.setFrameShape(QFrame.Shape.VLine)
-        sep_fork.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        sep_fork.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         row1_layout.addWidget(sep_fork)
 
         fork_def = ANNOTATION_TYPE_MAP["fork"]
@@ -266,7 +265,7 @@ class AnnotationTools(QWidget):
         hdiv = QFrame()
         hdiv.setFrameShape(QFrame.Shape.HLine)
         hdiv.setFixedHeight(1)
-        hdiv.setStyleSheet("background-color: #2E2E4E;")
+        hdiv.setStyleSheet(f"background-color: {P.BORDER};")
         drawer_layout.addWidget(hdiv)
 
         row2 = QWidget()
@@ -295,7 +294,7 @@ class AnnotationTools(QWidget):
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.VLine)
-        sep2.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        sep2.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         row2_layout.addWidget(sep2)
 
         for ctype in CUSTOM_TYPES:
@@ -314,7 +313,7 @@ class AnnotationTools(QWidget):
             type_key="pressure_system",
             symbol="H/L",
             label="Pressure",
-            color="#E8EAF0",
+            color=P.TEXT,
         )
         btn_pressure.setToolTip("High / Low Pressure")
         btn_pressure.clicked.connect(lambda checked, b=btn_pressure: self._on_button_clicked(b))
@@ -323,46 +322,39 @@ class AnnotationTools(QWidget):
 
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.VLine)
-        sep3.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        sep3.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         row2_layout.addWidget(sep3)
 
         self._btn_refresh = QToolButton()
         self._btn_refresh.setText("↻\nRefresh")
         self._btn_refresh.setToolTip("Re-fetch current.json from the API")
-        self._btn_refresh.setFixedHeight(38)
+        self._btn_refresh.setMinimumHeight(40)
         self._btn_refresh.setMinimumWidth(64)
-        self._btn_refresh.setStyleSheet("""
+        self._btn_refresh.setStyleSheet(P.qss("""
             QToolButton {
                 background-color: transparent;
-                border: 1px solid #2E2E4E;
+                border: 1px solid $border;
                 border-radius: 6px;
-                color: #8888AA;
-                font-size: 9px;
+                color: $text_label;
+                font-size: 11px;
                 font-weight: 600;
                 padding: 2px 6px;
             }
             QToolButton:hover {
-                background-color: #1A1A2E;
-                border-color: #8888AA;
-                color: #CCCCEE;
+                background-color: $bg_elevated;
+                border-color: $text_label;
+                color: $text_secondary;
             }
             QToolButton:pressed {
-                background-color: #2E2E4E;
+                background-color: $border;
             }
-        """)
+        """))
         self._btn_refresh.clicked.connect(self.refresh_requested.emit)
         row2_layout.addWidget(self._btn_refresh)
 
         drawer_layout.addWidget(row2)
 
         layout.addWidget(self._drawer)
-        QTimer.singleShot(0, self._measure_expanded_height)
-
-    def _measure_expanded_height(self):
-        self.setMaximumHeight(16777215)
-        self._expanded_height = self.sizeHint().height()
-        self.setMaximumHeight(0)
-
 
     def deactivate_tool(self):
         """Clear the active tool without emitting tool_selected."""
@@ -376,27 +368,7 @@ class AnnotationTools(QWidget):
         if not checked:
             self.deactivate_tool()
             self.tool_selected.emit("")
-
-        target = self._expanded_height if checked else 0
-        if checked:
-            current = self.maximumHeight()
-            if target == 0:
-                self.setMaximumHeight(16777215)
-                target = self.sizeHint().height()
-                self.setMaximumHeight(current)
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim   # keep ref alive for animation duration
+        super().toggle_drawer(checked)
 
     def _on_button_clicked(self, btn: AnnotationButton):
         if self._active_type == btn.type_key:

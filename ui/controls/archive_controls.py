@@ -9,7 +9,6 @@ from PyQt6.QtWidgets import (
     QDialog, QPushButton, QDateTimeEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
 
 try:
     from zoneinfo import ZoneInfo
@@ -18,6 +17,7 @@ except ImportError:
     _HAS_ZONEINFO = False
 
 from archive.time_controller import TimeController, SPEED_OPTIONS
+from ui import palette as P
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class ArchiveControls(QWidget):
 
         archive_badge = QLabel("ARCHIVE")
         archive_badge.setStyleSheet(
-            "color: #FF9F1C; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
+            f"color: {P.MODE_ARCHIVE}; font-size: 11px; font-weight: 700; letter-spacing: 1px;"
         )
         row1.addWidget(archive_badge)
 
@@ -76,13 +76,13 @@ class ArchiveControls(QWidget):
 
         self._date_label = QLabel("---- -- --")
         self._date_label.setStyleSheet(
-            "color: #C8D0DE; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
+            f"color: {P.TEXT_SECONDARY}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
         )
         row1.addWidget(self._date_label)
 
         self._utc_label = QLabel("--:--:-- UTC")
         self._utc_label.setStyleSheet(
-            "color: #E8EAF0; font-size: 10px; font-weight: 700; letter-spacing: 0.5px;"
+            f"color: {P.TEXT}; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;"
         )
         row1.addWidget(self._utc_label)
 
@@ -90,7 +90,7 @@ class ArchiveControls(QWidget):
 
         self._local_label = QLabel("--:-- CT / --:-- MT")
         self._local_label.setStyleSheet(
-            "color: #8E97AB; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 500; letter-spacing: 0.5px;"
         )
         row1.addWidget(self._local_label)
 
@@ -98,7 +98,7 @@ class ArchiveControls(QWidget):
 
         self._radar_status = QLabel("Radar: --")
         self._radar_status.setStyleSheet(
-            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
         row1.addWidget(self._radar_status)
 
@@ -106,7 +106,7 @@ class ArchiveControls(QWidget):
 
         self._sat_status = QLabel("Sat: --")
         self._sat_status.setStyleSheet(
-            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
         row1.addWidget(self._sat_status)
 
@@ -114,7 +114,7 @@ class ArchiveControls(QWidget):
 
         self._obs_status = QLabel("OBS: MQTT")
         self._obs_status.setStyleSheet(
-            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
         row1.addWidget(self._obs_status)
 
@@ -139,7 +139,7 @@ class ArchiveControls(QWidget):
 
         self._speed_label = QLabel("SPEED")
         self._speed_label.setStyleSheet(
-            "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
+            f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
         )
         row2.addWidget(self._speed_label)
 
@@ -173,28 +173,28 @@ class ArchiveControls(QWidget):
     def _vdiv(self) -> QFrame:
         d = QFrame()
         d.setFrameShape(QFrame.Shape.VLine)
-        d.setStyleSheet("color: #394056; margin: 3px 0;")
+        d.setStyleSheet(f"color: {P.DIVIDER}; margin: 3px 0;")
         return d
 
     def set_radar_status(self, text: str, error: bool = False) -> None:
         self._radar_status.setText(text)
-        color = "#FF8F8F" if error else "#8E97AB"
+        color = P.ERROR_SOFT_2 if error else P.TEXT_LABEL
         self._radar_status.setStyleSheet(
-            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
 
     def set_satellite_status(self, text: str, error: bool = False) -> None:
         self._sat_status.setText(text)
-        color = "#FF8F8F" if error else "#8E97AB"
+        color = P.ERROR_SOFT_2 if error else P.TEXT_LABEL
         self._sat_status.setStyleSheet(
-            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
 
     def set_obs_status(self, text: str, active: bool = False) -> None:
         self._obs_status.setText(text)
-        color = "#39D98A" if active else "#8E97AB"
+        color = P.OK if active else P.TEXT_LABEL
         self._obs_status.setStyleSheet(
-            f"color: {color}; font-size: 9px; font-weight: 600; letter-spacing: 0.4px;"
+            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
         )
 
     def set_precision_mode(self, enabled: bool) -> None:
@@ -216,33 +216,11 @@ class ArchiveControls(QWidget):
         self._tc.time_changed.connect(self._on_time_changed)
         self._tc.playing_changed.connect(self._on_playing_changed)
 
-        self._btn_start.clicked.connect(self._on_skip_start)
-        self._btn_back.clicked.connect(self._on_step_back)
+        self._btn_start.clicked.connect(self.skip_start)
+        self._btn_back.clicked.connect(self.step_back)
         self._btn_play.clicked.connect(self._tc.toggle_play)
-        self._btn_fwd.clicked.connect(self._on_step_forward)
-        self._btn_end.clicked.connect(self._on_skip_end)
-
-        # keyboard shortcuts — these require a parent window to be set.
-        self._shortcuts_installed = False
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self._shortcuts_installed:
-            self._install_shortcuts()
-
-    def _install_shortcuts(self):
-        win = self.window()
-        if win is None:
-            return
-        self._shortcuts_installed = True
-        QShortcut(QKeySequence(Qt.Key.Key_Space),  win).activated.connect(self._tc.toggle_play)
-        QShortcut(QKeySequence(Qt.Key.Key_Left),   win).activated.connect(self._on_step_back)
-        QShortcut(QKeySequence(Qt.Key.Key_Right),  win).activated.connect(self._on_step_forward)
-        QShortcut(QKeySequence(Qt.Key.Key_A),      win).activated.connect(self._on_step_back)
-        QShortcut(QKeySequence(Qt.Key.Key_D),      win).activated.connect(self._on_step_forward)
-        QShortcut(QKeySequence(Qt.Key.Key_Home),   win).activated.connect(self._on_skip_start)
-        QShortcut(QKeySequence(Qt.Key.Key_End),    win).activated.connect(self._on_skip_end)
-
+        self._btn_fwd.clicked.connect(self.step_forward)
+        self._btn_end.clicked.connect(self.skip_end)
 
     def _on_time_changed(self, t: datetime) -> None:
         self._update_time_display(t)
@@ -256,16 +234,20 @@ class ArchiveControls(QWidget):
     def _on_speed_changed(self, idx: int) -> None:
         self._tc.set_speed_by_index(idx)
 
-    def _on_step_back(self) -> None:
+    # also bound to keys by MainWindow (ui/shortcuts.py)
+    def toggle_play(self) -> None:
+        self._tc.toggle_play()
+
+    def step_back(self) -> None:
         self._tc.step(-1 if self._precision_mode else -10)
 
-    def _on_step_forward(self) -> None:
+    def step_forward(self) -> None:
         self._tc.step(1 if self._precision_mode else 10)
 
-    def _on_skip_start(self) -> None:
+    def skip_start(self) -> None:
         self._tc.step(-10 if self._precision_mode else -60)
 
-    def _on_skip_end(self) -> None:
+    def skip_end(self) -> None:
         self._tc.step(10 if self._precision_mode else 60)
 
     def _show_jump_dialog(self) -> None:
@@ -308,7 +290,7 @@ class ArchiveControls(QWidget):
 
         prod_lbl = QLabel("PROD")
         prod_lbl.setStyleSheet(
-            "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
+            f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
         )
         row2.insertWidget(row2.count() - 1, prod_lbl)
 
@@ -326,7 +308,7 @@ class ArchiveControls(QWidget):
 
         tilt_lbl = QLabel("TILT")
         tilt_lbl.setStyleSheet(
-            "color: #6E7A8F; font-size: 9px; font-weight: 600; letter-spacing: 0.5px;"
+            f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
         )
         row2.insertWidget(row2.count() - 1, tilt_lbl)
 
@@ -362,28 +344,28 @@ class _JumpToTimeDialog(QDialog):
             Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
         )
         self.setFixedWidth(280)
-        self.setStyleSheet("""
-            QDialog { background-color: #0A0A0F; }
-            QLabel  { color: #8E97AB; font-size: 11px; background: transparent; }
+        self.setStyleSheet(P.qss("""
+            QDialog { background-color: $bg_base; }
+            QLabel  { color: $text_label; font-size: 11px; background: transparent; }
             QDateTimeEdit {
-                background-color: #1A1A2E;
-                border: 1px solid #1E1E2E;
+                background-color: $bg_elevated;
+                border: 1px solid $border_subtle;
                 border-radius: 6px;
-                color: #E8EAF0;
+                color: $text;
                 font-size: 13px;
                 padding: 6px 10px;
             }
             QPushButton {
-                background-color: #00CFFF;
+                background-color: $accent;
                 border: none;
                 border-radius: 6px;
-                color: #0A0A0F;
+                color: $bg_base;
                 font-size: 12px;
                 font-weight: 700;
                 padding: 7px 20px;
             }
-            QPushButton:hover { background-color: #33D9FF; }
-        """)
+            QPushButton:hover { background-color: $accent_hover; }
+        """))
 
         from PyQt6.QtCore import QDateTime
         layout = QVBoxLayout(self)

@@ -6,11 +6,13 @@ from PyQt6.QtWidgets import (
 )
 from math import radians, sin, cos, sqrt, atan2
 
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QTimer, QSize
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QSize
 from PyQt6.QtGui import QIcon, QPixmap, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
 from data.fetchers.routing_fetcher import RoutingFetcher, RouteResult, fmt_distance, fmt_duration
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 # pass-through detection thresholds
 _CLOSE_M        = 40.0    # must come within this to be "at" the maneuver
@@ -32,8 +34,8 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
 # text-colour styles applied inline on the QLineEdit fields
-_STYLE_GPS    = "color: #39D98A;"   # green  — set via GPS loc button
-_STYLE_MANUAL = "color: #EFF3FF;"   # white  — manually entered / map-picked
+_STYLE_GPS    = f"color: {P.OK};"   # green  — set via GPS loc button
+_STYLE_MANUAL = f"color: {P.TEXT_BRIGHT};"   # white  — manually entered / map-picked
 
 
 def _make_vehicle_icon(size: int = 15) -> QIcon:
@@ -59,8 +61,8 @@ def _make_vehicle_icon(size: int = 15) -> QIcon:
         return px
 
     icon = QIcon()
-    icon.addPixmap(_pixmap("#4A9EFF"), QIcon.Mode.Normal,   QIcon.State.Off)
-    icon.addPixmap(_pixmap("#3A3F52"), QIcon.Mode.Disabled, QIcon.State.Off)
+    icon.addPixmap(_pixmap(P.INFO), QIcon.Mode.Normal,   QIcon.State.Off)
+    icon.addPixmap(_pixmap(P.TEXT_DISABLED), QIcon.Mode.Disabled, QIcon.State.Off)
     return icon
 
 
@@ -100,8 +102,8 @@ def _make_loc_icon(size: int = 15) -> QIcon:
         return px
 
     icon = QIcon()
-    icon.addPixmap(_pixmap("#4A9EFF"), QIcon.Mode.Normal,   QIcon.State.Off)
-    icon.addPixmap(_pixmap("#3A3F52"), QIcon.Mode.Disabled, QIcon.State.Off)
+    icon.addPixmap(_pixmap(P.INFO), QIcon.Mode.Normal,   QIcon.State.Off)
+    icon.addPixmap(_pixmap(P.TEXT_DISABLED), QIcon.Mode.Disabled, QIcon.State.Off)
     return icon
 
 
@@ -115,7 +117,7 @@ def _loc_icon() -> QIcon:
     return _LOC_ICON
 
 
-class RoutingControls(QWidget):
+class RoutingControls(Drawer):
     """Floating drawer for route calculation and turn-by-turn display.
 
     Signals:
@@ -129,12 +131,10 @@ class RoutingControls(QWidget):
     cancel_pick_mode  = pyqtSignal()
     route_calculated  = pyqtSignal(object)   # RouteResult
     route_cleared     = pyqtSignal()
-    content_resized   = pyqtSignal()         # triggers layout pulse in main_window
     nav_updated       = pyqtSignal(str, str) # (step_text, summary_text) → NavPill
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation         = None
         self._fetcher           = RoutingFetcher()
 
         # known vehicles: {vehicle_id: (lat, lon)}
@@ -178,7 +178,6 @@ class RoutingControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(0)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -193,9 +192,9 @@ class RoutingControls(QWidget):
         ori.setSpacing(4)
 
         ori_lbl = QLabel("FROM")
-        ori_lbl.setFixedWidth(36)
+        ori_lbl.setMinimumWidth(48)   # fits "FROM" at 130 % text, keeps TO aligned
         ori_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        ori_lbl.setStyleSheet("color: #6E7A8F; font-size: 9px; font-weight: 700; "
+        ori_lbl.setStyleSheet(f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 700; "
                               "letter-spacing: 0.8px; background: transparent;")
 
         self._origin_input = QLineEdit()
@@ -247,9 +246,9 @@ class RoutingControls(QWidget):
         dst.setSpacing(4)
 
         dest_lbl = QLabel("TO")
-        dest_lbl.setFixedWidth(36)
+        dest_lbl.setMinimumWidth(48)
         dest_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
-        dest_lbl.setStyleSheet("color: #6E7A8F; font-size: 9px; font-weight: 700; "
+        dest_lbl.setStyleSheet(f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 700; "
                                "letter-spacing: 0.8px; background: transparent;")
 
         self._dest_input = QLineEdit()
@@ -318,7 +317,7 @@ class RoutingControls(QWidget):
 
         self._status_label = QLabel("")
         self._status_label.setStyleSheet(
-            "color: #9DA6B8; font-size: 10px; background: transparent; padding: 0 4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; background: transparent; padding: 0 4px;"
         )
         self._status_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
@@ -333,7 +332,7 @@ class RoutingControls(QWidget):
 
         self._summary_label = QLabel("")
         self._summary_label.setStyleSheet(
-            "color: #4A9EFF; font-size: 11px; font-weight: 600; "
+            f"color: {P.INFO}; font-size: 11px; font-weight: 600; "
             "background: transparent; padding: 1px 40px 1px 40px;"
         )
         self._summary_label.setVisible(False)
@@ -343,9 +342,9 @@ class RoutingControls(QWidget):
         self._steps_list.setStyleSheet(
             "QListWidget { background: transparent; border: none; "
             "  padding: 0 0 0 36px; }"
-            "QListWidget::item { color: #C8D0DE; font-size: 11px; "
+            f"QListWidget::item {{ color: {P.TEXT_SECONDARY}; font-size: 11px; "
             "  padding: 2px 2px 2px 0; background: transparent; border: none; }"
-            "QListWidget::item:selected { background: rgba(74,158,255,0.12); "
+            f"QListWidget::item:selected {{ background: {P.alpha(P.INFO, 0.12)}; "
             "  border-radius: 4px; }"
         )
         self._steps_list.setMaximumHeight(180)
@@ -361,30 +360,6 @@ class RoutingControls(QWidget):
         self._fetcher.route_ready.connect(self._on_route_ready)
         self._fetcher.geocode_ready.connect(self._on_geocode_ready)
         self._fetcher.fetch_error.connect(self._on_fetch_error)
-
-
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
 
     def update_own_position(self, lat: float, lon: float):
@@ -585,6 +560,12 @@ class RoutingControls(QWidget):
         self._update_go_enabled()
 
 
+    def cancel_pick(self) -> None:
+        """Leave origin/destination pick mode (another map click mode took over, or Esc)."""
+        for btn in (self._btn_origin_pick, self._btn_dest_pick):
+            if btn.isChecked():
+                btn.setChecked(False)
+
     def _on_origin_pick_toggled(self, checked: bool):
         if checked:
             # cancel dest pick if active
@@ -709,7 +690,7 @@ class RoutingControls(QWidget):
         self._populate_steps(result)
         self.route_calculated.emit(result)
         self._emit_nav_state()
-        self._resize_for_content()
+        self.content_changed()
 
     def _on_fetch_error(self, msg: str):
         self._geocoding_origin = False
@@ -747,11 +728,7 @@ class RoutingControls(QWidget):
         self._set_status("")
         self._update_go_enabled()
         self.route_cleared.emit()
-        # only animate the height change when the drawer is fully open.
-        if self.maximumHeight() == 16777215:
-            self._resize_for_content()
-        else:
-            self.content_resized.emit()
+        self.content_changed()
 
 
     def _populate_steps(self, result: RouteResult):
@@ -842,7 +819,7 @@ class RoutingControls(QWidget):
             self._min_maneuver_dist = float("inf")
             self._off_route_count   = 0
             self._emit_nav_state()
-            self._resize_for_content()
+            self.content_changed()
 
     def _on_copy_eta(self):
         if self._last_result is None:
@@ -867,23 +844,3 @@ class RoutingControls(QWidget):
         step_text = item.text() if item else "Navigating…"
         self.nav_updated.emit(step_text, self._summary_label.text())
 
-    def _resize_for_content(self):
-        """Animate to new natural height after content changes."""
-        if self.maximumHeight() <= 0:
-            return
-        self.setMaximumHeight(16777215)
-        target  = self.sizeHint().height()
-        current = self.height()
-        if target != current:
-            if self._animation:
-                self._animation.stop()
-            anim = QPropertyAnimation(self, b"maximumHeight")
-            anim.setDuration(150)
-            anim.setStartValue(current)
-            anim.setEndValue(target)
-            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-            anim.start()
-            self._animation = anim
-        # always notify so _start_layout_pulse runs and corrects geometry.
-        self.content_resized.emit()

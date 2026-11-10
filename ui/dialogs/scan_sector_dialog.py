@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.scan_sector import ScanSector
+from ui import palette as P
 
 
 _KEY_PREFIX = "scan_sector"
@@ -43,7 +44,7 @@ class ScanSectorDialog(QDialog):
         root.setSpacing(10)
 
         title = QLabel("CURRENT SAMPLING")
-        title.setStyleSheet("font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: #00CFFF;")
+        title.setStyleSheet(f"font-size: 11px; font-weight: 700; letter-spacing: 1.2px; color: {P.ACCENT};")
         root.addWidget(title)
 
         form = QFormLayout()
@@ -75,7 +76,7 @@ class ScanSectorDialog(QDialog):
         root.addLayout(form)
 
         note = QLabel(f"Anchor: {lat:.4f}, {lon:.4f}")
-        note.setStyleSheet("color: #8C96AA; font-size: 10px;")
+        note.setStyleSheet(f"color: {P.TEXT_LABEL}; font-size: 10px;")
         root.addWidget(note)
 
         buttons = QHBoxLayout()

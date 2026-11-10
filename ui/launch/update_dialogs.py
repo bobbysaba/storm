@@ -3,6 +3,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout
 
 from data.update_checker import UpdateWorker
+from ui import palette as P
 
 
 class _CondaUpdateDialog(QDialog):
@@ -17,11 +18,11 @@ class _CondaUpdateDialog(QDialog):
             | Qt.WindowType.CustomizeWindowHint
             | Qt.WindowType.WindowTitleHint
         )
-        self.setStyleSheet("""
-            QDialog { background-color: #0A0A0F; }
-            QLabel  { color: #E8EAF0; font-size: 12px; background: transparent; }
-            QLabel#status { color: #00CFFF; font-size: 11px; font-weight: 600; }
-        """)
+        self.setStyleSheet(P.qss("""
+            QDialog { background-color: $bg_base; }
+            QLabel  { color: $text; font-size: 12px; background: transparent; }
+            QLabel#status { color: $accent; font-size: 11px; font-weight: 600; }
+        """))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 28)
@@ -38,25 +39,25 @@ class _CondaUpdateDialog(QDialog):
         layout.addWidget(self._status)
 
         hint = QLabel("This may take 2-5 minutes. Please wait...")
-        hint.setStyleSheet("color: #8E97AB; font-size: 11px;")
+        hint.setStyleSheet(f"color: {P.TEXT_LABEL}; font-size: 11px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(hint)
 
         # animated dots to show progress
         self._dots_label = QLabel("●")
         self._dots_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._dots_label.setStyleSheet("color: #00CFFF; font-size: 18px;")
+        self._dots_label.setStyleSheet(f"color: {P.ACCENT}; font-size: 18px;")
         layout.addWidget(self._dots_label)
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setFixedWidth(100)
-        cancel_btn.setStyleSheet("""
+        cancel_btn.setStyleSheet(P.qss("""
             QPushButton {
-                background: transparent; color: #8E97AB; border: 1px solid #8E97AB;
+                background: transparent; color: $text_label; border: 1px solid $text_label;
                 border-radius: 4px; padding: 4px 12px; font-size: 11px;
             }
-            QPushButton:hover { color: #E8EAF0; border-color: #E8EAF0; }
-        """)
+            QPushButton:hover { color: $text; border-color: $text; }
+        """))
         cancel_btn.clicked.connect(self.reject)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -82,28 +83,28 @@ class _LogViewerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("STORM — Crash Log")
         self.setMinimumSize(620, 400)
-        self.setStyleSheet("""
-            QDialog { background-color: #0A0A0F; }
-            QLabel  { color: #8E97AB; font-size: 11px; background: transparent; }
+        self.setStyleSheet(P.qss("""
+            QDialog { background-color: $bg_base; }
+            QLabel  { color: $text_label; font-size: 11px; background: transparent; }
             QTextEdit {
-                background-color: #050508;
-                border: 1px solid #1A1A2E;
+                background-color: $bg_deep;
+                border: 1px solid $bg_elevated;
                 border-radius: 6px;
-                color: #39D98A;
+                color: $ok;
                 font-family: 'Courier New', monospace;
                 font-size: 11px;
                 padding: 8px;
             }
             QPushButton {
-                background-color: #1A1A2E;
-                border: 1px solid #1E1E2E;
+                background-color: $bg_elevated;
+                border: 1px solid $border_subtle;
                 border-radius: 6px;
-                color: #8E97AB;
+                color: $text_label;
                 font-size: 11px;
                 padding: 6px 16px;
             }
-            QPushButton:hover { border-color: #00CFFF; color: #00CFFF; }
-        """)
+            QPushButton:hover { border-color: $accent; color: $accent; }
+        """))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)

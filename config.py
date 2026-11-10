@@ -114,3 +114,16 @@ MQTT_USE_TLS = True
 MQTT_CA_CERT = str(_AWS / "storm.pem")
 MQTT_CERT_FILE = str(_AWS / "storm.pem.crt")
 MQTT_KEY_FILE = str(_AWS / "storm-private.pem.key")
+
+# data-age thresholds per layer, in minutes: (warn, stale). Ages past "warn"
+# turn the drawer time label amber; past "stale" the toolbar button gets an
+# amber dot. None disables that level (mesoanalysis / SFCOA frames are picked
+# by the user, so only their errors are tracked). See ui/layer_status.py.
+LAYER_AGE_THRESHOLDS_MIN: dict[str, tuple[float | None, float | None]] = {
+    "radar":        (8, 12),
+    "satellite":    (10, 20),
+    "hazards":      (6, 10),    # polled every 2 min; age = time since last fetch
+    "surface":      (12, 20),   # polled every 5 min; age = time since last fetch
+    "mesoanalysis": (None, None),
+    "sfcoa":        (None, None),
+}

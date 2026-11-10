@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from core.observation import Observation
 from ui.layers.station_plot_layer import _display_key, render_cached
+from ui import palette as P
 
 log = logging.getLogger(__name__)
 
@@ -88,13 +89,13 @@ class SurfacePlotLayer:
         if station_id.startswith("surface:asos:"):
             # asos reports hourly — use wider freshness thresholds
             if age_min <= 70.0:
-                return "#39D98A"
+                return P.OK
             if age_min <= 90.0:
-                return "#FFD166"
-            return "#E53935"
+                return P.WARN
+            return P.ERROR
         # ok Mesonet / WTM report every 5 min
         if age_min <= 5.0:
-            return "#39D98A"
+            return P.OK
         if age_min <= 10.0:
-            return "#FFD166"
-        return "#E53935"
+            return P.WARN
+        return P.ERROR

@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton, QPushButton, QFrame,
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
+from ui import palette as P
 
 
 DEFAULT_LAYERS: list[str] = [
@@ -142,11 +143,11 @@ class LayerOrderPill(QWidget):
         self._toggle_btn = QToolButton(self)
         self._toggle_btn.setObjectName("layerOrderToggle")
         self._toggle_btn.setStyleSheet(
-            "QToolButton { background: rgba(15,15,26,0.95); "
-            "border: 1px solid rgba(74,83,108,0.55); border-radius: 8px; "
-            "color: #C8D0DE; font-size: 10px; font-weight: 600; "
+            f"QToolButton {{ background: {P.alpha(P.BG_PANEL, 0.95)}; "
+            f"border: 1px solid {P.alpha(P.BORDER_SOFT, 0.55)}; border-radius: 8px; "
+            f"color: {P.TEXT_SECONDARY}; font-size: 11px; font-weight: 600; "
             "letter-spacing: 0.5px; padding: 5px 10px; }"
-            "QToolButton:hover { border-color: #4A9EFF; color: #4A9EFF; }"
+            f"QToolButton:hover {{ border-color: {P.INFO}; color: {P.INFO}; }}"
         )
         self._toggle_btn.clicked.connect(self._toggle_expanded)
 
@@ -161,7 +162,7 @@ class LayerOrderPill(QWidget):
         hdr.setContentsMargins(0, 0, 0, 0)
         title = QLabel("LAYER ORDER")
         title.setStyleSheet(
-            "font-size: 10px; font-weight: 700; letter-spacing: 1.3px; color: #4A9EFF;"
+            f"font-size: 11px; font-weight: 700; letter-spacing: 1.3px; color: {P.INFO};"
         )
         hdr.addWidget(title)
         hdr.addStretch()
@@ -169,10 +170,10 @@ class LayerOrderPill(QWidget):
         self._btn_reset = QPushButton("RESET")
         self._btn_reset.setFixedHeight(20)
         self._btn_reset.setStyleSheet(
-            "QPushButton { background: transparent; border: 1px solid #2E2E4E; "
-            "border-radius: 4px; color: #6E7A8F; font-size: 9px; "
+            f"QPushButton {{ background: transparent; border: 1px solid {P.BORDER}; "
+            f"border-radius: 4px; color: {P.TEXT_MUTED}; font-size: 11px; "
             "font-weight: 600; letter-spacing: 0.8px; padding: 0 6px; }"
-            "QPushButton:hover { border-color: #4A9EFF; color: #4A9EFF; }"
+            f"QPushButton:hover {{ border-color: {P.INFO}; color: {P.INFO}; }}"
         )
         self._btn_reset.clicked.connect(self._on_reset)
         hdr.addWidget(self._btn_reset)
@@ -180,7 +181,7 @@ class LayerOrderPill(QWidget):
 
         div = QFrame()
         div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet("color: #1E1E2E; margin: 2px 0;")
+        div.setStyleSheet(f"color: {P.BORDER_SUBTLE}; margin: 2px 0;")
         panel_layout.addWidget(div)
 
         self._rows_widget = QWidget()
@@ -192,16 +193,16 @@ class LayerOrderPill(QWidget):
 
         div2 = QFrame()
         div2.setFrameShape(QFrame.Shape.HLine)
-        div2.setStyleSheet("color: #1E1E2E; margin: 2px 0;")
+        div2.setStyleSheet(f"color: {P.BORDER_SUBTLE}; margin: 2px 0;")
         panel_layout.addWidget(div2)
 
         self._btn_confirm = QPushButton("APPLY ORDER")
         self._btn_confirm.setStyleSheet(
-            "QPushButton { background: rgba(0,207,255,0.12); border: 1px solid #00CFFF; "
-            "border-radius: 5px; color: #00CFFF; font-size: 10px; "
+            f"QPushButton {{ background: {P.alpha(P.ACCENT, 0.12)}; border: 1px solid {P.ACCENT}; "
+            f"border-radius: 5px; color: {P.ACCENT}; font-size: 11px; "
             "font-weight: 700; letter-spacing: 0.8px; padding: 4px 0; }"
-            "QPushButton:hover { background: rgba(0,207,255,0.22); }"
-            "QPushButton:pressed { background: rgba(0,207,255,0.35); }"
+            f"QPushButton:hover {{ background: {P.alpha(P.ACCENT, 0.22)}; }}"
+            f"QPushButton:pressed {{ background: {P.alpha(P.ACCENT, 0.35)}; }}"
         )
         self._btn_confirm.clicked.connect(self._on_confirm)
         panel_layout.addWidget(self._btn_confirm)
@@ -278,13 +279,13 @@ class LayerOrderPill(QWidget):
 
         lbl = QLabel(LAYER_LABELS.get(key, key))
         lbl.setStyleSheet(
-            f"font-size: 10px; font-weight: 500; "
-            f"color: {'#C8D0DE' if active else '#3A3B5A'};"
+            f"font-size: 11px; font-weight: 500; "
+            f"color: {P.TEXT_SECONDARY if active else P.TEXT_DISABLED};"
         )
         rl.addWidget(lbl, 1)
 
         dot = QLabel("●")
-        dot.setStyleSheet(f"font-size: 8px; color: {'#39D98A' if active else '#1E2434'};")
+        dot.setStyleSheet(f"font-size: 11px; color: {P.OK if active else P.BORDER_3};")
         rl.addWidget(dot)
 
         btn_up = QToolButton()
@@ -307,11 +308,11 @@ class LayerOrderPill(QWidget):
 
     @staticmethod
     def _arrow_style(enabled: bool) -> str:
-        color = "#C8D0DE" if enabled else "#2A2B3A"
+        color = P.TEXT_SECONDARY if enabled else P.TEXT_DISABLED
         return (
-            f"QToolButton {{ background: transparent; border: 1px solid #1E1E2E; "
+            f"QToolButton {{ background: transparent; border: 1px solid {P.BORDER_SUBTLE}; "
             f"border-radius: 3px; color: {color}; font-size: 11px; }}"
-            f"QToolButton:hover {{ border-color: #4A9EFF; color: #4A9EFF; }}"
+            f"QToolButton:hover {{ border-color: {P.INFO}; color: {P.INFO}; }}"
         )
 
 

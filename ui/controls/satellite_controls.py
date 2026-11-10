@@ -3,10 +3,13 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QFrame, QToolButton, QLabel,
     QSlider, QSizePolicy,
 )
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt, QEvent
+from PyQt6.QtCore import pyqtSignal, Qt, QEvent
+from ui import palette as P
+from ui.widgets.drawer import Drawer
+from ui.layer_status import StatusTimeLabel
 
 
-class SatelliteControls(QWidget):
+class SatelliteControls(Drawer):
     """
     Collapsible two-row drawer for GOES-East satellite overlay controls.
 
@@ -33,8 +36,8 @@ class SatelliteControls(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
         self._updating  = False
+        self._pending_mode = ""     # restored MESO mode waiting for its sector
         self._meso_bboxes: dict[int, dict | None] = {1: None, 2: None}
         self._setup_ui()
 
@@ -44,7 +47,6 @@ class SatelliteControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -80,7 +82,7 @@ class SatelliteControls(QWidget):
         r1.addWidget(self._vdiv())
 
         lbl = QLabel("OPACITY")
-        lbl.setStyleSheet("color: #B5BDCC; font-size: 10px; letter-spacing: 0.5px;")
+        lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px; letter-spacing: 0.5px;")
         lbl.setFixedHeight(22)
         r1.addWidget(lbl)
 
@@ -132,7 +134,7 @@ class SatelliteControls(QWidget):
         self._frame_slider.sliderReleased.connect(self._on_slider_released)
         r2.addWidget(self._frame_slider)
 
-        self._time_label = QLabel("--:--Z")
+        self._time_label = StatusTimeLabel()
         self._time_label.setObjectName("satTimeLabel")
         self._time_label.setFixedHeight(26)
         self._time_label.setMinimumWidth(52)
@@ -170,7 +172,7 @@ class SatelliteControls(QWidget):
     def _vdiv(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        div.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         return div
 
 
@@ -178,6 +180,10 @@ class SatelliteControls(QWidget):
         btn = self._btn_meso1 if idx == 1 else self._btn_meso2
         btn.setEnabled(available)
         self._meso_bboxes[idx] = bbox if available else None
+        if self._pending_mode == f"meso{idx}":
+            self._pending_mode = ""
+            # restored sector is gone: fall back to CONUS rather than nothing
+            (btn if available else self._btn_conus).setChecked(True)
         if available:
             btn.setToolTip(f"Mesoscale sector {idx}")
         else:
@@ -204,8 +210,12 @@ class SatelliteControls(QWidget):
         self._frame_slider.setValue(idx)
         self._frame_slider.blockSignals(False)
 
-    def set_scan_time(self, time_str: str):
-        self._time_label.setText(time_str)
+    def set_scan_time(self, time_str: str, when=None):
+        self._time_label.set_frame(time_str, when)
+
+    def bind_status(self, status) -> None:
+        """Color the time label and show data age from a LayerStatus."""
+        self._time_label.bind(status)
 
     def current_frame(self) -> int:
         return self._frame_slider.value()
@@ -222,6 +232,26 @@ class SatelliteControls(QWidget):
     def is_at_latest_frame(self) -> bool:
         return self._frame_slider.value() >= self._frame_slider.maximum()
 
+    def save_state(self) -> dict:
+        return {"mode": self.current_mode(), "opacity": self._opacity_slider.value()}
+
+    def restore_state(self, state: dict, mode: bool = True) -> None:
+        """Restore opacity and, unless ``mode`` is False, the CONUS/MESO choice.
+        A MESO mode whose sector isn't known yet is applied when it arrives."""
+        opacity = state.get("opacity")
+        if isinstance(opacity, int):
+            self._opacity_slider.setValue(max(0, min(100, opacity)))
+        if not mode:
+            return
+        btn = {"conus": self._btn_conus, "meso1": self._btn_meso1,
+               "meso2": self._btn_meso2}.get(state.get("mode"))
+        if btn is None:
+            return
+        if btn.isEnabled():
+            btn.setChecked(True)
+        else:
+            self._pending_mode = state["mode"]
+
     def is_looping(self) -> bool:
         return self._btn_play.isChecked()
 
@@ -235,7 +265,7 @@ class SatelliteControls(QWidget):
         self._frame_slider.setRange(0, 0)
         self._frame_slider.setValue(0)
         self._frame_slider.blockSignals(False)
-        self._time_label.setText("--:--Z")
+        self._time_label.clear_frame()
         for w in (self._frame_slider, self._btn_back, self._btn_fwd,
                   self._btn_play, self._btn_jump_start, self._btn_jump_end):
             w.setEnabled(False)
@@ -244,6 +274,7 @@ class SatelliteControls(QWidget):
         row2 = self._drawer.layout().itemAt(1).widget()
         if row2 is not None:
             row2.setVisible(not enabled)
+        self.content_changed()
         if enabled:
             # meso buttons are disabled until live sectors are found; in archive
             self._btn_meso1.setEnabled(True)
@@ -252,27 +283,10 @@ class SatelliteControls(QWidget):
             self._btn_meso2.setToolTip("Mesoscale sector 2")
 
     def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
+        if not checked:
             self.meso_preview.emit(1, False)
             self.meso_preview.emit(2, False)
-
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
+        super().toggle_drawer(checked)
 
     def eventFilter(self, obj, event):
         if obj in (self._btn_meso1, self._btn_meso2):
@@ -298,6 +312,7 @@ class SatelliteControls(QWidget):
         if self._updating:
             return
         if checked:
+            self._pending_mode = ""
             self._set_mode(mode)
             self.mode_changed.emit(mode)
         else:

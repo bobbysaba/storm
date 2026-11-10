@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QToolButton,
     QPushButton, QSizePolicy, QFrame,
 )
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 _PRODUCT_BUTTON_MIN_WIDTH = 64
 _PRODUCT_BUTTON_MIN_HEIGHT = 22
@@ -33,20 +35,18 @@ _COLUMN_GROUPS = (
 )
 
 
-class SfcoaControls(QWidget):
+class SfcoaControls(Drawer):
     """Adaptive SFCOA mesoanalysis product drawer."""
 
     product_toggled = pyqtSignal(str, bool)
     frame_requested = pyqtSignal(int)
     refresh_requested = pyqtSignal()
     visible_toggled = pyqtSignal(bool)
-    content_resized = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
-        self._drawer_open_requested = False
         self._updating = False
+        self._pending_products: set[str] = set()   # restored, waiting for set_products
         self._times: list[str] = []
         self._time_labels: list[str] = []
         self._current_frame = 0
@@ -59,7 +59,6 @@ class SfcoaControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._drawer = QWidget()
         self._drawer.setObjectName("sfcoaDrawer")
@@ -75,7 +74,7 @@ class SfcoaControls(QWidget):
 
         self._refresh_btn = QPushButton("REFRESH")
         self._refresh_btn.setObjectName("sfcoaRefreshButton")
-        self._refresh_btn.setFixedSize(_REFRESH_BUTTON_WIDTH, 22)
+        self._refresh_btn.setMinimumSize(_REFRESH_BUTTON_WIDTH, 22)
         self._refresh_btn.clicked.connect(self.refresh_requested.emit)
         r.addWidget(self._refresh_btn)
         r.addWidget(self._vdiv())
@@ -108,48 +107,6 @@ class SfcoaControls(QWidget):
         col.addWidget(self._product_grid_widget)
         outer.addWidget(self._drawer)
 
-    def toggle_drawer(self, checked: bool):
-        if self._animation:
-            self._animation.stop()
-            self._animation = None
-        if checked:
-            self._drawer_open_requested = True
-            self.setMaximumHeight(0)
-            QTimer.singleShot(0, self._animate_open)
-            return
-        self._drawer_open_requested = False
-        current = self.height()
-        self.setMaximumHeight(current)
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(0)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        anim.start()
-        self._animation = anim
-
-    def _animate_open(self) -> None:
-        if not self._drawer_open_requested:
-            return
-        layout = self.layout()
-        if layout is not None:
-            layout.invalidate()
-            layout.activate()
-        self.updateGeometry()
-        target = max(1, self.sizeHint().height())
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(0)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        anim.finished.connect(self._finish_open_animation)
-        anim.start()
-        self._animation = anim
-
-    def _finish_open_animation(self) -> None:
-        if self._drawer_open_requested:
-            self.setMaximumHeight(16777215)
-
     def set_times(self, times) -> None:
         current = self.current_time()
         self._times = [item.time_id for item in times]
@@ -157,7 +114,7 @@ class SfcoaControls(QWidget):
         idx = self._times.index(current) if current in self._times else max(0, len(self._times) - 1)
         self.set_cache_size(len(self._times))
         self.set_frame(idx)
-        self._notify_content_resized()
+        self.content_changed()
 
     def set_products(self, products) -> None:
         previous_active = set(self._active_products)
@@ -213,7 +170,8 @@ class SfcoaControls(QWidget):
         for product_id in previous_active - self._active_products:
             self.product_toggled.emit(product_id, False)
         self.visible_toggled.emit(bool(self._active_products))
-        self._notify_content_resized()
+        self._apply_pending_products()
+        self.content_changed()
 
     def set_status(self, text: str) -> None:
         text = str(text or "")
@@ -230,6 +188,24 @@ class SfcoaControls(QWidget):
 
     def active_products(self) -> set[str]:
         return set(self._active_products)
+
+    def save_state(self) -> dict:
+        return {"products": sorted(self._active_products | self._pending_products)}
+
+    def restore_state(self, state: dict) -> None:
+        """Products turn on when the next ``set_products`` lists them."""
+        self._pending_products = set(state.get("products") or ())
+
+    def _apply_pending_products(self) -> None:
+        # products this listing doesn't offer stay pending for the next one
+        for product_id in sorted(self._pending_products):
+            btn = self._product_buttons.get(product_id)
+            if btn is None or not btn.isEnabled():
+                continue
+            self._pending_products.discard(product_id)
+            if product_id not in self._active_products:
+                btn.setChecked(True)
+                self._toggle_product(product_id, True)
 
     def set_cache_size(self, n: int) -> None:
         n = max(0, int(n))
@@ -256,6 +232,7 @@ class SfcoaControls(QWidget):
     def _toggle_product(self, product_id: str, checked: bool) -> None:
         if self._updating:
             return
+        self._pending_products.discard(product_id)
         if checked:
             self._active_products.add(product_id)
             self.visible_toggled.emit(True)
@@ -294,19 +271,8 @@ class SfcoaControls(QWidget):
     def _vdiv(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        div.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         return div
-
-    def _notify_content_resized(self) -> None:
-        layout = self.layout()
-        if layout is not None:
-            layout.invalidate()
-            layout.activate()
-        if self._drawer_open_requested or self.maximumHeight() > 0:
-            self.setMaximumHeight(16777215)
-        self.updateGeometry()
-        QTimer.singleShot(0, self.content_resized.emit)
-
 
 def _sort_products(group: str, products: list) -> list:
     return sorted(products, key=lambda product: (_product_sort_key(group, product), product.label))

@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt
 
 from core.annotation import Annotation, ANNOTATION_TYPE_MAP
 from ui.theme import ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED
+from ui import palette as P
 
 
 def _dialog_style() -> str:
@@ -19,11 +20,11 @@ def _dialog_style() -> str:
         }}
         QLineEdit {{
             background-color: {BG_ELEVATED};
-            border: 1px solid #2E2E4E;
+            border: 1px solid {P.BORDER};
             border-radius: 6px;
             padding: 6px 10px;
             font-size: 11px;
-            color: #E8EAF0;
+            color: {P.TEXT};
         }}
         QLineEdit:focus {{
             border-color: {ACCENT};
@@ -75,7 +76,7 @@ class AnnotationPlaceDialog(QDialog):
         self._pressure_default_label = ""
         self._is_pressure_selector = type_key == "pressure_system"
         if self._is_pressure_selector:
-            meta = {"symbol": "L", "label": "Pressure System", "color": "#E53935"}
+            meta = {"symbol": "L", "label": "Pressure System", "color": P.ERROR}
             self._result_type_key = "low_pressure"
             self._pressure_default_label = ANNOTATION_TYPE_MAP["low_pressure"]["label"]
         else:
@@ -93,7 +94,7 @@ class AnnotationPlaceDialog(QDialog):
             notice = QLabel("Viewer mode — this annotation will only appear on your screen.")
             notice.setWordWrap(True)
             notice.setStyleSheet(
-                "font-size: 10px; color: #E8A020; background: transparent;"
+                f"font-size: 10px; color: {P.WARN_4}; background: transparent;"
             )
             layout.addWidget(notice)
 
@@ -118,7 +119,7 @@ class AnnotationPlaceDialog(QDialog):
             self._pressure_group.addButton(self._low_radio)
             self._pressure_group.addButton(self._high_radio)
 
-            for radio, color in ((self._low_radio, "#E53935"), (self._high_radio, "#4A9EFF")):
+            for radio, color in ((self._low_radio, P.ERROR), (self._high_radio, P.INFO)):
                 radio.setStyleSheet(
                     f"font-size: 11px; font-weight: 700; color: {color}; background: transparent;"
                 )
@@ -212,7 +213,7 @@ class AnnotationEditDialog(QDialog):
             notice = QLabel("Viewer mode — changes and deletions will only affect your screen.")
             notice.setWordWrap(True)
             notice.setStyleSheet(
-                "font-size: 10px; color: #E8A020; background: transparent;"
+                f"font-size: 10px; color: {P.WARN_4}; background: transparent;"
             )
             layout.addWidget(notice)
 

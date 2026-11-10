@@ -7,21 +7,22 @@ from PyQt6.QtCore import Qt
 
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
 from ui.theme import ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED
+from ui import palette as P
 
 _COLOR_PRESETS = [
-    ("White",  "#E8EAF0"),
-    ("Red",    "#E53935"),
-    ("Blue",   "#4A9EFF"),
+    ("White",  P.TEXT),
+    ("Red",    P.ERROR),
+    ("Blue",   P.INFO),
     ("Pink",   "#FF69B4"),
-    ("Green",  "#39D98A"),
+    ("Green",  P.OK),
 ]
-_DEFAULT_COLOR = "#E8EAF0"
+_DEFAULT_COLOR = P.TEXT
 
 
 def _make_color_combo(current_hex: str = _DEFAULT_COLOR) -> QComboBox:
     combo = QComboBox()
     combo.setStyleSheet(
-        "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+        f"background-color: {P.BG_ELEVATED}; color: {P.TEXT}; border: 1px solid {P.BORDER};"
         "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
     )
     selected = 0
@@ -43,11 +44,11 @@ def _dialog_style() -> str:
         }}
         QLineEdit {{
             background-color: {BG_ELEVATED};
-            border: 1px solid #2E2E4E;
+            border: 1px solid {P.BORDER};
             border-radius: 6px;
             padding: 6px 10px;
             font-size: 11px;
-            color: #E8EAF0;
+            color: {P.TEXT};
         }}
         QLineEdit:focus {{
             border-color: {ACCENT};
@@ -123,7 +124,7 @@ class DrawingTitleDialog(QDialog):
         self._style_combo = QComboBox()
         self._style_combo.addItems(["Solid", "Dashed", "Dotted"])
         self._style_combo.setStyleSheet(
-            "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+            f"background-color: {P.BG_ELEVATED}; color: {P.TEXT}; border: 1px solid {P.BORDER};"
             "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
         )
         style_row.addWidget(self._style_combo)
@@ -152,8 +153,8 @@ class DrawingTitleDialog(QDialog):
         if not text:
             self._title_edit.setPlaceholderText("Title is required")
             self._title_edit.setStyleSheet(
-                f"background-color: {BG_ELEVATED}; border: 1px solid #E53935;"
-                "border-radius: 6px; padding: 6px 10px; font-size: 11px; color: #E8EAF0;"
+                f"background-color: {BG_ELEVATED}; border: 1px solid {P.ERROR};"
+                f"border-radius: 6px; padding: 6px 10px; font-size: 11px; color: {P.TEXT};"
             )
             return
         self._title = text
@@ -299,7 +300,7 @@ class DrawingEditDialog(QDialog):
                 {"solid": 0, "dashed": 1, "dotted": 2}.get(self._result_line_style, 0)
             )
             self._style_combo.setStyleSheet(
-                "background-color: #1A1A2E; color: #E8EAF0; border: 1px solid #2E2E4E;"
+                f"background-color: {P.BG_ELEVATED}; color: {P.TEXT}; border: 1px solid {P.BORDER};"
                 "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
             )
             style_row.addWidget(self._style_combo)

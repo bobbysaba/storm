@@ -827,7 +827,7 @@ class RadarOverlay(QObject):
                       }});
                       // always restore opacity if we are actively injecting an image
                       if (map.getLayer("{self.LAYER_ID}")) {{
-                          map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", 0.75);
+                          map.setPaintProperty("{self.LAYER_ID}", "raster-opacity", window._stormRadarOpacity);
                       }}
                   }} else {{
                       map.addSource("{self.SOURCE_ID}", {{
@@ -841,7 +841,7 @@ class RadarOverlay(QObject):
                               type: "raster",
                               source: "{self.SOURCE_ID}",
                               paint: {{
-                                  "raster-opacity": 0.75,
+                                  "raster-opacity": window._stormRadarOpacity,
                                   "raster-fade-duration": 0
                               }}
                           }}, "road-unpaved");
@@ -852,7 +852,7 @@ class RadarOverlay(QObject):
                               type: "raster",
                               source: "{self.SOURCE_ID}",
                               paint: {{
-                                  "raster-opacity": 0.75,
+                                  "raster-opacity": window._stormRadarOpacity,
                                   "raster-fade-duration": 0
                               }}
                           }});

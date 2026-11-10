@@ -3,26 +3,27 @@ import sys
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
+from ui import palette as P
 
-_LOADING_STYLE = """
+_LOADING_STYLE = P.qss("""
 QDialog {
-    background-color: #0A0A0F;
+    background-color: $bg_base;
 }
 QLabel#title {
-    color: #00CFFF;
+    color: $accent;
     font-size: 22px;
     font-weight: 700;
     letter-spacing: 3px;
 }
 QLabel#message {
-    color: #8E97AB;
+    color: $text_label;
     font-size: 13px;
 }
 QLabel#dots {
-    color: #00CFFF;
+    color: $accent;
     font-size: 18px;
 }
-"""
+""")
 
 
 class LoadingDialog(QDialog):

@@ -34,3 +34,36 @@ def bottom_left_y_avoiding(
     if rectangles_overlap(candidate, obstacle):
         return max(margin, obstacle[1] - gap - height)
     return y
+
+
+def stack_gap(height: int, gap: int = 6) -> int:
+    """Gap below a stacked overlay; shrinks with a drawer that is sliding closed."""
+    return min(height, gap)
+
+
+def stack_extent(heights: list[int], gap: int = 6) -> int:
+    """Total height of overlays stacked top-down with ``stack_gap`` spacing."""
+    return sum(h + stack_gap(h, gap) for h in heights)
+
+
+def drawers_to_close(
+    stack: list[tuple[str, int, bool]],
+    available: int,
+    gap: int = 6,
+) -> list[str]:
+    """Pick drawers to close so the stack fits in ``available`` pixels.
+
+    ``stack`` is ``(key, height, closable)`` in the order the drawers were
+    opened, oldest first. Closable drawers are closed oldest first until the
+    rest fits. If it cannot fit even with every closable drawer closed, all
+    closable drawers are returned.
+    """
+    total = stack_extent([h for _key, h, _closable in stack], gap)
+    out = []
+    for key, h, closable in stack:
+        if total <= available:
+            break
+        if closable:
+            out.append(key)
+            total -= h + stack_gap(h, gap)
+    return out

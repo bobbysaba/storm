@@ -12,6 +12,7 @@ import runtime_flags
 from dataclasses import replace
 from datetime import datetime, timezone
 from ui.launch.dialog import LaunchDialog
+from ui import text_scale
 from data.ingest.truck_replay import load_truck_observations
 
 # try to import PyQt packages
@@ -416,6 +417,8 @@ def main() -> None:
     app.setApplicationName("STORM")
     app.setOrganizationName("STORM")
     app.setFont(QFont("Segoe UI", 10))
+    # scale stylesheet font sizes by the saved MAP → TEXT setting (before any window exists)
+    text_scale.install(app)
 
     # set application quit behavior
     app.setQuitOnLastWindowClosed(False)

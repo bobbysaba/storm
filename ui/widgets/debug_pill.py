@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QFont
+from ui import palette as P
 
 
 class DebugPill(QWidget):
@@ -33,16 +34,16 @@ class DebugPill(QWidget):
         self._toggle_btn = QToolButton(self)
         self._toggle_btn.setStyleSheet(
             "QToolButton {"
-            "  background: rgba(15,15,26,0.95);"
-            "  border: 1px solid rgba(57,217,138,0.45);"
+            f"  background: {P.alpha(P.BG_PANEL, 0.95)};"
+            f"  border: 1px solid {P.alpha(P.OK, 0.45)};"
             "  border-radius: 8px;"
-            "  color: #39D98A;"
+            f"  color: {P.OK};"
             "  font-size: 10px;"
             "  font-weight: 600;"
             "  letter-spacing: 0.8px;"
             "  padding: 5px 12px;"
             "}"
-            "QToolButton:hover { border-color: #39D98A; color: #5CFFA8; }"
+            f"QToolButton:hover {{ border-color: {P.OK}; color: {P.OK_HOVER}; }}"
         )
         self._toggle_btn.clicked.connect(self._toggle_expanded)
         self._refresh_label()
@@ -51,8 +52,8 @@ class DebugPill(QWidget):
         self._panel.setObjectName("debugPillPanel")
         self._panel.setStyleSheet(
             "#debugPillPanel {"
-            "  background: rgba(12,13,22,0.97);"
-            "  border: 1px solid rgba(74,83,108,0.55);"
+            f"  background: {P.alpha(P.BG_MENU_3, 0.97)};"
+            f"  border: 1px solid {P.alpha(P.BORDER_SOFT, 0.55)};"
             "  border-radius: 10px;"
             "}"
         )
@@ -63,18 +64,18 @@ class DebugPill(QWidget):
 
         self._tabs = QTabWidget()
         self._tabs.setObjectName("debugTabs")
-        self._tabs.setStyleSheet("""
+        self._tabs.setStyleSheet(P.qss("""
             QTabWidget#debugTabs::pane {
                 border: none;
                 background: transparent;
             }
             QTabWidget#debugTabs QTabBar {
                 background: transparent;
-                border-bottom: 1px solid rgba(74,83,108,0.3);
+                border-bottom: 1px solid $border_soft@0.3;
             }
             QTabWidget#debugTabs QTabBar::tab {
                 background: transparent;
-                color: #4A5068;
+                color: $text_muted;
                 padding: 5px 14px;
                 font-size: 10px;
                 font-weight: 600;
@@ -84,13 +85,13 @@ class DebugPill(QWidget):
                 margin-right: 2px;
             }
             QTabWidget#debugTabs QTabBar::tab:hover {
-                color: #8A93A8;
+                color: $text_label;
             }
             QTabWidget#debugTabs QTabBar::tab:selected {
-                color: #39D98A;
-                border-bottom: 2px solid #39D98A;
+                color: $ok;
+                border-bottom: 2px solid $ok;
             }
-        """)
+        """))
 
         status_wrap = QWidget()
         status_wrap.setStyleSheet("background: transparent;")
@@ -99,8 +100,8 @@ class DebugPill(QWidget):
         status_vbox.setSpacing(0)
 
         self._status_label = QLabel("initializing…")
-        self._status_label.setFont(QFont("Courier New", 9))
-        self._status_label.setStyleSheet("color: #39D98A; background: transparent;")
+        self._status_label.setFont(QFont("Courier New", 10))
+        self._status_label.setStyleSheet(f"color: {P.OK}; background: transparent;")
         self._status_label.setWordWrap(True)
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._status_label.setTextInteractionFlags(
@@ -118,10 +119,10 @@ class DebugPill(QWidget):
 
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setFont(QFont("Courier New", 9))
+        self._log_view.setFont(QFont("Courier New", 10))
         self._log_view.setStyleSheet(
             "QPlainTextEdit {"
-            "  color: #C8D0DE;"
+            f"  color: {P.TEXT_SECONDARY};"
             "  background: transparent;"
             "  border: none;"
             "  padding: 0;"

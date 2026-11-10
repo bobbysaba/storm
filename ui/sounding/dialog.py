@@ -597,7 +597,7 @@ class SoundingDialog(QDialog):
         for i, lbl in enumerate(self._tick_labels):
             active = (i == self._cur_idx)
             lbl.setStyleSheet(
-                "background-color: transparent; font-size: 8px; "
+                "background-color: transparent; font-size: 10px; "
                 + (f"color: {_STORM_CYAN}; font-weight: bold;" if active
                    else f"color: {_MUTED};")
             )

@@ -1,5 +1,7 @@
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QGridLayout, QHBoxLayout, QSlider, QWidget, QVBoxLayout
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
 _NLCD_LEGEND: tuple[tuple[str, str], ...] = (
@@ -22,14 +24,13 @@ _NLCD_LEGEND: tuple[tuple[str, str], ...] = (
 )
 
 
-class LandcoverControls(QWidget):
+class LandcoverControls(Drawer):
     """Small drawer for the optional offline NLCD land-cover raster."""
 
     opacity_changed = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -37,7 +38,6 @@ class LandcoverControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -54,7 +54,7 @@ class LandcoverControls(QWidget):
         r.setSpacing(6)
 
         lbl = QLabel("OPACITY")
-        lbl.setStyleSheet("color: #B5BDCC; font-size: 10px; letter-spacing: 0.5px;")
+        lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px; letter-spacing: 0.5px;")
         lbl.setFixedHeight(22)
         r.addWidget(lbl)
 
@@ -92,12 +92,12 @@ class LandcoverControls(QWidget):
             swatch = QLabel()
             swatch.setFixedSize(12, 8)
             swatch.setStyleSheet(
-                f"background: {color}; border: 1px solid rgba(255,255,255,0.35);"
+                f"background: {color}; border: 1px solid {P.alpha(P.WHITE, 0.35)};"
             )
             item_row.addWidget(swatch)
 
             text = QLabel(label)
-            text.setStyleSheet("color: #C1C9D8; font-size: 9px;")
+            text.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px;")
             text.setFixedHeight(14)
             item_row.addWidget(text)
             grid.addWidget(item, row_idx, col_idx)
@@ -105,29 +105,6 @@ class LandcoverControls(QWidget):
         col.addWidget(legend)
 
         outer.addWidget(self._drawer)
-
-    def toggle_drawer(self, checked: bool) -> None:
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
     def opacity(self) -> float:
         return self._opacity_slider.value() / 100.0

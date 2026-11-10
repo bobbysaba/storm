@@ -9,7 +9,10 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QComboBox, QToolButton, QLabel,
     QCheckBox, QSlider, QSizePolicy,
 )
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, QTimer, Qt
+from PyQt6.QtCore import pyqtSignal, Qt
+from ui import palette as P
+from ui.widgets.drawer import Drawer
+from ui.layer_status import StatusTimeLabel
 
 
 NEXRAD_SITES = [
@@ -81,7 +84,7 @@ PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
 OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0K", "SPEC DIFF PHASE")]
 ALL_PRODUCTS = PRODUCTS + OPTIONAL_PRODUCTS
 THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
-class RadarControls(QWidget):
+class RadarControls(Drawer):
     """
     Toolbar widget containing:
       - RADAR toggle button — slides the two-row control drawer in/out
@@ -109,6 +112,7 @@ class RadarControls(QWidget):
     loop_toggled    = pyqtSignal(bool)
     speed_changed   = pyqtSignal(int)      # new interval in ms
     vad_requested   = pyqtSignal()         # VAD hodograph dialog requested
+    opacity_changed = pyqtSignal(float)    # 0.1–1.0
 
     # internal — emitted from the _refresh_product_availability background thread
     _products_refreshed = pyqtSignal(dict)  # {code: bool} availability map
@@ -123,8 +127,6 @@ class RadarControls(QWidget):
         self._product_availability: dict[tuple[str, str], bool] = {}
         self._site               = "KTLX"
         self._all_sites          = list(NEXRAD_SITES)
-        self._animation          = None   # hold ref to prevent GC during animation
-        self._expanded_height    = 0
         self._setup_ui()
         self._products_refreshed.connect(self._apply_product_items)
         self.set_selected_site("KTLX")
@@ -135,7 +137,6 @@ class RadarControls(QWidget):
         layout.setSpacing(0)
 
         # starts collapsed — height animates open as a dropdown pill below toolbar.
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -192,6 +193,25 @@ class RadarControls(QWidget):
         self._btn_vad.setToolTip("View VAD wind profile hodograph")
         self._btn_vad.clicked.connect(self.vad_requested.emit)
         r1.addWidget(self._btn_vad)
+
+        opacity_label = QLabel("OPACITY")
+        opacity_label.setStyleSheet(
+            f"color: {P.TEXT_SECONDARY}; font-size: 11px; letter-spacing: 0.5px;"
+        )
+        opacity_label.setFixedHeight(22)
+        r1.addWidget(opacity_label)
+
+        # floor at 10 %: a 0 opacity layer reads as hidden to the map
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(10, 100)
+        self._opacity_slider.setValue(75)
+        self._opacity_slider.setFixedHeight(22)
+        self._opacity_slider.setFixedWidth(90)
+        self._opacity_slider.setToolTip("Radar opacity")
+        self._opacity_slider.valueChanged.connect(
+            lambda v: self.opacity_changed.emit(v / 100.0)
+        )
+        r1.addWidget(self._opacity_slider)
 
         r1.addStretch()
 
@@ -258,7 +278,7 @@ class RadarControls(QWidget):
         r2.addWidget(self._frame_slider)
 
         # time label sits right of slider so it reads: [slider] [23:45Z]
-        self._frame_time_label = QLabel("--:--Z")
+        self._frame_time_label = StatusTimeLabel()
         self._frame_time_label.setObjectName("radarTimeLabel")
         self._frame_time_label.setFixedHeight(26)
         self._frame_time_label.setMinimumWidth(52)
@@ -279,8 +299,6 @@ class RadarControls(QWidget):
 
         layout.addWidget(self._drawer)
 
-        # measure natural height after layout settles, before first collapse
-        QTimer.singleShot(0, self._measure_expanded_height)
 
 
     def current_site(self) -> str:
@@ -316,13 +334,36 @@ class RadarControls(QWidget):
             if self.is_data_enabled():
                 self.fetch_requested.emit()
 
-    def set_scan_time(self, time_str: str):
-        # update the time label next to the slider
-        self._frame_time_label.setText(time_str)
+    def set_scan_time(self, time_str: str, when=None):
+        # update the time label next to the slider; ``when`` adds the age
+        self._frame_time_label.set_frame(time_str, when)
+
+    def bind_status(self, status) -> None:
+        """Color the time label and show data age from a LayerStatus."""
+        self._frame_time_label.bind(status)
 
     def is_data_enabled(self) -> bool:
         """Return whether radar data fetch/display is enabled."""
         return self._chk_show_data.isChecked()
+
+    def opacity(self) -> float:
+        return self._opacity_slider.value() / 100.0
+
+    def save_state(self) -> dict:
+        return {"data": self.is_data_enabled(), "product": self._product,
+                "opacity": self._opacity_slider.value()}
+
+    def restore_state(self, state: dict) -> None:
+        """Re-select the product and opacity, then turn data on; all go through
+        the normal signals."""
+        opacity = state.get("opacity")
+        if isinstance(opacity, int):
+            self._opacity_slider.setValue(max(10, min(100, opacity)))
+        idx = self._product_combo.findData(state.get("product"))
+        if idx >= 0 and idx != self._product_combo.currentIndex():
+            self._product_combo.setCurrentIndex(idx)
+        if state.get("data") and not self.is_data_enabled():
+            self._chk_show_data.setChecked(True)
 
     def _set_product_items(self, items: list[tuple[str, str]], preserve_code: str | None = None):
         self._product_combo.blockSignals(True)
@@ -370,6 +411,17 @@ class RadarControls(QWidget):
     def is_looping(self) -> bool:
         return self._btn_play.isChecked()
 
+    def toggle_loop(self) -> None:
+        """Play/pause the loop (Space). No-op until there are frames to loop."""
+        if self._btn_play.isEnabled():
+            self._btn_play.toggle()
+
+    def step_frame(self, delta: int) -> None:
+        """Step one frame back (-1) or forward (+1) ([ / ]). No-op without history."""
+        btn = self._btn_back if delta < 0 else self._btn_fwd
+        if btn.isEnabled():
+            btn.click()
+
     def stop_loop(self):
         if self._btn_play.isChecked():
             self._btn_play.setChecked(False)   # triggers _on_play_toggled(False)
@@ -392,6 +444,7 @@ class RadarControls(QWidget):
         if playback_row is not None:
             playback_row.setVisible(not enabled)
         self._tilt_combo.setVisible(enabled and self._tilt_combo.count() > 0)
+        self.content_changed()
 
     def set_archive_products(self, products: list[tuple[str, str]]) -> None:
         if not products:
@@ -410,13 +463,8 @@ class RadarControls(QWidget):
             self._tilt_combo.setCurrentIndex(idx)
         self._tilt_combo.blockSignals(False)
         self._tilt_combo.setVisible(self._archive_mode and self._tilt_combo.count() > 0)
+        self.content_changed()
 
-
-    def _measure_expanded_height(self):
-        """store the natural height of RadarControls before it was ever collapsed."""
-        self.setMaximumHeight(16777215)
-        self._expanded_height = self.sizeHint().height()
-        self.setMaximumHeight(0)
 
     def _refresh_product_availability(self, site_id: str):
         site = _normalize_site(site_id)
@@ -483,29 +531,7 @@ class RadarControls(QWidget):
     def toggle_drawer(self, checked: bool):
         """animate RadarControls open or closed — called by the toolbar RADAR button."""
         self._radar_on = checked
-
-        target = self._expanded_height if checked else 0
-        if checked:
-            current = self.maximumHeight()
-            if target == 0:
-                # expanded height wasn't measured yet — measure now
-                self.setMaximumHeight(16777215)
-                target = self.sizeHint().height()
-                self.setMaximumHeight(current)
-        else:
-            # after opening, maximumHeight is 16777215 — animate from actual pixel
-            current = self.height()
-            self.setMaximumHeight(current)
-
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(self._expanded_height))
-        anim.start()
-        self._animation = anim   # keep ref alive for duration of animation
+        super().toggle_drawer(checked)
 
     def _on_data_enabled_toggled(self, checked: bool):
         """show data checkbox — controls whether data is actually fetched."""

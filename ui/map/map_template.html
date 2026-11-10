@@ -447,6 +447,12 @@
     window.stormSetSatelliteFrame = _stormNoop;
     window.stormSetRadarGL = _stormNoop;
     window.stormHideRadarGL = _stormNoop;
+    // radar opacity (radar drawer slider), read by the PNG and WebGL radar paths
+    window._stormRadarOpacity = 0.75;
+    window.stormSetRadarOpacity = function(opacity) {
+      var o = parseFloat(opacity);
+      if (!isNaN(o)) window._stormRadarOpacity = Math.max(0, Math.min(1, o));
+    };
     window.stormSetSatelliteTime = _stormNoop;
     window.stormSetSatelliteVisible = _stormNoop;
     window.stormSetSatelliteMode = _stormNoop;
@@ -3934,7 +3940,7 @@
         gl.uniform3fv(this.loc.radar, _radarGLUniformRadar(meta));
         gl.uniform4f(this.loc.gates, meta.firstGateM, meta.gateWidthM, meta.farEdgeM, meta.nGates);
         gl.uniform3f(this.loc.dims, meta.nAz, meta.azTexW, meta.azTexH);
-        gl.uniform1f(this.loc.opacity, 0.75);
+        gl.uniform1f(this.loc.opacity, window._stormRadarOpacity);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -4011,6 +4017,17 @@
         } catch(_) {}
       }
       _applySatMesoBoxes();
+    };
+
+    window.stormSetRadarOpacity = function(opacity) {
+      var o = parseFloat(opacity);
+      if (isNaN(o)) return;
+      window._stormRadarOpacity = Math.max(0, Math.min(1, o));
+      // a hidden radar layer stays hidden; its next frame picks the new value up
+      if (map.getLayer('radar-overlay') && !window._stormRadarSuspend
+          && map.getPaintProperty('radar-overlay', 'raster-opacity') > 0)
+        map.setPaintProperty('radar-overlay', 'raster-opacity', window._stormRadarOpacity);
+      if (_radarGL.visible) map.triggerRepaint();
     };
 
     window.stormSetSatelliteOpacity = function(opacity) {

@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QLabel, QDockWidget, QVBoxLayout, QWidget
 
 import config
 from ui.widgets.debug_pill import DebugPill
+from ui import palette as P
 
 
 class MainWindowDebugMixin:
@@ -114,9 +115,9 @@ class MainWindowDebugMixin:
         layout.setSpacing(4)
 
         self._error_log_text = QLabel("no errors logged")
-        self._error_log_text.setFont(QFont("Courier New", 9))
+        self._error_log_text.setFont(QFont("Courier New", 10))
         self._error_log_text.setStyleSheet(
-            "color: #FFD166; background: #050508; padding: 6px; border-radius: 4px;"
+            f"color: {P.WARN}; background: {P.BG_DEEP}; padding: 6px; border-radius: 4px;"
         )
         self._error_log_text.setWordWrap(True)
         self._error_log_text.setTextInteractionFlags(

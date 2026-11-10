@@ -2,12 +2,14 @@ from datetime import datetime, timezone
 from html import escape
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton, QLabel, QCheckBox
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
+from PyQt6.QtCore import pyqtSignal, Qt
 
 from config import ACCENT_COLOR
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
-class SurfaceControls(QWidget):
+class SurfaceControls(Drawer):
     """Collapsible drawer for surface observation overlays."""
 
     ok_toggled   = pyqtSignal(bool)
@@ -19,11 +21,9 @@ class SurfaceControls(QWidget):
     asos_toggled = pyqtSignal(bool)
     asos_bbox_requested = pyqtSignal()
     plots_toggled = pyqtSignal(bool)
-    content_resized = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -31,7 +31,6 @@ class SurfaceControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -87,7 +86,7 @@ class SurfaceControls(QWidget):
         self._asos_bbox_link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self._asos_bbox_link.setOpenExternalLinks(False)
         self._asos_bbox_link.setStyleSheet(
-            "font-size: 9px; font-weight: 500; letter-spacing: 0.2px; padding: 0;"
+            "font-size: 11px; font-weight: 500; letter-spacing: 0.2px; padding: 0;"
         )
         self._asos_bbox_link.linkActivated.connect(
             lambda link: self.asos_bbox_requested.emit() if link == "new-asos-bbox" else None
@@ -100,7 +99,7 @@ class SurfaceControls(QWidget):
 
         self._status = QLabel("Surface obs idle")
         self._status.setStyleSheet(
-            "color: #B5BDCC; font-size: 10px; letter-spacing: 0.4px; padding: 1px 4px 2px 4px;"
+            f"color: {P.TEXT_SECONDARY}; font-size: 11px; letter-spacing: 0.4px; padding: 1px 4px 2px 4px;"
         )
         self._status.setTextFormat(Qt.TextFormat.RichText)
         self._status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -109,13 +108,13 @@ class SurfaceControls(QWidget):
         self._status_div = QFrame()
         self._status_div.setFrameShape(QFrame.Shape.NoFrame)
         self._status_div.setFixedHeight(1)
-        self._status_div.setStyleSheet("background-color: #8E97AB; margin: 2px 4px 2px 4px;")
+        self._status_div.setStyleSheet(f"background-color: {P.TEXT_LABEL}; margin: 2px 4px 2px 4px;")
         self._status_div.setVisible(False)
         col.addWidget(self._status_div)
 
         self._detail = QLabel("")
         self._detail.setStyleSheet(
-            "color: #8E97AB; font-size: 9px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 1px 4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 1px 4px;"
         )
         self._detail.setTextFormat(Qt.TextFormat.RichText)
         self._detail.setWordWrap(True)
@@ -126,13 +125,13 @@ class SurfaceControls(QWidget):
         self._legend_div = QFrame()
         self._legend_div.setFrameShape(QFrame.Shape.NoFrame)
         self._legend_div.setFixedHeight(1)
-        self._legend_div.setStyleSheet("background-color: #8E97AB; margin: 2px 4px 2px 4px;")
+        self._legend_div.setStyleSheet(f"background-color: {P.TEXT_LABEL}; margin: 2px 4px 2px 4px;")
         self._legend_div.setVisible(False)
         col.addWidget(self._legend_div)
 
         self._legend = QLabel(self._legend_html())
         self._legend.setStyleSheet(
-            "color: #7E879A; font-size: 9px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 2px 4px;"
+            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.35px; padding: 0 4px 2px 4px;"
         )
         self._legend.setTextFormat(Qt.TextFormat.RichText)
         self._legend.setWordWrap(True)
@@ -152,36 +151,12 @@ class SurfaceControls(QWidget):
     def _vdiv(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        div.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         return div
-
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
     def set_status(self, text: str):
         self._status.setText(self._status_html(text))
-        if self.maximumHeight() > 0:
-            self.content_resized.emit()
+        self.content_changed()
 
     def set_diagnostics(self, diagnostics: dict) -> None:
         detail = self._diagnostics_html(diagnostics or {})
@@ -191,8 +166,7 @@ class SurfaceControls(QWidget):
         self._legend_div.setVisible(active)
         self._legend.setVisible(active)
         self._detail.setText(detail)
-        if self.maximumHeight() > 0:
-            self.content_resized.emit()
+        self.content_changed()
 
     def _diagnostics_html(self, diagnostics: dict) -> str:
         parts = []
@@ -210,9 +184,9 @@ class SurfaceControls(QWidget):
         return "<br/>".join(parts)
 
     def _legend_html(self) -> str:
-        green = '<span style="color:#39D98A;">●</span>'
-        yellow = '<span style="color:#FFD166;">●</span>'
-        red = '<span style="color:#E53935;">●</span>'
+        green = f'<span style="color:{P.OK};">●</span>'
+        yellow = f'<span style="color:{P.WARN};">●</span>'
+        red = f'<span style="color:{P.ERROR};">●</span>'
         return (
             f"Mesonet age: {green} ≤ 5 min  {yellow} ≤ 10 min  {red} > 10 min<br/>"
             f"ASOS age: {green} ≤ 70 min  {yellow} ≤ 90 min  {red} > 90 min"
@@ -223,7 +197,7 @@ class SurfaceControls(QWidget):
         if not text:
             return ""
         parts = [escape(part.strip()) for part in text.split("  |  ") if part.strip()]
-        return " <span style=\"color:#8E97AB;\">|</span> ".join(parts)
+        return f" <span style=\"color:{P.TEXT_LABEL};\">|</span> ".join(parts)
 
     @staticmethod
     def _fmt_dt(value) -> str:
@@ -237,6 +211,25 @@ class SurfaceControls(QWidget):
 
     def plots_visible(self) -> bool:
         return self._chk_show_plots.isChecked()
+
+    def _source_buttons(self) -> dict:
+        # ASOS is left out: it needs a box drawn on the map each session
+        return {"ok": self._btn_ok, "wtm": self._btn_wtm, "ks": self._btn_ks,
+                "co": self._btn_co, "ne": self._btn_ne, "sd": self._btn_sd}
+
+    def save_state(self) -> dict:
+        return {
+            "sources": [k for k, b in self._source_buttons().items() if b.isChecked()],
+            "plots": self.plots_visible(),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        for key in state.get("sources") or ():
+            btn = self._source_buttons().get(key)
+            if btn is not None:
+                btn.setChecked(True)
+        if "plots" in state:
+            self._chk_show_plots.setChecked(bool(state["plots"]))
 
     def asos_enabled(self) -> bool:
         return self._btn_asos.isChecked()

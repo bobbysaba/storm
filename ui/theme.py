@@ -1,25 +1,24 @@
+from ui.palette import qss, ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED  # noqa: F401  (re-exported)
 
-from config import ACCENT_COLOR
-
-DARK_THEME = """
+DARK_THEME = qss("""
 /* ── Base ─────────────────────────────────────────────── */
 * {
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
-    color: #E8EAF0;
-    selection-background-color: #FF6B35;
-    selection-color: #0A0A0F;
+    color: $text;
+    selection-background-color: $accent;
+    selection-color: $bg_base;
 }
 
 QMainWindow, QWidget {
-    background-color: #0A0A0F;
+    background-color: $bg_base;
     border: none;
 }
 
 /* ── Floating Toolbar ─────────────────────────────────── */
 #floatingToolbar {
-    background-color: rgba(15, 15, 26, 0.95);
+    background-color: $bg_panel@0.95;
     border-radius: 12px;
-    border: 1px solid rgba(74, 83, 108, 0.55);
+    border: 1px solid $border_soft@0.55;
 }
 
 #floatingToolbar QToolButton {
@@ -30,57 +29,83 @@ QMainWindow, QWidget {
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
-    color: #C8D0DE;
+    color: $text_secondary;
 }
 
 #floatingToolbar QToolButton:hover {
-    background-color: #20253A;
-    border-color: #3C4664;
-    color: #EFF3FF;
+    background-color: $bg_hover;
+    border-color: $border_strong;
+    color: $text_bright;
 }
 
 #floatingToolbar QToolButton:checked, #floatingToolbar QToolButton:pressed {
-    background-color: #FF6B35;
-    border-color: #FF6B35;
-    color: #0A0A0F;
+    background-color: $accent;
+    border-color: $accent;
+    color: $bg_base;
+}
+
+/* Overflow (⋯) button of the responsive toolbar: no menu arrow. */
+#floatingToolbar QToolButton#toolbarMore::menu-indicator {
+    image: none;
+    width: 0px;
+}
+
+/* Drawer pinned open (right-click a toolbar button). */
+#floatingToolbar QToolButton[pinned="true"] {
+    border-color: $accent@0.45;
+}
+
+#floatingToolbar QToolButton[pinned="true"]:checked {
+    border-color: $accent;
+}
+
+/* Layer health (ui/layer_status.py): dot on toolbar buttons, drawer time labels. */
+QLabel#layerStatusDot {
+    background-color: transparent;
+    border: 1px solid $bg_panel;
+    border-radius: 4px;
+}
+
+QLabel#layerStatusDot[layerState="stale"] {
+    background-color: $warn;
+}
+
+QLabel#layerStatusDot[layerState="error"] {
+    background-color: $error;
+}
+
+#floatingToolbar QLabel[layerState="warn"] {
+    color: $warn;
+}
+
+#floatingToolbar QLabel[layerState="stale"] {
+    color: $warn_5;
+}
+
+#floatingToolbar QLabel[layerState="error"] {
+    color: $error_soft;
 }
 
 /* Reusable transparent outlined buttons for product palettes. */
 #floatingToolbar QToolButton[paletteButton="true"] {
     background: transparent;
     background-color: transparent;
-    border: 1px solid rgba(74, 83, 108, 0.62);
+    border: 1px solid $border_soft@0.62;
     border-radius: 6px;
-    color: #C8D0DE;
+    color: $text_secondary;
 }
 
 #floatingToolbar QToolButton[paletteButton="true"]:hover {
-    background: rgba(74, 158, 255, 0.08);
-    border-color: rgba(74, 158, 255, 0.55);
-    color: #EFF3FF;
+    background: $info@0.08;
+    border-color: $info@0.55;
+    color: $text_bright;
 }
 
 #floatingToolbar QToolButton[paletteButton="true"]:checked,
 #floatingToolbar QToolButton[paletteButton="true"]:pressed {
-    background: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
-}
-
-/* Slightly upscale controls when the window is wide enough. */
-#floatingToolbar[wide="true"] QToolButton {
-    padding: 4px 10px;
-    font-size: 12px;
-}
-
-#floatingToolbar[wide="true"] QCheckBox {
-    font-size: 12px;
-}
-
-#floatingToolbar[wide="true"] QComboBox#radarSiteCombo,
-#floatingToolbar[wide="true"] QComboBox#radarProductCombo,
-#floatingToolbar[wide="true"] QToolButton#radarStationsButton {
-    min-height: 24px;
+    background: $info@0.18;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#radarDrawer,
@@ -115,14 +140,14 @@ QMainWindow, QWidget {
 #floatingToolbar QComboBox#radarSiteCombo,
 #floatingToolbar QComboBox#radarProductCombo,
 #floatingToolbar QToolButton#radarStationsButton {
-    background-color: rgba(32, 37, 58, 0.62);
-    border: 1px solid rgba(74, 83, 108, 0.48);
+    background-color: $bg_hover@0.62;
+    border: 1px solid $border_soft@0.48;
 }
 
 #floatingToolbar QComboBox#radarSiteCombo:hover,
 #floatingToolbar QComboBox#radarProductCombo:hover,
 #floatingToolbar QToolButton#radarStationsButton:hover {
-    border-color: rgba(120, 138, 178, 0.72);
+    border-color: $text_label@0.72;
 }
 
 #floatingToolbar QCheckBox::indicator {
@@ -132,9 +157,9 @@ QMainWindow, QWidget {
 
 /* ── Vehicle Pill ─────────────────────────────────────── */
 #vehiclePill {
-    background-color: rgba(12, 14, 22, 0.98);
+    background-color: $bg_menu@0.98;
     border-radius: 12px;
-    border: 1px solid rgba(74, 83, 108, 0.6);
+    border: 1px solid $border_soft@0.6;
     min-width: 280px;
 }
 
@@ -144,35 +169,35 @@ QMainWindow, QWidget {
 
 #vehiclePill QLabel {
     background: transparent;
-    color: #C8D0DE;
+    color: $text_secondary;
 }
 
 #vehiclePill QLabel#vehiclePillTitle {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 1.3px;
-    color: #4A9EFF;
+    color: $info;
 }
 
 #vehiclePill QLabel#vehiclePillCount {
-    background-color: rgba(74, 158, 255, 0.16);
-    color: #4A9EFF;
+    background-color: $info@0.16;
+    color: $info;
     border-radius: 8px;
     padding: 1px 6px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.6px;
 }
 
 #vehiclePill QCheckBox#vehiclePillToggle {
-    font-size: 10px;
-    color: #9DA6B8;
+    font-size: 11px;
+    color: $text_label;
     background: transparent;
 }
 
 #vehiclePill QLabel#vehiclePillEmpty {
-    color: #9DA6B8;
-    font-size: 10px;
+    color: $text_label;
+    font-size: 11px;
     padding: 6px 0;
 }
 
@@ -186,17 +211,17 @@ QMainWindow, QWidget {
 }
 
 #vehicleDetailPill {
-    background-color: rgba(10, 12, 20, 0.98);
+    background-color: $bg_menu_2@0.98;
     border-radius: 12px;
-    border: 1px solid rgba(74, 83, 108, 0.6);
+    border: 1px solid $border_soft@0.6;
     min-width: 280px;
 }
 
 #vehicleDetailPill QLabel#vehicleDetailTitle {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.8px;
-    color: #E8EAF0;
+    color: $text;
 }
 
 /* ── Hazard Drawer ────────────────────────────────────── */
@@ -204,9 +229,9 @@ QMainWindow, QWidget {
  * hazard mode buttons always show blue and stay readable over the map.     */
 #floatingToolbar QWidget#hazardDrawer QToolButton {
     background-color: transparent;
-    border: 1px solid #2E2E4E;
+    border: 1px solid $border;
     border-radius: 6px;
-    color: #B8BFCD;
+    color: $text_secondary;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
@@ -214,23 +239,23 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#hazardDrawer QToolButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
+    background-color: $info@0.08;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#hazardDrawer QToolButton:checked {
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #4A9EFF;
+    background-color: $info@0.18;
+    border-color: $info;
+    color: $info;
     font-weight: 600;
 }
 
 #floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo {
-    background-color: rgba(32, 37, 58, 0.62);
-    border: 1px solid rgba(74, 83, 108, 0.48);
+    background-color: $bg_hover@0.62;
+    border: 1px solid $border_soft@0.48;
     border-radius: 6px;
-    color: #E8EAF0;
+    color: $text;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0px;
@@ -240,9 +265,9 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo:hover {
-    background-color: rgba(32, 37, 58, 0.78);
-    border-color: rgba(120, 138, 178, 0.72);
-    color: #EFF3FF;
+    background-color: $bg_hover@0.78;
+    border-color: $text_label@0.72;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo::drop-down {
@@ -252,11 +277,11 @@ QMainWindow, QWidget {
 }
 
 #floatingToolbar QWidget#hazardDrawer QComboBox#spcDayCombo QAbstractItemView {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
-    color: #E8EAF0;
-    selection-background-color: #FF6B35;
-    selection-color: #0A0A0F;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
+    color: $text;
+    selection-background-color: $accent;
+    selection-color: $bg_base;
     outline: none;
     padding: 0px;
     min-width: 156px;
@@ -264,8 +289,8 @@ QMainWindow, QWidget {
 }
 
 QFrame#spcDayPopup {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 6px;
 }
 
@@ -273,7 +298,7 @@ QToolButton#spcDayPopupButton {
     background-color: transparent;
     border: none;
     border-radius: 4px;
-    color: #E8EAF0;
+    color: $text;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0px;
@@ -281,13 +306,13 @@ QToolButton#spcDayPopupButton {
 }
 
 QToolButton#spcDayPopupButton:hover {
-    background-color: #20253A;
-    color: #EFF3FF;
+    background-color: $bg_hover;
+    color: $text_bright;
 }
 
 QToolButton#spcDayPopupButton:checked {
-    background-color: rgba(74, 158, 255, 0.18);
-    color: #4A9EFF;
+    background-color: $info@0.18;
+    color: $info;
     font-weight: 600;
 }
 
@@ -297,9 +322,9 @@ QToolButton#spcDayPopupButton:checked {
 #floatingToolbar QWidget#satelliteDrawer QToolButton {
     background: transparent;
     background-color: transparent;
-    border: 1px solid #2E2E4E;
+    border: 1px solid $border;
     border-radius: 6px;
-    color: #B8BFCD;
+    color: $text_secondary;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
@@ -309,10 +334,10 @@ QToolButton#spcDayPopupButton:checked {
 #floatingToolbar QWidget#mapDrawer QToolButton:hover,
 #floatingToolbar QToolButton[mapSubButton="true"]:hover,
 #floatingToolbar QWidget#satelliteDrawer QToolButton:hover {
-    background: rgba(74, 158, 255, 0.08);
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
+    background: $info@0.08;
+    background-color: $info@0.08;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#mapDrawer QToolButton:checked,
@@ -321,19 +346,19 @@ QToolButton#spcDayPopupButton:checked {
 #floatingToolbar QToolButton[mapSubButton="true"]:pressed,
 #floatingToolbar QWidget#satelliteDrawer QToolButton:checked,
 #floatingToolbar QWidget#satelliteDrawer QToolButton:pressed {
-    background: rgba(74, 158, 255, 0.18);
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #4A9EFF;
+    background: $info@0.18;
+    background-color: $info@0.18;
+    border-color: $info;
+    color: $info;
     font-weight: 600;
 }
 
 /* ── Deploy Locs Drawer ───────────────────────────────── */
 #floatingToolbar QWidget#deployLocsDrawer QToolButton {
     background-color: transparent;
-    border: 1px solid #2E2E4E;
+    border: 1px solid $border;
     border-radius: 6px;
-    color: #B8BFCD;
+    color: $text_secondary;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
@@ -341,15 +366,15 @@ QToolButton#spcDayPopupButton:checked {
 }
 
 #floatingToolbar QWidget#deployLocsDrawer QToolButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
+    background-color: $info@0.08;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#deployLocsDrawer QToolButton:checked {
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #4A9EFF;
+    background-color: $info@0.18;
+    border-color: $info;
+    color: $info;
     font-weight: 600;
 }
 
@@ -363,12 +388,12 @@ QToolButton#spcDayPopupButton:checked {
 
 #floatingToolbar QSlider#deployLocsSlider::groove:horizontal {
     height: 4px;
-    background: #2E2E4E;
+    background: $border;
     border-radius: 2px;
 }
 
 #floatingToolbar QSlider#deployLocsSlider::sub-page:horizontal {
-    background: #4A9EFF;
+    background: $info;
     border-radius: 2px;
 }
 
@@ -376,18 +401,18 @@ QToolButton#spcDayPopupButton:checked {
     width: 12px;
     height: 12px;
     margin: -4px 0;
-    background: #EFF3FF;
+    background: $text_bright;
     border-radius: 6px;
 }
 
 #floatingToolbar QSlider#deployLocsSlider::handle:horizontal:hover {
-    background: #4A9EFF;
+    background: $info;
 }
 
 #floatingToolbar QLabel#deployLocsSliderLabel {
     background: transparent;
-    color: #B5BDCC;
-    font-size: 10px;
+    color: $text_secondary;
+    font-size: 11px;
 }
 
 #floatingToolbar QWidget#deployLocsSizeRow {
@@ -400,12 +425,12 @@ QToolButton#spcDayPopupButton:checked {
 
 #floatingToolbar QSlider#deployLocsSizeSlider::groove:horizontal {
     height: 4px;
-    background: #2E2E4E;
+    background: $border;
     border-radius: 2px;
 }
 
 #floatingToolbar QSlider#deployLocsSizeSlider::sub-page:horizontal {
-    background: #4A9EFF;
+    background: $info;
     border-radius: 2px;
 }
 
@@ -413,34 +438,34 @@ QToolButton#spcDayPopupButton:checked {
     width: 12px;
     height: 12px;
     margin: -4px 0;
-    background: #EFF3FF;
+    background: $text_bright;
     border-radius: 6px;
 }
 
 #floatingToolbar QSlider#deployLocsSizeSlider::handle:horizontal:hover {
-    background: #4A9EFF;
+    background: $info;
 }
 
 /* ── Routing Drawer ───────────────────────────────────── */
 #floatingToolbar QWidget#routingDrawer QLineEdit {
-    background-color: rgba(26, 26, 46, 0.85);
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated@0.85;
+    border: 1px solid $border;
     border-radius: 5px;
     padding: 3px 7px;
     font-size: 11px;
-    color: #E8EAF0;
+    color: $text;
     min-height: 20px;
 }
 
 #floatingToolbar QWidget#routingDrawer QLineEdit:focus {
-    border-color: #4A9EFF;
+    border-color: $info;
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton {
     background-color: transparent;
-    border: 1px solid #2E2E4E;
+    border: 1px solid $border;
     border-radius: 6px;
-    color: #B8BFCD;
+    color: $text_secondary;
     font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
@@ -448,16 +473,16 @@ QToolButton#spcDayPopupButton:checked {
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
+    background-color: $info@0.08;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton:checked,
 #floatingToolbar QWidget#routingDrawer QToolButton:pressed {
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #4A9EFF;
+    background-color: $info@0.18;
+    border-color: $info;
+    color: $info;
     font-weight: 600;
 }
 
@@ -470,51 +495,51 @@ QToolButton#spcDayPopupButton:checked {
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton#locBtn:enabled {
-    border-color: rgba(74, 158, 255, 0.4);
+    border-color: $info@0.4;
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton#locBtn:enabled:hover {
-    background-color: rgba(74, 158, 255, 0.15);
-    border-color: #4A9EFF;
+    background-color: $info@0.15;
+    border-color: $info;
 }
 
 #floatingToolbar QWidget#routingDrawer QToolButton#locBtn:disabled {
-    border-color: #252535;
+    border-color: $border_4;
 }
 
 /* ── Outlook Panel ────────────────────────────────────── */
 #outlookPanel {
-    background-color: rgba(15, 15, 26, 0.95);
+    background-color: $bg_panel@0.95;
     border-radius: 12px;
-    border: 1px solid rgba(74, 83, 108, 0.55);
+    border: 1px solid $border_soft@0.55;
 }
 
 #outlookPanelTitle {
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 1.2px;
-    color: #4A9EFF;
+    color: $info;
     background: transparent;
 }
 
 #outlookPanelClose {
     background: transparent;
     border: none;
-    color: #5A5B6A;
+    color: $text_muted;
     font-size: 16px;
     padding: 0 2px;
 }
 
 #outlookPanelClose:hover {
-    color: #E8EAF0;
+    color: $text;
 }
 
 #outlookPanelText {
     background-color: transparent;
     border: none;
-    color: #C1C9D8;
+    color: $text_secondary;
     font-size: 11px;
-    selection-background-color: #FF6B35;
+    selection-background-color: $accent;
 }
 
 QWidget#outlookTabRow {
@@ -522,53 +547,140 @@ QWidget#outlookTabRow {
 }
 
 #outlookTabBtn {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(74, 83, 108, 0.5);
+    background: $white@0.05;
+    border: 1px solid $border_soft@0.5;
     border-radius: 4px;
-    color: #8A92A8;
+    color: $text_label;
     font-size: 10px;
     font-weight: 600;
     padding: 2px 7px;
 }
 
 #outlookTabBtn:hover {
-    background: rgba(74, 158, 255, 0.12);
-    border-color: rgba(74, 158, 255, 0.4);
-    color: #C1C9D8;
+    background: $info@0.12;
+    border-color: $info@0.4;
+    color: $text_secondary;
 }
 
 #outlookTabBtn:checked {
-    background: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #4A9EFF;
+    background: $info@0.18;
+    border-color: $info;
+    color: $info;
 }
 
 /* ── Status Overlays ──────────────────────────────────── */
 QWidget#statusOverlayLeft {
-    background-color: rgba(15, 15, 26, 0.88);
+    background-color: $bg_panel@0.88;
     border-radius: 8px;
-    border: 1px solid rgba(84, 94, 122, 0.5);
+    border: 1px solid $border_soft_2@0.5;
 }
 
-QWidget#statusOverlayLeft QLabel {
+QWidget#statusOverlayLeft QLabel,
+QWidget#statusOverlayLeft QPushButton {
     background: transparent;
-    font-size: 10px;
+    border: none;
+    font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.5px;
     padding: 0;
-    color: #C8D0DE;
+    color: $text_secondary;
+}
+
+/* GPS / AWS / NET / mode badge and the clock: the things read at a glance. */
+QWidget#statusOverlayLeft *[pillRole="badge"] {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+QWidget#statusOverlayLeft *[pillRole="clock"] {
+    font-size: 12px;
+}
+
+QWidget#statusOverlayLeft *[pillRole="action"] {
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+/* Colors set with _set_pill_status() in ui/app/main_window.py. */
+QWidget#statusOverlayLeft *[pillStatus="ok"]     { color: $ok; }
+QWidget#statusOverlayLeft *[pillStatus="info"]   { color: $info; }
+QWidget#statusOverlayLeft *[pillStatus="warn"]   { color: $warn; }
+QWidget#statusOverlayLeft *[pillStatus="error"]  { color: $error_soft; }
+QWidget#statusOverlayLeft *[pillStatus="deps"]   { color: $warn_2; }
+QWidget#statusOverlayLeft *[pillStatus="accent"] { color: $accent; }
+QWidget#statusOverlayLeft *[pillStatus="label"]  { color: $text_label; }
+QWidget#statusOverlayLeft *[pillStatus="muted"]  { color: $text_muted; }
+QWidget#statusOverlayLeft *[pillStatus="off"]    { color: $text_disabled; }
+QWidget#statusOverlayLeft *[pillStatus="mode_vehicle"] { color: $mode_vehicle; }
+QWidget#statusOverlayLeft *[pillStatus="mode_monitor"] { color: $mode_monitor; }
+QWidget#statusOverlayLeft *[pillStatus="mode_viewer"]  { color: $mode_viewer; }
+QWidget#statusOverlayLeft *[pillStatus="mode_archive"] { color: $mode_archive; }
+QWidget#statusOverlayLeft *[pillStatus="mode_admin"]   { color: $mode_admin; }
+
+/* Current map click mode (ui/click_mode.py): "▶ measure — click first point · Esc to exit". */
+QLabel#clickModeBanner {
+    background-color: $bg_panel@0.92;
+    border: 1px solid $accent@0.6;
+    border-radius: 8px;
+    padding: 5px 12px;
+    color: $accent;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* Keyboard shortcut list (? key, ui/widgets/shortcut_overlay.py). */
+QFrame#shortcutOverlay {
+    background-color: $bg_panel@0.97;
+    border: 1px solid $border_soft@0.7;
+    border-radius: 12px;
+}
+
+QFrame#shortcutOverlay QWidget {
+    background: transparent;
+}
+
+QFrame#shortcutOverlay QLabel {
+    color: $text_secondary;
+    font-size: 12px;
+}
+
+QFrame#shortcutOverlay QLabel#shortcutOverlayTitle {
+    color: $text;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+QFrame#shortcutOverlay QLabel#shortcutOverlayGroup {
+    color: $text_label;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding-bottom: 2px;
+}
+
+QFrame#shortcutOverlay QLabel#shortcutKey {
+    color: $accent;
+    font-weight: 700;
+}
+
+QFrame#shortcutOverlay QLabel#shortcutOverlayHint {
+    color: $text_muted;
+    font-size: 11px;
 }
 
 /* ── Navigation Pill ──────────────────────────────────── */
 QWidget#navPill {
-    background-color: rgba(15, 15, 26, 0.93);
+    background-color: $bg_panel@0.93;
     border-radius: 10px;
-    border: 1px solid rgba(74, 158, 255, 0.4);
+    border: 1px solid $info@0.4;
 }
 
 QWidget#navPill QLabel#navPillStep {
     background: transparent;
-    color: #EFF3FF;
+    color: $text_bright;
     font-size: 15px;
     font-weight: 600;
     padding: 0;
@@ -576,7 +688,7 @@ QWidget#navPill QLabel#navPillStep {
 
 QWidget#navPill QLabel#navPillSummary {
     background: transparent;
-    color: #4A9EFF;
+    color: $info;
     font-size: 13px;
     font-weight: 500;
     padding: 0;
@@ -585,36 +697,36 @@ QWidget#navPill QLabel#navPillSummary {
 QWidget#navPill QToolButton {
     background: transparent;
     border: none;
-    color: #9DA6B8;
+    color: $text_label;
     font-size: 16px;
     padding: 0;
 }
 
 QWidget#navPill QToolButton:hover {
-    color: #EFF3FF;
+    color: $text_bright;
 }
 
 /* ── Side Panel ───────────────────────────────────────── */
 QDockWidget {
-    background-color: #0F0F1A;
+    background-color: $bg_panel;
     border: none;
     titlebar-close-icon: none;
     titlebar-normal-icon: none;
 }
 
 QDockWidget::title {
-    background-color: #0F0F1A;
-    border-bottom: 1px solid #1E1E2E;
+    background-color: $bg_panel;
+    border-bottom: 1px solid $border_subtle;
     padding: 8px 12px;
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1.5px;
     text-transform: uppercase;
-    color: #6E7A8F;
+    color: $text_muted;
 }
 
 QDockWidget QWidget {
-    background-color: #0F0F1A;
+    background-color: $bg_panel;
 }
 
 /* ── Scroll Bars ──────────────────────────────────────── */
@@ -625,13 +737,13 @@ QScrollBar:vertical {
 }
 
 QScrollBar::handle:vertical {
-    background-color: #2E2E4E;
+    background-color: $border;
     border-radius: 3px;
     min-height: 20px;
 }
 
 QScrollBar::handle:vertical:hover {
-    background-color: #FF6B35;
+    background-color: $accent;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -644,12 +756,12 @@ QScrollBar:horizontal {
 }
 
 QScrollBar::handle:horizontal {
-    background-color: #2E2E4E;
+    background-color: $border;
     border-radius: 3px;
 }
 
 QScrollBar::handle:horizontal:hover {
-    background-color: #FF6B35;
+    background-color: $accent;
 }
 
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
@@ -659,77 +771,77 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 /* ── Labels ───────────────────────────────────────────── */
 QLabel {
     background-color: transparent;
-    color: #E8EAF0;
+    color: $text;
 }
 
 QLabel#sectionHeader {
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1.5px;
-    color: #6E7A8F;
+    color: $text_muted;
     padding: 4px 0px;
 }
 
 QLabel#vehicleCallsign {
     font-size: 13px;
     font-weight: 600;
-    color: #E8EAF0;
+    color: $text;
 }
 
 QLabel#vehicleMeta {
     font-size: 10px;
-    color: #6E7A8F;
+    color: $text_muted;
 }
 
 QLabel#obsValue {
     font-size: 12px;
     font-weight: 500;
-    color: #FF6B35;
+    color: $accent;
 }
 
 /* ── Buttons ──────────────────────────────────────────── */
 QPushButton {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 6px;
     padding: 7px 16px;
     font-size: 11px;
     font-weight: 500;
-    color: #E8EAF0;
+    color: $text;
 }
 
 QPushButton:hover {
-    background-color: #1E1E3E;
-    border-color: #FF6B35;
-    color: #FF6B35;
+    background-color: $bg_elevated_2;
+    border-color: $accent;
+    color: $accent;
 }
 
 QPushButton:pressed {
-    background-color: #FF6B35;
-    border-color: #FF6B35;
-    color: #0A0A0F;
+    background-color: $accent;
+    border-color: $accent;
+    color: $bg_base;
 }
 
 QPushButton#primaryButton {
-    background-color: #FF6B35;
-    border-color: #FF6B35;
-    color: #0A0A0F;
+    background-color: $accent;
+    border-color: $accent;
+    color: $bg_base;
     font-weight: 600;
 }
 
 QPushButton#primaryButton:hover {
-    background-color: #FF8555;
-    border-color: #FF8555;
+    background-color: $accent_hover_legacy;
+    border-color: $accent_hover_legacy;
 }
 
 QPushButton#dangerButton {
-    border-color: #E53935;
-    color: #E53935;
+    border-color: $error;
+    color: $error;
 }
 
 QPushButton#dangerButton:hover {
-    background-color: #E53935;
-    color: #0A0A0F;
+    background-color: $error;
+    color: $bg_base;
 }
 
 QComboBox#radarProductCombo, QComboBox#radarSiteCombo, QToolButton#radarStationsButton {
@@ -738,17 +850,17 @@ QComboBox#radarProductCombo, QComboBox#radarSiteCombo, QToolButton#radarStations
 
 /* ── ComboBox ─────────────────────────────────────────── */
 QComboBox {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 6px;
     padding: 5px 10px;
     font-size: 11px;
-    color: #E8EAF0;
+    color: $text;
     min-width: 120px;
 }
 
 QComboBox:hover {
-    border-color: #FF6B35;
+    border-color: $accent;
 }
 
 QComboBox::drop-down {
@@ -759,29 +871,29 @@ QComboBox::drop-down {
 QComboBox::down-arrow {
     width: 8px;
     height: 8px;
-    border-left: 2px solid #5A5B6A;
-    border-bottom: 2px solid #5A5B6A;
+    border-left: 2px solid $text_muted;
+    border-bottom: 2px solid $text_muted;
     margin-right: 6px;
 }
 
 QComboBox QAbstractItemView {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 6px;
-    selection-background-color: #FF6B35;
-    selection-color: #0A0A0F;
+    selection-background-color: $accent;
+    selection-color: $bg_base;
     padding: 4px;
 }
 
 /* ── Slider ───────────────────────────────────────────── */
 QSlider::groove:horizontal {
-    background-color: #1E1E2E;
+    background-color: $border_subtle;
     height: 3px;
     border-radius: 2px;
 }
 
 QSlider::handle:horizontal {
-    background-color: #FF6B35;
+    background-color: $accent;
     width: 14px;
     height: 14px;
     border-radius: 7px;
@@ -789,7 +901,7 @@ QSlider::handle:horizontal {
 }
 
 QSlider::sub-page:horizontal {
-    background-color: #FF6B35;
+    background-color: $accent;
     border-radius: 2px;
 }
 
@@ -802,7 +914,7 @@ QSlider::sub-page:horizontal {
 #floatingToolbar QWidget#radarDrawer QSlider::groove:horizontal,
 #floatingToolbar QWidget#satelliteDrawer QSlider::groove:horizontal,
 #floatingToolbar QWidget#landcoverDrawer QSlider::groove:horizontal {
-    background-color: rgba(184, 191, 205, 0.28);
+    background-color: $text_secondary@0.28;
     height: 2px;
     border-radius: 1px;
 }
@@ -821,16 +933,16 @@ QSlider::sub-page:horizontal {
 #floatingToolbar QWidget#mesoanalysisDrawer QToolButton,
 #floatingToolbar QWidget#sfcoaDrawer QToolButton {
     background-color: transparent;
-    border: 1px solid rgba(74, 83, 108, 0.42);
+    border: 1px solid $border_soft@0.42;
     border-radius: 6px;
-    color: #C8D0DE;
+    color: $text_secondary;
     padding: 3px 8px;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisGroupLabel,
 #floatingToolbar QWidget#sfcoaDrawer QLabel#sfcoaGroupLabel {
-    color: #6E7A8F;
-    font-size: 9px;
+    color: $text_muted;
+    font-size: 11px;
     font-weight: 700;
     min-width: 72px;
 }
@@ -841,7 +953,7 @@ QSlider::sub-page:horizontal {
     background: transparent;
     min-width: 62px;
     padding: 2px 6px;
-    font-size: 10px;
+    font-size: 11px;
 }
 
 #floatingToolbar QWidget#mesoanalysisProductGrid,
@@ -855,67 +967,67 @@ QSlider::sub-page:horizontal {
 
 #floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisTimeLabel,
 #floatingToolbar QWidget#sfcoaDrawer QLabel#sfcoaTimeLabel {
-    color: #C8D0DE;
-    font-size: 10px;
+    color: $text_secondary;
+    font-size: 11px;
     font-weight: 600;
 }
 
 #floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:hover,
 #floatingToolbar QWidget#sfcoaProductGrid QToolButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: rgba(74, 158, 255, 0.35);
+    background-color: $info@0.08;
+    border-color: $info@0.35;
 }
 
 #floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:checked,
 #floatingToolbar QWidget#sfcoaProductGrid QToolButton:checked {
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
+    background-color: $info@0.18;
+    border-color: $info;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QToolButton:hover,
 #floatingToolbar QWidget#sfcoaDrawer QToolButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: rgba(74, 158, 255, 0.55);
+    background-color: $info@0.08;
+    border-color: $info@0.55;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QToolButton:checked,
 #floatingToolbar QWidget#sfcoaDrawer QToolButton:checked {
-    background-color: rgba(74, 158, 255, 0.18);
-    border-color: #4A9EFF;
-    color: #EFF3FF;
+    background-color: $info@0.18;
+    border-color: $info;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QComboBox,
 #floatingToolbar QWidget#sfcoaDrawer QComboBox {
-    background-color: rgba(32, 37, 58, 0.62);
-    border: 1px solid rgba(74, 83, 108, 0.48);
+    background-color: $bg_hover@0.62;
+    border: 1px solid $border_soft@0.48;
     border-radius: 6px;
-    color: #D9E0EC;
+    color: $text_secondary;
     padding: 2px 7px;
     min-width: 0;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QComboBox:hover,
 #floatingToolbar QWidget#sfcoaDrawer QComboBox:hover {
-    border-color: rgba(120, 138, 178, 0.72);
+    border-color: $text_label@0.72;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QPushButton,
 #floatingToolbar QWidget#sfcoaDrawer QPushButton {
     background: transparent;
-    border: 1px solid rgba(74, 83, 108, 0.48);
+    border: 1px solid $border_soft@0.48;
     border-radius: 6px;
-    color: #C8D0DE;
-    font-size: 10px;
+    color: $text_secondary;
+    font-size: 11px;
     font-weight: 600;
     padding: 2px 8px;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QPushButton:hover,
 #floatingToolbar QWidget#sfcoaDrawer QPushButton:hover {
-    background-color: rgba(74, 158, 255, 0.08);
-    border-color: rgba(74, 158, 255, 0.55);
-    color: #EFF3FF;
+    background-color: $info@0.08;
+    border-color: $info@0.55;
+    color: $text_bright;
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QSlider {
@@ -923,7 +1035,7 @@ QSlider::sub-page:horizontal {
 }
 
 #floatingToolbar QWidget#mesoanalysisDrawer QSlider::groove:horizontal {
-    background-color: rgba(184, 191, 205, 0.28);
+    background-color: $text_secondary@0.28;
     height: 2px;
     border-radius: 1px;
 }
@@ -937,27 +1049,27 @@ QWidget#satPlaybackRow QToolButton {
 
 QWidget#radarPlaybackRow QToolButton:hover,
 QWidget#satPlaybackRow QToolButton:hover {
-    background-color: #1A1A2E;
-    border-color: #2E2E4E;
-    color: #E8EAF0;
+    background-color: $bg_elevated;
+    border-color: $border;
+    color: $text;
 }
 
 QWidget#radarPlaybackRow QToolButton:checked,
 QWidget#radarPlaybackRow QToolButton:pressed,
 QWidget#satPlaybackRow QToolButton:checked,
 QWidget#satPlaybackRow QToolButton:pressed {
-    background-color: #FF6B35;
-    border-color: #FF6B35;
-    color: #0A0A0F;
+    background-color: $accent;
+    border-color: $accent;
+    color: $bg_base;
 }
 
 /* ── Tooltips ─────────────────────────────────────────── */
 QToolTip {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 4px;
-    color: #E8EAF0;
-    font-size: 10px;
+    color: $text;
+    font-size: 11px;
     padding: 4px 8px;
 }
 
@@ -965,7 +1077,7 @@ QToolTip {
 #floatingToolbar QCheckBox {
     background: transparent;
     border: none;
-    color: #B8BFCD;
+    color: $text_secondary;
     font-size: 11px;
     spacing: 5px;
     padding: 0;
@@ -993,12 +1105,12 @@ QToolTip {
 
 /* ── Separators ───────────────────────────────────────── */
 QFrame[frameShape="4"], QFrame[frameShape="5"] {
-    color: #1E1E2E;
+    color: $border_subtle;
 }
 
 /* ── Annotation Dialog ────────────────────────────────── */
 QDialog#annotationDialog {
-    background-color: #0A0A0F;
+    background-color: $bg_base;
 }
 
 QDialog#annotationDialog QLabel {
@@ -1006,16 +1118,16 @@ QDialog#annotationDialog QLabel {
 }
 
 QDialog#annotationDialog QLineEdit {
-    background-color: #1A1A2E;
-    border: 1px solid #2E2E4E;
+    background-color: $bg_elevated;
+    border: 1px solid $border;
     border-radius: 6px;
     padding: 6px 10px;
     font-size: 11px;
-    color: #E8EAF0;
+    color: $text;
 }
 
 QDialog#annotationDialog QLineEdit:focus {
-    border-color: #FF6B35;
+    border-color: $accent;
 }
 
 /* ── Layer Order Pill ────────────────────────────────── */
@@ -1024,9 +1136,9 @@ QDialog#annotationDialog QLineEdit:focus {
 }
 
 #layerOrderPanel {
-    background-color: rgba(15, 15, 26, 0.95);
+    background-color: $bg_panel@0.95;
     border-radius: 10px;
-    border: 1px solid rgba(74, 83, 108, 0.55);
+    border: 1px solid $border_soft@0.55;
     min-width: 200px;
 }
 
@@ -1036,8 +1148,8 @@ QDialog#annotationDialog QLineEdit:focus {
 
 /* ── Archive Controls Bar ─────────────────────────────── */
 #archiveControls {
-    background-color: rgba(15, 15, 26, 0.88);
-    border: 1px solid rgba(84, 94, 122, 0.5);
+    background-color: $bg_panel@0.88;
+    border: 1px solid $border_soft_2@0.5;
     border-radius: 8px;
 }
 
@@ -1047,35 +1159,35 @@ QDialog#annotationDialog QLineEdit:focus {
 }
 
 #archiveControls QToolButton {
-    background-color: rgba(26, 26, 46, 0.34);
+    background-color: $bg_elevated@0.34;
     border: 1px solid transparent;
     border-radius: 5px;
-    color: #C8D0DE;
+    color: $text_secondary;
     font-size: 12px;
     font-weight: 600;
     padding: 0;
 }
 
 #archiveControls QToolButton:hover {
-    background-color: rgba(32, 37, 58, 0.85);
-    border-color: rgba(74, 83, 108, 0.75);
-    color: #EFF3FF;
+    background-color: $bg_hover@0.85;
+    border-color: $border_soft@0.75;
+    color: $text_bright;
 }
 
 #archiveControls QToolButton:checked {
-    background-color: #FF9F1C;
-    border-color: #FF9F1C;
-    color: #0A0A0F;
+    background-color: $mode_archive;
+    border-color: $mode_archive;
+    color: $bg_base;
 }
 
 #archiveControls QSlider::groove:horizontal {
     height: 4px;
-    background: #1E1E2E;
+    background: $border_subtle;
     border-radius: 2px;
 }
 
 #archiveControls QSlider::handle:horizontal {
-    background: #00CFFF;
+    background: $accent;
     border: none;
     width: 12px;
     height: 12px;
@@ -1084,36 +1196,38 @@ QDialog#annotationDialog QLineEdit:focus {
 }
 
 #archiveControls QSlider::sub-page:horizontal {
-    background: #00CFFF;
+    background: $accent;
     border-radius: 2px;
 }
 
 #archiveControls QComboBox {
-    background-color: rgba(26, 26, 46, 0.55);
-    border: 1px solid rgba(46, 46, 78, 0.85);
+    background-color: $bg_elevated@0.55;
+    border: 1px solid $border@0.85;
     border-radius: 5px;
-    color: #C8D0DE;
-    font-size: 10px;
+    color: $text_secondary;
+    font-size: 11px;
     font-weight: 600;
     padding: 1px 6px;
 }
 
 #archiveControls QComboBox:hover {
-    border-color: #3C4664;
+    border-color: $border_strong;
 }
 
 #archiveControls QComboBox QAbstractItemView {
-    background-color: #1A1A2E;
-    border: 1px solid #3C4664;
-    color: #E8EAF0;
-    selection-background-color: #FF9F1C;
-    selection-color: #0A0A0F;
+    background-color: $bg_elevated;
+    border: 1px solid $border_strong;
+    color: $text;
+    selection-background-color: $mode_archive;
+    selection-color: $bg_base;
 }
-""".replace("#FF6B35", ACCENT_COLOR)
+""")
 
-# accent color for use in Python code — reads from config.toml [ui] accent_color
-ACCENT = ACCENT_COLOR
 
-BG_BASE       = "#0A0A0F"
-BG_ELEVATED   = "#1A1A2E"
-TEXT_MUTED    = "#6E7A8F"
+def set_pill_status(widget, status: str) -> None:
+    """Color a status-pill label through its ``pillStatus`` property (rules above)."""
+    if widget.property("pillStatus") == status:
+        return
+    widget.setProperty("pillStatus", status)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)

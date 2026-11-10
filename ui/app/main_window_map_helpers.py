@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from ui.widgets.layer_order_pill import MAPLIBRE_LAYERS
 from ui.map.widget import TILES_PATH
 from ui.controls.radar_controls import NEXRAD_SITES
+from ui.theme import set_pill_status
 
 
 class MainWindowMapHelpersMixin:
@@ -13,9 +14,7 @@ class MainWindowMapHelpersMixin:
         self.status_msg_label.setText(
             "  Monitor mode — no local obs data"
         )
-        self.status_msg_label.setStyleSheet(
-            "color: #4A9EFF; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
-        )
+        set_pill_status(self.status_msg_label, "info")
         self._layout_overlays()
 
     def _load_radar_station_sites(self) -> list[dict]:
@@ -170,9 +169,11 @@ class MainWindowMapHelpersMixin:
             self.map_widget.move_layer_before(lid, None)
 
     def _set_layer_active(self, key: str, active: bool) -> None:
-        """Notify the layer pill that a layer's visibility changed."""
+        """Notify the layer pill and layer health that a layer's visibility changed."""
         if hasattr(self, "_layer_pill"):
             self._layer_pill.set_layer_active(key, active)
+        if hasattr(self, "_layer_status"):
+            self._layer_status.set_source_active(key, active)
 
     def _refresh_annotation_layer(self) -> None:
         """Update the annotations pill entry based on whether any annotations or drawings exist."""

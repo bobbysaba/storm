@@ -2,8 +2,9 @@
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QToolButton, QLabel, QSlider,
 )
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import pyqtSignal, Qt
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
 # best → worst color ramp (rank 1 = green, rank 5 = red)
@@ -61,7 +62,7 @@ def _slider_label_text(metric: str, slider_val: int) -> str:
         return f"RQI ≥ {slider_val / 10:.1f}"
 
 
-class DeployLocsControls(QWidget):
+class DeployLocsControls(Drawer):
     """
     Floating drawer for previous deployment location color-coding + threshold
     filtering.
@@ -75,11 +76,9 @@ class DeployLocsControls(QWidget):
     metric_changed   = pyqtSignal(str)          # "rank_abi" | "rank_aoi" | "rqi"
     filter_changed   = pyqtSignal(str, float)   # (metric, threshold)
     size_changed     = pyqtSignal(int)          # circle radius in pixels
-    content_resized  = pyqtSignal()             # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation  = None
         self._updating   = False
         self._setup_ui()
 
@@ -89,7 +88,6 @@ class DeployLocsControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(0)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -116,9 +114,8 @@ class DeployLocsControls(QWidget):
 
         self._legend = QLabel()
         self._legend.setTextFormat(Qt.TextFormat.RichText)
-        self._legend.setFont(QFont("Helvetica Neue", 9))
         self._legend.setStyleSheet(
-            "color: #B5BDCC; background: transparent; padding: 1px 4px 2px 4px;"
+            f"font-size: 11px; color: {P.TEXT_SECONDARY}; background: transparent; padding: 1px 4px 2px 4px;"
         )
         self._legend.setVisible(False)
         col.addWidget(self._legend)
@@ -136,9 +133,8 @@ class DeployLocsControls(QWidget):
 
         self._slider_label = QLabel()
         self._slider_label.setObjectName("deployLocsSliderLabel")
-        self._slider_label.setFont(QFont("Helvetica Neue", 9))
         self._slider_label.setStyleSheet(
-            "color: #B5BDCC; background: transparent;"
+            f"font-size: 11px; color: {P.TEXT_SECONDARY}; background: transparent;"
         )
         self._slider_label.setMinimumWidth(80)
 
@@ -154,8 +150,7 @@ class DeployLocsControls(QWidget):
         sr.setSpacing(8)
 
         size_lbl = QLabel("Size")
-        size_lbl.setFont(QFont("Helvetica Neue", 9))
-        size_lbl.setStyleSheet("color: #B5BDCC; background: transparent;")
+        size_lbl.setStyleSheet(f"font-size: 11px; color: {P.TEXT_SECONDARY}; background: transparent;")
 
         self._size_slider = QSlider(Qt.Orientation.Horizontal)
         self._size_slider.setObjectName("deployLocsSizeSlider")
@@ -166,8 +161,7 @@ class DeployLocsControls(QWidget):
         self._size_slider.valueChanged.connect(self._on_size_changed)
 
         self._size_val_label = QLabel("6 px")
-        self._size_val_label.setFont(QFont("Helvetica Neue", 9))
-        self._size_val_label.setStyleSheet("color: #B5BDCC; background: transparent;")
+        self._size_val_label.setStyleSheet(f"font-size: 11px; color: {P.TEXT_SECONDARY}; background: transparent;")
         self._size_val_label.setMinimumWidth(36)
 
         sr.addWidget(size_lbl)
@@ -192,30 +186,6 @@ class DeployLocsControls(QWidget):
         b.setCheckable(True)
         b.setChecked(False)
         return b
-
-
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
 
     def current_metric(self) -> str:
@@ -277,27 +247,11 @@ class DeployLocsControls(QWidget):
     def _update_legend(self, metric: str):
         entries = _LEGENDS.get(metric, [])
         parts = [
-            f'<span style="color:{c}; font-size:11px;">■</span>'
-            f'&thinsp;<span style="font-size:9px;">{lbl}</span>'
+            f'<span style="color:{c};">■</span>'
+            f'&thinsp;{lbl}'
             for c, lbl in entries
         ]
         self._legend.setText("&nbsp;&nbsp;".join(parts))
         self._legend.setVisible(True)
 
-        if self.maximumHeight() > 0:
-            self.setMaximumHeight(16777215)
-            target  = self.sizeHint().height()
-            current = self.height()
-            if target == current:
-                return
-            if self._animation:
-                self._animation.stop()
-            anim = QPropertyAnimation(self, b"maximumHeight")
-            anim.setDuration(120)
-            anim.setStartValue(current)
-            anim.setEndValue(target)
-            anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-            anim.start()
-            self._animation = anim
-            self.content_resized.emit()
+        self.content_changed()

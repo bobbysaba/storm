@@ -1,9 +1,11 @@
 
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButton
-from PyQt6.QtCore import pyqtSignal, QPropertyAnimation, QEasingCurve, Qt
+from PyQt6.QtCore import pyqtSignal, Qt
+from ui import palette as P
+from ui.widgets.drawer import Drawer
 
 
-class SoundingControls(QWidget):
+class SoundingControls(Drawer):
     """Floating drawer that appears when the SOUNDING toolbar button is active.
 
     Presents two mutually-exclusive source buttons:
@@ -12,11 +14,9 @@ class SoundingControls(QWidget):
     """
 
     mode_changed   = pyqtSignal(str)   # "hrrr", "obs", or "nssl"
-    content_resized = pyqtSignal()     # triggers layout pulse in main_window
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation   = None
         self._active_mode = "hrrr"
         self._setup_ui()
 
@@ -26,7 +26,6 @@ class SoundingControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(0)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._drawer = QWidget()
@@ -70,7 +69,7 @@ class SoundingControls(QWidget):
     def _vdiv(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #2E2E4E; margin: 4px 2px;")
+        div.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
         return div
 
 
@@ -99,30 +98,6 @@ class SoundingControls(QWidget):
                 btn.blockSignals(False)
 
         self.mode_changed.emit(mode)
-
-
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
 
 
     def reset_to_hrrr(self):

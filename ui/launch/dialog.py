@@ -23,6 +23,7 @@ from ui.launch.styles import (
     _UPD_SUCCESS, _UPD_WARNING,
 )
 from ui.launch.update_dialogs import _CondaUpdateDialog, _LogViewerDialog, UpdateWorker
+from ui import palette as P
 
 
 
@@ -101,7 +102,7 @@ class LaunchDialog(QDialog):
         div = QFrame()
         div.setObjectName("divider")
         div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet("background-color: #1E1E2E;")
+        div.setStyleSheet(f"background-color: {P.BORDER_SUBTLE};")
         div.setFixedHeight(1)
         root.addWidget(div)
         root.addSpacing(16)
@@ -157,11 +158,11 @@ class LaunchDialog(QDialog):
         self._gps_mode_check = QCheckBox("GPS data file (no met obs)")
         self._gps_mode_check.setChecked(saved.get("gps_file_mode", False))
         self._gps_mode_check.setStyleSheet(
-            "QCheckBox { color: #8E97AB; font-size: 11px; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #1E1E2E;"
-            " border-radius: 3px; background: #1A1A2E; }"
-            "QCheckBox::indicator:checked { background: #00CFFF; border-color: #00CFFF; }"
-            "QCheckBox:disabled { color: #2A2A3E; }"
+            f"QCheckBox {{ color: {P.TEXT_LABEL}; font-size: 11px; }}"
+            f"QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {P.BORDER_SUBTLE};"
+            f" border-radius: 3px; background: {P.BG_ELEVATED}; }}"
+            f"QCheckBox::indicator:checked {{ background: {P.ACCENT}; border-color: {P.ACCENT}; }}"
+            f"QCheckBox:disabled {{ color: {P.TEXT_DISABLED}; }}"
         )
         vs.addWidget(self._gps_mode_check)
         vs.addSpacing(14)
@@ -185,7 +186,7 @@ class LaunchDialog(QDialog):
             btn.setObjectName("iconBtn")
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setIconSize(QSize(22, 22))
-            btn.setIcon(QIcon(_svg_pixmap(key, "#5A5B6A", 22)))
+            btn.setIcon(QIcon(_svg_pixmap(key, P.TEXT_MUTED, 22)))
             btn.clicked.connect(lambda _checked, k=key: self._select_icon(k))
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             icon_row.addWidget(btn)
@@ -221,10 +222,10 @@ class LaunchDialog(QDialog):
         self._admin_check = QCheckBox("admin mode")
         self._admin_check.setChecked(False)
         self._admin_check.setStyleSheet(
-            "QCheckBox { color: #C8D0DE; font-size: 11px; font-weight: 600; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #1E1E2E;"
-            " border-radius: 3px; background: #1A1A2E; }"
-            "QCheckBox::indicator:checked { background: #00CFFF; border-color: #00CFFF; }"
+            f"QCheckBox {{ color: {P.TEXT_SECONDARY}; font-size: 11px; font-weight: 600; }}"
+            f"QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {P.BORDER_SUBTLE};"
+            f" border-radius: 3px; background: {P.BG_ELEVATED}; }}"
+            f"QCheckBox::indicator:checked {{ background: {P.ACCENT}; border-color: {P.ACCENT}; }}"
         )
         self._admin_check.toggled.connect(self._on_admin_toggled)
         root.addWidget(self._admin_check)
@@ -298,7 +299,7 @@ class LaunchDialog(QDialog):
         div2 = QFrame()
         div2.setObjectName("divider")
         div2.setFrameShape(QFrame.Shape.HLine)
-        div2.setStyleSheet("background-color: #1E1E2E;")
+        div2.setStyleSheet(f"background-color: {P.BORDER_SUBTLE};")
         div2.setFixedHeight(1)
         root.addWidget(div2)
         root.addSpacing(10)
@@ -489,7 +490,7 @@ class LaunchDialog(QDialog):
         # dropdown arrow on the QDateTimeEdit itself
         _drop = self._archive_dt_edit.findChild(QToolButton)
         if _drop:
-            _drop.setIcon(_tri_icon([(0.1, 0.2), (0.9, 0.2), (0.5, 0.85)], "#8E97AB", 10, 8))
+            _drop.setIcon(_tri_icon([(0.1, 0.2), (0.9, 0.2), (0.5, 0.85)], P.TEXT_LABEL, 10, 8))
             _drop.setIconSize(QSize(10, 8))
 
         # calendar prev/next month nav arrows
@@ -497,10 +498,10 @@ class LaunchDialog(QDialog):
         _prev = cal.findChild(QToolButton, "qt_calendar_prevmonth")
         _next = cal.findChild(QToolButton, "qt_calendar_nextmonth")
         if _prev:
-            _prev.setIcon(_tri_icon([(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)], "#FFFFFF"))
+            _prev.setIcon(_tri_icon([(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)], P.WHITE))
             _prev.setIconSize(QSize(10, 10))
         if _next:
-            _next.setIcon(_tri_icon([(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)], "#FFFFFF"))
+            _next.setIcon(_tri_icon([(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)], P.WHITE))
             _next.setIconSize(QSize(10, 10))
 
         # year spinbox up/down arrows
@@ -508,9 +509,9 @@ class LaunchDialog(QDialog):
         if _spin:
             _btns = _spin.findChildren(QAbstractButton)
             if len(_btns) >= 2:
-                _btns[0].setIcon(_tri_icon([(0.1, 0.85), (0.9, 0.85), (0.5, 0.15)], "#8E97AB", 10, 8))
+                _btns[0].setIcon(_tri_icon([(0.1, 0.85), (0.9, 0.85), (0.5, 0.15)], P.TEXT_LABEL, 10, 8))
                 _btns[0].setIconSize(QSize(10, 8))
-                _btns[1].setIcon(_tri_icon([(0.1, 0.15), (0.9, 0.15), (0.5, 0.85)], "#8E97AB", 10, 8))
+                _btns[1].setIcon(_tri_icon([(0.1, 0.15), (0.9, 0.15), (0.5, 0.85)], P.TEXT_LABEL, 10, 8))
                 _btns[1].setIconSize(QSize(10, 8))
 
 
@@ -600,7 +601,7 @@ class LaunchDialog(QDialog):
         for k, btn in self._icon_btns.items():
             selected = (k == self._selected_icon)
             btn.setStyleSheet(_ICON_SELECTED_STYLE if selected else "")
-            btn.setIcon(QIcon(_svg_pixmap(k, "#00CFFF" if selected else "#5A5B6A", 22)))
+            btn.setIcon(QIcon(_svg_pixmap(k, P.ACCENT if selected else P.TEXT_MUTED, 22)))
 
 
     def _start_update_check(self):

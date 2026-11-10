@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGridLayout, QLabel, QToolButton, QPushButton,
 )
+from ui.widgets.drawer import Drawer
 
 _PRODUCT_BUTTON_WIDTH = 72
 _PRODUCT_COLUMN_WIDTH = 118
@@ -48,7 +49,7 @@ MESO_PRODUCT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 )
 
 
-class MesoanalysisControls(QWidget):
+class MesoanalysisControls(Drawer):
     """Grouped product palette for Satsquatch mesoanalysis contour overlays."""
 
     product_toggled = pyqtSignal(str, bool)
@@ -58,8 +59,8 @@ class MesoanalysisControls(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._animation = None
         self._updating = False
+        self._pending_products: set[str] = set()   # restored, waiting for set_products
         self._times: list[str] = []
         self._time_labels: list[str] = []
         self._current_frame = 0
@@ -72,7 +73,6 @@ class MesoanalysisControls(QWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(5)
 
-        self.setMaximumHeight(0)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._drawer = QWidget()
         self._drawer.setObjectName("mesoanalysisDrawer")
@@ -93,7 +93,7 @@ class MesoanalysisControls(QWidget):
             label = QLabel(group_name.upper())
             label.setObjectName("mesoanalysisGroupLabel")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setFixedWidth(_PRODUCT_COLUMN_WIDTH)
+            label.setMinimumWidth(_PRODUCT_COLUMN_WIDTH)
             grid.addWidget(label, 0, col_idx)
 
             for row_idx, (product_id, text) in enumerate(products, start=1):
@@ -101,7 +101,7 @@ class MesoanalysisControls(QWidget):
                 btn.setText(text)
                 btn.setCheckable(True)
                 btn.setToolTip(text)
-                btn.setFixedWidth(_PRODUCT_BUTTON_WIDTH)
+                btn.setMinimumWidth(_PRODUCT_BUTTON_WIDTH)
                 btn.setProperty("paletteButton", True)
                 btn.clicked.connect(
                     lambda checked=False, pid=product_id: self._toggle_product(pid, checked)
@@ -126,13 +126,13 @@ class MesoanalysisControls(QWidget):
         self._time_label = QLabel("--:--Z")
         self._time_label.setObjectName("mesoanalysisTimeLabel")
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._time_label.setFixedSize(_TIME_LABEL_WIDTH, _CONTROL_HEIGHT)
+        self._time_label.setMinimumSize(_TIME_LABEL_WIDTH, _CONTROL_HEIGHT)
         time_grid.addWidget(self._time_label, 0, 1)
         time_grid.addWidget(self._btn_fwd, 0, 2)
         grid.addWidget(time_wrap, 4, 4, Qt.AlignmentFlag.AlignHCenter)
 
         self._refresh_btn = QPushButton("REFRESH")
-        self._refresh_btn.setFixedSize(_PRODUCT_BUTTON_WIDTH, _CONTROL_HEIGHT)
+        self._refresh_btn.setMinimumSize(_PRODUCT_BUTTON_WIDTH, _CONTROL_HEIGHT)
         self._refresh_btn.setToolTip("Clear and refresh mesoanalysis products")
         self._refresh_btn.clicked.connect(self._on_refresh_clicked)
         grid.addWidget(self._refresh_btn, 4, 5, Qt.AlignmentFlag.AlignHCenter)
@@ -140,33 +140,11 @@ class MesoanalysisControls(QWidget):
         col.addWidget(groups)
         outer.addWidget(self._drawer)
 
-    def toggle_drawer(self, checked: bool):
-        if checked:
-            self.setMaximumHeight(16777215)
-            target = self.sizeHint().height()
-            self.setMaximumHeight(0)
-            current = 0
-        else:
-            current = self.height()
-            self.setMaximumHeight(current)
-            target = 0
-
-        if self._animation:
-            self._animation.stop()
-        anim = QPropertyAnimation(self, b"maximumHeight")
-        anim.setDuration(180)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if checked:
-            anim.finished.connect(lambda: self.setMaximumHeight(16777215))
-        anim.start()
-        self._animation = anim
-
     def set_products(self, products) -> None:
         available = {product.product_id for product in products}
         for product_id, btn in self._product_buttons.items():
             btn.setEnabled(product_id in available)
+        self._apply_pending_products()
 
     def set_times(self, times) -> None:
         current = self.current_time()
@@ -185,6 +163,24 @@ class MesoanalysisControls(QWidget):
     def active_products(self) -> set[str]:
         return set(self._active_products)
 
+    def save_state(self) -> dict:
+        return {"products": sorted(self._active_products | self._pending_products)}
+
+    def restore_state(self, state: dict) -> None:
+        """Products turn on when the next ``set_products`` lists them."""
+        self._pending_products = set(state.get("products") or ())
+
+    def _apply_pending_products(self) -> None:
+        # products this listing doesn't offer stay pending for the next one
+        for product_id in sorted(self._pending_products):
+            btn = self._product_buttons.get(product_id)
+            if btn is None or not btn.isEnabled():
+                continue
+            self._pending_products.discard(product_id)
+            if product_id not in self._active_products:
+                btn.setChecked(True)
+                self._toggle_product(product_id, True)
+
     def current_time(self) -> str:
         if 0 <= self._current_frame < len(self._times):
             return self._times[self._current_frame]
@@ -192,6 +188,7 @@ class MesoanalysisControls(QWidget):
 
     def clear_selection(self) -> None:
         self.stop_loop()
+        self._pending_products.clear()
         active = set(self._active_products)
         self._active_products.clear()
         self._times = []
@@ -240,6 +237,7 @@ class MesoanalysisControls(QWidget):
     def _toggle_product(self, product_id: str, checked: bool) -> None:
         if self._updating:
             return
+        self._pending_products.discard(product_id)
         self.stop_loop()
         if checked:
             self._active_products.add(product_id)

@@ -14,13 +14,17 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QLabel, QDockWidget, QVBoxLayout, QHBoxLayout,
     QToolButton, QFrame, QCheckBox, QPushButton, QGridLayout,
-    QFileDialog, QSizePolicy,
+    QFileDialog, QSizePolicy, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, QObject, pyqtSignal, QSize, QStandardPaths
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QIcon, QPixmap, QPainter
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
-from ui.theme import DARK_THEME, ACCENT
+from ui.theme import DARK_THEME, set_pill_status
+from ui.click_mode import ClickModeController, kind_of
+from ui.shortcuts import ARCHIVE, LIVE, ShortcutRegistry
+from ui.widgets.shortcut_overlay import ShortcutOverlay
+from ui import session_state, text_scale
 from ui.map.widget import MapWidget, TILES_PATH
 from ui.controls.radar_controls import RadarControls, NEXRAD_SITES
 from ui.controls.hazard_controls import HazardControls
@@ -41,8 +45,10 @@ from ui.map.radar_overlay import (
 )
 from ui.sounding.controls import SoundingControls
 from archive.vehicle_speed import calculate_vehicle_speed, format_vehicle_speed
-from ui.app.overlay_geometry import bottom_left_y_avoiding
+from ui.app.overlay_geometry import bottom_left_y_avoiding, stack_gap
+from ui.layer_status import LayerStatusBoard, LayerStatusDot, parse_utc
 from ui.widgets.annotation_tools import AnnotationTools
+from ui.widgets.responsive_toolbar import ResponsiveToolbar
 from ui.dialogs.annotation_dialog import AnnotationPlaceDialog, AnnotationEditDialog, AnnotationMoveConfirmDialog
 from ui.dialogs.drawing_dialog import (
     DrawingTitleDialog, DrawingEditDialog, DrawingPlaceConfirmDialog,
@@ -85,8 +91,11 @@ from data.ingest.obs_file_watcher import ObsFileWatcher, FieldMap
 from ui.layers.station_plot_layer import StationPlotLayer
 from ui.layers.surface_plot_layer import SurfacePlotLayer
 from ui.widgets.layer_order_pill import LayerOrderPill
+from ui.widgets.drawer import Drawer
+from ui.app.drawer_manager import DrawerManager
 from ui.app.main_window_debug import MainWindowDebugMixin
 from ui.app.main_window_map_helpers import MainWindowMapHelpersMixin
+from ui import palette as P
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +125,7 @@ def _overlay_time_label(value: object) -> str:
     return text
 
 
-def _make_camera_icon(size: int = 18, color: str = "#C8D0DE") -> QIcon:
+def _make_camera_icon(size: int = 18, color: str = P.TEXT_SECONDARY) -> QIcon:
     """Return a minimal camera QIcon rendered from inline SVG."""
     svg = (
         '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
@@ -156,6 +165,16 @@ def _clear_layout(layout):
             w.deleteLater()
 
 
+# ANNOTATE drawer tools; switching between them keeps the drawer's tool highlighted
+_ANNOTATE_KINDS = ("annotation", "drawing", "storm_motion_fix")
+
+_SOUNDING_PROMPTS = {
+    "hrrr": "HRRR sounding — click map",
+    "obs": "observed sounding — click a station",
+    "nssl": "NSSL soundings",
+}
+
+
 class _NetChecker(QObject):
     """Worker that checks internet connectivity from a background thread."""
     result_ready = pyqtSignal(str)   # "ok", "slow", or "none"
@@ -183,6 +202,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     _archive_render_ready = pyqtSignal(object)
     # emitted when the user aborts an archive loading session.
     session_aborted = pyqtSignal()
+
+    _layout_pending = False
 
     def __init__(
         self,
@@ -228,9 +249,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # build UI in dependency order
         self._runtime_safe = runtime_flags.FLAGS.runtime_safe
 
+        self._init_layer_status()
         self._init_map()
         self._init_toolbar()
         self._init_statusbar()
+        self._init_click_modes()
         self._init_vehicle_panel()
         self._radar_station_sites = self._load_radar_station_sites()
         self._radar_station_picker_visible = False
@@ -268,9 +291,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._init_measure()
             self._init_stations()
             self.status_msg_label.setText("Safe runtime mode - background services disabled")
-            self.status_msg_label.setStyleSheet(
-                "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
-            )
+            set_pill_status(self.status_msg_label, "warn")
         else:
             log.warning(
                 "Startup toggles: radar=%s mqtt=%s annotations=%s deploy_locs=%s data_inputs=%s",
@@ -335,15 +356,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         QTimer.singleShot(0, self._layout_overlays)
         QTimer.singleShot(220, self._layout_overlays)
 
-        # ctrl+d toggles debug panel even outside --debug mode (emergency diagnostic)
-        self._debug_shortcut = QShortcut(QKeySequence("Ctrl+D"), self)
-        self._debug_shortcut.activated.connect(self._toggle_debug_panel)
-        # ctrl+E toggles error log panel
-        self._error_log_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
-        self._error_log_shortcut.activated.connect(self._toggle_error_log_panel)
-        # esc cancels in-progress line/polygon/front drawing.
-        self._esc_shortcut = QShortcut(QKeySequence("Escape"), self)
-        self._esc_shortcut.activated.connect(self._on_escape_pressed)
+        # keyboard shortcuts (ui/shortcuts.py); ctrl+d works even outside --debug
+        self._init_shortcuts()
 
         # auto-init debug panel when launched with --debug flag
         if debug:
@@ -378,6 +392,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # time controller — central archive clock.
         self._time_ctrl = TimeController(start_time=self._archive_time, parent=self)
+        # data age in archive mode is measured against playback time
+        self._layer_status.set_clock(lambda: self._time_ctrl.current_time, archive=True)
+        self._time_ctrl.time_changed.connect(lambda _t: self._layer_status.refresh())
 
         # archive controls bar at bottom of screen.
         self._archive_controls = ArchiveControls(self._time_ctrl, self._map_container)
@@ -775,12 +792,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if result["gen"] == self._archive_render_generation:
             scan = result["scan"]
             if "error" in result:
+                self._layer_status["radar"].mark_error(f"render error: {result['error']}")
                 if hasattr(self, "_archive_controls"):
                     self._archive_controls.set_radar_status("Radar: render error", error=True)
             else:
                 self._radar_overlay.inject(result["png"], result["bounds"])
+                self._layer_status["radar"].mark_success(scan.scan_time)
                 if hasattr(self, "radar_controls"):
-                    self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
+                    self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"), scan.scan_time)
                 if hasattr(self, "_archive_controls"):
                     self._archive_controls.set_radar_status(
                         f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg {scan.scan_time.strftime('%H:%MZ')}"
@@ -793,7 +812,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         w, s, e, n = frame.bbox
         self.map_widget.set_satellite_frame(frame.mode, frame.frame_id, frame.png, w, s, e, n)
         self._archive_sat_has_data = True
-        self.satellite_controls.set_scan_time(frame.time_str)
+        self._layer_status["satellite"].mark_success(frame.timestamp)
+        self.satellite_controls.set_scan_time(frame.time_str, frame.timestamp)
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_satellite_status(
                 f"Sat: AWS {frame.mode.upper()} {frame.time_str}"
@@ -870,8 +890,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_archive_radar_error(self, msg: str) -> None:
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_radar_status("Radar: error", error=True)
-        self.status_msg_label.setText(msg)
-        self._layout_overlays()
+        self._layer_status["radar"].mark_error(msg)
 
     def _on_archive_loading_aborted(self) -> None:
         """User clicked Abort on the loading dialog — quit the application."""
@@ -881,8 +900,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_archive_satellite_error(self, msg: str) -> None:
         if hasattr(self, "_archive_controls"):
             self._archive_controls.set_satellite_status("Sat: error", error=True)
-        self.status_msg_label.setText(f"Satellite: {msg}")
-        self._layout_overlays()
+        self._layer_status["satellite"].mark_error(msg)
 
 
     def _on_archive_spc_mode_changed(self, mode: str) -> None:
@@ -1038,6 +1056,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._init_satellite()
         self._init_surface_obs()
         self._apply_launch_prefs()
+        QTimer.singleShot(0, self._restore_session)
 
     def _apply_launch_prefs(self):
         """Auto-enable map layers based on launch dialog preferences."""
@@ -1067,6 +1086,85 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         elif sat == "auto_meso":
             self._auto_meso_pending = True
             self._satellite_fetcher.meso_sectors_updated.connect(self._on_auto_meso_caps_ready)
+
+    # control attribute per session-state key (each has save_state / restore_state)
+    _SESSION_CONTROLS = {
+        "radar": "radar_controls", "satellite": "satellite_controls",
+        "hazards": "hazard_controls", "surface": "surface_controls",
+        "mesoanalysis": "mesoanalysis_controls", "sfcoa": "sfcoa_controls",
+    }
+    # opening SOUNDING enters its map-click mode; don't do that on launch
+    _SESSION_SKIP_DRAWERS = ("sounding",)
+
+    def _session_mode(self) -> str:
+        return session_state.mode_key(self._monitor, self._viewer, self._archive)
+
+    def _session_skipped(self) -> set[str]:
+        """Controls and drawers this launch mode has no data source for."""
+        if self._archive:
+            # archive radar follows the archive case, not the live product list
+            return {"radar", "surface", "mesoanalysis", "sfcoa", "prev_locs", "annotate"}
+        skip = set()
+        if not hasattr(self, "_radar_fetcher"):
+            skip.add("radar")
+        return skip
+
+    def _collect_session_state(self) -> dict:
+        state = {"drawers": [k for k in self._drawers.open_keys()
+                             if k not in self._SESSION_SKIP_DRAWERS]}
+        for key, attr in self._SESSION_CONTROLS.items():
+            control = getattr(self, attr, None)
+            if control is not None:
+                state[key] = control.save_state()
+        state["radar_site"] = self.radar_controls.current_site()
+        return state
+
+    def _restore_session(self) -> None:
+        """Bring back the last session's view for this launch mode (see
+        ui/session_state.py). Runs after the launch-dialog prefs, which win
+        where the two overlap: the satellite sector and the SPC product."""
+        self._session_restored = True
+        state = session_state.load(self._session_mode())
+        if not state:
+            return
+        skip = self._session_skipped()
+        if "radar" not in skip:
+            site = state.get("radar_site")
+            # other live modes pick the nearest site from GPS
+            if self._monitor and site and site != self.radar_controls.current_site():
+                self.radar_controls.set_selected_site(site, emit=True)
+            self.radar_controls.restore_state(state.get("radar") or {})
+        self.satellite_controls.restore_state(state.get("satellite") or {},
+                                              mode=not self._launch_auto_satellite)
+        self.hazard_controls.restore_state(state.get("hazards") or {},
+                                           spc_mode=not self._launch_auto_spc)
+        if "surface" not in skip:
+            self.surface_controls.restore_state(state.get("surface") or {})
+        for key, init in (("mesoanalysis", self._init_mesoanalysis), ("sfcoa", self._init_sfcoa)):
+            control = getattr(self, self._SESSION_CONTROLS[key], None)
+            saved = state.get(key) or {}
+            if control is None or key in skip or not saved.get("products"):
+                continue
+            control.restore_state(saved)
+            init()   # the fetcher lists products, which turns the saved ones on
+        for key in state.get("drawers") or ():
+            if key in skip or key in self._SESSION_SKIP_DRAWERS:
+                continue
+            try:
+                btn = self._drawers.entry(key).button
+            except KeyError:
+                continue
+            if not btn.isChecked():
+                btn.setChecked(True)
+
+    def _on_reset_layout(self) -> None:
+        """MAP → RESET LAYOUT: close every drawer, default pins, AUTO, 100 % text."""
+        self._drawers.close_all()
+        self._drawers.reset()
+        self.map_controls.set_drawer_mode(self._drawers.mode)
+        self.map_controls.set_text_scale(100)
+        self._on_text_scale_changed(100)
+        self._request_layout()
 
     def _on_auto_meso_caps_ready(self, sectors: dict):
         """One-shot: pick the closer meso sector once caps have been fetched."""
@@ -1104,125 +1202,99 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
 
     def _init_toolbar(self):
-        self._floating_toolbar = QWidget(self._map_container)
-        self._floating_toolbar.setObjectName("floatingToolbar")
+        # groups: data | analysis | team | map (see ui/widgets/responsive_toolbar.py)
+        tb = self._floating_toolbar = ResponsiveToolbar(self._map_container)
+        tb.set_icon_px(self._toolbar_icon_px())
 
-        tb = QHBoxLayout(self._floating_toolbar)
-        tb.setContentsMargins(8, 4, 8, 4)
-        tb.setSpacing(4)
-
-        self.btn_radar = self._toolbar_toggle("RADAR", "Show/hide radar controls", tb)
+        # ── data ──
+        self.btn_radar = tb.add_button("RADAR", "Show/hide radar controls", "radar")
         # radar controls drop down below the toolbar as a separate floating pill
         self.radar_controls = RadarControls(self._map_container)
         self.radar_controls.setObjectName("floatingToolbar")
         self.btn_radar.toggled.connect(self.radar_controls.toggle_drawer)
+        self.radar_controls.opacity_changed.connect(self.map_widget.set_radar_opacity)
         self.btn_radar.toggled.connect(
             lambda on: self._set_radar_station_picker_visible(False) if not on else None
         )
-        # pulse layout updates for the duration of the open/close animation
-        self.btn_radar.toggled.connect(self._start_layout_pulse)
 
-        self._add_separator(tb)
-
-        self.btn_vehicles = self._toolbar_toggle("VEHICLES", "Toggle vehicle panel", tb)
-
-        self.btn_prev_locs = self._toolbar_toggle(
-            "PREV LOCS", "Show previous truck deployment locations", tb
+        self.btn_satellite = tb.add_button(
+            "SATELLITE", "Show/hide GOES satellite imagery overlay", "satellite"
         )
-        self.deploy_locs_controls = DeployLocsControls(self._map_container)
-        self.deploy_locs_controls.setObjectName("floatingToolbar")
-        self.btn_prev_locs.toggled.connect(self.deploy_locs_controls.toggle_drawer)
-        self.btn_prev_locs.toggled.connect(self._start_layout_pulse)
-        self.deploy_locs_controls.content_resized.connect(self._start_layout_pulse)
+        self.satellite_controls = SatelliteControls(self._map_container)
+        self.satellite_controls.setObjectName("floatingToolbar")
+        self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
+        self.btn_satellite.toggled.connect(self._on_satellite_toggled)
 
-        self._add_separator(tb)
-
-        self.btn_hazards = self._toolbar_toggle(
-            "HAZARDS", "Show/hide SPC and NWS hazard overlays", tb
+        self.btn_hazards = tb.add_button(
+            "HAZARDS", "Show/hide SPC and NWS hazard overlays", "hazards"
         )
         self.hazard_controls = HazardControls(self._map_container)
         self.hazard_controls.setObjectName("floatingToolbar")
         self.btn_hazards.toggled.connect(self.hazard_controls.toggle_drawer)
-        self.btn_hazards.toggled.connect(self._start_layout_pulse)
-        self.hazard_controls.content_resized.connect(self._start_layout_pulse)
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
         self._fetch_generation = 0
         self._panel_text_ready.connect(self._on_panel_text_ready)
 
-        self._add_separator(tb)
-
-        self.btn_satellite = self._toolbar_toggle(
-            "SATELLITE", "Show/hide GOES satellite imagery overlay", tb
-        )
-        self.satellite_controls = SatelliteControls(self._map_container)
-        self.satellite_controls.setObjectName("floatingToolbar")
-        self.btn_satellite.toggled.connect(self.satellite_controls.toggle_drawer)
-        self.btn_satellite.toggled.connect(self._start_layout_pulse)
-        self.btn_satellite.toggled.connect(self._on_satellite_toggled)
-
-        if feature_flags.is_enabled("mesoanalysis") or feature_flags.is_enabled("sfcoa"):
-            self._add_separator(tb)
-
-        if feature_flags.is_enabled("mesoanalysis"):
-            self.btn_mesoanalysis = self._toolbar_toggle(
-                "MESO", "Show/hide Satsquatch mesoanalysis contours", tb
-            )
-            self.mesoanalysis_controls = MesoanalysisControls(self._map_container)
-            self.mesoanalysis_controls.setObjectName("floatingToolbar")
-            self.btn_mesoanalysis.toggled.connect(self.mesoanalysis_controls.toggle_drawer)
-            self.btn_mesoanalysis.toggled.connect(self._start_layout_pulse)
-            self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
-
-        if feature_flags.is_enabled("sfcoa"):
-            self.btn_sfcoa = self._toolbar_toggle(
-                "SFCOA", "Show/hide SFCOA mesoanalysis contours", tb
-            )
-            self.sfcoa_controls = SfcoaControls(self._map_container)
-            self.sfcoa_controls.setObjectName("floatingToolbar")
-            self.btn_sfcoa.toggled.connect(self.sfcoa_controls.toggle_drawer)
-            self.btn_sfcoa.toggled.connect(self._start_layout_pulse)
-            self.btn_sfcoa.toggled.connect(self._on_sfcoa_drawer_toggled)
-            self.sfcoa_controls.content_resized.connect(self._start_layout_pulse)
-
-        if feature_flags.is_enabled("mesoanalysis") or feature_flags.is_enabled("sfcoa"):
-            self._add_separator(tb)
-
-        self.btn_surface = self._toolbar_toggle(
-            "SURFACE", "Show/hide surface observation controls", tb
+        self.btn_surface = tb.add_button(
+            "SURFACE", "Show/hide surface observation controls", "surface"
         )
         self.surface_controls = SurfaceControls(self._map_container)
         self.surface_controls.setObjectName("floatingToolbar")
         self.btn_surface.toggled.connect(self.surface_controls.toggle_drawer)
-        self.btn_surface.toggled.connect(self._start_layout_pulse)
-        self.surface_controls.content_resized.connect(self._start_layout_pulse)
 
-        self._add_separator(tb)
+        if feature_flags.is_enabled("mesoanalysis"):
+            self.btn_mesoanalysis = tb.add_button(
+                "MESO", "Show/hide Satsquatch mesoanalysis contours", "meso", overflow=True
+            )
+            self.mesoanalysis_controls = MesoanalysisControls(self._map_container)
+            self.mesoanalysis_controls.setObjectName("floatingToolbar")
+            self.btn_mesoanalysis.toggled.connect(self.mesoanalysis_controls.toggle_drawer)
+            self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
 
-        self.btn_sounding = self._toolbar_toggle(
-            "SOUNDING", "Click map for HRRR point sounding or observed radiosonde data", tb
+        if feature_flags.is_enabled("sfcoa"):
+            self.btn_sfcoa = tb.add_button(
+                "SFCOA", "Show/hide SFCOA mesoanalysis contours", "sfcoa", overflow=True
+            )
+            self.sfcoa_controls = SfcoaControls(self._map_container)
+            self.sfcoa_controls.setObjectName("floatingToolbar")
+            self.btn_sfcoa.toggled.connect(self.sfcoa_controls.toggle_drawer)
+            self.btn_sfcoa.toggled.connect(self._on_sfcoa_drawer_toggled)
+
+        # ── analysis ──
+        tb.add_group()
+        self.btn_sounding = tb.add_button(
+            "SOUNDING", "Click map for HRRR point sounding or observed radiosonde data",
+            "sounding",
         )
         self.sounding_controls = SoundingControls(self._map_container)
         self.sounding_controls.setObjectName("floatingToolbar")
         self.btn_sounding.toggled.connect(self.sounding_controls.toggle_drawer)
-        self.btn_sounding.toggled.connect(self._start_layout_pulse)
         self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
 
-        self._add_separator(tb)
+        # ── team ──
+        tb.add_group()
+        self.btn_vehicles = tb.add_button("VEHICLES", "Toggle vehicle panel", "vehicles")
 
-        self.btn_annotate = self._toolbar_toggle(
-            "ANNOTATE", "Place road annotations and storm motion cone", tb
+        self.btn_prev_locs = tb.add_button(
+            "PREV LOCS", "Show previous truck deployment locations", "prev_locs", overflow=True
+        )
+        self.deploy_locs_controls = DeployLocsControls(self._map_container)
+        self.deploy_locs_controls.setObjectName("floatingToolbar")
+        self.btn_prev_locs.toggled.connect(self.deploy_locs_controls.toggle_drawer)
+
+        self.btn_annotate = tb.add_button(
+            "ANNOTATE", "Place road annotations and storm motion cone", "annotate"
         )
         # annotation tools drop down below the toolbar as a separate floating pill
         self.annotation_tools = AnnotationTools(self._map_container)
         self.annotation_tools.setObjectName("floatingToolbar")
         self.btn_annotate.toggled.connect(self.annotation_tools.toggle_drawer)
-        self.btn_annotate.toggled.connect(self._start_layout_pulse)
 
-        self._add_separator(tb)
-
-        self.btn_map = self._toolbar_toggle("MAP", "Map tools and base layers", tb)
+        # ── map ──
+        tb.add_group()
+        self.btn_map = tb.add_button("MAP", "Map tools and base layers", "map")
         nlcd_available = feature_flags.is_enabled("nlcd") and os.path.isfile(NLCD_TILES_PATH)
         satellite_available = (
             feature_flags.is_enabled("satellite_basemap")
@@ -1236,7 +1308,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         )
         self.map_controls.setObjectName("floatingToolbar")
         self.btn_map.toggled.connect(self.map_controls.toggle_drawer)
-        self.btn_map.toggled.connect(self._start_layout_pulse)
 
         self.btn_measure = self.map_controls.btn_measure
         self.btn_route = self.map_controls.btn_route
@@ -1246,25 +1317,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.routing_controls = RoutingControls(self._map_container)
         self.routing_controls.setObjectName("floatingToolbar")
         self.btn_route.toggled.connect(self.routing_controls.toggle_drawer)
-        self.btn_route.toggled.connect(self._start_layout_pulse)
-        self.routing_controls.enter_pick_mode.connect(
-            lambda: self.map_widget.set_route_pick_mode(True)
-        )
-        self.routing_controls.enter_pick_mode.connect(
-            lambda: self.btn_sounding.setChecked(False) if self.btn_sounding.isChecked() else None
-        )
-        self.routing_controls.enter_pick_mode.connect(
-            lambda: self.btn_measure.setChecked(False) if self.btn_measure.isChecked() else None
-        )
+        self.routing_controls.enter_pick_mode.connect(self._enter_route_pick)
         self.routing_controls.cancel_pick_mode.connect(
-            lambda: self.map_widget.set_route_pick_mode(False)
+            lambda: self._click_modes.exit("route_pick")
         )
         self.routing_controls.route_calculated.connect(self._on_route_calculated)
         self.routing_controls.route_cleared.connect(self._on_route_cleared)
-        self.routing_controls.content_resized.connect(self._start_layout_pulse)
-        self.map_widget.map_pick_for_route.connect(
-            self.routing_controls.on_map_pick
-        )
+        self.map_widget.map_pick_for_route.connect(self._on_map_pick_for_route)
         self.map_widget.private_pin_route_requested.connect(
             self._on_private_pin_route_requested
         )
@@ -1272,20 +1331,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.landcover_controls = LandcoverControls(self._map_container)
             self.landcover_controls.setObjectName("floatingToolbar")
             self.btn_nlcd.toggled.connect(self.landcover_controls.toggle_drawer)
-            self.btn_nlcd.toggled.connect(self._start_layout_pulse)
             self.btn_nlcd.toggled.connect(self._on_nlcd_toggled)
             self.landcover_controls.opacity_changed.connect(self._on_nlcd_opacity_changed)
         if satellite_available:
             self.btn_satellite_basemap.toggled.connect(self._on_satellite_basemap_toggled)
         if self._archive:
-            self.btn_prev_locs.hide()
+            tb.set_available(self.btn_prev_locs, False)
             # no archive data sources for these — hide to prevent crashes.
-            self.btn_surface.hide()     # _surface_fetcher / _surface_layer absent
-            self.btn_annotate.hide()    # _mqtt_client / _annotation_sync / _drawing_sync absent
+            tb.set_available(self.btn_surface, False)    # _surface_fetcher / _surface_layer absent
+            tb.set_available(self.btn_annotate, False)   # _mqtt_client / _annotation_sync / _drawing_sync absent
             if hasattr(self, "btn_mesoanalysis"):
-                self.btn_mesoanalysis.hide()   # Satsquatch mesoanalysis is not archived
+                tb.set_available(self.btn_mesoanalysis, False)   # Satsquatch mesoanalysis is not archived
             if hasattr(self, "btn_sfcoa"):
-                self.btn_sfcoa.hide()          # SFCOA mesoanalysis is not archived
+                tb.set_available(self.btn_sfcoa, False)          # SFCOA mesoanalysis is not archived
+        tb.finish()
 
         self.nav_pill = NavPill(self._map_container)
         self._pill_route_expanded = False
@@ -1296,9 +1355,136 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.nav_pill.open_drawer_requested.connect(self._on_pill_expand_requested)
         self.nav_pill.clear_requested.connect(self.routing_controls._on_clear)
         self.btn_route.toggled.connect(self._on_route_drawer_toggled)
-        self.btn_route.toggled.connect(
-            lambda on: self.btn_measure.setChecked(False) if on and self.btn_measure.isChecked() else None
+
+        for drawer in self._map_container.findChildren(Drawer):
+            drawer.geometry_changed.connect(self._request_layout)
+        self._init_drawer_manager()
+        self._init_layer_status_dots()
+
+    def _init_layer_status(self):
+        """One health record per data layer (see ui/layer_status.py)."""
+        self._layer_status = LayerStatusBoard(parent=self)
+        surface_sources = (
+            "ok_mesonet", "wtm", "ks_mesonet", "co_mesonet", "ne_mesonet", "sd_mesonet", "asos",
         )
+        hazard_sources = (
+            "spc_outlook", "spc_tor", "spc_wind", "spc_hail", "spc_prob", "spc_sig",
+            "spc_watches", "spc_mds", "nws_warnings",
+        )
+        layers = [
+            ("radar", "Radar", ("radar",)),
+            # active while a mode is selected, not while the drawer is open
+            ("satellite", "Satellite", ()),
+            ("hazards", "Hazards", hazard_sources),
+            ("mesoanalysis", "Mesoanalysis", ("mesoanalysis",)),
+            ("sfcoa", "SFCOA", ("sfcoa",)),
+            ("surface", "Surface obs", surface_sources),
+        ]
+        for name, label, sources in layers:
+            self._layer_status.add(
+                name, label, sources, config.LAYER_AGE_THRESHOLDS_MIN.get(name, (None, None))
+            )
+
+    def _init_layer_status_dots(self):
+        """Amber/red dot on each data layer's toolbar button; a red dot opens the drawer."""
+        buttons = {
+            "radar": "btn_radar",
+            "satellite": "btn_satellite",
+            "hazards": "btn_hazards",
+            "mesoanalysis": "btn_mesoanalysis",
+            "sfcoa": "btn_sfcoa",
+            "surface": "btn_surface",
+        }
+        self._layer_status_dots = []
+        self._overflow_dots = {}
+        for name, btn_attr in buttons.items():
+            btn = getattr(self, btn_attr, None)
+            if btn is None:
+                continue
+            dot = LayerStatusDot(btn, self._layer_status[name])
+            dot.activated.connect(lambda b=btn: b.setChecked(True))
+            self._layer_status_dots.append(dot)
+            # a copy on the ⋯ button, shown while this button sits in its menu
+            more_dot = LayerStatusDot(self._floating_toolbar.more_button, self._layer_status[name])
+            more_dot.activated.connect(lambda b=btn: b.setChecked(True))
+            more_dot.set_allowed(False)
+            self._overflow_dots[btn] = more_dot
+        self._floating_toolbar.overflow_changed.connect(self._on_toolbar_overflow_changed)
+        self._on_toolbar_overflow_changed(self._floating_toolbar.overflowed())
+        if hasattr(self, "radar_controls"):
+            self.radar_controls.bind_status(self._layer_status["radar"])
+        if hasattr(self, "satellite_controls"):
+            self.satellite_controls.bind_status(self._layer_status["satellite"])
+
+    def _on_toolbar_overflow_changed(self, overflowed):
+        for btn, dot in self._overflow_dots.items():
+            dot.set_allowed(btn in overflowed)
+
+    def _init_drawer_manager(self):
+        """Decide which drawers share the screen (see ui/app/drawer_manager.py)."""
+        self._drawers = DrawerManager(lambda: self._map_container.height(), parent=self)
+        entries = [
+            ("radar", "radar_controls", "btn_radar"),
+            ("prev_locs", "deploy_locs_controls", "btn_prev_locs"),
+            ("hazards", "hazard_controls", "btn_hazards"),
+            ("satellite", "satellite_controls", "btn_satellite"),
+            ("mesoanalysis", "mesoanalysis_controls", "btn_mesoanalysis"),
+            ("sfcoa", "sfcoa_controls", "btn_sfcoa"),
+            ("surface", "surface_controls", "btn_surface"),
+            ("sounding", "sounding_controls", "btn_sounding"),
+            ("annotate", "annotation_tools", "btn_annotate"),
+            ("map", "map_controls", "btn_map"),
+        ]
+        for key, drawer_attr, btn_attr in entries:
+            if not hasattr(self, drawer_attr):
+                continue
+            btn = getattr(self, btn_attr)
+            self._drawers.add(key, getattr(self, drawer_attr), btn)
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, k=key, b=btn: self._show_drawer_pin_menu(k, b, pos)
+            )
+        # opened from inside the MAP drawer; never auto-closed
+        self._drawers.add("route", self.routing_controls, self.btn_route, child=True)
+        if hasattr(self, "landcover_controls"):
+            self._drawers.add("landcover", self.landcover_controls, self.btn_nlcd, child=True)
+
+        self._drawers.pins_changed.connect(self._refresh_drawer_pins)
+        pin_keys = {self._drawers.entry(k).button: k for k in self._drawers.keys()}
+        self._floating_toolbar.set_pin_handlers(
+            lambda b: self._drawers.is_pinned(pin_keys[b]) if b in pin_keys else None,
+            lambda b, on: self._drawers.set_pinned(pin_keys[b], on),
+        )
+        self._refresh_drawer_pins()
+        self.map_controls.set_drawer_mode(self._drawers.mode)
+        self.map_controls.drawer_mode_changed.connect(self._drawers.set_mode)
+        self.map_controls.set_text_scale(text_scale.percent())
+        self.map_controls.text_scale_changed.connect(self._on_text_scale_changed)
+        self.map_controls.reset_layout_requested.connect(self._on_reset_layout)
+        self._drawers.mode_changed.connect(self._request_layout)
+
+    def _show_drawer_pin_menu(self, key: str, button: QToolButton, pos):
+        menu = QMenu(self)
+        act = menu.addAction("Keep open when other drawers open")
+        act.setCheckable(True)
+        act.setChecked(self._drawers.is_pinned(key))
+        act.toggled.connect(lambda on: self._drawers.set_pinned(key, on))
+        menu.exec(button.mapToGlobal(pos))
+
+    def _refresh_drawer_pins(self):
+        for key in ("radar", "prev_locs", "hazards", "satellite", "mesoanalysis", "sfcoa",
+                    "surface", "sounding", "annotate", "map"):
+            try:
+                btn = self._drawers.entry(key).button
+            except KeyError:
+                continue
+            pinned = self._drawers.is_pinned(key)
+            if btn.property("pinned") != pinned:
+                btn.setProperty("pinned", pinned)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            tip = btn.toolTip().removesuffix(" (pinned open)")
+            btn.setToolTip(tip + (" (pinned open)" if pinned else ""))
 
     def _on_nav_updated(self, step_text: str, summary: str):
         """Show/refresh the nav pill — but only when the toolbar drawer is open."""
@@ -1312,7 +1498,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._pill_route_expanded = not self._pill_route_expanded
         self.nav_pill.set_expanded(self._pill_route_expanded)
         self.routing_controls.toggle_drawer(self._pill_route_expanded)
-        self._start_layout_pulse()
+        self._request_layout()
 
     def _on_pill_route_cleared(self):
         """Collapse the pill-expanded routing panel when the route is cleared."""
@@ -1343,6 +1529,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_route_cleared(self):
         self._set_layer_active("route", False)
         self.map_widget.clear_route()
+        self._click_modes.exit("route_pick")
+        self.map_widget.set_route_pick_mode(False)
+
+    def _enter_route_pick(self):
+        self._click_modes.enter("route_pick", "route — click map to pick the point")
+        self.map_widget.set_route_pick_mode(True)
+
+    def _on_map_pick_for_route(self, lat: float, lon: float):
+        # the pick lands first; exiting afterwards finds nothing left to cancel
+        self.routing_controls.on_map_pick(lat, lon)
+        self._click_modes.exit("route_pick")
+
+    def _exit_route_pick(self, _mode: str, _next: str):
+        self.routing_controls.cancel_pick()
         self.map_widget.set_route_pick_mode(False)
 
     def _on_private_pin_route_requested(self, lat: float, lon: float, label: str):
@@ -1354,21 +1554,57 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_route.setChecked(True)
         self._layout_overlays()
 
-    def _toolbar_toggle(self, label: str, tooltip: str, layout: QHBoxLayout) -> QToolButton:
-        btn = QToolButton()
-        btn.setText(label)
-        btn.setToolTip(tooltip)
-        btn.setCheckable(True)
-        btn.setChecked(False)
-        layout.addWidget(btn)
-        return btn
+    # toolbar buttons driven by single-key shortcuts
+    _SHORTCUT_BUTTONS = {
+        "radar": "btn_radar", "satellite": "btn_satellite", "hazards": "btn_hazards",
+        "surface": "btn_surface", "vehicles": "btn_vehicles", "sounding": "btn_sounding",
+        "measure": "btn_measure", "annotate": "btn_annotate",
+    }
 
-    def _add_separator(self, layout: QHBoxLayout):
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("color: #394056; margin: 6px 2px;")
-        layout.addWidget(sep)
+    def _init_shortcuts(self):
+        """Bind the shortcut table for this launch mode and build the ? overlay."""
+        mode = ARCHIVE if self._archive else LIVE
+        sc = self._shortcuts = ShortcutRegistry(self, mode)
+        for action, attr in self._SHORTCUT_BUTTONS.items():
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            sc.bind(action, lambda b=btn: self._click_if_shown(b))
+            btn.setToolTip(sc.tooltip(action, btn.toolTip()))
 
+        sc.bind("escape", self._on_escape_pressed)
+        sc.bind("loop", self.radar_controls.toggle_loop)
+        sc.bind("frame_prev", lambda: self.radar_controls.step_frame(-1))
+        sc.bind("frame_next", lambda: self.radar_controls.step_frame(1))
+        for action, method in (("play", "toggle_play"), ("step_back", "step_back"),
+                               ("step_forward", "step_forward"), ("skip_start", "skip_start"),
+                               ("skip_end", "skip_end")):
+            sc.bind(action, lambda m=method: self._call_archive_controls(m))
+        sc.bind("screenshot", lambda: self._click_if_shown(self.btn_screenshot))
+        self.btn_screenshot.setToolTip(sc.tooltip("screenshot", self.btn_screenshot.toolTip()))
+        sc.bind("help", self._toggle_shortcut_overlay)
+        sc.bind("debug", self._toggle_debug_panel)
+        sc.bind("error_log", self._toggle_error_log_panel)
+
+        self._shortcut_overlay = ShortcutOverlay(mode, self._map_container)
+
+    @staticmethod
+    def _click_if_shown(btn) -> None:
+        # buttons hidden for this mode or feature set ignore their key
+        if not btn.isHidden() and btn.isEnabled():
+            btn.click()
+
+    def _call_archive_controls(self, method: str) -> None:
+        controls = getattr(self, "_archive_controls", None)
+        if controls is not None:
+            getattr(controls, method)()
+
+    def _toggle_shortcut_overlay(self) -> None:
+        self._shortcut_overlay.toggle()
+        self._request_layout()
+
+    def _toolbar_icon_px(self) -> int:
+        return round(14 * text_scale.percent() / 100)
 
     def _init_statusbar(self):
         # row 0: version anchor | [update indicator] | status message
@@ -1383,18 +1619,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         row0.setSpacing(8)
 
         version_label = QLabel(f"STORM v{config.VERSION}")
-        version_label.setStyleSheet(
-            "color: #4A5268; font-size: 10px; font-weight: 600; letter-spacing: 0.8px;"
-        )
+        set_pill_status(version_label, "muted")
         row0.addWidget(version_label)
 
         # in-ops update indicator — hidden until an update is detected
         self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
         self.update_indicator.setFlat(True)
-        self.update_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-            "color: #00CFFF; background: transparent; border: none; padding: 0;"
-        )
+        self.update_indicator.setProperty("pillRole", "action")
+        set_pill_status(self.update_indicator, "accent")
         self.update_indicator.setToolTip("Click to apply update and restart STORM")
         self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_indicator.setVisible(False)
@@ -1402,9 +1634,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         row0.addWidget(self.update_indicator)
 
         self.status_msg_label = QLabel("")
-        self.status_msg_label.setStyleSheet(
-            "color: #9BA3B2; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;"
-        )
+        set_pill_status(self.status_msg_label, "label")
         row0.addWidget(self.status_msg_label)
         row0.addStretch()
 
@@ -1417,35 +1647,23 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.coord_label.setMinimumWidth(self.coord_label.fontMetrics().horizontalAdvance(coord_probe) + 8)
         self.vehicle_count_label = QLabel("VEHICLES: 0")
 
-        for lbl in [self.coord_label, self.vehicle_count_label]:
-            lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; font-weight: 500; letter-spacing: 0.5px;")
-
         # mode badge: VEHICLE / MONITOR / VIEWER / ARCHIVE — always leftmost in row 1
         if self._archive:
             mode_badge = QLabel("● ARCHIVE")
-            mode_badge.setStyleSheet(
-                "color: #FF9F1C; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
-            )
+            set_pill_status(mode_badge, "mode_archive")
         elif self._monitor:
             mode_badge = QLabel("● MONITOR")
-            mode_badge.setStyleSheet(
-                "color: #FFD166; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
-            )
+            set_pill_status(mode_badge, "mode_monitor")
         elif self._viewer:
             mode_badge = QLabel("● VIEWER")
-            mode_badge.setStyleSheet(
-                "color: #9B8FFF; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
-            )
+            set_pill_status(mode_badge, "mode_viewer")
         elif runtime_flags.FLAGS.admin_mode:
             mode_badge = QLabel("● ADMIN")
-            mode_badge.setStyleSheet(
-                "color: #00CFFF; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
-            )
+            set_pill_status(mode_badge, "mode_admin")
         else:
             mode_badge = QLabel("● VEHICLE")
-            mode_badge.setStyleSheet(
-                "color: #39D98A; font-size: 10px; font-weight: 600; letter-spacing: 1px;"
-            )
+            set_pill_status(mode_badge, "mode_vehicle")
+        mode_badge.setProperty("pillRole", "badge")
         row1.addWidget(mode_badge)
 
         row1.addWidget(self._status_divider())
@@ -1460,9 +1678,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # gps fix status — vehicle mode only (hidden in monitor/viewer)
         self.gps_indicator = QLabel("● NO GPS FIX")
-        self.gps_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-        )
+        self.gps_indicator.setProperty("pillRole", "badge")
+        set_pill_status(self.gps_indicator, "error")
         self.gps_indicator.setVisible(not (self._monitor or self._viewer))
         row2.addWidget(self.gps_indicator)
 
@@ -1470,33 +1687,26 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             row2.addWidget(self._status_divider())
 
         self.conn_indicator = QLabel("● AWS OFFLINE")
-        self.conn_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-        )
+        self.conn_indicator.setProperty("pillRole", "badge")
+        set_pill_status(self.conn_indicator, "error")
         row2.addWidget(self.conn_indicator)
         row2.addWidget(self._status_divider())
 
         self.net_indicator = QLabel("")
-        self.net_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #3A3B4A;"
-        )
+        self.net_indicator.setProperty("pillRole", "badge")
+        set_pill_status(self.net_indicator, "off")
         self.net_indicator.setVisible(False)
         row2.addWidget(self.net_indicator)
 
         row2.addStretch()
 
         self.date_label = QLabel("-- --- ----")
-        self.date_label.setStyleSheet(
-            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
-        )
         row2.addWidget(self.date_label)
 
         row2.addWidget(self._status_divider())
 
         self.clock_label = QLabel("--:--:-- UTC")
-        self.clock_label.setStyleSheet(
-            "font-size: 10px; font-weight: 500; letter-spacing: 0.5px; color: #C8D0DE;"
-        )
+        self.clock_label.setProperty("pillRole", "clock")
         row2.addWidget(self.clock_label)
 
         # keep hazard_indicator as a hidden member so existing callers don't break
@@ -1508,10 +1718,37 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         pill.addLayout(row2)
 
 
+    def _init_click_modes(self):
+        """One map click mode at a time (ui/click_mode.py), named by an on-map banner."""
+        self._click_modes = ClickModeController(self)
+        cm = self._click_modes
+        cm.register("sounding", lambda _m, _n: self.btn_sounding.setChecked(False))
+        cm.register("measure", lambda _m, _n: self.btn_measure.setChecked(False),
+                    self._on_measure_click)
+        cm.register("route_pick", self._exit_route_pick)
+        cm.register("annotation", self._exit_annotation_mode, self._on_annotation_place_click)
+        cm.register("storm_motion_fix", self._exit_annotation_mode, self._on_storm_motion_fix_click)
+        cm.register("drawing", self._exit_drawing_mode, self._on_drawing_click)
+        cm.register("asos_bbox", self._exit_asos_bbox)
+        cm.prompt_changed.connect(self._on_click_mode_prompt)
+
+        self._mode_banner = QLabel(self._map_container)
+        self._mode_banner.setObjectName("clickModeBanner")
+        self._mode_banner.setVisible(False)
+
+    def _on_click_mode_prompt(self, prompt: str):
+        self._show_mode_banner(prompt, cancellable=True)
+
+    def _show_mode_banner(self, text: str, cancellable: bool):
+        if text:
+            self._mode_banner.setText(f"▶  {text}  ·  Esc to exit" if cancellable else f"▶  {text}")
+        self._mode_banner.setVisible(bool(text))
+        self._request_layout()
+
     def _status_divider(self) -> QFrame:
         div = QFrame()
         div.setFrameShape(QFrame.Shape.VLine)
-        div.setStyleSheet("color: #394056; margin: 4px 0;")
+        div.setStyleSheet(f"color: {P.DIVIDER}; margin: 4px 0;")
         return div
 
     def closeEvent(self, event):
@@ -1520,6 +1757,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         _s.setValue("windowState", self.saveState())
         from ui.widgets.layer_order_pill import save_layer_order
         save_layer_order(self._layer_pill.current_order())
+        # only once restored: quitting mid-startup would overwrite it with defaults
+        if getattr(self, "_session_restored", False):
+            try:
+                session_state.save(self._session_mode(), self._collect_session_state())
+            except Exception:
+                log.exception("could not save session state")
 
         # stop all background workers before closing so threads don't outlive
         self._clock_timer.stop()
@@ -1563,12 +1806,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         # toolbar: shrink-wrap to content, center horizontally, float with margin
         if hasattr(self, "_floating_toolbar"):
-            # wide-mode scales toolbar controls slightly on larger windows
-            wide_mode = r.width() >= 1500
-            if self._floating_toolbar.property("wide") != wide_mode:
-                self._floating_toolbar.setProperty("wide", wide_mode)
-                self._floating_toolbar.style().unpolish(self._floating_toolbar)
-                self._floating_toolbar.style().polish(self._floating_toolbar)
+            # drops to icon-only, then the ⋯ menu, as the window narrows
+            self._floating_toolbar.fit(r.width() - 2 * MARGIN)
             self._floating_toolbar.adjustSize()
             tb_w = self._floating_toolbar.width()
             tb_h = self._floating_toolbar.height()
@@ -1593,9 +1832,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 x = max(0, (r.width() - w) // 2)
                 widget.setGeometry(x, _stack_y, w, h)
                 widget.raise_()
-                _stack_y += h + 6
+                _stack_y += h + stack_gap(h)
 
-            if hasattr(self, "radar_controls") and self.btn_radar.isChecked():
+            if hasattr(self, "radar_controls") and self.radar_controls.occupies_space():
                 _stack(self.radar_controls)
             if hasattr(self, "vehicle_panel") and self.vehicle_panel.isVisible():
                 # apply a session-scoped size watermark so the panel only ever
@@ -1612,31 +1851,38 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 x = max(0, (r.width() - w) // 2)
                 vp.setGeometry(x, _stack_y, w, h)
                 vp.raise_()
-                _stack_y += h + 6
+                _stack_y += h + stack_gap(h)
             if hasattr(self, "vehicle_detail_panel") and self.vehicle_detail_panel.isVisible():
                 _stack(self.vehicle_detail_panel)
-            if hasattr(self, "deploy_locs_controls") and self.btn_prev_locs.isChecked():
+            if hasattr(self, "deploy_locs_controls") and self.deploy_locs_controls.occupies_space():
                 _stack(self.deploy_locs_controls)
-            if hasattr(self, "hazard_controls") and self.btn_hazards.isChecked():
+            if hasattr(self, "hazard_controls") and self.hazard_controls.occupies_space():
                 _stack(self.hazard_controls)
-            if hasattr(self, "satellite_controls") and self.btn_satellite.isChecked():
+            if hasattr(self, "satellite_controls") and self.satellite_controls.occupies_space():
                 _stack(self.satellite_controls)
-            if hasattr(self, "mesoanalysis_controls") and self.btn_mesoanalysis.isChecked():
+            if hasattr(self, "mesoanalysis_controls") and self.mesoanalysis_controls.occupies_space():
                 _stack(self.mesoanalysis_controls)
-            if hasattr(self, "sfcoa_controls") and self.btn_sfcoa.isChecked():
+            if hasattr(self, "sfcoa_controls") and self.sfcoa_controls.occupies_space():
                 _stack(self.sfcoa_controls)
-            if hasattr(self, "surface_controls") and self.btn_surface.isChecked():
+            if hasattr(self, "surface_controls") and self.surface_controls.occupies_space():
                 _stack(self.surface_controls)
-            if hasattr(self, "sounding_controls") and self.btn_sounding.isChecked():
+            if hasattr(self, "sounding_controls") and self.sounding_controls.occupies_space():
                 _stack(self.sounding_controls)
-            if hasattr(self, "annotation_tools") and self.btn_annotate.isChecked():
+            if hasattr(self, "annotation_tools") and self.annotation_tools.occupies_space():
                 _stack(self.annotation_tools)
-            if hasattr(self, "map_controls") and self.btn_map.isChecked():
+            if hasattr(self, "map_controls") and self.map_controls.occupies_space():
                 _stack(self.map_controls)
-            if hasattr(self, "landcover_controls") and self.btn_nlcd.isChecked():
+            if hasattr(self, "landcover_controls") and self.landcover_controls.occupies_space():
                 _stack(self.landcover_controls)
             if hasattr(self, "routing_controls") and self.btn_route.isChecked():
                 _stack(self.routing_controls)
+
+            if hasattr(self, "_mode_banner") and self._mode_banner.isVisible():
+                mb = self._mode_banner
+                mb.adjustSize()
+                mb.setGeometry(max(MARGIN, (r.width() - mb.width()) // 2), _stack_y,
+                               mb.width(), mb.height())
+                mb.raise_()
 
         # nav pill — upper-right, below toolbar (hidden while toolbar drawer is open)
         _np_w = min(340, r.width() - 2 * MARGIN)
@@ -1683,6 +1929,14 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             archive_rect = (ac_x, r.height() - arc_bar_h, ac_w, ac_h)
             ac.raise_()
 
+        # shortcut list (? key) — centered over the map
+        if hasattr(self, "_shortcut_overlay") and self._shortcut_overlay.isVisible():
+            so = self._shortcut_overlay
+            so.adjustSize()
+            so.move(max(MARGIN, (r.width() - so.width()) // 2),
+                    max(MARGIN, (r.height() - so.height()) // 2))
+            so.raise_()
+
         # debug pill — bottom-center, sits above archive controls (or above bottom margin)
         if hasattr(self, "_debug_pill"):
             dp = self._debug_pill
@@ -1722,6 +1976,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._layer_pill._relayout()
             self._layer_pill.raise_()
 
+        # keep the drawer stack above the bottom overlays (see DrawerManager)
+        if hasattr(self, "_drawers"):
+            bottom = archive_rect[1] if archive_rect else r.height()
+            if hasattr(self, "_status_left"):
+                bottom = min(bottom, _status_y)
+            fixed = [w.height() for w in (getattr(self, "vehicle_panel", None),
+                                          getattr(self, "vehicle_detail_panel", None),
+                                          getattr(self, "_mode_banner", None))
+                     if w is not None and w.isVisible()]
+            skip = ("route",) if self._pill_route_expanded else ()
+            self._drawers.enforce_fit(bottom - 6 - _drop_y, fixed, skip)
+
         # re-center button — bottom-right, above MapLibre zoom controls (~70px tall)
         _ZOOM_CTRL_H = 70   # approximate height of MapLibre NavigationControl
         _GAP = 6
@@ -1760,14 +2026,22 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self.btn_scan.raise_()
 
 
-    def _start_layout_pulse(self):
-        """Re-layout at ~60 fps for 220 ms to track drawer open/close animations."""
-        if not hasattr(self, "_pulse_timer"):
-            self._pulse_timer = QTimer()
-            self._pulse_timer.setInterval(16)
-            self._pulse_timer.timeout.connect(self._layout_overlays)
-        self._pulse_timer.start()
-        QTimer.singleShot(220, self._pulse_timer.stop)
+    def _on_text_scale_changed(self, pct: int) -> None:
+        if text_scale.set_percent(pct):
+            self._floating_toolbar.set_icon_px(self._toolbar_icon_px())
+            self._floating_toolbar.invalidate()
+            self._request_layout()
+
+    def _request_layout(self, *_args):
+        """Coalesce overlay re-layout to once per event-loop turn."""
+        if self._layout_pending:
+            return
+        self._layout_pending = True
+        QTimer.singleShot(0, self._run_requested_layout)
+
+    def _run_requested_layout(self):
+        self._layout_pending = False
+        self._layout_overlays()
 
 
     def update_coordinates(self, lat: float, lon: float):
@@ -1796,19 +2070,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_net_result(self, state: str):
         if state == "ok":
             self.net_indicator.setText("● NET OK")
-            self.net_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
-            )
+            set_pill_status(self.net_indicator, "ok")
         elif state == "slow":
             self.net_indicator.setText("● NET SLOW")
-            self.net_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #FFD166;"
-            )
+            set_pill_status(self.net_indicator, "warn")
         else:
             self.net_indicator.setText("● NO INTERNET")
-            self.net_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-            )
+            set_pill_status(self.net_indicator, "error")
         self.net_indicator.setVisible(True)
         self._layout_overlays()
 
@@ -1817,19 +2085,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         age = time.monotonic() - self._last_local_obs_ts
         if self._last_local_obs_ts == 0.0 or age > 30:
             self.gps_indicator.setText("● NO GPS FIX")
-            self.gps_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-            )
+            set_pill_status(self.gps_indicator, "error")
         elif age > 5:
             self.gps_indicator.setText("● GPS STALE")
-            self.gps_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #FFD166;"
-            )
+            set_pill_status(self.gps_indicator, "warn")
         else:
             self.gps_indicator.setText("● GPS OK")
-            self.gps_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
-            )
+            set_pill_status(self.gps_indicator, "ok")
         self._layout_overlays()
 
 
@@ -1847,17 +2109,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_update_check_done(self, commits_behind: int):
         if commits_behind > 0:
             self.update_indicator.setText("↑ UPDATE AVAILABLE")
-            self.update_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-                "color: #00CFFF; background: transparent; border: none; padding: 0;"
-            )
+            set_pill_status(self.update_indicator, "accent")
             self.update_indicator.setEnabled(True)
         elif commits_behind == -2:
             self.update_indicator.setText("DEV BUILD")
-            self.update_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; "
-                "color: #3A3B4A; background: transparent; border: none; padding: 0;"
-            )
+            set_pill_status(self.update_indicator, "off")
             self.update_indicator.setEnabled(False)
         else:
             # -1 (error) or 0 (current) — stay silent
@@ -1870,10 +2126,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_update_indicator_clicked(self):
         self.update_indicator.setEnabled(False)
         self.update_indicator.setText("↑ UPDATING...")
-        self.update_indicator.setStyleSheet(
-            "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-            "color: #5A5B6A; background: transparent; border: none; padding: 0;"
-        )
+        set_pill_status(self.update_indicator, "muted")
         self._update_worker.start_pull()
 
     def _on_update_pull_done(self, success: bool, deps_changed: bool):
@@ -1882,27 +2135,18 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             # can't auto-restart safely if conda env changed — tell the user
             _cmd = "conda env update -f envs/storm.yml --prune"
             self.update_indicator.setText(f"↑ DEPS CHANGED — RUN: {_cmd}  THEN RESTART")
-            self.update_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-                "color: #FFB800; background: transparent; border: none; padding: 0;"
-            )
+            set_pill_status(self.update_indicator, "deps")
             self.update_indicator.setEnabled(False)
             self.update_indicator.setVisible(True)
             self._layout_overlays()
         elif success:
             self.update_indicator.setText("↑ RESTARTING...")
-            self.update_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-                "color: #39D98A; background: transparent; border: none; padding: 0;"
-            )
+            set_pill_status(self.update_indicator, "ok")
             self._layout_overlays()
             QTimer.singleShot(600, lambda: os.execv(sys.executable, [sys.executable] + sys.argv))
         else:
             self.update_indicator.setText("↑ UPDATE FAILED — RETRY")
-            self.update_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 700; letter-spacing: 1px; "
-                "color: #E53935; background: transparent; border: none; padding: 0;"
-            )
+            set_pill_status(self.update_indicator, "error")
             self.update_indicator.setEnabled(True)
             self.update_indicator.setVisible(True)
             self._layout_overlays()
@@ -1910,14 +2154,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def set_connection_status(self, connected: bool):
         if connected:
             self.conn_indicator.setText("● AWS OK")
-            self.conn_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #39D98A;"
-            )
+            set_pill_status(self.conn_indicator, "ok")
         else:
             self.conn_indicator.setText("● AWS OFFLINE")
-            self.conn_indicator.setStyleSheet(
-                "font-size: 10px; font-weight: 600; letter-spacing: 1px; color: #E53935;"
-            )
+            set_pill_status(self.conn_indicator, "error")
 
 
     def _init_vehicle_panel(self):
@@ -1961,7 +2201,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         placeholder = QLabel("AWAITING VEHICLES...")
         placeholder.setObjectName("vehiclePillEmpty")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("color: #3A3B5A; font-size: 10px; font-weight: 500; letter-spacing: 0.5px; padding: 6px 0;")
+        placeholder.setStyleSheet(f"color: {P.TEXT_DISABLED}; font-size: 11px; font-weight: 500; letter-spacing: 0.5px; padding: 6px 0;")
         self._vehicle_placeholder = placeholder
         layout.addWidget(placeholder)
 
@@ -1981,7 +2221,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.vehicle_panel.hide()
         self.btn_vehicles.toggled.connect(self.vehicle_panel.setVisible)
         self.btn_vehicles.toggled.connect(self._on_vehicle_panel_toggled)
-        self.btn_vehicles.toggled.connect(self._start_layout_pulse)
+        self.btn_vehicles.toggled.connect(self._request_layout)
         self.btn_prev_locs.toggled.connect(self.map_widget.set_deploy_locs_visible)
         self.btn_prev_locs.toggled.connect(self._apply_deploy_locs_filter_on_show)
         self.deploy_locs_controls.metric_changed.connect(self.map_widget.set_deploy_locs_metric)
@@ -2077,9 +2317,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self._radar_fetcher.new_data.connect(self._on_radar_data)
         self._radar_fetcher.fetch_error.connect(self._on_radar_error)
-        self._radar_error_clear_timer = QTimer()
-        self._radar_error_clear_timer.setSingleShot(True)
-        self._radar_error_clear_timer.timeout.connect(self._clear_radar_error)
 
         self.map_widget.set_radar_stations(self._radar_station_sites)
         self.radar_controls.set_selected_site("KTLX")
@@ -2151,10 +2388,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
 
-        self._hazard_error_clear_timer = QTimer()
-        self._hazard_error_clear_timer.setSingleShot(True)
-        self._hazard_error_clear_timer.timeout.connect(self._clear_hazard_error)
-
         # seed NWS bbox from MBTiles domain extent so warnings are filtered
         try:
             import sqlite3 as _sqlite3
@@ -2190,17 +2423,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         self._hazard_fetcher.start()
 
-        # keep top drawers mutually exclusive for clean placement
-        self.btn_hazards.toggled.connect(
-            lambda on: self.btn_radar.setChecked(False) if on else None
-        )
-        self.btn_hazards.toggled.connect(
-            lambda on: self.btn_annotate.setChecked(False) if on else None
-        )
-        self.btn_radar.toggled.connect(
-            lambda on: self.btn_hazards.setChecked(False) if on else None
-        )
-
     def _init_satellite(self):
         self._satellite_fetcher  = SatelliteFetcher(parent=self)
         self._satellite_cache: dict[str, list] = {"conus": [], "meso1": [], "meso2": []}
@@ -2221,32 +2443,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._satellite_fetcher.frames_updated.connect(self._on_satellite_frames_updated)
         self._satellite_fetcher.fetch_error.connect(self._on_satellite_error)
 
-        self._satellite_error_clear_timer = QTimer(self)
-        self._satellite_error_clear_timer.setSingleShot(True)
-        self._satellite_error_clear_timer.timeout.connect(self._clear_satellite_error)
-
         self._satellite_fetcher.start()
-
-        # drawer mutually exclusive with radar/hazards/annotate
-        for btn, other in [
-            (self.btn_satellite, self.btn_radar),
-            (self.btn_satellite, self.btn_hazards),
-            (self.btn_satellite, self.btn_surface),
-            (self.btn_satellite, self.btn_annotate),
-            (self.btn_radar,     self.btn_satellite),
-            (self.btn_radar,     self.btn_surface),
-            (self.btn_hazards,   self.btn_satellite),
-            (self.btn_hazards,   self.btn_surface),
-            (self.btn_surface,   self.btn_satellite),
-            (self.btn_surface,   self.btn_radar),
-            (self.btn_surface,   self.btn_hazards),
-            (self.btn_surface,   self.btn_annotate),
-            (self.btn_annotate,  self.btn_satellite),
-            (self.btn_annotate,  self.btn_surface),
-        ]:
-            btn.toggled.connect(
-                lambda on, o=other: o.setChecked(False) if on else None
-            )
 
     def _init_mesoanalysis(self):
         if self._mesoanalysis_fetcher is not None:
@@ -2262,22 +2459,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._mesoanalysis_fetcher.times_ready.connect(self._on_mesoanalysis_times_ready)
         self._mesoanalysis_fetcher.overlay_ready.connect(self._on_mesoanalysis_overlay_ready)
         self._mesoanalysis_fetcher.fetch_error.connect(self._on_mesoanalysis_error)
-
-        for btn, other in [
-            (self.btn_mesoanalysis, self.btn_satellite),
-            (self.btn_mesoanalysis, self.btn_radar),
-            (self.btn_mesoanalysis, self.btn_hazards),
-            (self.btn_mesoanalysis, self.btn_surface),
-            (self.btn_mesoanalysis, self.btn_annotate),
-            (self.btn_satellite,    self.btn_mesoanalysis),
-            (self.btn_radar,        self.btn_mesoanalysis),
-            (self.btn_hazards,      self.btn_mesoanalysis),
-            (self.btn_surface,      self.btn_mesoanalysis),
-            (self.btn_annotate,     self.btn_mesoanalysis),
-        ]:
-            btn.toggled.connect(
-                lambda on, o=other: o.setChecked(False) if on else None
-            )
 
         self._mesoanalysis_fetcher.refresh_products()
         self.mesoanalysis_controls.set_status("Meso: products")
@@ -2296,28 +2477,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._sfcoa_fetcher.variables_ready.connect(self._on_sfcoa_variables_ready)
         self._sfcoa_fetcher.overlay_ready.connect(self._on_sfcoa_overlay_ready)
         self._sfcoa_fetcher.fetch_error.connect(self._on_sfcoa_error)
-
-        pairs = [
-            (self.btn_sfcoa, self.btn_satellite),
-            (self.btn_sfcoa, self.btn_radar),
-            (self.btn_sfcoa, self.btn_hazards),
-            (self.btn_sfcoa, self.btn_surface),
-            (self.btn_sfcoa, self.btn_annotate),
-            (self.btn_satellite, self.btn_sfcoa),
-            (self.btn_radar, self.btn_sfcoa),
-            (self.btn_hazards, self.btn_sfcoa),
-            (self.btn_surface, self.btn_sfcoa),
-            (self.btn_annotate, self.btn_sfcoa),
-        ]
-        if hasattr(self, "btn_mesoanalysis"):
-            pairs.extend([
-                (self.btn_sfcoa, self.btn_mesoanalysis),
-                (self.btn_mesoanalysis, self.btn_sfcoa),
-            ])
-        for btn, other in pairs:
-            btn.toggled.connect(
-                lambda on, o=other: o.setChecked(False) if on else None
-            )
 
         self._sfcoa_fetcher.refresh_catalog()
         self.sfcoa_controls.set_status("SFCOA: times")
@@ -2363,6 +2522,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         ))
 
     def _on_surface_observations_updated(self, items: list[dict]):
+        self._layer_status["surface"].mark_success()
         items = [
             item for item in items
             if self._surface_source_enabled(item.get("source", ""))
@@ -2531,8 +2691,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.remove_surface_station_plots_batch(ids)
 
     def _on_surface_error(self, msg: str):
-        self.status_msg_label.setText(f"Surface: {msg}")
-        if str(msg).startswith("ASOS:"):
+        self._layer_status["surface"].mark_error(msg)
+        if str(msg).startswith("ASOS:") and not self._click_modes.exit("asos_bbox"):
             self.map_widget.set_asos_bbox_mode(False)
             self.map_widget.run_js(
                 "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
@@ -2670,6 +2830,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_mesoanalysis_overlay_ready(self, metadata: dict):
         self._mesoanalysis_current_metadata = metadata
+        self._layer_status["mesoanalysis"].mark_success(parse_utc(metadata.get("valid_time")))
         product_id = str(metadata.get("product") or self.mesoanalysis_controls.current_product())
         time_id = str(metadata.get("time") or self.mesoanalysis_controls.current_time())
         if product_id and time_id:
@@ -2719,7 +2880,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_mesoanalysis_error(self, msg: str):
         self.mesoanalysis_controls.set_status(str(msg))
-        self.status_msg_label.setText(str(msg))
+        self._layer_status["mesoanalysis"].mark_error(str(msg))
 
     def _on_sfcoa_times_ready(self, times):
         self._sfcoa_times = list(times)
@@ -2809,6 +2970,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_sfcoa_overlay_ready(self, metadata: dict):
         self._sfcoa_current_metadata = metadata
+        self._layer_status["sfcoa"].mark_success(parse_utc(metadata.get("valid_time")))
         product_id = str(metadata.get("product") or metadata.get("variable") or "")
         time_id = str(metadata.get("time") or self.sfcoa_controls.current_time())
         if product_id and time_id:
@@ -2864,9 +3026,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_sfcoa_error(self, msg: str):
         text = f"SFCOA: {msg}"
         self.sfcoa_controls.set_status(text)
-        self.status_msg_label.setText(text)
+        self._layer_status["sfcoa"].mark_error(str(msg))
 
     def _on_satellite_mode_changed(self, mode: str):
+        self._layer_status["satellite"].set_source_active("mode", bool(mode))
         if self._archive:
             self.satellite_controls.stop_loop()
             self.satellite_controls.reset_cache_ui()
@@ -2889,6 +3052,8 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.satellite_controls.stop_loop()
         self.satellite_controls.reset_cache_ui()
         self._satellite_fetcher.set_active_mode(mode)
+        # each mode has its own data age
+        self._layer_status["satellite"].restart()
 
         if not mode:
             self.map_widget.set_satellite_visible(False)
@@ -2897,9 +3062,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.map_widget.set_satellite_mode(mode)
         frames = self._satellite_cache.get(mode, [])
         if frames:
+            self._layer_status["satellite"].mark_success(frames[-1].timestamp)
             self.satellite_controls.set_cache_size(len(frames))
             self._render_satellite_frame(frames[-1])
-            self.satellite_controls.set_scan_time(frames[-1].time_str)
+            self.satellite_controls.set_scan_time(frames[-1].time_str, frames[-1].timestamp)
             self.map_widget.set_satellite_visible(True)
             self.status_msg_label.setText(f"GOES {mode.upper()} {frames[-1].time_str}")
             self._layout_overlays()
@@ -2917,11 +3083,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         active_mode = self.satellite_controls.current_mode()
         if mode != active_mode:
             return
+        if frames:
+            self._layer_status["satellite"].mark_success(frames[-1].timestamp)
         was_live = self.satellite_controls.is_at_latest_frame()
         self.satellite_controls.set_cache_size(len(frames))
         if was_live:
             self._render_satellite_frame(frames[-1])
-            self.satellite_controls.set_scan_time(frames[-1].time_str)
+            self.satellite_controls.set_scan_time(frames[-1].time_str, frames[-1].timestamp)
             self.status_msg_label.setText(f"GOES {mode.upper()} {frames[-1].time_str}")
             self._layout_overlays()
             if not self.satellite_controls.is_looping():
@@ -2934,7 +3102,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         frame = frames[idx]
         self._render_satellite_frame(frame)
-        self.satellite_controls.set_scan_time(frame.time_str)
+        self.satellite_controls.set_scan_time(frame.time_str, frame.timestamp)
 
     def _on_satellite_speed_changed(self, ms: int):
         self._satellite_loop_timer.setInterval(_loop_interval_ms(ms))
@@ -2954,7 +3122,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         nxt     = (current + 1) % len(frames)
         self.satellite_controls.set_frame(nxt)
         self._render_satellite_frame(frames[nxt])
-        self.satellite_controls.set_scan_time(frames[nxt].time_str)
+        self.satellite_controls.set_scan_time(frames[nxt].time_str, frames[nxt].timestamp)
 
     def _render_satellite_frame(self, frame):
         if frame.png:
@@ -2997,29 +3165,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _on_radar_error(self, msg: str):
         if not self._radar_data_enabled():
             return
-        self.status_msg_label.setText(f"Radar: {msg}")
-        self._layout_overlays()
-        self._radar_error_clear_timer.start(10_000)
-
-    def _clear_radar_error(self):
-        if self.status_msg_label.text().startswith("Radar:"):
-            self.status_msg_label.setText("")
-            self._layout_overlays()
-
-    def _clear_hazard_error(self):
-        if self.status_msg_label.text().startswith("Hazards:"):
-            self.status_msg_label.setText("")
-            self._layout_overlays()
+        self._layer_status["radar"].mark_error(msg)
 
     def _on_satellite_error(self, msg: str):
-        self.status_msg_label.setText(f"Satellite: {msg}")
-        self._layout_overlays()
-        self._satellite_error_clear_timer.start(10_000)
-
-    def _clear_satellite_error(self):
-        if self.status_msg_label.text().startswith("Satellite:"):
-            self.status_msg_label.setText("")
-            self._layout_overlays()
+        self._layer_status["satellite"].mark_error(msg)
 
     def _on_radar_toggled(self, enabled: bool):
         self._set_layer_active("radar", enabled)
@@ -3065,9 +3214,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._radar_overlay.clear()
 
     def _on_hazard_error(self, msg: str):
-        self.status_msg_label.setText(f"Hazards: {msg}")
-        self._layout_overlays()
-        self._hazard_error_clear_timer.start(10_000)
+        self._layer_status["hazards"].mark_error(msg)
 
     def _on_hazard_connectivity(self, online: bool):
         self.hazard_indicator.setVisible(not online)
@@ -3082,7 +3229,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         prob_str: str = '{"type":"FeatureCollection","features":[]}',
         sig_str: str = '{"type":"FeatureCollection","features":[]}',
     ):
-        self._clear_hazard_fetch_msg()
+        self._on_hazard_data_received()
         self.map_widget.set_spc_geojson(cat_str, wind_str, hail_str, tor_str, prob_str, sig_str)
 
     def _on_nws_raw_phenoms(self, phenoms: set):
@@ -3096,19 +3243,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._update_hazard_legend()
 
     def _on_nws_received(self, warnings_str: str):
-        self._clear_hazard_fetch_msg()
+        self._on_hazard_data_received()
         self.map_widget.set_nws_warnings_geojson(warnings_str)
         # _nws_active_phenoms is updated by _on_nws_raw_phenoms (raw signal),
 
     def _on_spc_watches_received(self, watches_str: str):
-        self._clear_hazard_fetch_msg()
+        self._on_hazard_data_received()
         self.map_widget.set_spc_watches_geojson(watches_str)
 
     def _on_spc_mds_received(self, mds_str: str):
-        self._clear_hazard_fetch_msg()
+        self._on_hazard_data_received()
         self.map_widget.set_spc_mds_geojson(mds_str)
 
-    def _clear_hazard_fetch_msg(self):
+    def _on_hazard_data_received(self):
+        self._layer_status["hazards"].mark_success()
         txt = self.status_msg_label.text()
         if txt.startswith("Fetching ") or txt.startswith("Refreshing "):
             self.status_msg_label.setText("")
@@ -3173,7 +3321,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if hc._btn_nws_warnings.isChecked():
                 active.append("nws-warnings")
             hc.update_legend(active, nws_phenoms=self._nws_active_phenoms)
-            self._start_layout_pulse()
+            self._request_layout()
             return
         fc = self._hazard_fetcher
         active = []
@@ -3189,7 +3337,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if fc._nws_enabled:
             active.append("nws-warnings")
         self.hazard_controls.update_legend(active, nws_phenoms=self._nws_active_phenoms)
-        self._start_layout_pulse()
+        self._request_layout()
 
     def _on_spc_feature_clicked(self, payload: str):
         """Handle a click on one or more overlapping hazard polygons."""
@@ -3493,6 +3641,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # show fetching status
         self._radar_initial_backfill_complete = False
         self._radar_backfill_products_received = set()
+        self._layer_status["radar"].restart()
         self.status_msg_label.setText(f"Fetching {site} radar data…")
         self._layout_overlays()
 
@@ -3527,6 +3676,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_sounding_mode_toggled(self, active: bool):
         if not active:
+            self._click_modes.exit("sounding")
             # deactivate both sub-modes and clear station layer
             self.map_widget.set_sounding_mode(False)
             self.map_widget.set_obs_sounding_mode(False)
@@ -3534,25 +3684,16 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             if hasattr(self, "sounding_controls"):
                 self.sounding_controls.reset_to_hrrr()
             return
+        self._click_modes.enter("sounding")
         # activate the currently selected sub-mode
         mode = self.sounding_controls.active_mode if hasattr(self, "sounding_controls") else "hrrr"
         self._on_sounding_mode_changed(mode)
-        # untoggle other exclusive map-click modes
-        if self.btn_measure.isChecked():
-            self.btn_measure.setChecked(False)
-        if hasattr(self, "btn_annotate") and self.btn_annotate.isChecked():
-            self.btn_annotate.setChecked(False)
-        # cancel active annotation sub-tool even if annotate drawer was already closed
-        if getattr(self, "_active_annotation_type", "") or getattr(self, "_active_drawing_type", ""):
-            self._on_annotation_tool_selected("")
-        # cancel route pick mode
-        if hasattr(self, "map_widget"):
-            self.map_widget.set_route_pick_mode(False)
 
     def _on_sounding_mode_changed(self, mode: str):
         """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
         if not self.btn_sounding.isChecked():
             return
+        self._click_modes.set_prompt(_SOUNDING_PROMPTS.get(mode, ""))
         if self._archive:
             # archive mode: HRRR → model sounding, OBS → radiosonde, NSSL not supported.
             if mode == "hrrr":
@@ -3596,10 +3737,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._surface_fetcher.set_asos_enabled(enabled)
         self._set_layer_active("asos", enabled)
         if enabled and self._surface_fetcher._asos_bbox is None:
-            self.map_widget.set_asos_bbox_mode(True)
+            self._enter_asos_bbox()
         elif not enabled:
-            self.map_widget.set_asos_bbox_mode(False)
+            self._click_modes.exit("asos_bbox")
             self._remove_surface_source_plots("asos")
+
+    def _enter_asos_bbox(self):
+        self._click_modes.enter("asos_bbox", "ASOS — drag a box on the map")
+        self.map_widget.set_asos_bbox_mode(True)
+
+    def _exit_asos_bbox(self, _mode: str, _next: str):
+        self.map_widget.set_asos_bbox_mode(False)
+        self.map_widget.run_js(
+            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
+        )
 
     def _start_new_asos_bbox(self):
         """Let the user replace the saved ASOS bbox with a freshly drawn one."""
@@ -3622,17 +3773,13 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         else:
             self._surface_fetcher.set_asos_enabled(True)
             self._set_layer_active("asos", True)
-        self.status_msg_label.setText("ASOS: draw a new bounding box")
-        self.map_widget.set_asos_bbox_mode(True)
+        self._enter_asos_bbox()
 
     def _on_asos_bbox_selected(self, west: float, south: float, east: float, north: float):
         """Triggered when user finishes an ASOS bbox selection on the map."""
         self.status_msg_label.setText("Fetching ASOS observations…")
         # exit drawing mode but keep the ASOS button checked (auto-refresh stays active)
-        self.map_widget.set_asos_bbox_mode(False)
-        self.map_widget.run_js(
-            "if(window.stormRestoreAsosMapInteractions) stormRestoreAsosMapInteractions();"
-        )
+        self._click_modes.exit("asos_bbox")
 
         def _start_asos_fetch():
             try:
@@ -3857,6 +4004,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             )
             return
         scan.scan_time = scan_time
+        self._layer_status["radar"].mark_success(scan_time)
 
         key = f"{site}/{product}"
         cache = self._scan_cache.setdefault(key, [])
@@ -4014,8 +4162,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._radar_overlay.inject(result["png_bytes"], result["bounds"])
             self._radar_overlay._maybe_adjust_grid(result["elapsed_ms"])
         self._last_inject_time = _time.monotonic()
-        self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
-        self._radar_error_clear_timer.stop()
+        self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"), scan.scan_time)
         if not self._pending_cone_motion_fix:
             self.status_msg_label.setText(scan.label)
         self._layout_overlays()
@@ -4034,8 +4181,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         self._current_radar_scan = scan
         self._radar_overlay.inject(*cached)
-        self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"))
-        self._radar_error_clear_timer.stop()
+        self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"), scan.scan_time)
         if not self._pending_cone_motion_fix:
             self.status_msg_label.setText(scan.label)
         self._layout_overlays()
@@ -4189,20 +4335,6 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._active_annotation_type: str = ""
         self._annotation_sync = AnnotationSync(self._mqtt_client, read_only=self._viewer, parent=self)
 
-        # mutual exclusion: opening one drawer closes the other
-        self.btn_radar.toggled.connect(
-            lambda on: self.btn_annotate.setChecked(False) if on else None
-        )
-        self.btn_hazards.toggled.connect(
-            lambda on: self.btn_annotate.setChecked(False) if on else None
-        )
-        self.btn_annotate.toggled.connect(
-            lambda on: self.btn_radar.setChecked(False) if on else None
-        )
-        self.btn_annotate.toggled.connect(
-            lambda on: self.btn_hazards.setChecked(False) if on else None
-        )
-
         # tool selection → set cursor mode
         self.annotation_tools.tool_selected.connect(self._on_annotation_tool_selected)
         self.annotation_tools.refresh_requested.connect(self._on_refresh_current_json)
@@ -4236,45 +4368,33 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._drawing_sync.drawing_deleted.connect(self._recv_remote_drawing_deleted)
 
     def _set_placement_prompt(self, msg: str, needs_click: bool = True):
-        """Show an accent-colored status prompt."""
-        suffix = "  —  click map to place" if needs_click else ""
-        self.status_msg_label.setText(f"  ▶  {msg}{suffix}")
-        self.status_msg_label.setStyleSheet(
-            f"color: {ACCENT}; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
-        )
-        self._layout_overlays()
+        """Name what the next map click or drag does, in the on-map banner."""
+        text = f"{msg}  —  click map to place" if needs_click else msg
+        if self._click_modes.is_active():
+            self._click_modes.set_prompt(text)
+        else:
+            # drag-to-move flows aren't click modes; Esc doesn't cancel them
+            self._show_mode_banner(text, cancellable=False)
 
     def _clear_placement_prompt(self):
-        self.status_msg_label.setText("")
-        self.status_msg_label.setStyleSheet("")
-        self._layout_overlays()
+        if not self._click_modes.is_active():
+            self._show_mode_banner("", cancellable=False)
 
     def _on_annotation_tool_selected(self, type_key: str):
-        # selecting any tool deactivates sounding mode
-        if type_key and hasattr(self, "btn_sounding") and self.btn_sounding.isChecked():
-            self.btn_sounding.setChecked(False)
-        # cancel any in-progress drawing when tool switches
-        if getattr(self, "_active_drawing_type", ""):
-            self._cancel_drawing()
-
-        # if the drawer is closing (type_key=="") but a storm motion fix is
-        if (
-            not type_key
-            and self._active_annotation_type == "storm_motion"
-            and self._pending_cone_motion_fix is not None
-        ):
+        if not type_key:
+            # drawer closed or the active tool clicked again. A storm-motion fix in
+            # progress survives closing the drawer, so radar frames can be stepped.
+            if (self._click_modes.is_active("storm_motion_fix")
+                    and self._pending_cone_motion_fix is not None):
+                return
+            for kind in _ANNOTATE_KINDS:
+                self._click_modes.exit(kind)
             return
-
-        self._pending_cone_params = None
-        self._pending_cone_motion_fix = None
-        self._active_annotation_type = ""
-        self._active_drawing_type = ""
-        self.map_widget.set_storm_cone_placement_mode(False)
 
         if type_key in DRAWING_TYPE_MAP:
             # drawing tool (front or custom shape)
+            self._click_modes.enter(f"drawing:{type_key}")
             self._active_drawing_type = type_key
-            self.map_widget.set_annotation_mode(False)
             self.map_widget.set_drawing_mode(True, type_key)
             meta = DRAWING_TYPE_MAP[type_key]
             self._set_placement_prompt(
@@ -4282,60 +4402,59 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 needs_click=False,
             )
         elif type_key == "storm_motion":
+            self._click_modes.enter("storm_motion_fix")
             self._active_annotation_type = type_key
-            self.map_widget.set_drawing_mode(False)
             self.map_widget.set_annotation_mode(True)
             self._set_placement_prompt(
                 "storm cone — select first radar feature position",
                 needs_click=False,
             )
-        elif type_key == "pressure_system":
-            self._active_annotation_type = type_key
-            self.map_widget.set_drawing_mode(False)
-            self.map_widget.set_annotation_mode(True)
-            self._set_placement_prompt("pressure system")
-        elif type_key:
-            self._active_annotation_type = type_key
-            self.map_widget.set_drawing_mode(False)
-            self.map_widget.set_annotation_mode(True)
-            label = ANNOTATION_TYPE_MAP.get(type_key, {}).get("label", "annotation")
-            self._set_placement_prompt(label)
         else:
-            self.map_widget.set_drawing_mode(False)
-            self.map_widget.set_annotation_mode(False)
-            self._clear_placement_prompt()
+            self._click_modes.enter(f"annotation:{type_key}")
+            self._active_annotation_type = type_key
+            self.map_widget.set_annotation_mode(True)
+            if type_key == "pressure_system":
+                label = "pressure system"
+            else:
+                label = ANNOTATION_TYPE_MAP.get(type_key, {}).get("label", "annotation")
+            self._set_placement_prompt(label)
+
+    def _exit_annotation_mode(self, _mode: str, next_mode: str):
+        self._active_annotation_type = ""
+        self._pending_cone_params = None
+        self._pending_cone_motion_fix = None
+        self.map_widget.set_annotation_mode(False)
+        self.map_widget.set_storm_cone_placement_mode(False)
+        if kind_of(next_mode) not in _ANNOTATE_KINDS:
+            self.annotation_tools.deactivate_tool()
+
+    def _exit_drawing_mode(self, _mode: str, next_mode: str):
+        self._cancel_drawing()
+        if kind_of(next_mode) not in _ANNOTATE_KINDS:
+            self.annotation_tools.deactivate_tool()
 
     def _on_map_click(self, lat: float, lon: float):
-        if getattr(self, "_measure_active", False):
-            self._on_measure_click(lat, lon)
-            return
-        if getattr(self, "_active_drawing_type", ""):
-            self._on_drawing_click(lat, lon)
-            return
-        if self._active_annotation_type == "storm_motion":
-            self._on_storm_motion_fix_click(lat, lon)
-            return
-        if self._active_annotation_type == "fork":
-            # remove any existing fork annotations before placing new one
+        self._click_modes.click(lat, lon)
+
+    def _on_annotation_place_click(self, lat: float, lon: float):
+        type_key = self._active_annotation_type
+        if type_key == "fork":
+            # only one fork on the map: remove the old one before placing
             existing_forks = [aid for aid, a in self._annotations.items() if a.type_key == "fork"]
             for fid in existing_forks:
                 self._delete_annotation(fid)
-            annotation = Annotation.new(type_key="fork", lat=lat, lon=lon)
-            self._active_annotation_type = ""
-            self.map_widget.set_annotation_mode(False)
-            self.annotation_tools.deactivate_tool()
-            self._clear_placement_prompt()
+            self._click_modes.exit()
+            self._place_annotation(Annotation.new(type_key="fork", lat=lat, lon=lon))
+            return
+        dlg = AnnotationPlaceDialog(type_key, lat, lon, viewer_mode=self._viewer, parent=self)
+        if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:
+            annotation = Annotation.new(
+                type_key=dlg.result_type_key(),
+                lat=lat,
+                lon=lon,
+                label=dlg.result_label(),
+            )
             self._place_annotation(annotation)
-        elif self._active_annotation_type:
-            dlg = AnnotationPlaceDialog(self._active_annotation_type, lat, lon, viewer_mode=self._viewer, parent=self)
-            if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:
-                annotation = Annotation.new(
-                    type_key=dlg.result_type_key(),
-                    lat=lat,
-                    lon=lon,
-                    label=dlg.result_label(),
-                )
-                self._place_annotation(annotation)
 
     def _on_annotation_clicked(self, annotation_id: str):
         annotation = self._annotations.get(annotation_id)
@@ -4351,10 +4470,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             elif dlg.action() == "move":
                 self._moving_annotation_id = annotation_id
                 self.map_widget.set_annotation_draggable(annotation_id, True)
-                self.status_msg_label.setText("  ▶  Drag the annotation to its new location")
-                self.status_msg_label.setStyleSheet(
-                    f"color: {ACCENT}; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;"
-                )
+                self._set_placement_prompt("drag the annotation to its new location", needs_click=False)
 
     def _on_annotation_drag_end(self, annotation_id: str, lat: float, lon: float):
         annotation = self._annotations.get(annotation_id)
@@ -4362,7 +4478,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         self.map_widget.set_annotation_draggable(annotation_id, False)
         self._moving_annotation_id = None
-        self.status_msg_label.setText("")
+        self._clear_placement_prompt()
 
         dlg = AnnotationMoveConfirmDialog(annotation, lat, lon, parent=self)
         if dlg.exec() == AnnotationMoveConfirmDialog.DialogCode.Accepted:
@@ -4421,7 +4537,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         )
 
     def _on_map_dblclick(self, lat: float, lon: float):
-        if not getattr(self, "_active_drawing_type", ""):
+        if not self._click_modes.is_active("drawing"):
             return
         self._finalize_drawing(lat, lon)
 
@@ -4451,7 +4567,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             )
             return
 
-        self._cancel_drawing()   # clear state + preview before showing dialog
+        self._click_modes.exit("drawing")   # clear state + preview before showing dialog
 
         if drawing_type in ("polyline", "polygon"):
             dlg = DrawingTitleDialog(drawing_type, parent=self)
@@ -4486,15 +4602,19 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self._clear_placement_prompt()
 
     def _on_escape_pressed(self):
-        if not getattr(self, "_active_drawing_type", ""):
+        """Esc closes the shortcut list, else leaves the map click mode, else closes the newest drawer."""
+        overlay = getattr(self, "_shortcut_overlay", None)
+        if overlay is not None and not overlay.isHidden():
+            overlay.hide()
             return
-        self._cancel_drawing()
-        if hasattr(self, "annotation_tools"):
-            self.annotation_tools.deactivate_tool()
+        if self._click_modes.exit():
+            return
+        if hasattr(self, "_drawers"):
+            self._drawers.close_newest(skip=("route",) if self._pill_route_expanded else ())
 
     def _on_drawing_clicked(self, drawing_id: str):
-        # ignore if a tool is currently active
-        if self._active_annotation_type or getattr(self, "_active_drawing_type", ""):
+        # ignore while a map click mode is active
+        if self._click_modes.is_active():
             return
         drawing = self._drawings.get(drawing_id)
         if drawing is None:
@@ -4685,13 +4805,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             speed_kts=speed_kts,
             valid_at=scan_time,
         )
-        self._pending_cone_motion_fix = None
-        self._pending_cone_params = None
-        self._active_annotation_type = ""
-        self.map_widget.set_annotation_mode(False)
-        self.map_widget.set_storm_cone_placement_mode(False)
-        self.annotation_tools.deactivate_tool()
-        self._clear_placement_prompt()
+        self._click_modes.exit()
         self._place_storm_cone(cone)
 
     def _on_storm_cone_clicked(self, cone_id: str):
@@ -4756,9 +4870,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             return
         cone = StormCone.new(lat, lon, **self._pending_cone_params)
         self._pending_cone_params = None
-        self._active_annotation_type = ""
-        self.map_widget.set_storm_cone_placement_mode(False)
-        self.annotation_tools.deactivate_tool()
+        self._click_modes.exit()
         self._clear_placement_prompt()
         self._place_storm_cone(cone)
 
@@ -4823,37 +4935,22 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
 
     def _init_measure(self):
-        self._measure_active = False
         self._measure_has_anchor = False
         self._measure_complete = False
-
-        # mutual exclusion: MEASURE, ANNOTATE, and SOUNDING all consume map clicks
-        self.btn_measure.toggled.connect(
-            lambda on: self.btn_annotate.setChecked(False) if on else None
-        )
-        self.btn_measure.toggled.connect(
-            lambda on: self.btn_sounding.setChecked(False) if on else None
-        )
-        self.btn_annotate.toggled.connect(
-            lambda on: self.btn_measure.setChecked(False) if on else None
-        )
-        self.btn_annotate.toggled.connect(
-            lambda on: self.btn_sounding.setChecked(False) if on else None
-        )
         self.btn_measure.toggled.connect(self._on_measure_toggled)
 
     def _on_measure_toggled(self, active: bool):
         if active:
-            self._measure_active = True
+            self._click_modes.enter("measure")
             self._measure_has_anchor = False
             self._measure_complete = False
             self.map_widget.set_measure_mode(True)
             self._set_placement_prompt("measure — click first point")
         else:
+            self._click_modes.exit("measure")
             # if user exits mid-measure after first point, clear partial artifacts.
             if self._measure_has_anchor or self._measure_complete:
                 self.map_widget.clear_measure()
-            self._measure_active = False
             self._measure_has_anchor = False
             self._measure_complete = False
             self.map_widget.set_measure_mode(False)
@@ -4861,7 +4958,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
     def _on_measure_click(self, lat: float, lon: float):
         if self._measure_complete:
-            self._set_placement_prompt("measure complete — toggle off to clear", needs_click=False)
+            self._set_placement_prompt("measure complete", needs_click=False)
             return
 
         self.map_widget.measure_click(lat, lon)
@@ -4873,7 +4970,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             self._measure_has_anchor = False
             self._measure_complete = True
             self.map_widget.set_measure_mode(False)   # reset cursor while keeping line visible
-            self._set_placement_prompt("measure complete — toggle off to clear", needs_click=False)
+            self._set_placement_prompt("measure complete", needs_click=False)
 
 
     def _init_stations(self):
@@ -4901,20 +4998,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_recenter.setIconSize(QSize(18, 18))
         self.btn_recenter.setToolTip("Re-center on vehicle")
         self.btn_recenter.setFixedSize(32, 32)
-        self.btn_recenter.setStyleSheet("""
+        self.btn_recenter.setStyleSheet(P.qss("""
             QToolButton {
-                background: #1E2433;
-                border: 1px solid #2A3045;
+                background: $bg_hover_2;
+                border: 1px solid $border_2;
                 border-radius: 4px;
             }
             QToolButton:hover {
-                background: #252D42;
-                border-color: #4A9EFF;
+                background: $bg_hover_4;
+                border-color: $info;
             }
             QToolButton:pressed {
-                background: #1A1F30;
+                background: $bg_hover_3;
             }
-        """)
+        """))
         self.btn_recenter.clicked.connect(self._on_recenter_clicked)
         self.btn_recenter.hide()
 
@@ -5074,20 +5171,20 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_screenshot.setIconSize(QSize(18, 18))
         self.btn_screenshot.setToolTip("Save a screenshot of the map")
         self.btn_screenshot.setFixedSize(32, 32)
-        self.btn_screenshot.setStyleSheet("""
+        self.btn_screenshot.setStyleSheet(P.qss("""
             QToolButton {
-                background: #1E2433;
-                border: 1px solid #2A3045;
+                background: $bg_hover_2;
+                border: 1px solid $border_2;
                 border-radius: 4px;
             }
             QToolButton:hover {
-                background: #252D42;
-                border-color: #4A9EFF;
+                background: $bg_hover_4;
+                border-color: $info;
             }
             QToolButton:pressed {
-                background: #1A1F30;
+                background: $bg_hover_3;
             }
-        """)
+        """))
         self.btn_screenshot.clicked.connect(self._on_screenshot_clicked)
         self.btn_screenshot.show()
 
@@ -5096,27 +5193,27 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         self.btn_scan.setText("SCAN")
         self.btn_scan.setToolTip("Start or stop current data collection footprint")
         self.btn_scan.setFixedSize(58, 32)
-        self.btn_scan.setStyleSheet("""
+        self.btn_scan.setStyleSheet(P.qss("""
             QToolButton {
-                background: #1E2433;
-                border: 1px solid #2A3045;
+                background: $bg_hover_2;
+                border: 1px solid $border_2;
                 border-radius: 4px;
-                color: #C8D0DE;
-                font-size: 10px;
+                color: $text_secondary;
+                font-size: 11px;
                 font-weight: 700;
                 letter-spacing: 0.8px;
             }
             QToolButton:hover {
-                background: #252D42;
-                border-color: #00CFFF;
-                color: #00CFFF;
+                background: $bg_hover_4;
+                border-color: $accent;
+                color: $accent;
             }
             QToolButton[active="true"] {
-                background: rgba(0, 207, 255, 0.18);
-                border-color: #00CFFF;
-                color: #00CFFF;
+                background: $accent@0.18;
+                border-color: $accent;
+                color: $accent;
             }
-        """)
+        """))
         self.btn_scan.clicked.connect(self._on_scan_button_clicked)
         self.btn_scan.setVisible(not (self._monitor or self._viewer or self._archive))
 
@@ -5365,12 +5462,12 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
     def _obs_age_color(self, obs: Observation) -> str:
         age_min = self._obs_age_minutes(obs)
         if age_min <= 1.0:
-            return "#39D98A"  # fresh
+            return P.OK  # fresh
         if age_min <= 3.0:
-            return "#FFD166"  # caution
+            return P.WARN  # caution
         if age_min <= 5.0:
-            return "#FF9F43"  # aging
-        return "#E53935"      # stale
+            return P.WARN_5  # aging
+        return P.ERROR      # stale
 
     def _obs_age_label(self, obs: Observation) -> str:
         age_min = self._obs_age_minutes(obs)
@@ -5443,7 +5540,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
                 col_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
                 header = QLabel(icon.upper())
-                header.setStyleSheet("color: #6E7A8F; font-size: 10px; font-weight: bold; padding-bottom: 4px; padding-left: 4px;")
+                header.setStyleSheet(f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: bold; padding-bottom: 4px; padding-left: 4px;")
                 col_layout.addWidget(header)
 
                 for v in vehicles:
@@ -5470,15 +5567,15 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         row = QFrame()
         row.setStyleSheet(
-            "QFrame { background-color: rgba(74,158,255,0.08); border-bottom: 1px solid #1E2434; }"
+            f"QFrame {{ background-color: {P.alpha(P.INFO, 0.08)}; border-bottom: 1px solid {P.BORDER_3}; }}"
             if selected else
-            "QFrame { background: transparent; border-bottom: 1px solid #1E2434; }"
+            f"QFrame {{ background: transparent; border-bottom: 1px solid {P.BORDER_3}; }}"
         )
         rl = QHBoxLayout(row)
         rl.setContentsMargins(0, 5, 0, 5)
         rl.setSpacing(6)
 
-        badge_color = self._obs_age_color(obs) if obs else "#6E7A8F"
+        badge_color = self._obs_age_color(obs) if obs else P.TEXT_MUTED
         badge = QLabel("●")
         badge.setStyleSheet(f"color: {badge_color}; font-size: 12px; background: transparent; border: none;")
         badge.setFixedWidth(12)
@@ -5492,9 +5589,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             QSizePolicy.Policy.Fixed,
         )
         name_btn.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #E8EAF0; "
-            "font-weight: 600; font-size: 10px; padding: 0; text-align: left; }"
-            "QPushButton:hover { color: #4A9EFF; }"
+            f"QPushButton {{ background: transparent; border: none; color: {P.TEXT}; "
+            "font-weight: 600; font-size: 11px; padding: 0; text-align: left; }"
+            f"QPushButton:hover {{ color: {P.INFO}; }}"
         )
         name_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         name_btn.clicked.connect(lambda checked=False, vid=v.id: self._on_vehicle_row_clicked(vid))
@@ -5502,16 +5599,16 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         if obs is None:
             no_obs = QLabel("no observations")
-            no_obs.setStyleSheet("color: #9DA6B8; font-size: 10px; background: transparent; border: none;")
+            no_obs.setStyleSheet(f"color: {P.TEXT_LABEL}; font-size: 11px; background: transparent; border: none;")
             no_obs.setFixedWidth(78)
             rl.addWidget(no_obs)
         else:
             sep = QLabel("·")
-            sep.setStyleSheet("color: #6E7A8F; background: transparent; border: none;")
+            sep.setStyleSheet(f"color: {P.TEXT_MUTED}; background: transparent; border: none;")
             sep.setFixedWidth(6)
             rl.addWidget(sep)
             age = QLabel(f"{self._obs_age_label(obs)} old")
-            age.setStyleSheet("color: #C8D0DE; font-size: 10px; background: transparent; border: none;")
+            age.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px; background: transparent; border: none;")
             age.setFixedWidth(42)
             rl.addWidget(age)
             self._vehicle_row_age_labels[v.id] = age
@@ -5632,7 +5729,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         obs = vehicle.latest_obs if vehicle else None
 
         section = QFrame()
-        section.setStyleSheet("QFrame { background: transparent; border-bottom: 1px solid #1E2434; }")
+        section.setStyleSheet(f"QFrame {{ background: transparent; border-bottom: 1px solid {P.BORDER_3}; }}")
         sl = QVBoxLayout(section)
         sl.setContentsMargins(0, 6, 0, 6)
         sl.setSpacing(4)
@@ -5640,10 +5737,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         if obs is None:
             top = QHBoxLayout()
             name = QLabel(vid)
-            name.setStyleSheet("color: #E8EAF0; font-weight: 600; background: transparent; border: none;")
+            name.setStyleSheet(f"color: {P.TEXT}; font-weight: 600; background: transparent; border: none;")
             top.addWidget(name)
             no_obs = QLabel("no observations")
-            no_obs.setStyleSheet("color: #9DA6B8; margin-left: 6px; background: transparent; border: none;")
+            no_obs.setStyleSheet(f"color: {P.TEXT_LABEL}; margin-left: 6px; background: transparent; border: none;")
             top.addWidget(no_obs)
             top.addStretch()
             sl.addLayout(top)
@@ -5660,11 +5757,11 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         top.addWidget(badge)
 
         name_lbl = QLabel(vid)
-        name_lbl.setStyleSheet("color: #E8EAF0; font-weight: 600; background: transparent; border: none;")
+        name_lbl.setStyleSheet(f"color: {P.TEXT}; font-weight: 600; background: transparent; border: none;")
         top.addWidget(name_lbl)
 
         age_lbl = QLabel(f"{self._obs_age_label(obs)} old")
-        age_lbl.setStyleSheet("color: #C8D0DE; background: transparent; border: none;")
+        age_lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; background: transparent; border: none;")
         top.addWidget(age_lbl)
         
         # timeseries button — only shown if vehicle has met data history
@@ -5673,10 +5770,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             ts_btn = QPushButton("TIMESERIES")
             ts_btn.setFlat(True)
             ts_btn.setStyleSheet(
-                "QPushButton { background: transparent; border: 1px solid #4A9EFF; "
-                "color: #4A9EFF; font-size: 8px; font-weight: 600; padding: 2px 6px; "
+                f"QPushButton {{ background: transparent; border: 1px solid {P.INFO}; "
+                f"color: {P.INFO}; font-size: 11px; font-weight: 600; padding: 2px 6px; "
                 "border-radius: 3px; }"
-                "QPushButton:hover { background: rgba(74,158,255,0.1); }"
+                f"QPushButton:hover {{ background: {P.alpha(P.INFO, 0.1)}; }}"
             )
             ts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             ts_btn.clicked.connect(lambda checked=False, v=vid: self._on_timeseries_button_clicked(v))
@@ -5686,10 +5783,10 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
 
         for key, val in [("lat", f"{obs.lat:.4f}"), ("lon", f"{obs.lon:.4f}")]:
             k_lbl = QLabel(key)
-            k_lbl.setStyleSheet("color: #C8D0DE; background: transparent; border: none;")
+            k_lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; background: transparent; border: none;")
             top.addWidget(k_lbl)
             v_lbl = QLabel(val)
-            v_lbl.setStyleSheet("color: #E8EAF0; background: transparent; border: none;")
+            v_lbl.setStyleSheet(f"color: {P.TEXT}; background: transparent; border: none;")
             top.addWidget(v_lbl)
 
         sl.addLayout(top)
@@ -5697,7 +5794,7 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
         # timestamp
         ts = obs.timestamp.astimezone(timezone.utc).strftime("%d %b %Y %H%M UTC")
         ts_lbl = QLabel(ts)
-        ts_lbl.setStyleSheet("color: #C8D0DE; font-size: 10px; background: transparent; border: none;")
+        ts_lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px; background: transparent; border: none;")
         sl.addWidget(ts_lbl)
 
         # obs values grid
@@ -5721,9 +5818,9 @@ class MainWindow(MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
             for col, (text, is_val) in enumerate([(lbl1, False), (val1, True), (lbl2, False), (val2, True)]):
                 cell = QLabel(text)
                 cell.setStyleSheet(
-                    "color: #E8EAF0; background: transparent; border: none;"
+                    f"color: {P.TEXT}; background: transparent; border: none;"
                     if is_val else
-                    "color: #C8D0DE; background: transparent; border: none;"
+                    f"color: {P.TEXT_SECONDARY}; background: transparent; border: none;"
                 )
                 grid.addWidget(cell, row_idx, col)
 
