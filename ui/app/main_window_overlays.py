@@ -40,6 +40,11 @@ class MainWindowOverlaysMixin:
 
         self._satellite_fetcher.start()
 
+        # a sector picked before this deferred init had no handler connected yet
+        mode = self.satellite_controls.current_mode()
+        if mode:
+            self._on_satellite_mode_changed(mode)
+
     def _init_mesoanalysis(self):
         if self._mesoanalysis_fetcher is not None:
             return
@@ -300,6 +305,9 @@ class MainWindowOverlaysMixin:
             # archive mode: simply show/hide the overlay the archive fetcher is updating.
             has_data = getattr(self, "_archive_sat_has_data", False)
             self.map_widget.set_satellite_visible(checked and has_data)
+            return
+        if not hasattr(self, "_satellite_fetcher"):
+            # drawer used before _init_satellite ran (it waits for the startup phases)
             return
         if not checked:
             # closing the drawer stops playback but leaves the overlay visible.
