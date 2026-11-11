@@ -7,6 +7,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
+# QtWebEngine must be imported before any QApplication exists (a later test needs it)
+pytest.importorskip("PyQt6.QtWebEngineWidgets")
 
 from core.vehicle import PositionTrack
 from ui.loop_sync import RADAR, SATELLITE, TILE_WAIT_S, LoopSync, frame_at
@@ -151,3 +153,44 @@ def test_track_ignores_missing_position():
     tr = PositionTrack()
     tr.append(0, None, -97.0)
     assert len(tr) == 0
+
+
+# SatelliteControls synced mode
+
+def test_satellite_controls_synced_disables_own_playback():
+    from PyQt6.QtWidgets import QApplication
+    from ui.controls.satellite_controls import SatelliteControls
+    app = QApplication.instance() or QApplication([])
+    assert app is not None   # held so it outlives the widgets below
+    sc = SatelliteControls()
+    sc.set_cache_size(5)
+    assert sc._btn_play.isEnabled()
+    sc._btn_play.setChecked(True)
+    sc.set_synced(True)
+    assert not sc.is_looping() and not sc._btn_play.isEnabled()
+    assert not sc._synced_label.isHidden() and sc._speed_combo.isHidden()
+    sc.set_cache_size(6)                    # new frames must not re-enable it
+    assert not sc._frame_slider.isEnabled()
+    sc.set_synced(False)
+    assert sc._btn_play.isEnabled()
+    assert sc._synced_label.isHidden() and not sc._speed_combo.isHidden()
+
+
+# MESO frame thinning (satellite fetcher)
+
+def test_meso_thinning_keeps_recent_frames_and_older_ones_sparse():
+    from data.fetchers.satellite_fetcher import (
+        MAX_FRAMES, MESO_KEEP_S, MESO_THIN_STRIDE_S, SatFrame, thin_meso_frames,
+    )
+    cache = []
+    for m in range(60):                       # an hour of 1-minute MESO polls
+        cache.append(SatFrame(timestamp=_t(m), png=b"x", bbox=[0, 0, 1, 1]))
+        cache = thin_meso_frames(cache)
+    times = [f.timestamp for f in cache]
+    assert times[-MAX_FRAMES:] == [_t(m) for m in range(50, 60)]
+    older = times[:-MAX_FRAMES]
+    gaps = [(b - a).total_seconds() for a, b in zip(older, older[1:])]
+    assert all(g >= MESO_THIN_STRIDE_S for g in gaps)
+    assert (times[-1] - times[0]).total_seconds() <= MESO_KEEP_S
+    assert (times[-1] - times[0]).total_seconds() >= 30 * 60   # covers the radar loop
+    assert len(cache) <= MAX_FRAMES + MESO_KEEP_S // MESO_THIN_STRIDE_S

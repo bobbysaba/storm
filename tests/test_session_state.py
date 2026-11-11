@@ -64,8 +64,10 @@ def test_radar_round_trip(app, monkeypatch):
     src._product_combo.setCurrentIndex(src._product_combo.findData("N0U"))
     src._chk_show_data.setChecked(True)
     src._opacity_slider.setValue(70)
+    src._btn_sync_vehicles.setChecked(True)
     state = src.save_state()
-    assert state == {"data": True, "product": "N0U", "opacity": 70}
+    assert state == {"data": True, "product": "N0U", "opacity": 70,
+                     "sync": True, "sync_vehicles": True}
 
     dst = RadarControls()
     toggled, products = [], []
@@ -77,6 +79,21 @@ def test_radar_round_trip(app, monkeypatch):
     assert dst.current_product() == "N0U" and dst.is_data_enabled()
     assert opacities == [0.7]
     assert products == ["N0U"] and toggled == [True]
+    assert dst.is_sync_enabled() and dst.is_sync_vehicles()
+
+
+def test_radar_sync_off_disables_vehicles(app, monkeypatch):
+    monkeypatch.setattr(RadarControls, "_refresh_product_availability", lambda self, site: None)
+    rc = RadarControls()
+    sync, vehicles = [], []
+    rc.sync_toggled.connect(sync.append)
+    rc.sync_vehicles_toggled.connect(vehicles.append)
+    rc.restore_state({"sync": False, "sync_vehicles": True})
+    assert not rc.is_sync_enabled() and not rc.is_sync_vehicles()
+    assert not rc._btn_sync_vehicles.isEnabled()
+    assert sync == [False]
+    rc._btn_sync.setChecked(True)
+    assert rc.is_sync_vehicles() and vehicles[-1] is True
 
 
 def test_satellite_round_trip_and_pending_meso(app):

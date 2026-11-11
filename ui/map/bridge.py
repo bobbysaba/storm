@@ -20,6 +20,7 @@ class MapBridge(QObject):
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     asos_bbox_selected = pyqtSignal(float, float, float, float)
     user_dragged          = pyqtSignal()
+    satellite_idle        = pyqtSignal()   # CONUS tiles for a new time have loaded
     map_pick_for_route    = pyqtSignal(float, float)
     annotation_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     drawing_drag_ended    = pyqtSignal(str, str)           # id, coords json
@@ -125,6 +126,10 @@ class MapBridge(QObject):
     @pyqtSlot()
     def on_user_drag(self):
         self.user_dragged.emit()
+
+    @pyqtSlot()
+    def on_satellite_idle(self):
+        self.satellite_idle.emit()
 
     map_loaded = pyqtSignal()
 

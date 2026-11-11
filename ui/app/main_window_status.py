@@ -114,6 +114,17 @@ class MainWindowStatusMixin:
 
         row2.addStretch()
 
+        # shown while the radar or satellite loop is off the live frame; click for live
+        self.loop_chip = QPushButton("")
+        self.loop_chip.setObjectName("loopChip")
+        self.loop_chip.setFlat(True)
+        self.loop_chip.setProperty("pillRole", "badge")
+        set_pill_status(self.loop_chip, "warn")
+        self.loop_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.loop_chip.setToolTip("Map is showing a past loop frame. Click to return to live")
+        self.loop_chip.setVisible(False)
+        row2.addWidget(self.loop_chip)
+
         self.date_label = QLabel("-- --- ----")
         row2.addWidget(self.date_label)
 

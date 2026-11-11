@@ -121,6 +121,11 @@ class SatelliteControls(Drawer):
                   self._btn_fwd, self._btn_jump_end):
             b.setEnabled(False)
             r2.addWidget(b)
+        self._playback_tips = {b: b.toolTip() for b in (
+            self._btn_jump_start, self._btn_back, self._btn_play,
+            self._btn_fwd, self._btn_jump_end)}
+        self._has_history = False
+        self._synced = False
 
         self._frame_slider = QSlider(Qt.Orientation.Horizontal)
         self._frame_slider.setRange(0, 0)
@@ -150,6 +155,15 @@ class SatelliteControls(Drawer):
         self._speed_combo.setCurrentIndex(1)   # default 1×
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         r2.addWidget(self._speed_combo)
+
+        # replaces the speed menu while the radar loop picks the frame
+        self._synced_label = QLabel("SYNCED TO RADAR")
+        self._synced_label.setStyleSheet(
+            f"color: {P.ACCENT}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
+        )
+        self._synced_label.setToolTip("Turn off SYNC in the radar drawer to loop satellite on its own")
+        self._synced_label.setVisible(False)
+        r2.addWidget(self._synced_label)
 
         col.addWidget(row2)
         outer.addWidget(self._drawer)
@@ -200,10 +214,40 @@ class SatelliteControls(Drawer):
         if was_live:
             self._frame_slider.setValue(n - 1)
         self._frame_slider.blockSignals(False)
-        has_history = n > 1
+        self._has_history = n > 1
+        self._apply_playback_enabled()
+
+    def set_synced(self, synced: bool) -> None:
+        """While synced the radar loop picks the frame, so own playback is off."""
+        if synced == self._synced:
+            return
+        self._synced = synced
+        if synced:
+            self.stop_loop()
+        self._apply_playback_enabled()
+        self._speed_combo.setVisible(not synced)
+        self._synced_label.setVisible(synced)
+        self.content_changed()
+        tip = "Synced to the radar loop (SYNC in the radar drawer)"
+        for b, own_tip in self._playback_tips.items():
+            b.setToolTip(tip if synced else own_tip)
+
+    def is_synced(self) -> bool:
+        return self._synced
+
+    def opacity(self) -> float:
+        return self._opacity_slider.value() / 100.0
+
+    def jump_to_latest(self) -> None:
+        """Stop the loop and show the live frame."""
+        self.stop_loop()
+        self._on_jump_end()
+
+    def _apply_playback_enabled(self) -> None:
+        enabled = self._has_history and not self._synced
         for w in (self._frame_slider, self._btn_back, self._btn_fwd,
                   self._btn_play, self._btn_jump_start, self._btn_jump_end):
-            w.setEnabled(has_history)
+            w.setEnabled(enabled)
 
     def set_frame(self, idx: int):
         self._frame_slider.blockSignals(True)
@@ -266,9 +310,8 @@ class SatelliteControls(Drawer):
         self._frame_slider.setValue(0)
         self._frame_slider.blockSignals(False)
         self._time_label.clear_frame()
-        for w in (self._frame_slider, self._btn_back, self._btn_fwd,
-                  self._btn_play, self._btn_jump_start, self._btn_jump_end):
-            w.setEnabled(False)
+        self._has_history = False
+        self._apply_playback_enabled()
 
     def configure_for_archive(self, enabled: bool):
         row2 = self._drawer.layout().itemAt(1).widget()

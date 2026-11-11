@@ -101,7 +101,8 @@ class MainWindowMapHelpersMixin:
                 continue
             prev_color = prev_state[0] if prev_state else None
             self._vehicle_age_display_state[v.id] = (color, age_label)
-            self.map_widget.add_vehicle(v.id, v.lat, v.lon, color, v.icon_type)
+            if not self._vehicle_loop_active():
+                self.map_widget.add_vehicle(v.id, v.lat, v.lon, color, v.icon_type)
             if prev_color != color:
                 # color tier changed → sort order may change → full rebuild needed.
                 vehicle_panel_needs_rebuild = True

@@ -10,6 +10,8 @@ from urllib.error import HTTPError, URLError
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+import runtime_flags
+
 log = logging.getLogger(__name__)
 
 IEM_WMS       = "https://mesonet.agron.iastate.edu/cgi-bin/wms/goes_east.cgi"
@@ -22,6 +24,11 @@ CAPS_POLL_MS = 5 * 60 * 1000   # 5 min — matches CONUS scan cadence
 MESO_POLL_MS =      60 * 1000  # 1 min — matches MESO scan cadence
 
 MAX_FRAMES      = 10
+# MESO frames past the newest MAX_FRAMES are thinned to one per MESO_THIN_STRIDE_S
+# and kept for MESO_KEEP_S, so a synced radar loop (~35 min) still finds a frame.
+# IEM has no TIME dimension, so these can only come from frames polled earlier.
+MESO_THIN_STRIDE_S = 5 * 60
+MESO_KEEP_S        = 40 * 60
 REQUEST_TIMEOUT = 20
 
 # fixed CONUS image extent — used as nominal bbox for time-only SatFrames.
@@ -258,8 +265,10 @@ class SatelliteFetcher(QObject):
         with self._lock:
             cache = self._frames.setdefault(mode, [])
             cache.append(frame)
-            if len(cache) > MAX_FRAMES:
-                cache.pop(0)
+            if runtime_flags.FLAGS.lite_mode:
+                del cache[:-MAX_FRAMES]
+            else:
+                cache[:] = thin_meso_frames(cache)
             frames_copy = list(cache)
         self.frames_updated.emit(mode, frames_copy)
         log.debug(
@@ -267,6 +276,27 @@ class SatelliteFetcher(QObject):
             mode, frame.time_str, len(frames_copy), MAX_FRAMES,
         )
 
+
+
+def thin_meso_frames(frames: list) -> list:
+    """Keep the newest MAX_FRAMES frames, plus older ones at least
+    MESO_THIN_STRIDE_S apart, up to MESO_KEEP_S behind the newest.
+
+    Older frames are picked walking forward from the oldest, so calling this
+    after every new frame keeps the same ones instead of re-picking them.
+    """
+    if len(frames) <= MAX_FRAMES:
+        return list(frames)
+    recent = frames[-MAX_FRAMES:]
+    newest = recent[-1].timestamp
+    kept_older = []
+    for f in frames[:-MAX_FRAMES]:
+        if (newest - f.timestamp).total_seconds() > MESO_KEEP_S:
+            continue
+        if (not kept_older
+                or (f.timestamp - kept_older[-1].timestamp).total_seconds() >= MESO_THIN_STRIDE_S):
+            kept_older.append(f)
+    return kept_older + recent
 
 
 def _parse_meso_bboxes(root: ET.Element) -> dict:

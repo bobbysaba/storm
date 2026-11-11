@@ -100,6 +100,8 @@ class RadarControls(Drawer):
         fetch_requested()      — trigger immediate fetch
         frame_requested(int)   — user selected a specific cache frame index
         loop_toggled(bool)     — loop playback started/stopped
+        sync_toggled(bool)     — satellite (and vehicles) follow the radar loop
+        sync_vehicles_toggled(bool) — vehicles follow the loop too
     """
 
     radar_toggled   = pyqtSignal(bool)
@@ -113,6 +115,8 @@ class RadarControls(Drawer):
     speed_changed   = pyqtSignal(int)      # new interval in ms
     vad_requested   = pyqtSignal()         # VAD hodograph dialog requested
     opacity_changed = pyqtSignal(float)    # 0.1–1.0
+    sync_toggled    = pyqtSignal(bool)
+    sync_vehicles_toggled = pyqtSignal(bool)
 
     # internal — emitted from the _refresh_product_availability background thread
     _products_refreshed = pyqtSignal(dict)  # {code: bool} availability map
@@ -295,6 +299,26 @@ class RadarControls(Drawer):
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         r2.addWidget(self._speed_combo)
 
+        # loop sync: satellite (SYNC) and vehicle markers (VEH) follow the radar loop
+        self._btn_sync = QToolButton()
+        self._btn_sync.setObjectName("radarSyncBtn")
+        self._btn_sync.setText("SYNC")
+        self._btn_sync.setCheckable(True)
+        self._btn_sync.setChecked(True)
+        self._btn_sync.setFixedHeight(26)
+        self._btn_sync.setToolTip("Satellite follows the radar loop")
+        self._btn_sync.toggled.connect(self._on_sync_toggled)
+        r2.addWidget(self._btn_sync)
+
+        self._btn_sync_vehicles = QToolButton()
+        self._btn_sync_vehicles.setObjectName("radarSyncVehiclesBtn")
+        self._btn_sync_vehicles.setText("VEH")
+        self._btn_sync_vehicles.setCheckable(True)
+        self._btn_sync_vehicles.setFixedHeight(26)
+        self._btn_sync_vehicles.setToolTip("Vehicles follow the loop, shown where they were")
+        self._btn_sync_vehicles.toggled.connect(self.sync_vehicles_toggled)
+        r2.addWidget(self._btn_sync_vehicles)
+
         drawer_layout.addWidget(row2)
 
         layout.addWidget(self._drawer)
@@ -349,9 +373,17 @@ class RadarControls(Drawer):
     def opacity(self) -> float:
         return self._opacity_slider.value() / 100.0
 
+    def is_sync_enabled(self) -> bool:
+        return self._btn_sync.isChecked()
+
+    def is_sync_vehicles(self) -> bool:
+        return self._btn_sync.isChecked() and self._btn_sync_vehicles.isChecked()
+
     def save_state(self) -> dict:
         return {"data": self.is_data_enabled(), "product": self._product,
-                "opacity": self._opacity_slider.value()}
+                "opacity": self._opacity_slider.value(),
+                "sync": self._btn_sync.isChecked(),
+                "sync_vehicles": self._btn_sync_vehicles.isChecked()}
 
     def restore_state(self, state: dict) -> None:
         """Re-select the product and opacity, then turn data on; all go through
@@ -359,6 +391,10 @@ class RadarControls(Drawer):
         opacity = state.get("opacity")
         if isinstance(opacity, int):
             self._opacity_slider.setValue(max(10, min(100, opacity)))
+        if isinstance(state.get("sync"), bool):
+            self._btn_sync.setChecked(state["sync"])
+        if isinstance(state.get("sync_vehicles"), bool):
+            self._btn_sync_vehicles.setChecked(state["sync_vehicles"])
         idx = self._product_combo.findData(state.get("product"))
         if idx >= 0 and idx != self._product_combo.currentIndex():
             self._product_combo.setCurrentIndex(idx)
@@ -425,6 +461,11 @@ class RadarControls(Drawer):
     def stop_loop(self):
         if self._btn_play.isChecked():
             self._btn_play.setChecked(False)   # triggers _on_play_toggled(False)
+
+    def jump_to_latest(self) -> None:
+        """Stop the loop and show the live frame."""
+        self.stop_loop()
+        self._on_jump_end()
 
     def reset_cache_ui(self):
         """reset playback controls when site or product changes."""
@@ -542,6 +583,12 @@ class RadarControls(Drawer):
     def _on_play_toggled(self, checked: bool):
         self._btn_play.setText("⏸" if checked else "▶")
         self.loop_toggled.emit(checked)
+
+    def _on_sync_toggled(self, checked: bool):
+        self._btn_sync_vehicles.setEnabled(checked)
+        self.sync_toggled.emit(checked)
+        if self._btn_sync_vehicles.isChecked():
+            self.sync_vehicles_toggled.emit(checked)
 
     def _on_product_changed(self, index: int):
         product = self._product_combo.itemData(index)

@@ -2115,13 +2115,25 @@
       hailcam: function(c) { return '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M21.5,12 L18.1,15.5 L16.8,20.2 L12,19 L7.2,20.2 L5.9,15.5 L2.5,12 L5.9,8.5 L7.2,3.8 L12,5 L16.8,3.8 L18.1,8.5 Z" fill="'+c+'"/></svg>'; },
     };
 
-    window.stormAddVehicle = function(id, lat, lon, color, iconType, hoverText) {
+    // a loop (past) position: faded, with a small clock badge
+    var _VEHICLE_PAST_BADGE = '<svg viewBox="0 0 12 12" xmlns="http://www.w3.org/2000/svg"'
+      + ' style="position:absolute;right:-5px;top:-5px;width:12px;height:12px;">'
+      + '<circle cx="6" cy="6" r="5.2" fill="#0A0A0F" stroke="#E8EAF0" stroke-width="1.2"/>'
+      + '<path d="M6 3.2 V6 L8 7.2" fill="none" stroke="#E8EAF0" stroke-width="1.2"'
+      + ' stroke-linecap="round"/></svg>';
+
+    function _styleVehicleEl(el, iconFn, c, past) {
+      el.style.filter = "drop-shadow(0 0 5px " + c + ")";
+      el.style.opacity = past ? "0.6" : "";
+      el.innerHTML = iconFn(c) + (past ? _VEHICLE_PAST_BADGE : "");
+    }
+
+    window.stormAddVehicle = function(id, lat, lon, color, iconType, hoverText, past) {
       const existing = document.getElementById("vehicle-" + id);
       var _iconFn = _vIcons[iconType] || _vIcons.car;
       var _c = color || "__ACCENT_COLOR__";
       if (existing) {
-        existing.style.filter = "drop-shadow(0 0 5px " + _c + ")";
-        existing.innerHTML = _iconFn(_c);
+        _styleVehicleEl(existing, _iconFn, _c, past);
         existing.dataset.hoverText = hoverText || id;
         if (existing._stormMarker) {
           existing._stormMarker.setLngLat([lon, lat]);
@@ -2132,8 +2144,7 @@
       const el = document.createElement("div");
       el.id = "vehicle-" + id;
       el.style.cssText = "width:28px;height:28px;cursor:pointer;";
-      el.style.filter = "drop-shadow(0 0 5px " + _c + ")";
-      el.innerHTML = _iconFn(_c);
+      _styleVehicleEl(el, _iconFn, _c, past);
       el.dataset.hoverText = hoverText || id;
 
       el.addEventListener("mouseenter", function(e) {
@@ -3766,6 +3777,10 @@
       }
       if (map.getLayer(SAT_WMS_LYR)) {
         map.setLayoutProperty(SAT_WMS_LYR, 'visibility', _satVisible ? 'visible' : 'none');
+      }
+      // tell Python when the new time's tiles have loaded (the radar loop waits on it)
+      if (bridge && bridge.on_satellite_idle) {
+        map.once('idle', function() { bridge.on_satellite_idle(); });
       }
     };
 

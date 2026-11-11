@@ -45,6 +45,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     asos_bbox_selected    = pyqtSignal(float, float, float, float)  # west, south, east, north
     user_dragged          = pyqtSignal()
+    satellite_idle        = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
 
     def __init__(self, parent=None):
@@ -104,6 +105,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.obs_sounding_station_clicked.connect(self.obs_sounding_station_clicked)
         self.bridge.asos_bbox_selected.connect(self.asos_bbox_selected)
         self.bridge.user_dragged.connect(self.user_dragged)
+        self.bridge.satellite_idle.connect(self.satellite_idle)
         self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
 
         # queue for JS calls that arrive before MapLibre has fully loaded.
@@ -162,12 +164,14 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def add_vehicle(self, vehicle_id: str, lat: float, lon: float,
                     color: str = ACCENT_COLOR, icon_type: str = "car",
-                    hover_text: str | None = None):
+                    hover_text: str | None = None, past: bool = False):
+        """Add or move a vehicle marker; ``past`` draws it faded with a clock
+        badge, for a position shown by the loop rather than the live one."""
         tooltip = hover_text or vehicle_id
         self.run_js(
             "stormAddVehicle("
             f"{json.dumps(vehicle_id)}, {lat}, {lon}, {json.dumps(color)}, "
-            f"{json.dumps(icon_type)}, {json.dumps(tooltip)});"
+            f"{json.dumps(icon_type)}, {json.dumps(tooltip)}, {'true' if past else 'false'});"
         )
 
     def remove_vehicle(self, vehicle_id: str):

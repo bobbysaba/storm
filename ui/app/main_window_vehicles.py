@@ -236,6 +236,9 @@ class MainWindowVehiclesMixin:
         )
         v.icon_type = icon_type
         v.lat, v.lon, v.latest_obs = obs.lat, obs.lon, obs
+        if obs.timestamp is not None:
+            v.track.append(obs.timestamp.timestamp(), obs.lat, obs.lon)
+        loop_active = self._vehicle_loop_active()
         
         # append to vehicle history if this is NOT the local vehicle and has met data
         if obs.vehicle_id != config.VEHICLE_ID:
@@ -257,14 +260,18 @@ class MainWindowVehiclesMixin:
         age_label = self._obs_age_label(obs)
         self._vehicle_age_display_state[obs.vehicle_id] = (marker_color, age_label)
         hover_text = self._archive_vehicle_hover_text(obs.vehicle_id)
-        self.map_widget.add_vehicle(
-            obs.vehicle_id,
-            obs.lat,
-            obs.lon,
-            marker_color,
-            v.icon_type,
-            hover_text=hover_text,
-        )
+        if loop_active:
+            # the marker shows the loop position; it returns to live when the loop stops
+            self._apply_vehicle_loop_time()
+        else:
+            self.map_widget.add_vehicle(
+                obs.vehicle_id,
+                obs.lat,
+                obs.lon,
+                marker_color,
+                v.icon_type,
+                hover_text=hover_text,
+            )
         if obs.vehicle_id == config.VEHICLE_ID and hasattr(self, "routing_controls"):
             self.routing_controls.update_own_position(obs.lat, obs.lon)
             if not self._viewer and not self._monitor and not self._archive and obs.lat is not None and obs.lon is not None:
@@ -278,7 +285,7 @@ class MainWindowVehiclesMixin:
         self._station_layer.update(obs.vehicle_id, obs.lat, obs.lon, obs)
         self._refresh_vehicle_detail()
         self._update_recenter_btn_visibility()
-        if self._follow_mode and obs.vehicle_id == self._follow_target_id():
+        if self._follow_mode and not loop_active and obs.vehicle_id == self._follow_target_id():
             self.map_widget.follow_move(obs.lat, obs.lon)
         if obs.vehicle_id == config.VEHICLE_ID:
             self._update_local_scan_from_vehicle(obs)

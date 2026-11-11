@@ -642,6 +642,8 @@ class MainWindowRadarMixin:
         if not self._radar_data_enabled():
             self._loop_timer.stop()
             return
+        if not self._loop_step_ready():
+            return   # synced CONUS satellite tiles still loading
         key = f"{self.radar_controls.current_site()}/{self.radar_controls.current_product()}"
         cache = self._scan_cache.get(key, [])
         if not cache:

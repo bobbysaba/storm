@@ -53,6 +53,7 @@ from ui.app.main_window_sounding import MainWindowSoundingMixin
 from ui.app.main_window_map_objects import MainWindowMapObjectsMixin
 from ui.app.main_window_vehicles import MainWindowVehiclesMixin
 from ui.app.main_window_status import MainWindowStatusMixin
+from ui.app.main_window_loop import MainWindowLoopMixin
 from ui.app.main_window_util import NLCD_TILES_PATH, SATELLITE_TILES_PATH, _make_camera_icon
 
 log = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class MainWindow(
     MainWindowMapObjectsMixin,
     MainWindowVehiclesMixin,
     MainWindowStatusMixin,
+    MainWindowLoopMixin,
     MainWindowMapHelpersMixin,
     MainWindowDebugMixin,
     QMainWindow,
@@ -371,6 +373,8 @@ class MainWindow(
         self._init_hazards()
 
         self._init_satellite()
+        if not self._disable_radar and not self._archive:
+            self._init_loop_sync()
         self._init_surface_obs()
         self._apply_launch_prefs()
         QTimer.singleShot(0, self._restore_session)
