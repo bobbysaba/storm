@@ -11,11 +11,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CO Mesonet station plots use the NSSL API-hosted `co_mesonet.json` feed with station positions and names from `co_metadata.json`.
 - Nebraska Mesonet surface observations are now available to all users from the SURFACE drawer and launch dialog.
 - NE Mesonet station plots use the NSSL API-hosted `ne_mesonet.json` feed with embedded station metadata.
+- Synced live loop: playing or stepping the radar loop moves the satellite to the matching frame (SYNC, on by default) and, optionally, vehicle markers to where they were (VEH). A LOOP chip by the clock returns to live.
 - Headless publisher (`headless/`): a Qt-free `storm-headless` service for Raspberry Pis that tails a vehicle's mesonet logger file and publishes to MQTT exactly like VEHICLE mode, with a one-line installer, `--check`, and `--dry-run`.
 
 ### Changed
 - Surface observation diagnostics and layer ordering now include CO and NE Mesonet as independent 5-minute mesonet sources.
+- MESO satellite keeps older frames at one per 5 minutes, up to 40 minutes back, instead of dropping everything past the newest 10.
+- `ui/app/main_window.py` is split into mixins by area (`main_window_radar.py`, `main_window_vehicles.py`, …); behavior is unchanged.
 - Obs file parsing and the vehicle MQTT payload now live in `headless/storm_headless` and are shared by the GUI and the headless publisher; behavior is unchanged.
+
+### Fixed
+- Closing the SATELLITE drawer before startup finished raised an error, and a sector picked then was ignored.
 
 ---
 

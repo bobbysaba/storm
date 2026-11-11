@@ -276,6 +276,18 @@ Enables or disables radar fetching. When unchecked, radar is hidden from the map
 | Timeline slider | Scrub to any cached frame by dragging |
 | Time label | Shows current frame's UTC time (HH:MMZ) |
 | Speed dropdown | Playback speed: 0.5× (1000 ms), 1× (500 ms), 2× (250 ms), 3× (167 ms) |
+| SYNC | Satellite follows the radar loop (on by default) |
+| VEH | Vehicle markers follow the loop too (needs SYNC) |
+
+#### Synced Loop
+
+While the radar shows a past frame (playing the loop, or stepped back from the live frame), the other layers follow its time:
+
+- **Satellite** (SYNC on) shows the newest frame at or before the radar frame's time. The satellite drawer's own playback controls are off and show **SYNCED TO RADAR**. If no satellite frame is close enough (10 min for CONUS, 3 min for MESO), the satellite dims and its time reads `no frame`. For CONUS, the loop waits up to 1.5 s for the new time's tiles before stepping.
+- **Vehicles** (VEH on) move to where they were at that time, drawn faded with a small clock badge. A vehicle with no fix yet at that time is hidden. Follow mode and station plots pause while vehicles show past positions. STORM keeps the last 90 minutes of positions in memory, starting from launch.
+- A **◷ LOOP HH:MMZ** chip appears next to the clock in the status bar. Click it to return to the live frame.
+
+Stopping the loop, or stepping to the latest frame, returns everything to live. With radar data off, the satellite loop drives instead and vehicles (VEH on) follow it. SYNC and VEH are saved with the session. ARCHIVE mode is not affected: it already syncs every layer to the archive clock.
 
 #### How Radar Data Works
 
@@ -434,11 +446,13 @@ Identical layout to the radar playback row:
 | Time label | Current frame UTC time (--:--Z if no data yet) |
 | Speed dropdown | Playback speed: 0.5× (1200 ms), 1× (600 ms), 2× (300 ms), 3× (200 ms) |
 
+While radar data is on and SYNC is on in the radar drawer, these controls are off and the radar loop picks the satellite frame. See [Synced Loop](#synced-loop).
+
 #### How Satellite Data Works
 
 - **Source:** IEM GOES-East WMS (`mesonet.agron.iastate.edu`) serving current operational GOES satellite (GOES-19 as of 2025)
 - **Request format:** WMS GetMap PNG
-- **Frame cache:** Up to 10 frames per mode
+- **Frame cache:** Up to 10 frames per mode. MESO also keeps older frames at one per 5 minutes, up to 40 minutes back, so a synced radar loop finds a frame (lite mode keeps only the 10). IEM serves only the current MESO frame, so these build up while the sector is selected.
 - **CONUS polling:** Every 5 minutes; 10 frames backfilled on mode selection
 - **MESO polling:** Every 1 minute once sectors are confirmed available
 - **Memory usage:** CONUS ~10–20 MB; each MESO sector ~20–30 MB
@@ -1004,7 +1018,7 @@ The status bar runs along the bottom of the main window.
 |---------|---------|
 | **Left** | Mouse coordinates (lat/lon) and zoom level, updated live as you move the cursor over the map. Example: `35.2413 | -97.4521   Z 6.2` |
 | **Center** | Status messages: "Ready" (default), "MQTT connected", error messages (e.g., "Radar fetch error: timeout") |
-| **Right** | Current UTC clock (updates every second). Example: `18:45:32 UTC` |
+| **Right** | Current UTC clock (updates every second). Example: `18:45:32 UTC`. While a loop shows a past frame, a **◷ LOOP HH:MMZ** chip sits before the date; click it to return to live. |
 | **Far right** | Network status indicator pill: **Green** = Online, **Yellow** = Slow (>1 s response), **Red** = Offline. Checked every 30 seconds via Cloudflare DNS. |
 
 ---
