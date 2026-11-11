@@ -59,15 +59,18 @@ log = logging.getLogger(__name__)
 
 
 class MainWindow(
-    MainWindowStatusMixin,
-    MainWindowVehiclesMixin,
-    MainWindowMapObjectsMixin,
-    MainWindowSoundingMixin,
-    MainWindowOverlaysMixin,
-    MainWindowHazardsMixin,
-    MainWindowRadarMixin,
     MainWindowArchiveMixin,
-    MainWindowMapHelpersMixin, MainWindowDebugMixin, QMainWindow):
+    MainWindowRadarMixin,
+    MainWindowHazardsMixin,
+    MainWindowOverlaysMixin,
+    MainWindowSoundingMixin,
+    MainWindowMapObjectsMixin,
+    MainWindowVehiclesMixin,
+    MainWindowStatusMixin,
+    MainWindowMapHelpersMixin,
+    MainWindowDebugMixin,
+    QMainWindow,
+):
     # emitted from background threads to update the discussion text panel safely.
     _panel_text_ready = pyqtSignal(int, str, str)
     # emitted from the decode thread when a scan has been decoded — carries
