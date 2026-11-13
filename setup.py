@@ -148,15 +148,42 @@ def create_env(conda):
 
 
 
+def is_wsl():
+    """True when running inside Windows Subsystem for Linux."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _apt_has(pkg):
+    """True when apt knows an installable candidate for pkg."""
+    result = subprocess.run(
+        ["apt-cache", "policy", pkg], capture_output=True, text=True,
+    )
+    return "Candidate:" in result.stdout and "Candidate: (none)" not in result.stdout
+
+
 def install_linux_deps():
     """Install Qt6 WebEngine system dependencies on Linux."""
     print("Installing Qt6 WebEngine system dependencies...")
     if shutil.which("apt-get"):
+        # fresh installs (WSL especially) ship with empty package lists
+        subprocess.check_call(["sudo", "apt-get", "update"])
+        # Ubuntu 24.04+ / Debian 13 renamed libasound2 to libasound2t64
+        alsa = "libasound2t64" if _apt_has("libasound2t64") else "libasound2"
         subprocess.check_call([
             "sudo", "apt-get", "install", "-y",
-            "libnss3", "libxss1", "libasound2", "libatk-bridge2.0-0",
+            "libnss3", "libxss1", alsa, "libatk-bridge2.0-0",
             "libgtk-3-0", "libx11-xcb1", "libxcomposite1", "libxdamage1",
-            "libxrandr2", "desktop-file-utils",
+            "libxrandr2", "libxkbcommon0", "libxkbcommon-x11-0",
+            "libxcb-cursor0", "libxcb-icccm4", "libxcb-image0",
+            "libxcb-keysyms1", "libxcb-randr0", "libxcb-render-util0",
+            "libxcb-shape0", "libxcb-xinerama0", "libxcb-xkb1",
+            "libgl1", "libegl1", "desktop-file-utils",
         ])
     elif shutil.which("dnf"):
         subprocess.check_call([
@@ -266,6 +293,11 @@ def main():
     # 0. linux system deps
     if SYSTEM == "Linux":
         install_linux_deps()
+        if is_wsl() and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            print("WARNING: WSL detected but no display is available.")
+            print("STORM's window needs WSLg (Windows 11, or Windows 10 with a")
+            print("current WSL). From Windows, run:  wsl --update  then  wsl --shutdown")
+            print()
 
     # 1. find or install conda
     conda = find_conda()
