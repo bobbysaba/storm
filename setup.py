@@ -277,6 +277,70 @@ def create_shortcuts_linux(conda):
         print("STORM shortcut placed on Desktop.")
 
 
+def create_shortcuts_wsl():
+    """Place a Windows Desktop shortcut that launches STORM inside WSL."""
+    powershell = (shutil.which("powershell.exe")
+                  or "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    if not os.path.isfile(powershell) and not shutil.which("powershell.exe"):
+        print("Note: Windows interop unavailable — skipping Windows Desktop shortcut.")
+        return
+
+    def ps(script):
+        # cwd on /mnt/c avoids PowerShell's "UNC paths are not supported" warning
+        return subprocess.check_output(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            text=True, cwd="/mnt/c",
+        ).strip()
+
+    def q(s):
+        return "'" + s.replace("'", "''") + "'"
+
+    try:
+        desktop, localappdata = ps(
+            "[Environment]::GetFolderPath('Desktop'); $env:LOCALAPPDATA"
+        ).splitlines()[:2]
+    except (subprocess.CalledProcessError, ValueError, OSError) as e:
+        print(f"Note: could not locate the Windows Desktop ({e}) — skipping shortcut.")
+        return
+
+    # Windows can't reliably read an icon from inside the WSL filesystem, so
+    # copy it to %LOCALAPPDATA%\STORM
+    icon_win = ""
+    icon_src = os.path.join(PROJECT_DIR, "storm.ico")
+    if os.path.isfile(icon_src):
+        icon_dir = subprocess.check_output(
+            ["wslpath", "-u", localappdata + "\\STORM"], text=True,
+        ).strip()
+        os.makedirs(icon_dir, exist_ok=True)
+        shutil.copy2(icon_src, os.path.join(icon_dir, "storm.ico"))
+        icon_win = localappdata + "\\STORM\\storm.ico"
+
+    # wslg.exe launches without a console window; fall back to a minimized wsl.exe
+    if os.path.isfile("/mnt/c/Program Files/WSL/wslg.exe"):
+        target, window_style = r"C:\Program Files\WSL\wslg.exe", 1
+    else:
+        target, window_style = r"C:\Windows\System32\wsl.exe", 7
+    launcher = os.path.join(PROJECT_DIR, "storm_launcher.sh")
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    args = (f'-d "{distro}" ' if distro else "") + f'-- "{launcher}"'
+
+    shortcut = desktop + "\\STORM.lnk"
+    script = (
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut(" + q(shortcut) + "); "
+        f"$s.TargetPath = {q(target)}; "
+        f"$s.Arguments = {q(args)}; "
+        f"$s.WindowStyle = {window_style}; "
+        + (f"$s.IconLocation = {q(icon_win + ',0')}; " if icon_win else "")
+        + "$s.Save()"
+    )
+    try:
+        ps(script)
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"Note: could not create Windows Desktop shortcut ({e}).")
+        return
+    print(f"STORM shortcut placed on Windows Desktop ({shortcut}).")
+
+
 def create_shortcuts_windows():
     """Create Desktop and Start Menu shortcuts via PowerShell."""
     create_app = os.path.join(PROJECT_DIR, "scripts", "create_app_windows.bat")
@@ -323,6 +387,8 @@ def main():
         create_shortcuts_mac()
     elif SYSTEM == "Linux":
         create_shortcuts_linux(conda)
+        if is_wsl():
+            create_shortcuts_wsl()
     elif SYSTEM == "Windows":
         create_shortcuts_windows()
 
