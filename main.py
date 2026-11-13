@@ -6,6 +6,7 @@ import uuid
 import socket
 import config
 import logging
+import net_compat
 import argparse
 import faulthandler
 import runtime_flags
@@ -17,7 +18,7 @@ from data.ingest.truck_replay import load_truck_observations
 
 # try to import PyQt packages
 try:
-    from PyQt6.QtCore import QCoreApplication, QTimer, Qt
+    from PyQt6.QtCore import QCoreApplication, QEvent, QTimer, Qt
     from PyQt6.QtGui import QFont
     from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 # if there is a failure, show an error message
@@ -62,6 +63,20 @@ def _acquire_instance_lock() -> bool:
         return False
 
 
+def _case_archive_time(path: str):
+    """The archive time a case package was made at; exits with a message if
+    the file isn't a package this STORM can open."""
+    from datetime import datetime  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+    from core import case_package  # noqa: PLC0415
+    try:
+        manifest, _ = case_package.read(Path(path))
+        return datetime.fromisoformat(manifest["case"]["archive_time"].replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        QMessageBox.warning(None, "Open Case Package", f"{Path(path).name}: {exc}")
+        sys.exit(1)
+
+
 # function to parse command line arguments (if run from the command line)
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -85,6 +100,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # run in debug mode 
     parser.add_argument("--debug", action="store_true", help="enable debug logging and in-app debug panel")
+
+    # open an archive case package straight away (File > Export Case Package)
+    parser.add_argument(
+        "--case", default=None, metavar="PACKAGE.zip",
+        help="open this case package in ARCHIVE mode, skipping the launch window;\n"
+             "its packed data is used before any download, so it opens offline",
+    )
+
+    # performance log for testing on field laptops (core/perf_log.py)
+    parser.add_argument(
+        "--perf-log", action="store_true",
+        help="write timings, memory and UI responsiveness to perf_logs/ (also: STORM_PERF_LOG=1)",
+    )
 
     parser.add_argument(
         "--log-level",
@@ -257,12 +285,12 @@ def _configure_logging(level_name: str) -> None:
     # set the logging level
     level = getattr(logging, level_name.upper(), logging.WARNING)
 
-    # configure logging
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # configure logging: every line carries the UTC date/time, this run's
+    # session ID and the open case (see log_context)
+    import log_context
+    logging.basicConfig(level=level)
+    for handler in logging.getLogger().handlers:
+        log_context.install(handler)
 
     # write WARNING+ logs to a persistent file for post-session review
     try:
@@ -272,10 +300,7 @@ def _configure_logging(level_name: str) -> None:
             _log_path, mode="a", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
         )
         _fh.setLevel(logging.WARNING)
-        _fh.setFormatter(logging.Formatter(
-            "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        log_context.install(_fh)
         logging.getLogger().addHandler(_fh)
     except Exception:
         pass
@@ -284,6 +309,63 @@ def _configure_logging(level_name: str) -> None:
     if level > logging.DEBUG:
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
         logging.getLogger("metpy").setLevel(logging.WARNING)
+        # newer radar volumes carry message types MetPy doesn't decode and
+        # STORM doesn't need ("Unknown message: 32", dozens per session)
+        logging.getLogger("metpy.io.nexrad").setLevel(logging.ERROR)
+
+def _start_perf_log(requested: bool) -> None:
+    """--perf-log / STORM_PERF_LOG=1: start core/perf_log.py, and copy
+    STORM's warnings and errors into it so one file holds everything."""
+    from core import perf_log
+    if not (requested or perf_log.requested()):
+        return
+    log_file = perf_log.start()
+    if log_file is None:
+        return
+    import atexit
+    atexit.register(perf_log.stop)
+
+    class _ToPerfLog(logging.Handler):
+        def emit(self, record):
+            perf_log.event("log", level=record.levelname, logger=record.name, msg=record.getMessage()[:500])
+
+    handler = _ToPerfLog(level=logging.WARNING)
+    logging.getLogger().addHandler(handler)
+    print(f"[STORM] performance log: {log_file}", flush=True)
+
+
+_perf_heartbeat = None
+
+
+def _perf_log_screen(app) -> None:
+    """Log the screen, and start the UI heartbeat: a 200 ms timer that runs
+    late by however long the window was too busy to respond."""
+    global _perf_heartbeat
+    from core import perf_log
+    if not perf_log.enabled():
+        return
+    import time
+    interval_ms = 200
+    last = [time.perf_counter()]
+
+    def beat():
+        now = time.perf_counter()
+        perf_log.note_ui_lag(max(0.0, (now - last[0]) * 1000.0 - interval_ms))
+        last[0] = now
+
+    _perf_heartbeat = QTimer()
+    _perf_heartbeat.setInterval(interval_ms)
+    _perf_heartbeat.timeout.connect(beat)
+    _perf_heartbeat.start()
+    try:
+        screen = app.primaryScreen()
+        size = screen.size()
+        perf_log.event("screen", width=size.width(), height=size.height(),
+                       scale=screen.devicePixelRatio(), dpi=round(screen.logicalDotsPerInch()),
+                       screens=len(app.screens()))
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # function to check for missing required files and show user-visible warnings
 def _warn_missing_files() -> None:
@@ -293,41 +375,40 @@ def _warn_missing_files() -> None:
     dialogs render correctly.  Warnings are non-fatal — the app continues in a
     degraded state so the user can at least see what is wrong.
     """
-    tiles_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "tiles", "storm.mbtiles")
-    )
-    if not os.path.exists(tiles_path):
-        QMessageBox.warning(
-            None,
-            "Missing Map Tiles",
-            f"Map tiles file not found:\n\n  {tiles_path}\n\n"
-            "The map will not render correctly.\n"
-            "Ensure 'tiles/storm.mbtiles' is present in the application directory.",
-        )
+    # no tiles/storm.mbtiles: the base map comes over the network instead
+    # (ui/map/html.py), so it's a note in the log and the status bar, not a warning
+    from ui.map.html import TILES_PATH, basemap_source  # noqa: PLC0415
+    if basemap_source() == "online":
+        logging.getLogger(__name__).info(
+            "Map tiles: %s not found; using online tiles (OpenFreeMap) while connected", TILES_PATH)
 
     if runtime_flags.FLAGS.disable_mqtt:
         return
 
+    # the shipped viewer certificate covers VIEWER; the launch window says
+    # what's missing if a publishing mode is picked without aws/
+    if config.viewer_cert_present():
+        return
+
     aws_dir = os.path.dirname(config.MQTT_CA_CERT)
-    cert_files = [config.MQTT_CA_CERT, config.MQTT_CERT_FILE, config.MQTT_KEY_FILE]
 
     if not os.path.isdir(aws_dir):
         QMessageBox.warning(
             None,
             "Missing AWS Credentials Folder",
             f"The AWS credentials directory was not found:\n\n  {aws_dir}\n\n"
-            "MQTT features (annotation sync, vehicle tracking) will be unavailable.\n"
-            "Create the 'aws/' folder and add your certificates to enable them.",
+            "Only VIEWER mode can launch without it, and it gets no live MQTT data.\n"
+            "Create the 'aws/' folder and add your certificates to enable the other modes.",
         )
     else:
-        missing = [f for f in cert_files if not os.path.isfile(f)]
+        missing = config.missing_mqtt_cert_files()
         if missing:
             names = "\n".join(f"  \u2022 {os.path.basename(f)}" for f in missing)
             QMessageBox.warning(
                 None,
                 "Missing AWS Certificate Files",
                 f"The following MQTT certificate files were not found:\n\n{names}\n\n"
-                "MQTT features (annotation sync, vehicle tracking) will be unavailable.",
+                "Only VIEWER mode can launch without them, and it gets no live MQTT data.",
             )
 
 
@@ -347,6 +428,9 @@ def main() -> None:
     except Exception:
         # do nothing
         pass
+
+    # stop every fetch waiting on unreachable IPv6 addresses (see net_compat)
+    net_compat.prefer_ipv4()
 
     # build the argument parser
     parser = _build_parser()
@@ -385,6 +469,7 @@ def main() -> None:
     # configure logging
     log_level = "DEBUG" if args.debug else args.log_level
     _configure_logging(log_level)
+    _start_perf_log(args.perf_log)
 
     # set the vehicle ID
     config.VEHICLE_ID = _normalize_vehicle_id(config.VEHICLE_ID)
@@ -412,6 +497,7 @@ def main() -> None:
 
     # create the application
     app = QApplication(sys.argv)
+    _perf_log_screen(app)
 
     # set application properties
     app.setApplicationName("STORM")
@@ -433,84 +519,128 @@ def main() -> None:
         sys.exit(0)
 
 
-    # show the launch dialog for mode selection and password verification
-    monitor      = False
-    viewer       = False
-    archive_time = None   # datetime | None
+    sys.exit(_run_sessions(app, args))
 
-    dialog = LaunchDialog()
 
-    # if the dialog is not accepted
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        # exit
-        sys.exit(0)
-
-    # get the vehicle ID
-    config.VEHICLE_ID = _normalize_vehicle_id(dialog.vehicle_id())
-
-    # get the vehicle icon type selected by the user
-    config.VEHICLE_ICON = dialog.vehicle_icon()
-
-    # get the directory for real-time observation files (if any)
-    config.OBS_FILE_DIR      = dialog.data_dir()
-    config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
-
-    # get mode from the dialog
-    monitor      = dialog.monitor()
-    viewer       = dialog.viewer()
-    archive_time = dialog.archive_start_time()   # None unless archive mode
-    runtime_flags.FLAGS.admin_mode = dialog.admin_mode()
-
-    # apply radar render resolution from the launch dialog
-    _dlg_res = dialog.radar_resolution()
-    if _dlg_res > 0:
-        from ui.map.radar_overlay import set_render_grid_size, set_adaptive_render_grid  # noqa: PLC0415
-        set_render_grid_size(_dlg_res)
-        set_adaptive_render_grid(False)
-
-    from ui.app.main_window import MainWindow  # noqa: PLC0415
+def _run_sessions(app, args, window_class=None) -> int:
+    """Open the launch window and the main window, and loop: a window
+    closed by Change Day, or to open a case package for another date, sets
+    ``restart_with`` (a SessionRestart), and the next session opens without
+    quitting STORM. Returns the exit code."""
+    if window_class is None:
+        from ui.app.main_window import MainWindow as window_class  # noqa: PLC0415
 
     _warn_missing_files()
+    verified_modes: set[str] = set()     # "admin" once its passphrase is given in this run
+    restart = None
+    first = True
+    while True:
+        monitor = viewer = False
+        case_package = None
+        if first and args.case:
+            # a case package names its own date; the launch window is skipped
+            archive_time = _case_archive_time(args.case)
+            case_package = args.case
+        elif restart is not None and not restart.launch_window:
+            # a case package for another date: straight to it
+            archive_time, case_package = restart.archive_time, restart.case_package
+        else:
+            # show the launch dialog for mode selection (and the admin passphrase)
+            dialog = LaunchDialog(
+                mode="archive" if restart is not None else None,
+                archive_time=restart.archive_time if restart is not None else None,
+                verified_modes=verified_modes,
+            )
 
-    from ui.dialogs.loading_dialog import LoadingDialog  # noqa: PLC0415
-    loading_dialog = LoadingDialog()
-    loading_dialog.show()
-    app.processEvents()  # Force the dialog to render immediately
+            # if the dialog is not accepted
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                # exit
+                return 0
 
-    # create the main window
-    window = MainWindow(
-        debug=args.debug,
-        monitor=monitor,
-        viewer=viewer,
-        archive_time=archive_time,
-    )
+            # get the vehicle ID
+            config.VEHICLE_ID = _normalize_vehicle_id(dialog.vehicle_id())
 
-    # close loading dialog once main window is ready
-    loading_dialog.close()
-    loading_dialog = None
+            # get the vehicle icon type selected by the user
+            config.VEHICLE_ICON = dialog.vehicle_icon()
 
-    # define the JS console message handler
-    js_log = logging.getLogger("storm.js")
+            # get the directory for real-time observation files (if any)
+            config.OBS_FILE_DIR      = dialog.data_dir()
+            config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
 
-    # if the map widget has a page
-    if hasattr(window.map_widget, "page"):
+            # get mode from the dialog
+            monitor      = dialog.monitor()
+            viewer       = dialog.viewer()
+            archive_time = dialog.archive_start_time()   # None unless archive mode
+            case_package = dialog.case_package()         # a case to open at launch, if chosen
+            runtime_flags.FLAGS.admin_mode = dialog.admin_mode()
+            if dialog.admin_mode():
+                verified_modes.add("admin")
+
+            # apply radar render resolution from the launch dialog
+            _dlg_res = dialog.radar_resolution()
+            if _dlg_res > 0:
+                from ui.map.radar_overlay import set_render_grid_size, set_adaptive_render_grid  # noqa: PLC0415
+                set_render_grid_size(_dlg_res)
+                set_adaptive_render_grid(False)
+            dialog.deleteLater()
+
+        from ui.dialogs.loading_dialog import LoadingDialog  # noqa: PLC0415
+        loading_dialog = LoadingDialog()
+        loading_dialog.show()
+        app.processEvents()  # Force the dialog to render immediately
+
+        # create the main window
+        window = window_class(
+            debug=args.debug,
+            monitor=monitor,
+            viewer=viewer,
+            archive_time=archive_time,
+            case_package=case_package,
+        )
+
+        # close loading dialog once main window is ready
+        loading_dialog.close()
+        loading_dialog = None
+
         # define the JS console message handler
-        def handle_js_message(level, message, line, source):
-            js_log.debug("JS [%s:%s] %s", source, line, message)
+        js_log = logging.getLogger("storm.js")
 
-        # set the JS console message handler
-        window.map_widget.page().javaScriptConsoleMessage = handle_js_message
+        # if the map widget has a page
+        if hasattr(window.map_widget, "page"):
+            # define the JS console message handler
+            def handle_js_message(level, message, line, source):
+                js_log.debug("JS [%s:%s] %s", source, line, message)
 
-    window.show()
+            # set the JS console message handler
+            window.map_widget.page().javaScriptConsoleMessage = handle_js_message
 
-    # if a truck replay file is specified
-    if args.truck_replay_file:
-        # start the truck replay
-        _start_truck_replay(window=window, file_path=args.truck_replay_file, interval_ms = max(50, args.truck_replay_interval_ms),
-                            restamp=args.truck_replay_restamp)
+        window.show()
 
-    # run the application
-    sys.exit(app.exec())
+        # if a truck replay file is specified (first session only)
+        if first and args.truck_replay_file:
+            # start the truck replay
+            _start_truck_replay(window=window, file_path=args.truck_replay_file, interval_ms = max(50, args.truck_replay_interval_ms),
+                                restamp=args.truck_replay_restamp)
+        first = False
+
+        # run the application; closeEvent quits the loop either way
+        code = app.exec()
+        restart = window.restart_with
+        if restart is None:
+            # a real quit: no deleteLater here, there's no event loop left to
+            # run it, and the process tears QtWebEngine down on exit
+            return code
+
+        # the sounding, VAD and other windows belong to the session that closed
+        for widget in app.topLevelWidgets():
+            if widget is not window and widget.isWindow() and widget.isVisible():
+                widget.close()
+        # deleted now, before the next MainWindow is built: with no event
+        # loop running, processEvents() alone wouldn't delete it
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        window = None
+
 
 # function to start a truck replay
 def _start_truck_replay(window, file_path: str, interval_ms: int, restamp: bool = False) -> None:

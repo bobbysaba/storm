@@ -7,6 +7,12 @@ by URL. Re-run when NWS publishes a new CWA shapefile:
 
 Simplification uses a 0.001° tolerance (about 100 m, under one pixel at zoom 10)
 and coordinates are rounded to 4 decimals (about 11 m).
+
+Each CWA also gets one Point feature for its office label, at the spot of its
+largest polygon farthest from any edge (the pole of inaccessibility), so the
+map labels each office once, well inside even an oddly shaped area, instead
+of once per tile wherever MapLibre places a polygon label. The map's hover
+readout reads the polygons, not these points.
 """
 
 from __future__ import annotations
@@ -16,11 +22,17 @@ import json
 import struct
 from pathlib import Path
 
+import math
+
+from shapely.affinity import scale
 from shapely.geometry import Polygon, MultiPolygon, mapping
+from shapely.ops import polylabel
 
 TOLERANCE_DEG = 0.001
 DECIMALS = 4
 KEEP_FIELDS = ("WFO", "CWA", "LON", "LAT")
+LABEL_FIELDS = ("WFO", "CWA")
+LABEL_TOLERANCE_DEG = 0.005
 
 
 def _signed_area(ring) -> float:
@@ -105,6 +117,20 @@ def to_geometry(rings):
     return parts[0] if len(parts) == 1 else MultiPolygon(parts)
 
 
+def label_point(geom) -> list[float] | None:
+    """[lon, lat] for a CWA's label: the pole of inaccessibility of its
+    largest polygon, found with longitude scaled by cos(latitude) so
+    "farthest from an edge" is measured in real distance, not degrees."""
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    parts = [p for p in parts if not p.is_empty and p.area > 0]
+    if not parts:
+        return None
+    largest = max(parts, key=lambda p: p.area)
+    kx = math.cos(math.radians(largest.centroid.y))
+    spot = polylabel(scale(largest, xfact=kx, yfact=1.0, origin=(0, 0)), tolerance=LABEL_TOLERANCE_DEG)
+    return [round(spot.x / kx, DECIMALS), round(spot.y, DECIMALS)]
+
+
 def _round_ring(ring):
     """Round a ring and drop repeated points; None if it collapses."""
     out = []
@@ -143,7 +169,7 @@ def main() -> None:
     base = Path(args.shp_base)
     geoms = read_shp(base.with_suffix(".shp"))
     recs = read_dbf(base.with_suffix(".dbf"))
-    features = []
+    features, labels = [], []
     for rings, rec in zip(geoms, recs):
         if not rings:
             continue
@@ -158,10 +184,18 @@ def main() -> None:
             "geometry": g,
             "properties": {k: rec[k] for k in KEEP_FIELDS if k in rec},
         })
+        spot = label_point(geom)
+        if spot is not None:
+            labels.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": spot},
+                "properties": {k: rec[k] for k in LABEL_FIELDS if k in rec},
+            })
+    features += labels
     Path(args.out).write_text(
         json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":"))
     )
-    print(f"{len(features)} features -> {args.out} ({Path(args.out).stat().st_size / 1e6:.2f} MB)")
+    print(f"{len(features) - len(labels)} areas and {len(labels)} label points -> {args.out} ({Path(args.out).stat().st_size / 1e6:.2f} MB)")
 
 
 if __name__ == "__main__":

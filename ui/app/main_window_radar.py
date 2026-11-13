@@ -18,34 +18,88 @@ from data.radar.radar_decoder import decode_nexrad_l3
 from core.observation import Observation
 from ui.app.main_window_util import LIVE_RADAR_MAX_AGE_MINUTES, _loop_interval_ms
 
+# archive: how long auto-pick waits for one-second vehicle positions
+# before starting radar from home
+RADAR_WAIT_FOR_VEHICLES_MS = 10_000
+
 log = logging.getLogger("ui.app.main_window")
 
 
 class MainWindowRadarMixin:
 
     def _try_auto_select_radar_station(self) -> None:
-        """Pick the nearest NEXRAD station from vehicle positions, or fall back
-        to the home location when no MQTT data is available."""
+        """Pick the NEXRAD station nearest the vehicles at the session start, or
+        fall back to the home location when no vehicle positions exist. Not the
+        day's first fix: crews can stage far from the storm and drive for hours.
+
+        MQTT has no history for dates STORM wasn't recording, but the
+        one-second FOFS data may still have the vehicles, so while that is
+        loading this waits for it (briefly: radar starts from home after
+        RADAR_WAIT_FOR_VEHICLES_MS, and moves once the vehicles arrive)."""
         if not hasattr(self, "_archive_mqtt"):
             return
-        positions = self._archive_mqtt.first_vehicle_positions()
+        if getattr(self, "_package_radar_station", None):     # an opened case package names it
+            self._apply_radar_station(None)
+            return
+        positions = self._archive_mqtt.vehicle_positions_near(self._archive_time)
         if positions:
-            _, lat, lon = positions[0]
-            site = self._nearest_nexrad(lat, lon, archive=True)
-        else:
-            log.info(
-                "Archive: no vehicle positions — falling back to home location "
-                "(%.3f, %.3f) for radar station selection",
-                config.HOME_LAT, config.HOME_LON,
-            )
-            site = self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True)
+            self._finish_radar_station_selection(positions, "MQTT")
+            return
 
+        dense = getattr(self, "_archive_vehicle_obs", None)
+        if dense is not None and not getattr(self, "_archive_vehicle_obs_loaded", False):
+            # _on_archive_vehicle_obs_loaded calls this again
+            self._radar_station_awaiting_dense_obs = True
+            self._later(RADAR_WAIT_FOR_VEHICLES_MS, self._radar_wait_for_vehicles_timed_out)
+            return
+        if dense is not None:
+            positions = dense.vehicle_positions_near(self._archive_time)
+            if positions:
+                self._finish_radar_station_selection(positions, "1-second archive")
+                return
+
+        if getattr(self, "_radar_station_provisional", False):
+            self._radar_station_provisional = False   # already running from home
+            return
+        log.info(
+            "Archive: no vehicle positions — falling back to home location "
+            "(%.3f, %.3f) for radar station selection",
+            config.HOME_LAT, config.HOME_LON,
+        )
+        self._apply_radar_station(self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True))
+
+    def _radar_wait_for_vehicles_timed_out(self) -> None:
+        if not self._radar_station_awaiting_dense_obs or self._archive_radar is not None:
+            return
+        log.info("Archive: vehicle positions not loaded after %d s; starting radar from home for now",
+                 RADAR_WAIT_FOR_VEHICLES_MS // 1000)
+        self._radar_station_provisional = True
+        self._apply_radar_station(self._nearest_nexrad(config.HOME_LAT, config.HOME_LON, archive=True))
+
+    def _finish_radar_station_selection(self, positions, source: str) -> None:
+        vehicle_id, lat, lon = positions[0]
+        site = self._nearest_nexrad(lat, lon, archive=True)
+        if getattr(self, "_radar_station_provisional", False):
+            # radar started from home while vehicles loaded: move only if
+            # the vehicles were near another radar and nobody picked one since
+            self._radar_station_provisional = False
+            if getattr(self, "_radar_station_user_picked", False) or (
+                    self._archive_radar is not None and self._archive_radar.station == site):
+                return
+        log.info("Archive: radar station %s from %s (%s) at (%.4f, %.4f)",
+                 site, vehicle_id, source, lat, lon)
+        self._apply_radar_station(site)
+
+    def _apply_radar_station(self, site: "str | None") -> None:
+        package_site = getattr(self, "_package_radar_station", None)
+        if package_site:                    # an opened case package names its station
+            self._package_radar_station = None
+            site = package_site
         if not site:
             self.status_msg_label.setText(
                 "Could not determine radar station — select one on the map"
             )
             return
-
         self._archive_session.radar_station = site
         self._start_archive_radar(site)
 
@@ -240,7 +294,7 @@ class MainWindowRadarMixin:
             self._layout_overlays()
             # defer the actual removeLayer + removeSource until the renderer has
             _guard_gen = self._render_generation
-            QTimer.singleShot(400, lambda: self._deferred_radar_clear(_guard_gen))
+            self._later(400, lambda: self._deferred_radar_clear(_guard_gen))
 
     def _deferred_radar_clear(self, guard_gen: int):
         """Remove the MapLibre radar source/layer after the deferred delay.
@@ -326,6 +380,7 @@ class MainWindowRadarMixin:
         self._radar_station_picker_visible = False
         if self._archive:
             # in archive mode, start fetching from the selected station.
+            self._radar_station_user_picked = True
             self._archive_session.radar_station = site
             self._start_archive_radar(site)
             return

@@ -23,12 +23,17 @@ _VPARCEL_CLR = "#ff3366"    # virtual-temperature parcel trace
 _EIL_CLR    = "#00e676"
 _RM_CLR     = "#ff6b6b"
 _LM_CLR     = "#4fc3f7"
+_OBS_MOTION_CLR = "#FFD400"   # observed storm motion (archive storm track)
 
 # per-source identity for comparison overlay
-_SOURCE_COLORS = {"obs": "#ff6b6b", "hrrr": "#4fc3f7", "nssl": "#81c784"}
-_SOURCE_LABELS = {"obs": "OBS",     "hrrr": "HRRR",    "nssl": "NSSL"}
-_SOURCE_LS     = {"obs": "-",       "hrrr": "--",       "nssl": ":"}
-_SOURCE_GLYPHS = {"obs": "━━",      "hrrr": "╌╌",       "nssl": "┈┈"}
+_SOURCE_COLORS = {"obs": "#ff6b6b", "hrrr": "#4fc3f7", "nssl": "#81c784",
+                  "clamps_tropoe": "#ffb74d", "coptersonde": "#ba68c8"}
+_SOURCE_LABELS = {"obs": "OBS",     "hrrr": "HRRR",    "nssl": "NSSL",
+                  "clamps_tropoe": "TROPoe", "coptersonde": "COPTER"}
+_SOURCE_LS     = {"obs": "-",       "hrrr": "--",       "nssl": ":",
+                  "clamps_tropoe": "-.", "coptersonde": (0, (5, 1, 1, 1))}
+_SOURCE_GLYPHS = {"obs": "━━",      "hrrr": "╌╌",       "nssl": "┈┈",
+                  "clamps_tropoe": "━┈", "coptersonde": "━╌"}
 
 _HODO_LAYERS = [
     ("#ff8585", 0,  3),

@@ -1,10 +1,8 @@
 """Which toolbar drawers stay open together.
 
-Modes:
-- ``one``: opening a drawer closes the other open drawers, except pinned ones.
-- ``stack``: drawers stack under the toolbar; when the stack would run past the
-  bottom overlays, the oldest unpinned drawers close until it fits.
-- ``auto``: ``one`` when the map is shorter than ``AUTO_ONE_BELOW_PX``, else ``stack``.
+One at a time: opening a drawer closes the other open drawers, except pinned
+ones and child drawers (MAP → ROUTE). Pinned drawers stack with it; when that
+stack would run past the bottom overlays, the oldest unpinned drawers close.
 
 Drawers are always closed through their toolbar button, so the button's own
 side effects (e.g. PREV LOCS hiding its layer) still run.
@@ -12,21 +10,18 @@ side effects (e.g. PREV LOCS hiding its layer) still run.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 
 from ui.app.overlay_geometry import drawers_to_close
 
-MODES = ("auto", "one", "stack")
-AUTO_ONE_BELOW_PX = 900
+DEFAULT_PINNED: tuple[str, ...] = ()
 
-# buttons that double as a layer or map-click mode toggle; pinned by default so
-# opening another drawer doesn't hide deploy locations or exit sounding mode
-DEFAULT_PINNED = ("prev_locs", "sounding")
-
-_MODE_KEY = "ui/drawer_mode"
-_PINNED_KEY = "ui/pinned_drawers"
+_PINNED_KEY = "ui/pinned_drawers_v2"
+# v1 pinned PREV LOCS and SOUNDING by default; migrating drops those two and
+# keeps any pins the user added
+_PINNED_KEY_V1 = "ui/pinned_drawers"
+_V1_DEFAULT = {"prev_locs", "sounding"}
 
 
 @dataclass
@@ -39,19 +34,24 @@ class DrawerEntry:
 
 class DrawerManager(QObject):
     pins_changed = pyqtSignal()
-    mode_changed = pyqtSignal(str)
 
-    def __init__(self, container_height: Callable[[], int], settings: QSettings | None = None,
-                 parent=None):
+    def __init__(self, settings: QSettings | None = None, parent=None):
         super().__init__(parent)
-        self._container_height = container_height
         self._settings = settings if settings is not None else QSettings("NSSL", "STORM")
         self._entries: dict[str, DrawerEntry] = {}
         self._open_order: list[str] = []
-        mode = self._settings.value(_MODE_KEY, "auto", type=str)
-        self._mode = mode if mode in MODES else "auto"
-        pinned = self._settings.value(_PINNED_KEY, list(DEFAULT_PINNED), type=list)
-        self._pinned: set[str] = set(pinned or [])
+        self._pinned: set[str] = self._load_pins()
+
+    def _load_pins(self) -> set[str]:
+        s = self._settings
+        if s.contains(_PINNED_KEY):
+            return set(s.value(_PINNED_KEY, [], type=list) or [])
+        pinned = set(DEFAULT_PINNED)
+        if s.contains(_PINNED_KEY_V1):
+            pinned = set(s.value(_PINNED_KEY_V1, [], type=list) or []) - _V1_DEFAULT
+            s.remove(_PINNED_KEY_V1)
+        s.setValue(_PINNED_KEY, sorted(pinned))
+        return pinned
 
     # ── registration ──────────────────────────────────────
     def add(self, key: str, drawer, button, child: bool = False) -> None:
@@ -64,25 +64,6 @@ class DrawerManager(QObject):
 
     def keys(self) -> list[str]:
         return list(self._entries)
-
-    # ── mode ──────────────────────────────────────────────
-    @property
-    def mode(self) -> str:
-        return self._mode
-
-    def set_mode(self, mode: str) -> None:
-        if mode not in MODES or mode == self._mode:
-            return
-        self._mode = mode
-        self._settings.setValue(_MODE_KEY, mode)
-        self.mode_changed.emit(mode)
-        if self.one_at_a_time() and self._open_order:
-            self._close_others(self._open_order[-1])
-
-    def one_at_a_time(self) -> bool:
-        if self._mode == "auto":
-            return self._container_height() < AUTO_ONE_BELOW_PX
-        return self._mode == "one"
 
     # ── pins ──────────────────────────────────────────────
     def is_pinned(self, key: str) -> bool:
@@ -99,12 +80,11 @@ class DrawerManager(QObject):
         self.pins_changed.emit()
 
     def reset(self) -> None:
-        """Default pins and AUTO mode (MAP → RESET LAYOUT)."""
+        """Default pins (settings → RESET LAYOUT)."""
         if self._pinned != set(DEFAULT_PINNED):
             self._pinned = set(DEFAULT_PINNED)
             self._settings.setValue(_PINNED_KEY, sorted(self._pinned))
             self.pins_changed.emit()
-        self.set_mode("auto")
 
     def _exempt(self, key: str) -> bool:
         """Never auto-closed, and opening it closes nothing."""
@@ -115,7 +95,7 @@ class DrawerManager(QObject):
         if key in self._open_order:
             self._open_order.remove(key)
         self._open_order.append(key)
-        if self.one_at_a_time() and not self._exempt(key):
+        if not self._exempt(key):
             self._close_others(key)
 
     def _on_closed(self, key: str) -> None:
@@ -162,12 +142,6 @@ class DrawerManager(QObject):
         """
         order = [k for k in self._open_order if k not in skip]
         newest = order[-1] if order else None
-        if self.one_at_a_time():
-            # e.g. the window shrank below AUTO_ONE_BELOW_PX
-            keep = next((k for k in reversed(order) if not self._exempt(k)), None)
-            if keep is not None:
-                self._close_others(keep)
-                order = [k for k in self._open_order if k not in skip]
         stack = [("", h, False) for h in fixed_heights]
         for key in order:
             h = self._entries[key].drawer.sizeHint().height()

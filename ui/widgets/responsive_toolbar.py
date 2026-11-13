@@ -23,8 +23,20 @@ def pick_tier(widths: dict[str, int], available: int) -> str:
     return measured[-1]
 
 
+def _set_labelled(btn: QToolButton, labelled: bool) -> None:
+    """``labelled`` picks the theme's padding for icon + label buttons."""
+    if btn.property("labelled") == labelled:
+        return
+    btn.setProperty("labelled", labelled)
+    btn.style().unpolish(btn)
+    btn.style().polish(btn)
+
+
 class ResponsiveToolbar(QWidget):
-    """Floating toolbar of drawer buttons in groups split by separators.
+    """Floating toolbar of drawer buttons in groups split by divider lines.
+
+    Dividers sit in the middle of the normal gap between two buttons rather
+    than in the layout, so every button is spaced the same across groups.
 
     ``fit(width)`` measures the toolbar in each tier and applies the widest one
     that fits, so breakpoints follow whatever buttons this mode and feature set
@@ -38,6 +50,8 @@ class ResponsiveToolbar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("floatingToolbar")
+        # QWidget subclasses only paint the stylesheet's pill background with this
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(8, 4, 8, 4)
         self._layout.setSpacing(4)
@@ -83,16 +97,17 @@ class ResponsiveToolbar(QWidget):
             self._overflowable.append(btn)
         self._groups[-1].append(btn)
         self._layout.addWidget(btn)
+        btn.installEventFilter(self)
         self.invalidate()
         return btn
 
     def add_group(self) -> None:
-        """Start a new group; a separator sits between it and the previous one."""
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"color: {P.DIVIDER}; margin: 6px 2px;")
+        """Start a new group; a divider line sits between it and the previous one."""
+        sep = QFrame(self)
+        sep.setObjectName("toolbarDivider")
+        sep.setStyleSheet(f"background-color: {P.DIVIDER};")
+        sep.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._separators.append(sep)
-        self._layout.addWidget(sep)
         self._groups.append([])
 
     def finish(self) -> None:
@@ -158,6 +173,16 @@ class ResponsiveToolbar(QWidget):
         self._apply(pick_tier(self.measured_widths(), available))
         return self._tier
 
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.Move, QEvent.Type.Resize,
+                            QEvent.Type.Show, QEvent.Type.Hide):
+            self._place_separators()
+        return False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_separators()
+
     def changeEvent(self, event):
         # text scale re-applies the stylesheet: label widths change
         if event.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange):
@@ -183,17 +208,33 @@ class ResponsiveToolbar(QWidget):
             for btn in group:
                 visible = btn not in self._unavailable and btn not in overflowed
                 btn.setToolButtonStyle(style)
+                _set_labelled(btn, tier == FULL)
                 btn.setVisible(visible)
                 shown = shown or visible
             if i > 0:
                 self._separators[i - 1].setVisible(shown and any_before)
             any_before = any_before or shown
         self.more_button.setVisible(bool(overflowed))
+        self._place_separators()
         if notify and overflowed != self._overflowed:
             self._overflowed = overflowed
             self.overflow_changed.emit(set(overflowed))
         elif notify:
             self._overflowed = overflowed
+
+    def _place_separators(self) -> None:
+        """Center each visible divider in the gap between its two groups."""
+        last_visible = None
+        for i, group in enumerate(self._groups):
+            shown = [b for b in group if not b.isHidden()]
+            if i > 0 and shown and last_visible is not None:
+                sep = self._separators[i - 1]
+                end = last_visible.geometry().right() + 1
+                x = (end + shown[0].geometry().left() - 1) // 2
+                sep.setGeometry(x, 8, 1, max(0, self.height() - 16))
+                sep.raise_()
+            if shown:
+                last_visible = shown[-1]
 
     def _rebuild_menu(self) -> None:
         self._more_menu.clear()

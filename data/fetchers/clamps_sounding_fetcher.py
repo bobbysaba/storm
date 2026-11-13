@@ -15,13 +15,15 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 import config
 from core.sounding import Sounding, SoundingSet
+from core import package_sources
+from data import endpoints
 
 log = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 20
 _LOOKBACK_HOURS  = 12
 _RAW_HEADER_BYTES = 4096
-_API_INDEX_PATH = "data/sonde/index.json"
+_API_INDEX_PATH = endpoints.NSSL_SONDE_INDEX
 
 _TEST_FILE_URL = None
 
@@ -165,8 +167,9 @@ def _soundings_to_set(soundings: list[Sounding], now_utc: datetime) -> SoundingS
 
 def _api_sonde_entries() -> list[_SondeEntry]:
     req = Request(_api_url(_API_INDEX_PATH), headers=_api_headers())
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
-        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    raw = package_sources.read_url("soundings", req, urlopen, timeout=_REQUEST_TIMEOUT,
+                                   context=config.NSSL_SSL_CONTEXT)
+    payload = json.loads(raw.decode("utf-8", errors="replace"))
 
     values = payload.get("soundings")
     if values is None:
@@ -263,8 +266,8 @@ def _fetch_and_parse_url(
     raw_url: str = "",
 ) -> "Sounding | None":
     req = Request(url, headers=_api_headers())
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
-        text = resp.read().decode("utf-8", errors="replace")
+    text = package_sources.read_url("soundings", req, urlopen, timeout=_REQUEST_TIMEOUT,
+                                    context=config.NSSL_SSL_CONTEXT).decode("utf-8", errors="replace")
     snd = _parse_skewt(text, file_time, idx)
     if snd is not None and raw_url:
         location = _fetch_raw_launch_location_url(raw_url)
@@ -276,8 +279,10 @@ def _fetch_and_parse_url(
 def _fetch_raw_launch_location_url(raw_url: str) -> "tuple[float, float] | None":
     headers = _api_headers({"Range": f"bytes=0-{_RAW_HEADER_BYTES - 1}"})
     req = Request(raw_url, headers=headers)
-    with urlopen(req, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT) as resp:
-        text = resp.read(_RAW_HEADER_BYTES).decode("utf-8", errors="replace")
+    # the Range header keeps this to the file's header block
+    text = package_sources.read_url("soundings", req, urlopen, timeout=_REQUEST_TIMEOUT,
+                                    context=config.NSSL_SSL_CONTEXT)[:_RAW_HEADER_BYTES].decode(
+        "utf-8", errors="replace")
     return _parse_raw_launch_location(text)
 
 

@@ -66,7 +66,6 @@ class FakeRadarControls(QObject):
     loop_toggled = pyqtSignal(bool)
     site_changed = pyqtSignal(str)
     product_changed = pyqtSignal(str)
-    sync_toggled = pyqtSignal(bool)
     sync_vehicles_toggled = pyqtSignal(bool)
 
     def __init__(self):
@@ -74,7 +73,6 @@ class FakeRadarControls(QObject):
         self.frame = 0
         self.n = 0
         self.looping = False
-        self.sync = True
         self.vehicles = False
         self.jumped = 0
 
@@ -93,11 +91,8 @@ class FakeRadarControls(QObject):
     def current_frame(self):
         return self.frame
 
-    def is_sync_enabled(self):
-        return self.sync
-
     def is_sync_vehicles(self):
-        return self.sync and self.vehicles
+        return self.vehicles
 
     def jump_to_latest(self):
         self.jumped += 1
@@ -295,17 +290,6 @@ def test_vehicle_without_fix_at_loop_time_is_hidden_then_restored(app):
     assert h.map_widget.vehicles["chase2"] == (35.0, -98.0, False)
     assert h.map_widget.vehicles["truck1"] == (36.0, -97.0, False)
     assert h.map_widget.follow is True and h.map_widget.plots_visible is True
-
-
-def test_sync_off_returns_everything_to_live(app):
-    h = _host_with_truck(app)
-    h.radar_controls.sync_vehicles_toggled.emit(True)
-    h.radar_controls.frame = 1
-    h.radar_controls.frame_requested.emit(1)
-    h.radar_controls.sync_toggled.emit(False)
-    assert not h.satellite_controls.synced
-    assert h.map_widget.vehicles["truck1"][2] is False
-    assert h.loop_chip.isHidden()
 
 
 def test_radar_off_hands_the_loop_to_satellite(app):

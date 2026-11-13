@@ -53,7 +53,7 @@ Status: done. As built (this replaced a first draft that used a scroll area and 
 - `ui/app/drawer_manager.py` replaces the hard-coded pairs of toolbar buttons that closed each other (RADAR, HAZARDS, SATELLITE, SURFACE, MESO, SFCOA, ANNOTATE). Drawers are always closed through their button, so button side effects still run.
 - Modes, set under MAP → DRAWERS and saved in QSettings: AUTO (ONE below 900px of map height, STACK otherwise), ONE, STACK.
 - Instead of a scroll area, STACK closes the oldest unpinned drawers when the stack would pass the status pill or archive bar (`drawers_to_close` in `overlay_geometry.py`). The newest drawer is never closed. This avoids scrolling a column of controls over the map.
-- Pins: right-click a toolbar button → "Keep open when other drawers open". Pinned buttons get an accent outline. PREV LOCS and SOUNDING are pinned by default, because closing them hides the deploy-location layer or exits sounding click mode. ROUTE and LANDCOVER (opened from MAP) are never auto-closed.
+- Pins: right-click a toolbar button → "Keep open when other drawers open". Pinned buttons get a small accent dot in the top-left corner (`ui/widgets/pin_dot.py`); the top-right is the layer status dot. Nothing is pinned by default. PREV LOCS and SOUNDING used to be, but their outline made them look unlike the other buttons and made stacking look inconsistent; pins now live under `ui/pinned_drawers_v2`, and the move from the old key drops those two defaults and keeps any other pins. ROUTE and LANDCOVER (opened from MAP) are never auto-closed.
 - Map-click exclusivity (SOUNDING / MEASURE / ANNOTATE) is unchanged; that is Step 6.
 
 - Done when: any combination of open drawers at 1366×768 keeps every control reachable, and the geometry tests pass.
@@ -145,11 +145,13 @@ Files: `ui/app/main_window.py` (`_init_toolbar`, `_layout_overlays`), `ui/theme.
 Status: built, pending manual pass. Notes on what was built:
 
 - `ui/widgets/responsive_toolbar.py`: `ResponsiveToolbar` owns the buttons, groups and separators. Tiers are `full` (icon + label), `icons` (icon only) and `overflow` (icon only, MESO / SFCOA / PREV LOCS in the `⋯` menu). `fit(width)` measures each tier's real width (cached until the buttons, icon size or style change) and applies the widest that fits; `_layout_overlays` calls it with the map width minus margins.
-- Buttons dropped for a mode use `set_available(btn, False)` instead of `hide()`, so tier changes don't bring them back. A group with no visible buttons drops its separator; with nothing to overflow (ARCHIVE), `icons` is the narrowest tier.
+- Buttons dropped for a mode use `set_available(btn, False)` instead of `hide()`, so tier changes don't bring them back. A group with no visible buttons drops its divider; with nothing to overflow (ARCHIVE), `icons` is the narrowest tier.
 - Tooltips always start with the label ("RADAR: Show/hide radar controls (R)"), so icon-only buttons still name themselves.
 - `⋯` menu entries click the real button, so drawer bookkeeping and side effects run. MESO and SFCOA status dots are copied onto `⋯` while they sit in the menu. Overflowed buttons can't be right-clicked, so the `⋯` menu ends with a "Keep open when other drawers open" section that has a Pin toggle for each of them (`set_pin_handlers`).
 - Icons are stroked SVGs in `ui/launch/icons.py` (`toolbar_icon`), dark on the accent background when checked, sized 14px × text scale.
-- Measured offscreen with every feature flag on: about 1030 px full, 400 px icon-only, 365 px overflow. So 1024 px windows get icon-only, and `overflow` only kicks in for much narrower map areas.
+- Measured offscreen with every feature flag on: about 990 px full, 380 px icon-only, 345 px overflow. So 1024 px windows (1008 px available) keep the labels, and `overflow` only kicks in for much narrower map areas.
+- Group dividers are 1px lines placed in the middle of the normal 4px gap, not layout items, so every button is spaced the same across groups.
+- The toolbar is a `QWidget` subclass, so it sets `WA_StyledBackground` to paint its pill. In the full tier, buttons get `labelled="true"`, whose theme padding (9px left, 3px right) offsets the ~9px of slack Qt adds after the label, so the icon and label sit centered.
 - Tests: `tests/test_responsive_toolbar.py` (tier choice, unavailable buttons, separators, menu, and a 1024 px fit at 130 % for each mode and flag combination).
 
 - Group buttons by purpose, with separators: Data (RADAR, SATELLITE, HAZARDS, SURFACE, MESO/SFCOA) | Analysis (SOUNDING) | Team (VEHICLES, PREV LOCS, ANNOTATE) | MAP.

@@ -6,7 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 
 ## Unreleased
+
+---
+
+## [2.0.0] - 2026-11-13
+STORM 2.0 is a large archive-mode release: case packages, a Video Studio, storm tracks, observation trails, velocity dealiasing, and CLAMPS, lidar, CopterSonde, ASOS and damage-path replay, plus a command palette and a map right-click menu in every mode.
+
 ### Added
+- Case packages: *File > Export Case Package…* saves an archive case (storm track, case settings, source addresses and checksums, and optionally the data files) as a ZIP; *File > Open Case Package…* or `python main.py --case <zip>` reopens it, serving packed files before downloading anything.
+- Video Studio (*File > Video Studio*, Ctrl+Shift+V): keyframe a case's clock, camera and radar, preview it on the map, and export MP4, GIF or PNG frames at up to 4K.
+- Menu bar (File, Edit, View, Help), with every entry also in the command palette.
+- Command palette (Ctrl+K / ⌘K): search actions, drawers, radar sites and products, satellite sectors, SPC products, vehicles, deployment locations and places.
+- Map right-click menu: sounding here, route to / from here, measure from here, place an annotation, start a drawing, nearest radar sites and copy lat/lon on bare map; edit / move / delete, follow, timeseries or open text on map features.
+- Storm tracks (archive, TRACK drawer, T): one point per radar frame, placed and dragged on the map, with undo / redo, a table of exact times and positions, CSV import / export (MESO-VIEW columns), autosave to `storm_tracks/`, and mean / current storm motion. The sounding viewer shows the observed motion and its SRH.
+- Observation trails (archive, VEHICLES panel): each platform's recent path colored by a measured or derived quantity (θ, θv, θe, θw, mixing ratio, wind components…), with optional wind barbs, storm-relative barbs and time-to-space.
+- Velocity dealiasing (archive, RADAR > DEALIAS): region-based unfolding of NEXRAD velocity; the archive bar says whether the frame on screen is dealiased.
+- Sharp radar when paused: after the archive clock stops, the frame on screen is re-rendered at up to 4096 px.
+- Archive time slider over the whole session, with hour labels, radar-scan ticks, data coverage, and previous / next radar scan buttons.
+- Archive sessions run past 00Z, to the next morning's 06Z, trimmed to the day's last activity.
+- One-second FOFS mobile mesonet data in archive mode for every user, found from the THREDDS index even on dates with no MQTT history, with value, position and date cleanup.
+- Launch window case finder: dates with data are shaded in the calendars, *Browse available cases…* finds dates by campaign, year, month and vehicle, and *Open case…* opens a case package. *File > Change Day…* returns to the launch window without quitting.
+- Archive ASOS replay (SURFACE > ASOS) and NWS damage-survey tornado paths (HAZARDS > DAMAGE PATHS) inside a drawn box.
+- Archive infrared satellite (SATELLITE > IR, band 13) alongside visible.
+- Archive CLAMPS and lidar truck data: lidar wind profiles in the VAD window, NSSL sondes and TROPoe soundings, CLAMPS trailer surface obs on the map, Doppler lidar PPI scans (LIDAR), and PERiLS CopterSonde ascents (SOUNDINGS > COPTERSONDE).
+- Performance logging (`scripts/launch_storm_perf_log.bat`, `scripts/summarize_perf_log.py`, `scripts/collect_perf_logs.py`) and a data-source check (`scripts/check_data_sources.py`).
 - Colorado Mesonet surface observations are now available from the SURFACE drawer and launch dialog alongside OK Mesonet, WTM, KS Mesonet, and ASOS.
 - CO Mesonet station plots use the NSSL API-hosted `co_mesonet.json` feed with station positions and names from `co_metadata.json`.
 - Nebraska Mesonet surface observations are now available to all users from the SURFACE drawer and launch dialog.
@@ -15,6 +38,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Headless publisher (`headless/`): a Qt-free `storm-headless` service for Raspberry Pis that tails a vehicle's mesonet logger file and publishes to MQTT exactly like VEHICLE mode, with a one-line installer, `--check`, and `--dry-run`.
 
 ### Changed
+- VIEWER is open to anyone and shows the team's vehicles, annotations, drawings, cones and scan sectors live (read-only, through a viewer certificate). VEHICLE, MONITOR and ARCHIVE need the MQTT certificate files instead of a passphrase; admin mode still asks for one.
+- Archive loading no longer blocks the window: a small indicator lists what is still loading while the map stays usable. The modal archive loading dialog is gone.
+- Archive replay shows each annotation, drawing and cone as of the clock, so edits appear, deletions disappear, cones expire after their hour, and rewinding no longer re-adds everything. MQTT history is read from THREDDS first.
+- Archive radar picks its station from vehicle positions near the session start, waiting briefly for one-second data when MQTT has none.
+- Archive soundings have no HRRR source; NSSL reads the lidar truck's sondes, then the NSSL API, then CLAMPS TROPoe.
+- Data endpoints are collected in `data/endpoints.py` and THREDDS paths in `data/thredds_paths.py`.
 - Surface observation diagnostics and layer ordering now include CO and NE Mesonet as independent 5-minute mesonet sources.
 - MESO satellite keeps older frames at one per 5 minutes, up to 40 minutes back, instead of dropping everything past the newest 10.
 - `ui/app/main_window.py` is split into mixins by area (`main_window_radar.py`, `main_window_vehicles.py`, …); behavior is unchanged.
@@ -22,6 +51,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 - Closing the SATELLITE drawer before startup finished raised an error, and a sector picked then was ignored.
+- Closing the window during an archive session could fire callbacks on a closed window; archive workers are now silenced and the radar render pools shut down on close.
+- Archive data requests use verified TLS.
 
 ---
 

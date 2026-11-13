@@ -16,9 +16,11 @@ class MapBridge(QObject):
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
+    lidar_location_clicked = pyqtSignal(str)     # core/lidar_scans.LidarLocation.key
     sounding_clicked             = pyqtSignal(float, float)
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     asos_bbox_selected = pyqtSignal(float, float, float, float)
+    asos_box_cancelled = pyqtSignal()
     user_dragged          = pyqtSignal()
     satellite_idle        = pyqtSignal()   # CONUS tiles for a new time have loaded
     map_pick_for_route    = pyqtSignal(float, float)
@@ -27,6 +29,10 @@ class MapBridge(QObject):
     storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     storm_cone_place_drag_ended = pyqtSignal(float, float)
     private_pin_route_requested = pyqtSignal(float, float, str)
+    context_menu_requested = pyqtSignal(float, float, str)  # lat, lon, feature json or ""
+    track_point_add_requested = pyqtSignal(float, float)          # lat, lon
+    track_point_selected      = pyqtSignal(int)                   # point_id
+    track_point_moved         = pyqtSignal(int, float, float, bool)  # point_id, lat, lon, keep_time
 
     @pyqtSlot(float, float)
     def on_map_click(self, lat: float, lon: float):
@@ -64,6 +70,23 @@ class MapBridge(QObject):
     def on_private_pin_route(self, lat: float, lon: float, label: str):
         self.private_pin_route_requested.emit(lat, lon, label)
 
+    @pyqtSlot(float, float, str)
+    def on_context_menu(self, lat: float, lon: float, feature_json: str):
+        # deferred so the menu opens after the page has finished the event
+        QTimer.singleShot(0, lambda: self.context_menu_requested.emit(lat, lon, feature_json))
+
+    @pyqtSlot(float, float)
+    def on_track_point_add(self, lat: float, lon: float):
+        self.track_point_add_requested.emit(lat, lon)
+
+    @pyqtSlot(int)
+    def on_track_point_select(self, point_id: int):
+        self.track_point_selected.emit(point_id)
+
+    @pyqtSlot(int, float, float, bool)
+    def on_track_point_move(self, point_id: int, lat: float, lon: float, keep_time: bool):
+        self.track_point_moved.emit(point_id, lat, lon, keep_time)
+
     @pyqtSlot(str)
     def on_private_pin_copy(self, text: str):
         try:
@@ -86,6 +109,10 @@ class MapBridge(QObject):
     @pyqtSlot(str)
     def on_radar_station_click(self, site_id: str):
         self.radar_station_clicked.emit(site_id)
+
+    @pyqtSlot(str)
+    def on_lidar_location_click(self, key: str):
+        self.lidar_location_clicked.emit(key)
 
     @pyqtSlot(str)
     def on_js_console(self, msg: str):
@@ -122,6 +149,11 @@ class MapBridge(QObject):
             )
         except Exception:
             pass
+
+    @pyqtSlot()
+    def on_asos_box_cancelled(self):
+        """Called from JS when the user backs out of drawing a box (Esc / right-click)."""
+        QTimer.singleShot(0, self.asos_box_cancelled.emit)
 
     @pyqtSlot()
     def on_user_drag(self):

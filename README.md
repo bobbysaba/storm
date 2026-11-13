@@ -37,16 +37,27 @@ A standalone desktop application for storm chasing situational awareness. Runs o
 - **SFCOA mesoanalysis overlays** — NSSL SFCOA vector-tile contours with grouped thermodynamic, parcel, lapse-rate, shear, helicity, composite, upper-air, and wind products; step through recent valid times and overlay one or more variables on the map
 - **Point soundings** — click any map location to fetch a live Skew-T log-P sounding; three sources: HRRR model (open-meteo, F0–F3 scrubber), observed radiosondes (IEM RAOB), and NSSL CLAMPS DL truck data; shows parcel parameters (including 0–3 km CAPE), kinematics table, surface T/Td labels, and hodograph
 - **Turn-by-turn routing** — on-map directions via OSRM with Nominatim geocoding; address, lat/lon, or map-click origin/destination; auto-re-routes when off-course
-- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (no MQTT, no obs), or ARCHIVE (replay a past session) — all modes selected exclusively through the launch dialog with passphrase authentication
+- **Multi-mode launch** — VEHICLE (full obs publish), MONITOR (view-only, no local publish), VIEWER (anyone; live team data, read-only), or ARCHIVE (replay a past session) — all modes selected exclusively through the launch dialog; VEHICLE, MONITOR and ARCHIVE need the MQTT certificate files in `aws/`, and admin mode asks for a passphrase
 - **Headless publisher** — `headless/` is a standalone, Qt-free package for Raspberry Pis (or any small Linux box) that tails a vehicle's logger file and publishes to MQTT exactly like VEHICLE mode, without the GUI; see [headless/README.md](headless/README.md)
-- **Archive mode** — replay any past session at a chosen UTC date/time; synchronized playback of NEXRAD Level 2/3 radar, GOES satellite, SPC/NWS hazards, soundings, and MQTT vehicle positions; central time controller with play/pause, 1×–300× speed multipliers, ←/→ 30-second step buttons, and a timeline scrubber
+- **Archive mode** — replay any past session at a chosen UTC date/time, from 00Z through the next morning's 06Z; synchronized playback of NEXRAD Level 2/3 radar (with velocity dealiasing and a sharp re-render when paused), GOES visible and infrared satellite, SPC/NWS hazards, soundings, one-second mobile mesonet and MQTT vehicle positions, CLAMPS and Doppler lidar data, ASOS and NWS damage paths; a session time slider with radar-scan ticks, 1×–300× playback, and a launch-window case finder
+- **Storm tracks and observation trails** — in archive mode, place a storm track one point per radar frame (table, CSV import/export, storm motion in the sounding viewer) and color each platform's recent path by a measured or derived quantity, with optional storm-relative wind barbs
+- **Case packages and Video Studio** — export an archive case (track, settings and optionally its data) as a ZIP that reopens offline, and keyframe the case into an MP4, GIF or PNG sequence
+- **Command palette and right-click menu** — Ctrl+K / ⌘K searches every action, drawer, radar site, vehicle and place; right-clicking the map offers soundings, routing, measuring, annotations and actions on the feature under the cursor
 - **Vehicle timeseries** — interactive time-series plots of meteorological observations (temperature, dewpoint, wind speed/direction, pressure) for any tracked vehicle; works in both live and archive modes; features scroll-wheel zoom, click-drag selection zoom with visual highlight, double-click to reset zoom, and inline cursor readouts below each subplot with 10-second grid snapping
 
-### What's New in 1.5.0
+### What's New in 2.0.0
 
-- Kansas Mesonet surface observations are now available in the SURFACE drawer and launch dialog
-- KS Mesonet station models use the NSSL API-hosted mesonet feed with embedded metadata
-- Surface obs diagnostics and layer ordering now treat KS and CO Mesonet as independent sources
+- **Case packages** — save an archive case as a ZIP (track, settings, and optionally the data) and reopen it later, offline, from *File > Open Case Package…* or `python main.py --case <zip>`
+- **Video Studio** — keyframe a case's clock, camera and radar and export it as MP4, GIF or PNG frames
+- **Storm tracks, trails and dealiasing** — draw a storm track per radar frame, color platform trails by derived quantities, and dealias archive velocity
+- **More archive data** — one-second mobile mesonet for everyone, sessions past 00Z, infrared satellite, CLAMPS and lidar winds, sondes and scans, CopterSonde, ASOS replay and NWS damage paths
+- **Faster to find a case** — shaded dates with data, a case browser by campaign and vehicle, and *File > Change Day…*
+- **Command palette and right-click menu** in every mode, plus a menu bar
+- **Synced live loop** — satellite (and optionally vehicles) follow the radar loop
+- **VIEWER for anyone** — live team data, read-only, with no passphrase; the other modes need the MQTT certificate files
+- **CO and NE Mesonet**, and the **headless publisher** for Raspberry Pis
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
@@ -209,13 +220,22 @@ storm/
 │
 ├── archive/                 # Archive (replay) mode — session config, clock, fetchers
 │   ├── session.py           # ArchiveSession dataclass — holds start time, radar station
-│   ├── time_controller.py   # Central archive clock (play/pause, speed, scrubber, signals)
+│   ├── time_controller.py   # Central archive clock (play/pause, speed, session window, signals)
+│   ├── catalog.py           # Dates with data, for the launch window's case finder
+│   ├── fofs_index.py        # Which vehicles have one-second FOFS files for a day
+│   ├── positions.py         # Vehicle position tracks for placing lidar scans
 │   └── fetchers/            # Per-layer archive data fetchers (synchronized to clock)
-│       ├── radar_archive_fetcher.py     # Fetches historical NEXRAD Level 3 frames
-│       ├── satellite_archive_fetcher.py # Fetches historical GOES satellite frames
-│       ├── hazard_archive_fetcher.py    # Fetches historical SPC/NWS hazard products
-│       ├── sounding_archive_fetcher.py  # Fetches historical sounding data
-│       └── mqtt_reader.py               # Replays historical MQTT vehicle positions
+│       ├── radar_archive_fetcher.py     # Historical NEXRAD frames (dealiasing, sharp renders)
+│       ├── satellite_archive_fetcher.py # Historical GOES visible / infrared frames
+│       ├── hazard_archive_fetcher.py    # Historical SPC/NWS hazard products
+│       ├── sounding_archive_fetcher.py  # Historical sounding data
+│       ├── vehicle_obs_archive_fetcher.py # One-second FOFS mobile mesonet
+│       ├── asos_archive_fetcher.py      # IEM ASOS history inside a drawn box
+│       ├── damage_paths_archive_fetcher.py # NWS DAT / NCEI tornado damage paths
+│       ├── clamps_*_archive_fetcher.py  # CLAMPS / lidar truck winds, sondes, TROPoe, surface met
+│       ├── coptersonde_archive_fetcher.py # PERiLS CopterSonde ascents
+│       ├── raw_lidar_archive_fetcher.py # Doppler lidar PPI / CSM scans
+│       └── mqtt_reader.py               # Replays MQTT vehicles, annotations, drawings, cones
 │
 ├── core/                    # Pure data types (no Qt, no I/O)
 │   ├── annotation.py        # Annotation dataclass + type registry
@@ -227,10 +247,19 @@ storm/
 │   ├── sounding.py          # Sounding + SoundingSet dataclasses; pressure levels
 │   ├── storm_cone.py        # StormCone dataclass + GeoJSON builder
 │   ├── vad.py               # Velocity-azimuth display data types
-│   └── vehicle.py           # Vehicle dataclass
+│   ├── vehicle.py           # Vehicle dataclass
+│   ├── case_package.py      # Case package ZIP export / import
+│   ├── storm_track.py       # Storm track edit model + CSV files
+│   ├── storm_motion.py      # Storm motion from a track
+│   ├── trails.py            # Observation trail builder
+│   ├── derived.py           # Derived quantities (θ, θe, mixing ratio, …) for trails
+│   ├── velocity_processing.py # Region-based velocity dealiasing
+│   └── studio.py            # Video Studio keyframe model
 │
 ├── data/                    # Background I/O and decoding
 │   ├── update_checker.py    # Git-based update check at launch
+│   ├── endpoints.py         # Every remote data endpoint in one place
+│   ├── thredds_paths.py     # NSSL THREDDS folder paths
 │   ├── asos_stations.json   # ASOS/AWOS station metadata
 │   ├── fetchers/            # Network-backed data fetchers
 │   │   ├── radar_fetcher.py     # Polls Unidata THREDDS; backfills 12 scans (Level 3)
@@ -266,10 +295,12 @@ storm/
 │   ├── app/                 # Main application window and mixins
 │   │   ├── main_window.py       # Top-level QMainWindow
 │   │   ├── main_window_debug.py # Debug helpers for MainWindow
+│   │   ├── main_window_*.py     # Mixins by area (radar, archive, track, trails, case, studio, palette, …)
 │   │   └── main_window_map_helpers.py # Map helper mixin for MainWindow
 │   ├── launch/              # Pre-launch config dialog modules
 │   │   ├── dialog.py            # VEHICLE / MONITOR / VIEWER / ARCHIVE launch dialog
 │   │   ├── icons.py             # Launch dialog icon helpers
+│   │   ├── date_finder.py       # Browse available cases window
 │   │   ├── styles.py            # Launch dialog styling
 │   │   └── update_dialogs.py    # Update and log dialogs shown at launch
 │   ├── map/                 # MapLibre/QWebEngine integration
@@ -280,7 +311,7 @@ storm/
 │   │   ├── radar_overlay.py     # RadarScan → PNG → MapLibre raster layer
 │   │   └── tile_scheme_handler.py # QWebEngineUrlSchemeHandler for storm://
 │   ├── controls/            # Toolbar drawers and layer controls
-│   │   ├── archive_controls.py  # Archive playback controls bar
+│   │   ├── archive_controls.py  # Archive playback bar and time slider
 │   │   ├── deploy_locs_controls.py # Deployment location filter drawer
 │   │   ├── hazard_controls.py   # SPC/NWS hazard toggle drawer
 │   │   ├── landcover_controls.py # NLCD opacity + legend drawer
@@ -290,19 +321,23 @@ storm/
 │   │   ├── routing_controls.py  # Turn-by-turn routing input / directions drawer
 │   │   ├── satellite_controls.py # Satellite mode/playback drawer
 │   │   ├── sfcoa_controls.py    # SFCOA mesoanalysis product drawer
-│   │   └── surface_controls.py  # Surface obs toggle drawer
+│   │   ├── surface_controls.py  # Surface obs toggle drawer
+│   │   ├── track_controls.py    # Storm TRACK drawer (archive)
+│   │   └── trail_controls.py    # Observation trail controls in the VEHICLES panel (archive)
 │   ├── dialogs/             # Modal and floating dialogs
 │   │   ├── annotation_dialog.py # Place / edit annotation dialogs
-│   │   ├── archive_loading_dialog.py # Archive prefetch progress dialog
+│   │   ├── case_export_dialog.py # Case package export choices
 │   │   ├── drawing_dialog.py    # Front/polyline/polygon drawing dialogs
 │   │   ├── loading_dialog.py    # Generic loading dialog
 │   │   ├── scan_sector_dialog.py # Scan sector input dialog
 │   │   ├── storm_cone_dialog.py # Storm motion cone input dialog
+│   │   ├── track_table_dialog.py # Storm track points table
 │   │   ├── vad_dialog.py        # VAD display dialog
 │   │   └── vehicle_timeseries_dialog.py # Vehicle observation timeseries plots
 │   ├── layers/              # Rendered map overlay helpers
 │   │   ├── station_plot_layer.py # MetPy station plot PNG markers at vehicle positions
 │   │   └── surface_plot_layer.py # MetPy station model circles for surface obs
+│   ├── studio/              # Video Studio panel, frame capture and movie export
 │   ├── sounding/            # Skew-T controls, dialog, parameters, and styling
 │   │   ├── controls.py          # Sounding source selector drawer
 │   │   ├── dialog.py            # Skew-T log-P dialog
@@ -310,6 +345,9 @@ storm/
 │   │   └── theme.py             # Sounding plot colors and styling
 │   └── widgets/             # Reusable floating widgets
 │       ├── annotation_tools.py  # Annotation type selector drawer
+│       ├── archive_loading_indicator.py # Archive startup loading line (non-blocking)
+│       ├── command_palette.py   # Ctrl+K command palette
+│       ├── map_context_menu.py  # Map right-click menu
 │       ├── debug_pill.py        # Debug information display pill
 │       ├── layer_order_pill.py  # Floating pill for reordering map layer draw order
 │       ├── nav_pill.py          # Compact navigation summary pill widget

@@ -67,11 +67,14 @@ _TOOLBAR_SVGS = {
     "meso":      '<path d="M3 8 C7 4 10 12 14 8 S19 6 21 8"/><path d="M3 13 C7 9 10 17 14 13 S19 11 21 13"/><path d="M3 18 C7 14 10 22 14 18 S19 16 21 18"/>',
     "sfcoa":     '<ellipse cx="12" cy="12" rx="9" ry="7"/><ellipse cx="12" cy="12" rx="5" ry="3.5"/><path d="M12 11.5 V12.5"/>',
     "sounding":  '<path d="M12 3 a5 5.5 0 0 1 5 5.5 c0 3.5 -3 6 -5 6.5 c-2 -0.5 -5 -3 -5 -6.5 A5 5.5 0 0 1 12 3 Z"/><path d="M12 15 C11 17 13 19 12 21"/>',
+    "lidar":     '<circle cx="5" cy="18" r="2"/><path d="M6.5 16.5 L19 6"/><path d="M11 18.5 a8 8 0 0 0 1.5 -9.5" /><path d="M15.5 19.5 a12 12 0 0 0 2 -14" />',
+    "track":     '<path d="M4 19 L9.5 13.5 L14 15 L20 6" stroke-dasharray="2.6 2.2"/><circle cx="4" cy="19" r="1.6"/><circle cx="9.5" cy="13.5" r="1.6"/><circle cx="14" cy="15" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
     "vehicles":  '<path d="M4 15 V12 L6.5 7 H17.5 L20 12 V15 Z"/><circle cx="8" cy="17" r="1.8"/><circle cx="16" cy="17" r="1.8"/>',
     "prev_locs": '<path d="M12 21 C8 16 5.5 13 5.5 9.5 a6.5 6.5 0 0 1 13 0 C18.5 13 16 16 12 21 Z"/><circle cx="12" cy="9.5" r="2.2"/>',
     "annotate":  '<path d="M4 20 L5 15.5 L15.5 5 a2 2 0 0 1 3 0 L19 5.5 a2 2 0 0 1 0 3 L8.5 19 Z"/><path d="M13.5 7 L17 10.5"/>',
     "map":       '<path d="M3 6 L9 4 L15 6 L21 4 V18 L15 20 L9 18 L3 20 Z"/><path d="M9 4 V18 M15 6 V20"/>',
     "more":      '<circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/>',
+    "gear":      '<circle cx="12" cy="12" r="3"/><path d="M12 2.5 V5 M12 19 V21.5 M2.5 12 H5 M19 12 H21.5 M5.3 5.3 L7.1 7.1 M16.9 16.9 L18.7 18.7 M5.3 18.7 L7.1 16.9 M16.9 7.1 L18.7 5.3"/><circle cx="12" cy="12" r="6.5"/>',
 }
 
 

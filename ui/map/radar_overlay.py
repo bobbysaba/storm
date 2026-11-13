@@ -12,6 +12,7 @@ from typing import Optional
 from functools import lru_cache
 from PyQt6.QtCore import QObject
 
+from core import perf_log
 from core.radar_scan import RadarScan
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,41 @@ ADAPTIVE_DOWN_MS = 280.0
 ADAPTIVE_UP_MS = 130.0
 ADAPTIVE_DOWN_SCANS = 2
 ADAPTIVE_UP_SCANS = 4
+
+# Archive mode's sharp render of a paused frame (main_window_archive.py).
+# Kept apart from the sizes above, which live mode's adaptive grid owns.
+# Measured on an M2 (KTLX 2013-05-31 23:23, 0.5 deg): 4096 px 1.8 s, 3072 px
+# 1.0 s, 2048 px 0.48 s. A slower computer steps down a size when one render
+# takes more than ARCHIVE_SUPERRES_SLOW_S of CPU.
+ARCHIVE_SUPERRES_SIZES = (4096, 3072, 2048)
+ARCHIVE_SUPERRES_GRID_SIZE = ARCHIVE_SUPERRES_SIZES[0]
+# the sharp render covers every gate out to this range (the far edge of
+# reflectivity), so pausing doesn't cut the outer echoes off; at 35 N that's
+# ~230 m/px on the ground at 4096 px, near the 250 m super-res gate spacing
+ARCHIVE_SUPERRES_RANGE_M = 460_000.0
+ARCHIVE_SUPERRES_SLOW_S = 2.5
+# a sharp render is skipped while less system memory than this is free; a
+# 4096 px one needs about 300 MB at its peak (index, RGBA, strips, PNG)
+ARCHIVE_SUPERRES_MIN_FREE_MB = 1024.0
+
+
+def next_superres_size(size: int, seconds: float) -> int:
+    """The size to use after a render of `size` took `seconds` of CPU."""
+    if seconds <= ARCHIVE_SUPERRES_SLOW_S:
+        return size
+    smaller = [s for s in ARCHIVE_SUPERRES_SIZES if s < size]
+    return smaller[0] if smaller else size
+
+
+def sharp_render_memory_ok() -> bool:
+    """True unless the system is known to be short of free memory.
+
+    Checked before each sharp render, so a busy moment skips one render and
+    the next pause tries again. Unknown (macOS) counts as enough.
+    """
+    from core.mem_probe import system_memory_mb  # noqa: PLC0415
+    _total, available = system_memory_mb()
+    return available < 0 or available >= ARCHIVE_SUPERRES_MIN_FREE_MB
 
 
 # function to set the render grid size (used on startup)
@@ -294,7 +330,16 @@ _AZ_BINS = 36000
 _RANGE_BIN_M = 10.0
 _RANGE_BINS = 65536
 _PIXEL_INDEX_CACHE_MAX = 4
+# an index costs 4 bytes a pixel: 67 MB at 4096 px, so only one that size is
+# kept beside the normal ones
+_SHARP_INDEX_MIN_GRID = 2048
+_SHARP_INDEX_CACHE_MAX = 1
 _LUT_CACHE_MAX = 32
+# pixels per strip when building an index or rendering: a 4096 px frame is
+# done 32 rows at a time, so its temporaries stay a few MB instead of most of
+# a GB. Larger strips aren't faster, and macOS's allocator keeps the freed
+# mid-size blocks (256-row strips left the process ~550 MB bigger).
+RENDER_STRIP_PIXELS = 1 << 17
 # rendered frames kept for loop playback / scrubbing
 _PNG_CACHE_MAX_BYTES = 32 * 1024 * 1024
 # reflectivity below this is not drawn (~8 dBZ matches RadarScope)
@@ -358,19 +403,47 @@ def footprint_bounds(scan: RadarScan) -> list:
     return [float(lon_w), float(lat_s), float(lon_e), float(lat_n)]
 
 
-def _pixel_index(scan: RadarScan, grid_size: int) -> _PixelIndex:
+def superres_crop_radius_m(scan: RadarScan) -> float:
+    """Half-width (Web Mercator m) of the square around the radar holding
+    every gate out to ARCHIVE_SUPERRES_RANGE_M. It depends on the station
+    alone, so every product and tilt shares one sharp pixel index."""
+    ring_lon, ring_lat = scan.gate_lonlat(np.arange(0.0, 360.0, 1.0), ARCHIVE_SUPERRES_RANGE_M)
+    ring_x, ring_y = _lonlat_to_merc(ring_lon, ring_lat)
+    cx, cy = _lonlat_to_merc(scan.radar_lon, scan.radar_lat)
+    return float(max(np.abs(ring_x - cx).max(), np.abs(ring_y - cy).max()))
+
+
+def _crop_merc(scan: RadarScan, crop_radius_m: float) -> tuple[float, float, float, float]:
+    """Web Mercator square of half-width crop_radius_m centered on the radar."""
+    cx, cy = _lonlat_to_merc(scan.radar_lon, scan.radar_lat)
+    cx, cy = float(cx), float(cy)
+    return cx - crop_radius_m, cy - crop_radius_m, cx + crop_radius_m, cy + crop_radius_m
+
+
+def _trim_pixel_index_cache() -> None:
+    """Drop the least recently used indexes over each size class's limit.
+    Call with _cache_lock held."""
+    sharp = [k for k in _pixel_index_cache if k[4] >= _SHARP_INDEX_MIN_GRID]
+    normal = [k for k in _pixel_index_cache if k[4] < _SHARP_INDEX_MIN_GRID]
+    for key in sharp[:-_SHARP_INDEX_CACHE_MAX] + normal[:-_PIXEL_INDEX_CACHE_MAX]:
+        del _pixel_index_cache[key]
+
+
+def _pixel_index(scan: RadarScan, grid_size: int, crop_radius_m: float | None = None) -> _PixelIndex:
     """Return the (cached) pixel index for scan's footprint at grid_size.
 
     The output grid is uniform in Web Mercator so MapLibre's image source
-    lines up with the basemap; its extent is the circle at the scan's far edge.
+    lines up with the basemap; its extent is the circle at the scan's far edge,
+    or with crop_radius_m a square of that half-width around the radar.
     """
-    far_edge_m = _far_edge_m(scan)
     key = (
         scan.geodesy,
         round(scan.radar_lat, 5),
         round(scan.radar_lon, 5),
-        round(far_edge_m, 1),
+        # a crop doesn't depend on the scan's reach, so products share it
+        round(_far_edge_m(scan), 1) if crop_radius_m is None else None,
         int(grid_size),
+        None if crop_radius_m is None else round(float(crop_radius_m), 1),
     )
     with _cache_lock:
         index = _pixel_index_cache.get(key)
@@ -378,31 +451,47 @@ def _pixel_index(scan: RadarScan, grid_size: int) -> _PixelIndex:
             _pixel_index_cache.move_to_end(key)
             return index
 
-    x_min, y_min, x_max, y_max = _footprint_merc(scan)
+    if crop_radius_m is None:
+        x_min, y_min, x_max, y_max = _footprint_merc(scan)
+    else:
+        x_min, y_min, x_max, y_max = _crop_merc(scan, crop_radius_m)
 
     out_x = np.linspace(x_min, x_max, grid_size)
     out_y = np.linspace(y_max, y_min, grid_size)   # rows top→bottom
-    x_grid, y_grid = np.meshgrid(out_x, out_y)
-    lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
-
-    # polar lookup uses the scan's own earth model, so it is the exact
-    # inverse of where the decoder placed the gates
-    range_m, az_deg = scan.polar_from_lonlat(lon_grid, lat_grid)
-    az_bin = (az_deg.ravel() * (_AZ_BINS / 360.0)).astype(np.int32) % _AZ_BINS
-    range_bin = np.minimum(range_m.ravel() / _RANGE_BIN_M, _RANGE_BINS - 1)
+    az_bin = np.empty(grid_size * grid_size, dtype=np.uint16)
+    range_bin = np.empty(grid_size * grid_size, dtype=np.uint16)
+    # built a strip of rows at a time: whole-grid float64 temporaries would
+    # be over a GB at the sharp sizes
+    strip_rows = max(1, RENDER_STRIP_PIXELS // grid_size)
+    for r0 in range(0, grid_size, strip_rows):
+        r1 = min(grid_size, r0 + strip_rows)
+        x_grid, y_grid = np.meshgrid(out_x, out_y[r0:r1])
+        lon_grid, lat_grid = _merc_to_lonlat(x_grid, y_grid)
+        # polar lookup uses the scan's own earth model, so it is the exact
+        # inverse of where the decoder placed the gates
+        range_m, az_deg = scan.polar_from_lonlat(lon_grid, lat_grid)
+        flat = slice(r0 * grid_size, r1 * grid_size)
+        az_bin[flat] = (az_deg.ravel() * (_AZ_BINS / 360.0)).astype(np.int32) % _AZ_BINS
+        range_bin[flat] = np.minimum(range_m.ravel() / _RANGE_BIN_M, _RANGE_BINS - 1)
 
     lon_w, lat_s = _merc_to_lonlat(np.array(x_min), np.array(y_min))
     lon_e, lat_n = _merc_to_lonlat(np.array(x_max), np.array(y_max))
     index = _PixelIndex(
         bounds=[float(lon_w), float(lat_s), float(lon_e), float(lat_n)],
-        az_bin=az_bin.astype(np.uint16),
-        range_bin=range_bin.astype(np.uint16),
+        az_bin=az_bin,
+        range_bin=range_bin,
     )
     with _cache_lock:
         _pixel_index_cache[key] = index
-        while len(_pixel_index_cache) > _PIXEL_INDEX_CACHE_MAX:
-            _pixel_index_cache.popitem(last=False)
+        _trim_pixel_index_cache()
     return index
+
+
+def ensure_pixel_index(scan: RadarScan, grid_size: int, crop_radius_m: float | None = None) -> None:
+    """Build (or touch) the pixel index a render will use. A 4096 px one
+    takes several seconds the first time, so callers timing the render
+    itself build it first."""
+    _pixel_index(scan, grid_size, crop_radius_m)
 
 
 def _range_gate_table(scan: RadarScan) -> np.ndarray:
@@ -444,23 +533,34 @@ def _az_row_table(azimuths_deg: np.ndarray) -> np.ndarray:
     return rows
 
 
-def _sample_scan(scan: RadarScan, index: _PixelIndex) -> tuple[np.ndarray, np.ndarray]:
-    """Nearest-gate sample of scan.raw for every output pixel.
+def _lookup_tables(scan: RadarScan) -> tuple[np.ndarray, np.ndarray]:
+    """(gate per range bin, radial per azimuth bin) for scan."""
+    return _range_gate_table(scan), _az_row_table(scan.azimuths_deg)
 
-    Returns (samples, invalid): flat arrays of length grid*grid.  Samples at
+
+def _sample_scan(
+    scan: RadarScan, index: _PixelIndex, tables=None, pixels: slice = slice(None),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest-gate sample of scan.raw for the output pixels in `pixels`
+    (all of them by default); tables are _lookup_tables(scan) if already made.
+
+    Returns (samples, invalid): flat arrays, one entry per pixel.  Samples at
     invalid pixels are meaningless.
     """
-    gates = _range_gate_table(scan)[index.range_bin]
-    rows = _az_row_table(scan.azimuths_deg)[index.az_bin]
+    gate_table, row_table = tables if tables is not None else _lookup_tables(scan)
+    gates = gate_table[index.range_bin[pixels]]
+    rows = row_table[index.az_bin[pixels]]
     invalid = (rows < 0) | (gates < 0)
     flat = rows * scan.raw.shape[1] + gates
     flat[invalid] = 0
     return scan.raw.reshape(-1)[flat], invalid
 
 
-def _sample_scan_values(scan: RadarScan, index: _PixelIndex) -> np.ndarray:
+def _sample_scan_values(
+    scan: RadarScan, index: _PixelIndex, tables=None, pixels: slice = slice(None),
+) -> np.ndarray:
     """Like _sample_scan but as physical float32 values, NaN where invalid."""
-    samples, invalid = _sample_scan(scan, index)
+    samples, invalid = _sample_scan(scan, index, tables, pixels)
     if scan.value_table is not None:
         values = scan.value_table[samples]
     else:
@@ -548,6 +648,7 @@ def render_scan_to_png(
     scan: RadarScan,
     grid_size: int,
     mask_scan: RadarScan | None = None,
+    crop_radius_m: float | None = None,
 ) -> tuple[bytes, list, float | None]:
     """
     Convert a RadarScan to a PNG.  Thread-safe.
@@ -555,29 +656,44 @@ def render_scan_to_png(
     Frames are cached, so replaying a loop or scrubbing back to a scan that
     was already drawn costs nothing.
 
+    crop_radius_m: when given, the image covers a square of this half-width
+    (Web Mercator meters) around the radar instead of the scan's whole
+    footprint. Archive mode's sharp renders use it; they keep their own cache
+    (ui/app/radar_superres_cache.py) and stay out of this one.
+
     Returns:
         (png_bytes, [west, south, east, north], elapsed_ms)
         elapsed_ms is None when the frame came from the cache.
     """
+    use_cache = crop_radius_m is None
     cache_key = _png_cache_key(scan, grid_size, mask_scan)
-    hit = cached_scan_png(scan, grid_size, mask_scan)
+    hit = cached_scan_png(scan, grid_size, mask_scan) if use_cache else None
     if hit is not None:
         return hit[0], hit[1], None
 
     t0 = perf_counter()
-    index = _pixel_index(scan, grid_size)
+    index = _pixel_index(scan, grid_size, crop_radius_m)
 
-    samples, invalid = _sample_scan(scan, index)
-    if scan.value_table is not None:
-        rgba = _code_lut(scan)[samples]
-    else:
-        rgba = _to_rgba(scan, samples.astype(np.float32))
-    rgba[invalid] = 0
-
-    if _mask_applies(scan, mask_scan):
-        ref = _sample_scan_values(mask_scan, index)
-        # NaN compares False against the threshold, hence the explicit isnan
-        rgba[np.isnan(ref) | (ref < _MIN_REF_DBZ)] = 0
+    tables = _lookup_tables(scan)
+    lut = _code_lut(scan) if scan.value_table is not None else None
+    masked = _mask_applies(scan, mask_scan)
+    mask_tables = _lookup_tables(mask_scan) if masked else None
+    num_px = grid_size * grid_size
+    rgba = np.empty((num_px, 4), dtype=np.uint8)
+    step = max(1, RENDER_STRIP_PIXELS // grid_size) * grid_size
+    for start in range(0, num_px, step):
+        pixels = slice(start, min(num_px, start + step))
+        samples, invalid = _sample_scan(scan, index, tables, pixels)
+        if lut is not None:
+            strip = lut[samples]
+        else:
+            strip = _to_rgba(scan, samples.astype(np.float32))
+        strip[invalid] = 0
+        if masked:
+            ref = _sample_scan_values(mask_scan, index, mask_tables, pixels)
+            # NaN compares False against the threshold, hence the explicit isnan
+            strip[np.isnan(ref) | (ref < _MIN_REF_DBZ)] = 0
+        rgba[pixels] = strip
 
     _mpl_colors()   # makes sure the Agg backend is selected
     import matplotlib.image as mimg  # noqa: PLC0415
@@ -586,6 +702,8 @@ def render_scan_to_png(
     png_bytes = buf.getvalue()
 
     elapsed_ms = (perf_counter() - t0) * 1000.0
+    perf_log.event("radar.render_live", size=grid_size, ms=round(elapsed_ms), cropped=not use_cache,
+                   product=getattr(scan, "product", None), kb=round(len(png_bytes) / 1024))
     log.debug(
         "render_scan_to_png: %.0f KB PNG in %.1f ms (grid=%d)",
         len(png_bytes) / 1024,
@@ -593,7 +711,8 @@ def render_scan_to_png(
         grid_size,
     )
 
-    _store_png(cache_key, png_bytes, index.bounds)
+    if use_cache:
+        _store_png(cache_key, png_bytes, index.bounds)
     return png_bytes, index.bounds, elapsed_ms
 
 

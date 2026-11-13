@@ -1,0 +1,105 @@
+"""The launch window's date scan worker: cancel, replace and close."""
+import os
+import time
+from threading import Event
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+
+from archive.catalog import AvailabilityIndex, ScanCanceled
+from ui.launch.availability import AvailabilityWorker
+
+
+@pytest.fixture(autouse=True)
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+def _wait(predicate):
+    deadline = time.monotonic() + 3
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(5)
+    assert predicate()
+
+
+def test_one_worker_cancels_active_request_and_keeps_only_latest_pending(listed_platform):
+    started, canceled, release = Event(), Event(), Event()
+    calls = []
+
+    def fetch(url, token):
+        calls.append(url)
+        if len(calls) == 1:
+            started.set()
+            assert token.wait(2)
+            canceled.set()
+            assert release.wait(2)
+            raise ScanCanceled()
+        return '<html>THREDDS catalog</html>'
+    worker = AvailabilityWorker(AvailabilityIndex([listed_platform()], fetch, pace=0))
+    updates = []
+    worker.updated.connect(lambda generation, snapshot: updates.append((generation, snapshot)))
+    try:
+        worker.request(1)
+        _wait(started.is_set)
+        original_thread = worker._thread
+        worker.request(2)
+        _wait(canceled.is_set)
+        worker.request(3)
+        release.set()
+        _wait(lambda: any(g == 3 and s.checked == s.total for g, s in updates))
+        assert worker._thread is original_thread
+        assert not any(g == 2 for g, _ in updates)
+        assert not any(g == 1 and s.checked for g, s in updates)
+        assert len(calls) == 3  # canceled first listing, then the two catalogs
+        worker.request(4)
+        _wait(lambda: any(g == 4 and s.checked == s.total for g, s in updates))
+        assert len(calls) == 3  # changing dates after completion is metadata-only
+    finally:
+        release.set()
+        worker.close()
+        worker._thread.join(timeout=3)
+    assert not worker._thread.is_alive()
+
+
+def test_close_interrupts_active_scan_and_joins_without_more_requests(listed_platform):
+    started = Event()
+    calls = []
+
+    def fetch(url, cancel):
+        calls.append(url)
+        started.set()
+        assert cancel.wait(2)
+        raise ScanCanceled()
+    worker = AvailabilityWorker(AvailabilityIndex([listed_platform()], fetch, pace=0))
+    worker.request(1)
+    _wait(started.is_set)
+    worker.close()
+    worker._thread.join(timeout=3)
+    assert not worker._thread.is_alive()
+    assert len(calls) == 1
+
+
+def test_an_unexpected_error_doesnt_stop_later_scans(listed_platform):
+    class Broken(AvailabilityIndex):
+        fail = True
+
+        def scan(self, cancel):
+            if Broken.fail:
+                Broken.fail = False
+                raise RuntimeError("bug")
+            yield from super().scan(cancel)
+    worker = AvailabilityWorker(Broken([listed_platform()], lambda *a: '<html>THREDDS catalog</html>', pace=0))
+    updates = []
+    worker.updated.connect(lambda generation, snapshot: updates.append(generation))
+    try:
+        worker.request(1)
+        _wait(lambda: not Broken.fail)
+        worker.request(2)
+        _wait(lambda: 2 in updates)
+        assert worker._thread.is_alive()
+    finally:
+        worker.close()
+        worker._thread.join(timeout=3)

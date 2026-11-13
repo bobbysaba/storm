@@ -87,6 +87,10 @@ class MainWindowVehiclesMixin:
         self._vehicle_rows_widget.setVisible(False)
         layout.addWidget(self._vehicle_rows_widget)
 
+        # archive: observation trails are the bottom of this same panel
+        if self._archive:
+            self._init_trail_controls(layout)
+
         # no stretch so the pill shrink-wraps to content
 
         # start hidden — opened via toolbar toggle
@@ -161,7 +165,7 @@ class MainWindowVehiclesMixin:
         self._chk_station_plots.toggled.connect(self._station_layer.set_visible)
         self.map_widget.user_dragged.connect(self._on_user_dragged)
         # station plots on by default — delayed until map is ready
-        QTimer.singleShot(1200, lambda: self._station_layer.set_visible(
+        self._later(1200, lambda: self._station_layer.set_visible(
             self._chk_station_plots.isChecked()
         ))
 
@@ -214,6 +218,8 @@ class MainWindowVehiclesMixin:
                     for r in reader
                 ]
             self.map_widget.load_deploy_locs(points)
+            # ranked points, for the command palette's "nearest deployment location"
+            self._deploy_points = [p for p in points if p["rank_abi"] is not None]
             log.info("deploy locs: loaded %d points from %s", len(points), config.DEPLOY_LOCS_FILE)
         except Exception as e:
             log.warning("deploy locs: could not load %s: %s", config.DEPLOY_LOCS_FILE, e)
@@ -750,6 +756,9 @@ class MainWindowVehiclesMixin:
         if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
             return []
 
+        surface = getattr(self, "_archive_clamps_surface", None)
+        if surface is not None and vehicle_id in surface.rows:
+            return surface.history(vehicle_id, self._time_ctrl.current_time)
         dense_obs = getattr(self, "_archive_vehicle_obs", None)
         if (
             dense_obs is not None

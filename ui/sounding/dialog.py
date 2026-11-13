@@ -30,10 +30,13 @@ from ui.sounding.params import (
 )
 from ui.sounding.theme import (
     _ACCENT, _AX_BG, _BARB_CLR, _BORDER, _DEWP_CLR, _EIL_CLR, _EXPORT_BTN_QSS,
-    _FIG_BG, _HDR_CLR, _HODO_LAYERS, _LM_CLR, _MUTED, _PARCEL_CLR, _RM_CLR,
+    _FIG_BG, _HDR_CLR, _HODO_LAYERS, _LM_CLR, _MUTED, _OBS_MOTION_CLR, _PARCEL_CLR, _RM_CLR,
     _SLIDER_QSS, _TEMP_CLR, _TEXT, _VPARCEL_CLR, _VTEMP_CLR, _force_bg, _lbl,
     _SOURCE_COLORS, _SOURCE_LABELS, _SOURCE_LS, _SOURCE_GLYPHS,
 )
+
+_MAX_TICK_LABELS = 8      # above this, only about five evenly spaced tick labels
+
 
 def _pill_qss(src: str, active: bool) -> str:
     color = _SOURCE_COLORS[src]
@@ -79,6 +82,7 @@ class SoundingDialog(QDialog):
         self._param_labels: dict[str, QLabel] = {}
         self._param_colors: dict[str, str]    = {}
         self._tick_labels:  list[QLabel]       = []
+        self._tick_indices: list[int]          = []   # the sounding each tick label names
 
         self._skewt_ax     = None
         self._current_snd: Sounding | None = None
@@ -96,8 +100,21 @@ class SoundingDialog(QDialog):
         self._pill_widgets: dict[str, QPushButton] = {}
         # comparison row labels: source_key → QLabel (one line per source)
         self._comp_row_labels: dict[str, QLabel] = {}
+        # observed storm motion from the archive storm track: (u_ms, v_ms) or None
+        self._observed_motion: tuple[float, float] | None = None
 
         self._build_ui()
+
+    def set_observed_storm_motion(self, motion) -> None:
+        """The storm track's mean motion (core.storm_motion.StormMotion), or
+        None. Shown on the hodograph as OBS beside Bunkers RM/LM, and used
+        for the 'SRH obs' column; the Bunkers-based values are unchanged."""
+        value = (motion.u_ms, motion.v_ms) if motion is not None else None
+        if value == self._observed_motion:
+            return
+        self._observed_motion = value
+        if self._sset is not None and self.isVisible():
+            self._draw()
 
 
     def load(self, sset: SoundingSet):
@@ -116,12 +133,20 @@ class SoundingDialog(QDialog):
 
         self._sset = sset
 
-        # check if this is an observed or NSSL sounding set
-        if sset.is_observed or sset.is_nssl:
+        # observed, NSSL, TROPoe and CopterSonde sets: soundings at clock times
+        if sset.is_time_series:
             # default to the most recent (last) sounding
             self._cur_idx = len(sset.soundings) - 1
             self._source_cur_idx[sset.source] = self._cur_idx
-            self.setWindowTitle("NSSL Observed Sounding" if sset.is_nssl else "Observed Sounding")
+            if sset.is_nssl:
+                title = "NSSL Observed Sounding"
+            elif sset.is_clamps_tropoe:
+                title = "CLAMPS TROPoe Profile"
+            elif sset.is_coptersonde:
+                title = "CopterSonde Profile"
+            else:
+                title = "Observed Sounding"
+            self.setWindowTitle(title)
         else:
             # existing logic for HRRR/Model soundings: default to F0 (Analysis)
             self._cur_idx = next(
@@ -155,8 +180,8 @@ class SoundingDialog(QDialog):
         src = sset.source
         self._sources[src] = sset
         self._enabled_sources.add(src)
-        # pick best matching index: for HRRR secondary snap to F0; for OBS/NSSL use latest
-        if sset.is_observed or sset.is_nssl:
+        # pick best matching index: for HRRR secondary snap to F0; otherwise the latest
+        if sset.is_time_series:
             self._source_cur_idx[src] = len(sset.soundings) - 1
         else:
             self._source_cur_idx[src] = next(
@@ -376,14 +401,19 @@ class SoundingDialog(QDialog):
         kg.setVerticalSpacing(1)
 
         kg.addWidget(_lbl("", color=_HDR_CLR, size=9, bold=True), 0, 0)
-        for c, hdr in enumerate(["Shear", "SRH", "SRW"]):
-            kg.addWidget(_lbl(hdr, color=_HDR_CLR, size=9, bold=True, align=_A), 0, c + 1)
+        for c, hdr in enumerate(["Shear", "SRH", "SRH obs", "SRW"]):
+            header = _lbl(hdr, color=_HDR_CLR, size=9, bold=True, align=_A)
+            if hdr == "SRH":
+                header.setToolTip("SRH using the Bunkers right-mover motion")
+            elif hdr == "SRH obs":
+                header.setToolTip("SRH using the observed storm motion from the archive storm track")
+            kg.addWidget(header, 0, c + 1)
 
         _kin_rows = [
-            ("0-500m", "shear_500", "srh_500", "srw_500"),
-            ("0-1km",  "shear01",   "srh01",   "srw01"),
-            ("0-3km",  "shear03",   "srh03",   "srw03"),
-            ("0-6km",  "shear06",   None,      "srw06"),
+            ("0-500m", "shear_500", "srh_500", "srh_500_obs", "srw_500"),
+            ("0-1km",  "shear01",   "srh01",   "srh01_obs",   "srw01"),
+            ("0-3km",  "shear03",   "srh03",   "srh03_obs",   "srw03"),
+            ("0-6km",  "shear06",   None,      None,          "srw06"),
         ]
         for r, (row_lbl, *keys) in enumerate(_kin_rows):
             kg.addWidget(_lbl(row_lbl, color=_HDR_CLR, size=10, bold=True), r + 1, 0)
@@ -501,18 +531,22 @@ class SoundingDialog(QDialog):
         self._scrubber.setValue(self._cur_idx)
         self._scrubber.blockSignals(False)
 
-        # for obs/nssl: show the day number if any two soundings share the same hour.
-        time_based = self._sset.is_observed or self._sset.is_nssl
-        snd_hours = (
-            [s.valid_time.strftime("%H%d") for s in self._sset.soundings]
-            if time_based else []
-        )
-        needs_day = len(snd_hours) != len(set(
-            s.valid_time.strftime("%H") for s in self._sset.soundings
-        )) if time_based else False
+        # for clock-time sets: show the day number when they span two days.
+        time_based = self._sset.is_time_series
+        needs_day = time_based and len({s.valid_time.date() for s in self._sset.soundings}) > 1
+
+        # TROPoe gives a retrieval every few minutes and the row is narrow:
+        # past _MAX_TICK_LABELS only spaced labels are built (the header has
+        # the exact time)
+        if count <= _MAX_TICK_LABELS:
+            self._tick_indices = list(range(count))
+        else:
+            step = -(-(count - 1) // 4)
+            self._tick_indices = list(range(0, count - 1, step)) + [count - 1]
 
         self._tick_row.addStretch(1)
-        for i, snd in enumerate(self._sset.soundings):
+        for n, i in enumerate(self._tick_indices):
+            snd = self._sset.soundings[i]
             if time_based:
                 if needs_day:
                     f_str = f"{snd.valid_time.strftime('%H%MZ')}\n{snd.valid_time.day}"
@@ -531,7 +565,7 @@ class SoundingDialog(QDialog):
             lbl.setFixedWidth(36)
             self._tick_labels.append(lbl)
             self._tick_row.addWidget(lbl)
-            if i < count - 1:
+            if n < len(self._tick_indices) - 1:
                 self._tick_row.addStretch(2)
         self._tick_row.addStretch(1)
 
@@ -552,8 +586,10 @@ class SoundingDialog(QDialog):
 
         if self._sset.is_nssl:
             valid_str = snd.valid_time.strftime("%H%MZ %d %b %Y")
-            lat = snd.lat if (snd.lat != 0.0 or snd.lon != 0.0) else self._sset.lat
-            lon = snd.lon if (snd.lat != 0.0 or snd.lon != 0.0) else self._sset.lon
+            # a launch placed (or found unplaceable) keeps its own position
+            own = snd.location_source is not None or snd.lat != 0.0 or snd.lon != 0.0
+            lat = snd.lat if own else self._sset.lat
+            lon = snd.lon if own else self._sset.lon
             self._header_line1.setText("NSSL  ·  DL Truck")
             location = ""
             if lat != 0.0 or lon != 0.0:
@@ -561,8 +597,26 @@ class SoundingDialog(QDialog):
                     f"  ·  {abs(lat):.3f}°{'N' if lat >= 0 else 'S'}  "
                     f"{abs(lon):.3f}°{'E' if lon >= 0 else 'W'}"
                 )
+            elif snd.location_source == "unknown":
+                location = "  ·  launch position unknown"
             self._header_line2.setText(
                 f"Valid {valid_str}{location}  ·  {self._sset.elevation:.0f} m MSL"
+            )
+        elif self._sset.is_clamps_tropoe:
+            valid_str = snd.valid_time.strftime("%H%MZ %d %b %Y")
+            self._header_line1.setText(f"CLAMPS  ·  {self._sset.station_name}")
+            self._header_line2.setText(
+                f"Valid {valid_str}  ·  {self._sset.elevation:.0f} m MSL  ·  "
+                "retrieval, no wind (AERI / MWR)"
+            )
+        elif self._sset.is_coptersonde:
+            valid_str = snd.valid_time.strftime("%H%MZ %d %b %Y")
+            self._header_line1.setText(f"CopterSonde  ·  {self._sset.station_id}")
+            self._header_line2.setText(
+                f"Valid {valid_str}  ·  "
+                f"{abs(snd.lat):.3f}°{'N' if snd.lat >= 0 else 'S'}  "
+                f"{abs(snd.lon):.3f}°{'E' if snd.lon >= 0 else 'W'}  ·  "
+                f"{float(snd.height[0]) if snd.height.size else 0.0:.0f} m MSL"
             )
         elif self._sset.is_observed:
             valid_str = snd.valid_time.strftime("%Hz %d %b %Y")
@@ -594,7 +648,7 @@ class SoundingDialog(QDialog):
                 f"{self._sset.elevation:.0f} m MSL"
             )
 
-        for i, lbl in enumerate(self._tick_labels):
+        for i, lbl in zip(self._tick_indices, self._tick_labels):
             active = (i == self._cur_idx)
             lbl.setStyleSheet(
                 "background-color: transparent; font-size: 10px; "
@@ -856,6 +910,10 @@ class SoundingDialog(QDialog):
         v_kt       = (snd.v_wind[thin] * units("m/s")).to("knots").magnitude
         pres_thin  = snd.pressure[thin]
         hgt_thin   = snd.height[thin]
+        if not hgt_thin.size:
+            # no wind at all (a TROPoe retrieval): an empty hodograph
+            ax.text(0, 0, "no wind", fontsize=7, color=_MUTED, ha="center", va="center")
+            return
         hgt_agl_km = (hgt_thin - hgt_thin[0]) / 1000.0
 
         # gapless height-colored trace via LineCollection
@@ -939,6 +997,17 @@ class SoundingDialog(QDialog):
                     fontsize=5.5, fontweight="bold", va="top", ha="left", zorder=8)
         except Exception as e:
             log.debug("Bunkers storm motion failed: %s", e)
+
+        # observed storm motion from the archive storm track
+        if self._observed_motion is not None:
+            obs_u, obs_v = self._observed_motion
+            obs_u_kt, obs_v_kt = obs_u * 1.94384, obs_v * 1.94384
+            obs_dir = float((np.degrees(np.arctan2(obs_u, obs_v)) + 180) % 360)
+            ax.plot(obs_u_kt, obs_v_kt, "D", color=_OBS_MOTION_CLR, markersize=5,
+                    markeredgecolor=_FIG_BG, markeredgewidth=0.8, zorder=7)
+            ax.text(0.03, 0.83, f"OBS {obs_dir:.0f}°/{np.hypot(obs_u_kt, obs_v_kt):.0f}kt",
+                    transform=ax.transAxes, color=_OBS_MOTION_CLR,
+                    fontsize=5.5, fontweight="bold", va="top", ha="left", zorder=8)
 
         # secondary source hodograph overlays — same height colormap, different linestyle
         if secondary_snds:
@@ -1382,6 +1451,23 @@ class SoundingDialog(QDialog):
             log.debug("storm motion / SRH failed: %s", e)
             for k in ("srh01", "srh03", "srh_500"):
                 _set(k, None)
+
+        # the same helicities relative to the observed (storm track) motion
+        for k in ("srh_500_obs", "srh01_obs", "srh03_obs"):
+            _set(k, None)
+        if self._observed_motion is not None:
+            try:
+                if wind_valid.sum() < 4:
+                    raise ValueError("not enough finite wind levels")
+                obs_u = self._observed_motion[0] * units("m/s")
+                obs_v = self._observed_motion[1] * units("m/s")
+                for key, depth in (("srh_500_obs", 500 * units.m), ("srh01_obs", 1 * units.km),
+                                   ("srh03_obs", 3 * units.km)):
+                    srh, _, _ = mpcalc.storm_relative_helicity(
+                        wind_hgt_agl, wind_u_ms, wind_v_ms, depth=depth, storm_u=obs_u, storm_v=obs_v)
+                    _set(key, float(srh.to("m**2/s**2").m))
+            except Exception as e:
+                log.debug("observed-motion SRH failed: %s", e)
 
         shear06_kt = None
         for depth, key in [

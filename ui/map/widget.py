@@ -26,6 +26,18 @@ if not SAFE_MAP_MODE:
 log = logging.getLogger(__name__)
 
 
+def _no_result(script: str) -> str:
+    """The script with a final `void 0`, so its completion value is undefined.
+
+    QtWebEngine sends a script's completion value (its last expression) back
+    from the page to this process even when no callback asks for it. MapLibre
+    methods return the map itself (map.setLayoutProperty(...) is `this`), so a
+    script ending in one made Chromium serialize the whole map: a large
+    returned object cost about 0.6 s per call, against under 0.1 ms with
+    `void 0` (measured 2026-11-11)."""
+    return f"{script}\n;void 0;"
+
+
 class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     map_ready             = pyqtSignal()
     map_clicked           = pyqtSignal(float, float)
@@ -38,12 +50,18 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     storm_cone_drag_ended = pyqtSignal(str, float, float)  # id, lat, lon
     storm_cone_place_drag_ended = pyqtSignal(float, float)
     private_pin_route_requested = pyqtSignal(float, float, str)
+    context_menu_requested = pyqtSignal(float, float, str)  # lat, lon, feature json or ""
+    track_point_add_requested = pyqtSignal(float, float)          # lat, lon
+    track_point_selected      = pyqtSignal(int)                   # point_id
+    track_point_moved         = pyqtSignal(int, float, float, bool)  # point_id, lat, lon, keep_time
     map_double_clicked    = pyqtSignal(float, float)
     drawing_clicked       = pyqtSignal(str)
     radar_station_clicked = pyqtSignal(str)
+    lidar_location_clicked = pyqtSignal(str)
     sounding_clicked             = pyqtSignal(float, float)
     obs_sounding_station_clicked = pyqtSignal(str, str, float, float, float)  # id, name, lat, lon, elev
     asos_bbox_selected    = pyqtSignal(float, float, float, float)  # west, south, east, north
+    asos_box_cancelled    = pyqtSignal()                            # Esc / right-click while drawing
     user_dragged          = pyqtSignal()
     satellite_idle        = pyqtSignal()
     map_pick_for_route    = pyqtSignal(float, float)
@@ -70,6 +88,9 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self._scheme_handler = StormSchemeHandler(
             TILES_PATH, STATIC_PATH, build_map_html()
         )
+        # the default profile is process-wide, and a second install for the
+        # scheme is ignored (Qt only logs it): the window closing before a
+        # new one is built (Change Day) removes its handler in shutdown()
         QWebEngineProfile.defaultProfile().installUrlSchemeHandler(
             b"storm", self._scheme_handler
         )
@@ -87,6 +108,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.channel = QWebChannel()
         self.channel.registerObject("bridge", self.bridge)
         self.page().setWebChannel(self.channel)
+        self._map_page = self.page()
 
         self.bridge.map_clicked.connect(self.map_clicked)
         self.bridge.map_moved.connect(self.map_moved)
@@ -98,12 +120,18 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.bridge.storm_cone_drag_ended.connect(self.storm_cone_drag_ended)
         self.bridge.storm_cone_place_drag_ended.connect(self.storm_cone_place_drag_ended)
         self.bridge.private_pin_route_requested.connect(self.private_pin_route_requested)
+        self.bridge.context_menu_requested.connect(self.context_menu_requested)
+        self.bridge.track_point_add_requested.connect(self.track_point_add_requested)
+        self.bridge.track_point_selected.connect(self.track_point_selected)
+        self.bridge.track_point_moved.connect(self.track_point_moved)
         self.bridge.map_double_clicked.connect(self.map_double_clicked)
         self.bridge.drawing_clicked.connect(self.drawing_clicked)
         self.bridge.radar_station_clicked.connect(self.radar_station_clicked)
+        self.bridge.lidar_location_clicked.connect(self.lidar_location_clicked)
         self.bridge.sounding_clicked.connect(self.sounding_clicked)
         self.bridge.obs_sounding_station_clicked.connect(self.obs_sounding_station_clicked)
         self.bridge.asos_bbox_selected.connect(self.asos_bbox_selected)
+        self.bridge.asos_box_cancelled.connect(self.asos_box_cancelled)
         self.bridge.user_dragged.connect(self.user_dragged)
         self.bridge.satellite_idle.connect(self.satellite_idle)
         self.bridge.map_pick_for_route.connect(self.map_pick_for_route)
@@ -115,6 +143,16 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.loadFinished.connect(self._on_page_load_finished)
 
         QTimer.singleShot(0, self._load_map)
+
+    def shutdown(self) -> None:
+        """Release storm:// on the default profile so the next MapWidget in
+        this process can install its own (MainWindow.closeEvent)."""
+        handler = getattr(self, "_scheme_handler", None)
+        if SAFE_MAP_MODE or handler is None:
+            return
+        from PyQt6.QtWebEngineCore import QWebEngineProfile
+        QWebEngineProfile.defaultProfile().removeUrlSchemeHandler(handler)
+        self._scheme_handler = None
 
     def javaScriptConsoleMessage(self, level, message, line, source):
         # emit all JS console messages to stdout for debugging (includes errors/warnings/info)
@@ -141,9 +179,60 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             return
         self._map_ready = True
         for script in self._js_queue:
-            self.page().runJavaScript(script)
+            self.map_page().runJavaScript(_no_result(script))
         self._js_queue.clear()
+        self._start_perf_log_probe()
         self.map_ready.emit()
+
+    # --perf-log only (core/perf_log.py): the GPU the map draws with, and
+    # how smoothly the page renders -- frame times from requestAnimationFrame,
+    # read every 5 s. The web view's renderer process is invisible to Python.
+    _PERF_JS_START = """(function(){
+      var c = document.createElement('canvas');
+      var gl = c.getContext('webgl2') || c.getContext('webgl');
+      var info = {webgl: gl ? (gl instanceof WebGL2RenderingContext ? 2 : 1) : 0};
+      if (gl) {
+        var d = gl.getExtension('WEBGL_debug_renderer_info');
+        info.renderer = d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        info.vendor = d ? gl.getParameter(d.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+        info.max_texture = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      }
+      info.device_pixel_ratio = window.devicePixelRatio;
+      if (!window._stormPerf) {
+        window._stormPerf = {frames: 0, worst: 0, slow: 0, last: performance.now()};
+        (function tick(now) {
+          var p = window._stormPerf, dt = now - p.last;
+          p.last = now; p.frames++; if (dt > p.worst) p.worst = dt; if (dt > 50) p.slow++;
+          requestAnimationFrame(tick);
+        })(performance.now());
+      }
+      return JSON.stringify(info);
+    })()"""
+    _PERF_JS_READ = """(function(){
+      var p = window._stormPerf; if (!p) return null;
+      var out = JSON.stringify({frames: p.frames, worst_ms: Math.round(p.worst), slow_frames: p.slow,
+                                heap_mb: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null});
+      p.frames = 0; p.worst = 0; p.slow = 0; return out;
+    })()"""
+
+    def _start_perf_log_probe(self) -> None:
+        from core import perf_log
+        if not perf_log.enabled() or getattr(self, "_perf_timer", None) is not None:
+            return
+
+        def logged(kind):
+            def callback(result):
+                try:
+                    if result:
+                        perf_log.event(kind, **json.loads(result))
+                except Exception:  # noqa: BLE001
+                    pass
+            return callback
+        self.map_page().runJavaScript(self._PERF_JS_START, logged("gpu"))
+        self._perf_timer = QTimer(self)
+        self._perf_timer.setInterval(5000)
+        self._perf_timer.timeout.connect(lambda: self.map_page().runJavaScript(self._PERF_JS_READ, logged("map.frames")))
+        self._perf_timer.start()
 
     def _mark_map_ready_if_bridge_stalled(self):
         """Allow Python startup to continue if the JS map-ready callback stalls."""
@@ -152,13 +241,32 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         log.warning("Map page loaded but JS map-ready callback did not fire; continuing startup")
         self._map_ready = True
         self._js_queue.clear()
+        self._start_perf_log_probe()
         self.map_ready.emit()
+
+    def map_page(self):
+        """The map's page, also while the Video Studio has moved it into an
+        off-screen view to render at export size (ui/studio/capture.py), when
+        this view's own page() is a blank placeholder."""
+        return getattr(self, "_map_page", None) or self.page()
+
+    _BIG_JS_BYTES = 200_000     # --perf-log: log calls this large (see core/perf_log.py)
+
+    @staticmethod
+    def _log_big_js(script: str) -> None:
+        from core import perf_log
+        if perf_log.enabled():
+            import re
+            names = re.findall(r"storm[A-Z]\w+", script[:400])
+            perf_log.event("map.big_js", kb=round(len(script) / 1024), call=names[0] if names else script[:60])
 
     def run_js(self, script: str):
         if SAFE_MAP_MODE:
             return
         if self._map_ready:
-            self.page().runJavaScript(script)
+            if len(script) >= self._BIG_JS_BYTES:
+                self._log_big_js(script)
+            self.map_page().runJavaScript(_no_result(script))
         else:
             self._js_queue.append(script)
 
@@ -383,6 +491,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"stormSetPrivatePinOwnLocation({lat}, {lon});"
         )
 
+    def add_private_pin(self, lat: float, lon: float):
+        """Drop a private pin (kept only in this browser's storage) and open its menu."""
+        self.run_js(f"if(window.stormAddPrivatePin) stormAddPrivatePin({lat}, {lon});")
+
     def set_route_pick_mode(self, active: bool):
         """Toggle crosshair pick mode for destination selection."""
         flag = "true" if active else "false"
@@ -516,6 +628,10 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def set_storm_cone_draggable(self, cone_id: str, on: bool) -> None:
         self.run_js(f"if(window.stormSetStormConeDraggable) stormSetStormConeDraggable('{cone_id}', {'true' if on else 'false'});")
 
+    def set_annotations_visible(self, visible: bool) -> None:
+        """Drawings (fronts, boundaries...), annotation markers and storm cones."""
+        self.run_js(f"if(window.stormSetAnnotationsVisible) stormSetAnnotationsVisible({'true' if visible else 'false'});")
+
     def set_storm_cone_placement_mode(self, active: bool) -> None:
         self.run_js(f"if(window.stormSetStormConePlacementMode) stormSetStormConePlacementMode({'true' if active else 'false'});")
 
@@ -614,6 +730,66 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
 
     def set_scan_sectors_visible(self, visible: bool) -> None:
         self.run_js(f"if(window.stormSetScanSectorsVisible) stormSetScanSectorsVisible({'true' if visible else 'false'});")
+
+    # ── storm track (archive TRACK) ──
+    def set_track_geojson(self, geojson: dict) -> None:
+        self.run_js(f"if(window.stormSetTrackGeoJSON) stormSetTrackGeoJSON({json.dumps(json.dumps(geojson))});")
+
+    def set_track_edit_mode(self, active: bool) -> None:
+        self.run_js(f"if(window.stormSetTrackEditMode) stormSetTrackEditMode({'true' if active else 'false'});")
+
+    def set_track_layers_visible(self, line: bool, points: bool) -> None:
+        self.run_js(
+            "if(window.stormSetTrackLayersVisible) stormSetTrackLayersVisible("
+            f"{'true' if line else 'false'}, {'true' if points else 'false'});"
+        )
+
+    def set_track_marker(self, marker: dict | None) -> None:
+        """The track's reference marker ({lat, lon, label}), or None to remove it."""
+        arg = json.dumps(json.dumps(marker)) if marker else "null"
+        self.run_js(f"if(window.stormSetTrackMarker) stormSetTrackMarker({arg});")
+
+    # ── observation trails (archive VEHICLES > show trails) ──
+    def set_trails(self, geojson: dict | None, stops: list | None = None, units: str = "",
+                   label: str = "") -> None:
+        """Observation trails (core/trails.py); None clears them. `stops` are
+        the band colors (core.trails.color_stops), `label` and `units` name the
+        quantity in the hover readout."""
+        data = json.dumps(geojson or {"type": "FeatureCollection", "features": []})
+        self.run_js(f"if(window.stormSetTrails) stormSetTrails({json.dumps(data)}, "
+                    f"{json.dumps(stops or [])}, {json.dumps(units)}, {json.dumps(label)});")
+
+    # ── Doppler lidar (archive LIDAR) ──
+    def set_lidar_locations(self, locations: list[dict]) -> None:
+        """Clickable lidar locations: dicts of key, lat, lon, label (under
+        the dot), hover (lines) and selected; an empty list removes them."""
+        features = [{
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [loc["lon"], loc["lat"]]},
+            "properties": {"key": loc["key"], "label": loc.get("label", ""),
+                           "hover": loc.get("hover", ""), "selected": bool(loc.get("selected"))},
+        } for loc in locations]
+        data = json.dumps({"type": "FeatureCollection", "features": features})
+        self.run_js(f"if(window.stormSetLidarLocations) stormSetLidarLocations({json.dumps(data)});")
+
+    def set_lidar_image(self, png: bytes, bounds) -> None:
+        """One lidar sweep's PNG over [west, south, east, north]."""
+        self._lidar_image_seq = getattr(self, "_lidar_image_seq", 0) + 1
+        image_id = str(self._lidar_image_seq)
+        self.scheme_handler.set_lidar_png(image_id, png)
+        west, south, east, north = bounds
+        url = f"storm://app/lidar/{image_id}.png"
+        self.run_js(f"if(window.stormSetLidarImage) stormSetLidarImage({json.dumps(url)},"
+                    f"{west},{south},{east},{north});")
+
+    def clear_lidar_image(self) -> None:
+        self.run_js("if(window.stormClearLidarImage) stormClearLidarImage();")
+
+    def set_damage_paths(self, geojson: dict | None) -> None:
+        """Damage-survey paths (archive/fetchers/damage_paths_archive_fetcher.py),
+        colored by EF rating; None clears them."""
+        data = json.dumps(geojson or {"type": "FeatureCollection", "features": []})
+        self.run_js(f"if(window.stormSetDamagePaths) stormSetDamagePaths({json.dumps(data)});")
 
     def set_spc_geojson(
         self,

@@ -1,6 +1,9 @@
 """Live loop sync: satellite and vehicles follow the radar loop (FEATURE_PLAN.md step 2)."""
 
 import logging
+from datetime import datetime, timezone
+
+from PyQt6.QtCore import QTimer
 
 from ui.loop_sync import RADAR, SATELLITE, SATELLITE_TOLERANCE_S, LoopSync, frame_at
 
@@ -8,6 +11,8 @@ log = logging.getLogger("ui.app.main_window")
 
 # satellite opacity, as a fraction of the user's, while the loop time has no frame
 _SATELLITE_NO_FRAME_DIM = 0.3
+# loop timeline: redraw this often to pick up new scans and frames
+_TIMELINE_REFRESH_MS = 2000
 
 
 class MainWindowLoopMixin:
@@ -20,6 +25,8 @@ class MainWindowLoopMixin:
         self._loop_satellite_dimmed = False
         self._loop_vehicles_shown = False
         self._loop_hidden_vehicles: set[str] = set()
+        if hasattr(self, "settings_pill"):
+            self.settings_pill.set_loop_available(True)
 
         self._loop_sync.time_changed.connect(self._on_loop_time_changed)
         self._loop_sync.vehicles_changed.connect(lambda _on: self._apply_vehicle_loop_time())
@@ -27,9 +34,7 @@ class MainWindowLoopMixin:
         self.loop_chip.clicked.connect(self._return_loop_to_live)
 
         rc = self.radar_controls
-        self._loop_sync.set_enabled(rc.is_sync_enabled())
         self._loop_sync.set_vehicles(rc.is_sync_vehicles())
-        rc.sync_toggled.connect(self._on_loop_sync_toggled)
         rc.sync_vehicles_toggled.connect(self._loop_sync.set_vehicles)
         # these run after the radar/satellite handlers connected in their own init,
         # so the frame they publish is the one now on screen
@@ -46,6 +51,94 @@ class MainWindowLoopMixin:
         self._satellite_fetcher.frames_updated.connect(
             lambda mode, _frames: self._on_loop_satellite_changed(mode))
         self._update_satellite_sync_state()
+        if getattr(self, "loop_timeline", None) is not None:
+            self._attach_loop_timeline()
+
+    # loop timeline (bottom centre)
+
+    def _attach_loop_timeline(self):
+        """Route the timeline to the driving drawer; it redraws from the loop's signals."""
+        tl, rc, sc = self.loop_timeline, self.radar_controls, self.satellite_controls
+        tl.play_clicked.connect(lambda: self._loop_driver_call("toggle_loop"))
+        tl.step_requested.connect(lambda d: self._loop_driver_call("step_frame", d))
+        tl.live_clicked.connect(lambda: self._loop_driver_call("jump_to_latest"))
+        tl.speed_chosen.connect(lambda i: self._loop_driver_call("set_speed_index", i))
+        tl.scrub_requested.connect(self._on_timeline_scrub)
+        refresh = lambda *_: self._schedule_timeline_refresh()  # noqa: E731
+        self._loop_sync.time_changed.connect(refresh)
+        self._loop_sync.vehicles_changed.connect(refresh)
+        for sig in (rc.radar_toggled, rc.frame_requested, rc.loop_toggled, rc.speed_changed, sc.mode_changed, sc.frame_requested, sc.loop_toggled,
+                    sc.speed_changed):
+            sig.connect(refresh)
+        self._timeline_refresh_pending = False
+        self._timeline_timer = QTimer(self)
+        self._timeline_timer.setInterval(_TIMELINE_REFRESH_MS)
+        self._timeline_timer.timeout.connect(self._refresh_loop_timeline)
+        self._timeline_timer.start()
+        rc.set_playback_row_visible(False)
+        self._refresh_loop_timeline()
+
+    def _loop_driver(self):
+        """(kind, controls) of the drawer the timeline drives, or (None, None)."""
+        if self._radar_data_enabled():
+            return RADAR, self.radar_controls
+        if self.satellite_controls.current_mode():
+            return SATELLITE, self.satellite_controls
+        return None, None
+
+    def _loop_times(self, kind) -> list:
+        if kind == RADAR:
+            rc = self.radar_controls
+            return [s.scan_time for s in
+                    self._scan_cache.get(f"{rc.current_site()}/{rc.current_product()}", [])]
+        mode = self.satellite_controls.current_mode()
+        return [f.timestamp for f in self._satellite_cache.get(mode, [])] if mode else []
+
+    def _loop_driver_call(self, method, *args):
+        _kind, driver = self._loop_driver()
+        if driver is not None:
+            getattr(driver, method)(*args)
+
+    def _on_timeline_scrub(self, t):
+        """Show the driver's frame nearest ``t``."""
+        kind, driver = self._loop_driver()
+        times = self._loop_times(kind) if driver is not None else []
+        if not times:
+            return
+        idx = min(range(len(times)), key=lambda i: abs((times[i] - t).total_seconds()))
+        driver.stop_loop()
+        driver.request_frame(idx)
+
+    def _schedule_timeline_refresh(self):
+        if getattr(self, "_timeline_refresh_pending", True):
+            return
+        self._timeline_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_loop_timeline)
+
+    def _refresh_loop_timeline(self):
+        self._timeline_refresh_pending = False
+        tl = self.loop_timeline
+        rc, sc = self.radar_controls, self.satellite_controls
+        kind, driver = self._loop_driver()
+        visible = driver is not None
+        if tl.isVisible() != visible:
+            tl.setVisible(visible)
+            self._request_layout()
+        if not visible:
+            return
+        times = self._loop_times(kind)
+        frame_time = None
+        if times:
+            frame_time = times[min(driver.current_frame(), len(times) - 1)]
+        mode = sc.current_mode()
+        sat_times = self._loop_times(SATELLITE) if mode else []
+        tl.set_ticks(times if kind == RADAR else [], sat_times,
+                     SATELLITE_TOLERANCE_S.get(mode, 600))
+        tl.set_state(frame_time=frame_time, now=datetime.now(timezone.utc),
+                     looping=driver.is_looping(),
+                     live=driver.is_at_latest_frame() and not driver.is_looping(),
+                     can_step=len(times) > 1, speed_labels=driver.speed_labels(),
+                     speed_index=driver.speed_index())
 
     # drivers
 
@@ -87,16 +180,8 @@ class MainWindowLoopMixin:
         self._publish_radar_loop_time()
         self._update_satellite_sync_state()
 
-    def _on_loop_sync_toggled(self, enabled: bool):
-        self._loop_sync.set_enabled(enabled)
-        self._update_satellite_sync_state()
-        if self._radar_data_enabled():
-            self._publish_radar_loop_time()
-        else:
-            self._publish_satellite_loop_time()
-
     def _update_satellite_sync_state(self):
-        """Satellite follows (own playback off) while sync is on and radar drives."""
+        """Satellite follows the radar loop (own playback off) while radar drives."""
         sync = getattr(self, "_loop_sync", None)
         if sync is None:
             return
@@ -128,7 +213,8 @@ class MainWindowLoopMixin:
             self.loop_chip.setVisible(False)
         else:
             self.loop_chip.setText(f"◷ LOOP {t.strftime('%H:%MZ')}")
-            self.loop_chip.setVisible(True)
+            # the timeline shows the loop time
+            self.loop_chip.setVisible(getattr(self, "loop_timeline", None) is None)
         self._layout_overlays()
 
     def _on_loop_satellite_changed(self, mode: str):

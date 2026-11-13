@@ -231,6 +231,22 @@ class SurfaceControls(Drawer):
         if "plots" in state:
             self._chk_show_plots.setChecked(bool(state["plots"]))
 
+    def configure_for_archive(self) -> None:
+        """ARCHIVE: ASOS only, replayed on the archive clock from a box drawn
+        on the map (the regional mesonets aren't archived)."""
+        for btn in self._source_buttons().values():
+            btn.hide()
+        self._btn_asos.setToolTip("Replay the ASOS stations inside a box you draw on the map")
+        self._asos_bbox_link.setToolTip("Draw another box (replaces these stations)")
+        green = f'<span style="color:{P.OK};">●</span>'
+        yellow = f'<span style="color:{P.WARN};">●</span>'
+        red = f'<span style="color:{P.ERROR};">●</span>'
+        self._legend.setText(
+            f"Report age at the clock: {green} ≤ 70 min  {yellow} ≤ 90 min  {red} > 90 min")
+        self._legend_div.setVisible(True)
+        self._legend.setVisible(True)
+        self.set_status("ASOS: turn on, then drag a box on the map")
+
     def asos_enabled(self) -> bool:
         return self._btn_asos.isChecked()
 

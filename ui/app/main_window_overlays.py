@@ -110,6 +110,7 @@ class MainWindowOverlaysMixin:
         self.surface_controls.plots_toggled.connect(self._surface_layer.set_visible)
 
         self.map_widget.asos_bbox_selected.connect(self._on_asos_bbox_selected)
+        self.map_widget.asos_box_cancelled.connect(self._on_asos_box_cancelled)
         self._surface_fetcher.observations_updated.connect(self._on_surface_observations_updated)
         self._surface_fetcher.status_updated.connect(self.surface_controls.set_status)
         self._surface_fetcher.diagnostics_updated.connect(self.surface_controls.set_diagnostics)
@@ -117,7 +118,7 @@ class MainWindowOverlaysMixin:
         self._surface_fetcher.error.connect(self._on_surface_error)
 
         self._surface_fetcher.start()
-        QTimer.singleShot(1200, lambda: self._surface_layer.set_visible(
+        self._later(1200, lambda: self._surface_layer.set_visible(
             self.surface_controls.plots_visible()
         ))
 
@@ -302,9 +303,12 @@ class MainWindowOverlaysMixin:
     def _on_satellite_toggled(self, checked: bool):
         self._set_layer_active("satellite", checked)
         if self._archive:
-            # archive mode: simply show/hide the overlay the archive fetcher is updating.
+            # archive mode: show/hide the overlay; the fetcher lists and
+            # downloads only while the layer is on.
             has_data = getattr(self, "_archive_sat_has_data", False)
             self.map_widget.set_satellite_visible(checked and has_data)
+            if hasattr(self, "_archive_satellite"):
+                self._archive_satellite.set_active(checked)
             return
         if not hasattr(self, "_satellite_fetcher"):
             # drawer used before _init_satellite ran (it waits for the startup phases)
@@ -647,7 +651,8 @@ class MainWindowOverlaysMixin:
             self.map_widget.clear_satellite_frame()
             self.map_widget.set_satellite_visible(False)
             self._archive_satellite.set_mode(mode)
-            self.status_msg_label.setText(f"Fetching GOES {mode.upper()}…")
+            if self._archive_satellite.is_active():
+                self.status_msg_label.setText(f"Fetching GOES {mode.upper()}…")
             self._layout_overlays()
             return
 

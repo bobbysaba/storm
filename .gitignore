@@ -47,3 +47,13 @@ locs/deployment_locations.json
 
 # pip build output for the headless package
 headless/build/
+
+# performance logs and their zips (core/perf_log.py, scripts/collect_perf_logs.py)
+perf_logs/
+
+# storm tracks saved from archive TRACK (core/workspace.py): local work, one CSV per case date
+storm_tracks/
+
+# case packages (File > Export Case Package)
+data/case_packages/
+data/studio/

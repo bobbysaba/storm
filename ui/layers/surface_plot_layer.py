@@ -10,13 +10,15 @@ from ui import palette as P
 log = logging.getLogger(__name__)
 
 
-def _surface_obs_fingerprint(obs: Observation, station_id: str = "") -> tuple:
+def _surface_obs_fingerprint(obs: Observation, station_id: str = "",
+                             reference_time: datetime | None = None) -> tuple:
     """Displayed values, position and age-colour bucket — not the timestamp.
 
     The colour is re-evaluated each fetch cycle, so a station that stops
-    reporting still turns yellow, then red.
+    reporting still turns yellow, then red. ARCHIVE passes its clock as
+    ``reference_time``; live ages against now.
     """
-    color = SurfacePlotLayer._obs_age_color(obs, station_id)
+    color = SurfacePlotLayer._obs_age_color(obs, station_id, reference_time)
     return (_display_key(obs), round(obs.lat, 5), round(obs.lon, 5), color)
 
 
@@ -79,13 +81,15 @@ class SurfacePlotLayer:
         self._map.set_surface_station_plots_visible(visible)
 
     @staticmethod
-    def _obs_age_color(obs: Observation, station_id: str = "") -> str:
+    def _obs_age_color(obs: Observation, station_id: str = "",
+                       reference_time: datetime | None = None) -> str:
         ts = obs.timestamp
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         else:
             ts = ts.astimezone(timezone.utc)
-        age_min = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds() / 60.0)
+        now = reference_time or datetime.now(timezone.utc)
+        age_min = max(0.0, (now - ts).total_seconds() / 60.0)
         if station_id.startswith("surface:asos:"):
             # asos reports hourly — use wider freshness thresholds
             if age_min <= 70.0:

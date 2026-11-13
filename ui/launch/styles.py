@@ -5,6 +5,10 @@ _DIALOG_STYLE = qss("""
 QDialog {
     background-color: $bg_base;
 }
+QWidget#launchForm, QScrollArea#launchFormScroll {
+    background-color: $bg_base;
+    border: none;
+}
 QLabel {
     color: $text;
     background: transparent;
@@ -422,4 +426,133 @@ _LOG_BTN_STYLE = qss("""
         padding: 2px 8px;
     }
     QPushButton:hover { color: $text_muted; }
+""")
+
+# the calendar's year grid (dialog._YearGridPopup)
+_YEAR_GRID_STYLE = qss("""
+QWidget#yearGridPopup {
+    background-color: $bg_base;
+    border: 1px solid $border;
+    border-radius: 10px;
+}
+QLabel#yearRangeLbl {
+    color: $text_label;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+QToolButton#yearNavBtn {
+    background-color: $bg_elevated;
+    border: 1px solid $border_subtle;
+    border-radius: 4px;
+    min-width: 22px;
+    min-height: 20px;
+    padding: 2px;
+}
+QToolButton#yearNavBtn:hover {
+    background-color: $bg_info_tint;
+    border-color: $accent;
+}
+QToolButton#yearNavBtn:disabled {
+    background-color: $bg_sunken;
+}
+QPushButton#yearCell {
+    background-color: $bg_elevated;
+    border: 1px solid $border_subtle;
+    border-radius: 5px;
+    color: $text_muted;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 7px 4px;
+    min-width: 44px;
+}
+QPushButton#yearCell:hover {
+    border-color: $accent;
+    color: $accent;
+}
+QPushButton#yearCell[available="true"] {
+    color: $text;
+    border-color: $accent@0.55;
+}
+QPushButton#yearCell[selected="true"] {
+    background-color: $bg_info_tint;
+    border: 2px solid $accent;
+    color: $accent;
+}
+""")
+
+# links under the archive date (Browse available cases, Open case)
+_LINK_BTN_STYLE = qss("""
+QPushButton {
+    background: transparent;
+    border: none;
+    color: $accent;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0;
+    text-align: left;
+}
+QPushButton:hover { color: $accent_hover; text-decoration: underline; }
+""")
+
+# the calendar button beside the archive date
+_CAL_BTN_STYLE = qss("""
+QToolButton {
+    background-color: $bg_elevated;
+    border: 1px solid $border_subtle;
+    border-radius: 6px;
+}
+QToolButton:hover {
+    background-color: $bg_info_tint;
+    border-color: $accent;
+}
+""")
+
+# the case finder (date_finder.FindDatesDialog)
+_FINDER_STYLE = qss("""
+QPushButton#monthBtn, QPushButton#segBtn {
+    background-color: $bg_elevated;
+    border: 1px solid $border_subtle;
+    border-radius: 4px;
+    color: $text_label;
+    font-size: 11px;
+    padding: 4px 0px;
+}
+QPushButton#segBtn { padding: 3px 10px; }
+QPushButton#monthBtn:hover, QPushButton#segBtn:hover { border-color: $accent@0.45; }
+QPushButton#monthBtn:checked, QPushButton#segBtn:checked {
+    background-color: $bg_info_tint;
+    border-color: $accent;
+    color: $accent;
+}
+QPushButton#linkBtn {
+    background: transparent; border: none; color: $accent;
+    font-size: 11px; font-weight: 600; padding: 0;
+}
+QPushButton#linkBtn:hover { color: $accent_hover; text-decoration: underline; }
+QPushButton#launchBtn:disabled { background-color: $bg_elevated; color: $text_disabled; }
+QListWidget#browseDatesList {
+    background-color: $bg_sunken;
+    border: 1px solid $border_subtle;
+    border-radius: 6px;
+    color: $text;
+    font-size: 11px;
+    outline: none;
+}
+QListWidget#browseDatesList::item { padding: 3px 4px; }
+QListWidget#browseDatesList::item:selected {
+    background-color: $bg_info_tint;
+    color: $accent;
+}
+QListWidget#browseDatesList::indicator {
+    width: 12px; height: 12px;
+    border: 1px solid $border;
+    border-radius: 3px;
+    background-color: $bg_sunken;
+}
+QListWidget#browseDatesList::indicator:checked {
+    background-color: $accent; border-color: $accent;
+}
+QScrollArea#gridScroll { background: transparent; border: none; }
+QWidget#gridHolder { background: transparent; }
 """)

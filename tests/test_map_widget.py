@@ -47,3 +47,26 @@ def test_add_vehicle_passes_multiline_hover_text():
     assert len(widget.scripts) == 1
     assert "stormAddVehicle" in widget.scripts[0]
     assert "\\n1s 25 mph" in widget.scripts[0]
+
+
+def test_no_result_ends_scripts_with_undefined():
+    from ui.map.widget import _no_result
+
+    # a trailing line comment must not swallow the terminator
+    wrapped = _no_result("map.setLayoutProperty('a', 'visibility', 'none') // hide")
+    assert wrapped.endswith("\n;void 0;")
+    assert wrapped.startswith("map.setLayoutProperty")
+
+
+def test_track_setters_call_the_page():
+    widget = _FakeMapWidget()
+    MapWidget.set_track_geojson(widget, {"type": "FeatureCollection", "features": []})
+    MapWidget.set_track_edit_mode(widget, True)
+    MapWidget.set_track_layers_visible(widget, True, False)
+    MapWidget.set_track_marker(widget, {"lat": 35.0, "lon": -97.0, "label": "M1"})
+    MapWidget.set_track_marker(widget, None)
+    assert "stormSetTrackGeoJSON(\"{\\\"type\\\"" in widget.scripts[0]
+    assert "stormSetTrackEditMode(true)" in widget.scripts[1]
+    assert "stormSetTrackLayersVisible(true, false)" in widget.scripts[2]
+    assert '\\"label\\": \\"M1\\"' in widget.scripts[3]
+    assert "stormSetTrackMarker(null)" in widget.scripts[4]

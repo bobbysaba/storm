@@ -12,11 +12,14 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.sounding import Sounding, SoundingSet
+from core import package_sources
+
+from data import endpoints
 
 log = logging.getLogger(__name__)
 
-_IEM_BASE_URL    = "https://mesonet.agron.iastate.edu/json/raob.py"
-_SPC_BASE_URL    = "https://www.spc.noaa.gov/exper/soundings"
+_IEM_BASE_URL    = endpoints.IEM_RAOB
+_SPC_BASE_URL    = endpoints.SPC_SOUNDINGS
 _IEM_TIMEOUT     = 5    # seconds — fast path; fall back to SPC on timeout/empty
 _SPC_TIMEOUT     = 8    # seconds
 _KNOTS_TO_MS     = 0.51444
@@ -108,8 +111,7 @@ def _fetch_iem_profiles(station_id: str, ts: str) -> list:
     """Fetch raw IEM profiles for one station/timestamp. Returns profile dicts."""
     url = f"{_IEM_BASE_URL}?station={station_id}&ts={ts}"
     log.debug("IEM sounding URL: %s", url)
-    with urlopen(url, timeout=_IEM_TIMEOUT) as resp:
-        raw = resp.read()
+    raw = package_sources.read_url("soundings", url, urlopen, timeout=_IEM_TIMEOUT)
     data = json.loads(raw)
     return data.get("profiles", [])
 
@@ -126,8 +128,8 @@ def _fetch_spc_profiles(station_id: str, ts: str) -> list:
     url      = f"{_SPC_BASE_URL}/{dir_name}/{station_id}.txt"
     log.debug("SPC sounding URL: %s", url)
     try:
-        with urlopen(url, timeout=_SPC_TIMEOUT) as resp:
-            text = resp.read().decode("ascii", errors="replace")
+        text = package_sources.read_url("soundings", url, urlopen, timeout=_SPC_TIMEOUT).decode(
+            "ascii", errors="replace")
     except HTTPError as e:
         if e.code == 404:
             return []

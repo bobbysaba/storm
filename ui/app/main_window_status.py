@@ -49,6 +49,11 @@ class MainWindowStatusMixin:
 
         self.status_msg_label = QLabel("")
         set_pill_status(self.status_msg_label, "label")
+        from ui.map.html import basemap_source
+        if basemap_source() == "online":
+            self.status_msg_label.setText("Map: online tiles (no tiles/storm.mbtiles)")
+            self.status_msg_label.setToolTip("The base map loads from OpenFreeMap while connected. "
+                                             "Put storm.mbtiles in the tiles folder to use it offline.")
         row0.addWidget(self.status_msg_label)
         row0.addStretch()
 
@@ -166,6 +171,7 @@ class MainWindowStatusMixin:
         threading.Thread(target=checker.check, daemon=True).start()
 
     def _on_net_result(self, state: str):
+        self._net_state = state
         if state == "ok":
             self.net_indicator.setText("● NET OK")
             set_pill_status(self.net_indicator, "ok")
@@ -257,7 +263,12 @@ class MainWindowStatusMixin:
             set_pill_status(self.conn_indicator, "error")
 
     def _init_mqtt(self):
-        self._mqtt_client = MQTTClient(client_id=config.VEHICLE_ID, parent=self)
+        # the read-only viewer certificate may only connect as viewer-*
+        self._mqtt_certs = config.mqtt_cert_files(viewer=self._viewer)
+        client_id = config.VEHICLE_ID
+        if self._mqtt_certs[1] == config.VIEWER_MQTT_CERT_FILE:
+            client_id = config.VIEWER_MQTT_CLIENT_PREFIX + client_id
+        self._mqtt_client = MQTTClient(client_id=client_id, read_only=self._viewer, parent=self)
         self._mqtt_client.connected.connect(self._on_mqtt_connected)
         self._mqtt_client.disconnected.connect(self._on_mqtt_disconnected)
 
@@ -281,9 +292,9 @@ class MainWindowStatusMixin:
             host=config.MQTT_HOST,
             port=config.MQTT_PORT,
             use_tls=use_tls,
-            ca_cert=config.MQTT_CA_CERT,
-            cert_file=config.MQTT_CERT_FILE,
-            key_file=config.MQTT_KEY_FILE,
+            ca_cert=self._mqtt_certs[0],
+            cert_file=self._mqtt_certs[1],
+            key_file=self._mqtt_certs[2],
         )
 
     def _on_mqtt_connected(self):

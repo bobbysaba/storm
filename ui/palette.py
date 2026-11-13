@@ -95,6 +95,12 @@ MODE_VIEWER     = "#9B8FFF"
 MODE_ARCHIVE    = "#FF9F1C"
 MODE_ADMIN      = ACCENT
 
+# ── Archive availability (launch calendar, case finder) ───
+AVAILABLE       = "#123C50"   # a day with data; the finder's grid ramps from it to ACCENT
+AVAILABLE_DIM   = "#142936"   # the same, on a day outside the month shown
+AVAILABLE_EDGE  = "#28627A"
+AVAILABLE_EDGE_DIM = "#24404F"
+
 
 TOKENS: dict[str, str] = {
     name.lower(): value

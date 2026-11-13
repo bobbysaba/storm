@@ -185,3 +185,64 @@ def test_overflow_menu_without_pin_handlers(app):
     tb.fit(tb.measured_widths()[ICONS] - 1)
     tb._rebuild_menu()
     assert not [a for a in tb._more_menu.actions() if a.text().startswith("Pin ")]
+
+
+def test_toolbar_paints_its_pill(app):
+    """A QWidget subclass needs WA_StyledBackground, or the pill is see-through."""
+    host = QWidget()
+    host.setObjectName("host")
+    host.setStyleSheet(DARK_THEME + " QWidget#host { background-color: #FF0000; }")
+    _hosts.append(host)
+    tb = ResponsiveToolbar(host)
+    tb.add_button("RADAR", "radar", "radar")
+    tb.finish()
+    tb.adjustSize()
+    host.resize(tb.width() + 20, tb.height() + 20)
+    tb.move(10, 10)
+    img = host.grab().toImage()
+    # inside the pill's left padding, clear of the rounded corners
+    pill = img.pixelColor(10 + 4, 10 + tb.height() // 2)
+    assert pill.red() < 100, pill.name()
+
+
+@pytest.mark.parametrize("tier", [FULL, ICONS])
+def test_button_content_is_centered(app, tier):
+    """Icon and label sit in the middle of each button, not pushed left by
+    the slack Qt adds after the label."""
+    tb, b = _build()
+    w = tb.measured_widths()
+    tb.fit(10_000 if tier == FULL else w[FULL] - 1)
+    tb.adjustSize()
+    tb.parent().resize(tb.size())
+    tb.parent().show()
+    img = tb.grab().toImage()
+    rows = range(6, img.height() - 6)
+    for key, btn in b.items():
+        if btn.isChecked():
+            continue
+        g = btn.geometry()
+        ink = [x for x in range(g.x(), g.x() + g.width())
+               if any(img.pixelColor(x, y).lightness() > 110 for y in rows)]
+        left = ink[0] - g.x()
+        right = g.x() + g.width() - 1 - ink[-1]
+        # icon shapes leave a pixel or two of side bearing
+        assert abs(left - right) <= 3, (key, left, right)
+
+
+@pytest.mark.parametrize("tier", [FULL, ICONS])
+def test_buttons_evenly_spaced_across_groups(app, tier):
+    tb, b = _build()
+    w = tb.measured_widths()
+    tb.fit(10_000 if tier == FULL else w[FULL] - 1)
+    tb.adjustSize()
+    tb.parent().resize(tb.size())
+    tb.parent().show()
+    app.processEvents()
+    shown = [btn for group in tb._groups for btn in group if not btn.isHidden()]
+    gaps = {nxt.geometry().left() - (prev.geometry().right() + 1)
+            for prev, nxt in zip(shown, shown[1:])}
+    assert gaps == {tb._layout.spacing()}
+    # each divider sits in the gap before its group's first button
+    for sep, group in zip(tb._separators, tb._groups[1:]):
+        first = group[0]
+        assert first.geometry().left() - tb._layout.spacing() <= sep.x() < first.geometry().left()

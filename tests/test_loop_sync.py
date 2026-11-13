@@ -168,12 +168,12 @@ def test_satellite_controls_synced_disables_own_playback():
     sc._btn_play.setChecked(True)
     sc.set_synced(True)
     assert not sc.is_looping() and not sc._btn_play.isEnabled()
-    assert not sc._synced_label.isHidden() and sc._speed_combo.isHidden()
     sc.set_cache_size(6)                    # new frames must not re-enable it
     assert not sc._frame_slider.isEnabled()
     sc.set_synced(False)
     assert sc._btn_play.isEnabled()
-    assert sc._synced_label.isHidden() and not sc._speed_combo.isHidden()
+    sc.show()
+    assert not sc._playback_row.isVisible()   # the loop timeline drives it
 
 
 # MESO frame thinning (satellite fetcher)

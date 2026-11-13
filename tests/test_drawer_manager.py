@@ -50,8 +50,8 @@ def settings(tmp_path):
     return QSettings(str(tmp_path / "storm.ini"), QSettings.Format.IniFormat)
 
 
-def _manager(settings, height=768, **drawer_heights):
-    mgr = DrawerManager(lambda: height, settings)
+def _manager(settings, **drawer_heights):
+    mgr = DrawerManager(settings)
     buttons = {}
     for key, h in drawer_heights.items():
         drawer = _FakeDrawer(h)
@@ -64,23 +64,39 @@ def _open(buttons):
     return sorted(k for k, b in buttons.items() if b.isChecked())
 
 
-def test_auto_mode_is_one_at_a_time_on_short_windows(settings):
-    mgr, b = _manager(settings, height=768, radar=64, hazards=36)
+def test_one_drawer_at_a_time(settings):
+    mgr, b = _manager(settings, radar=64, hazards=36)
     b["radar"].setChecked(True)
     b["hazards"].setChecked(True)
     assert _open(b) == ["hazards"]
 
 
-def test_auto_mode_stacks_on_tall_windows(settings):
-    mgr, b = _manager(settings, height=1000, radar=64, hazards=36)
-    b["radar"].setChecked(True)
-    b["hazards"].setChecked(True)
-    assert _open(b) == ["hazards", "radar"]
+def test_nothing_is_pinned_by_default(settings):
+    mgr, b = _manager(settings, radar=64, sounding=37, prev_locs=40)
+    assert not any(mgr.is_pinned(k) for k in b)
+    b["prev_locs"].setChecked(True)
+    b["sounding"].setChecked(True)
+    assert _open(b) == ["sounding"]
+
+
+@pytest.mark.parametrize("old, migrated", [
+    (["prev_locs", "sounding"], set()),                  # the old default
+    (["prev_locs", "radar", "sounding"], {"radar"}),     # user pins are kept
+    (["hazards"], {"hazards"}),
+])
+def test_old_default_pins_are_dropped(settings, old, migrated):
+    settings.setValue("ui/pinned_drawers", old)
+    mgr, b = _manager(settings, radar=64, hazards=36, sounding=37, prev_locs=40)
+    assert {k for k in b if mgr.is_pinned(k)} == migrated
+    assert not settings.contains("ui/pinned_drawers")
+    mgr.set_pinned("sounding", True)                     # migrates once, not every launch
+    again, b = _manager(settings, sounding=37)
+    assert again.is_pinned("sounding")
 
 
 def test_pinned_drawers_stay_open_and_close_nothing(settings):
-    mgr, b = _manager(settings, height=768, radar=64, hazards=36, sounding=37)
-    assert mgr.is_pinned("sounding")  # default pin
+    mgr, b = _manager(settings, radar=64, hazards=36, sounding=37)
+    mgr.set_pinned("sounding", True)
     b["radar"].setChecked(True)
     b["sounding"].setChecked(True)
     assert _open(b) == ["radar", "sounding"]
@@ -89,14 +105,16 @@ def test_pinned_drawers_stay_open_and_close_nothing(settings):
 
 
 def test_child_drawers_are_exempt(settings):
-    mgr, b = _manager(settings, height=768, map=37, route=280, radar=64)
+    mgr, b = _manager(settings, map=37, route=280, radar=64)
     b["map"].setChecked(True)
     b["route"].setChecked(True)
     assert _open(b) == ["map", "route"]
 
 
 def test_close_newest_closes_in_reverse_open_order(settings):
-    mgr, b = _manager(settings, height=1000, radar=64, hazards=36, sounding=40)
+    mgr, b = _manager(settings, radar=64, hazards=36, sounding=40)
+    mgr.set_pinned("radar", True)
+    mgr.set_pinned("sounding", True)
     for key in ("radar", "sounding", "hazards"):
         b[key].setChecked(True)
     assert mgr.close_newest()
@@ -108,52 +126,38 @@ def test_close_newest_closes_in_reverse_open_order(settings):
     assert not mgr.close_newest()
 
 
-def test_switching_to_one_closes_all_but_newest(settings):
-    mgr, b = _manager(settings, height=1000, radar=64, hazards=36, satellite=67)
-    for key in ("radar", "hazards", "satellite"):
-        b[key].setChecked(True)
-    mgr.set_mode("one")
-    assert _open(b) == ["satellite"]
-
-
 def test_enforce_fit_closes_oldest_unpinned_first(settings):
-    mgr, b = _manager(settings, height=1000, radar=64, hazards=200, satellite=67, map=37)
+    mgr, b = _manager(settings, radar=64, hazards=200, satellite=67, map=37)
+    for key in ("radar", "hazards", "satellite"):
+        mgr.set_pinned(key, True)                 # pinned: they stack
     for key in ("radar", "hazards", "satellite", "map"):
         b[key].setChecked(True)
+    for key in ("radar", "hazards", "satellite"):
+        mgr.set_pinned(key, False)                # now closable by the fit rule
     closed = mgr.enforce_fit(available=250, fixed_heights=[0])
     assert closed == ["radar", "hazards"]
     assert _open(b) == ["map", "satellite"]
 
 
 def test_enforce_fit_never_closes_newest(settings):
-    mgr, b = _manager(settings, height=1000, radar=64, hazards=900)
+    mgr, b = _manager(settings, radar=64, hazards=900)
+    mgr.set_pinned("radar", True)
     b["radar"].setChecked(True)
     b["hazards"].setChecked(True)
+    mgr.set_pinned("radar", False)
     mgr.enforce_fit(available=500)
     assert _open(b) == ["hazards"]
 
 
-def test_mode_and_pins_persist(settings):
+def test_pins_persist_and_old_mode_setting_is_ignored(settings):
+    settings.setValue("ui/drawer_mode", "stack")  # saved by an older version
     mgr, _b = _manager(settings, radar=64)
-    mgr.set_mode("stack")
     mgr.set_pinned("radar", True)
     mgr.set_pinned("sounding", False)
-    again, _b = _manager(settings, radar=64)
-    assert again.mode == "stack"
+    again, b = _manager(settings, radar=64, hazards=36)
     assert again.is_pinned("radar")
     assert not again.is_pinned("sounding")
-
-
-def test_enforce_fit_applies_one_mode_after_window_shrinks(settings):
-    height = [1000]
-    mgr = DrawerManager(lambda: height[0], settings)
-    b = {}
-    for key, h in (("radar", 64), ("hazards", 36)):
-        d = _FakeDrawer(h)
-        b[key] = _FakeButton(d)
-        mgr.add(key, d, b[key])
+    again.set_pinned("radar", False)
     b["radar"].setChecked(True)
     b["hazards"].setChecked(True)
-    height[0] = 768
-    mgr.enforce_fit(available=600)
-    assert _open(b) == ["hazards"]
+    assert _open(b) == ["hazards"]                # one at a time regardless

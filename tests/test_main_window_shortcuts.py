@@ -11,13 +11,14 @@ pytest.importorskip("PyQt6.QtWebEngineWidgets")
 from PyQt6.QtWidgets import QApplication, QLineEdit, QToolButton, QWidget
 
 from ui.app.main_window import MainWindow
+from ui.app.main_window_studio import MainWindowStudioMixin
 from ui.click_mode import ClickModeController
 
 _METHODS = ("_init_shortcuts", "_click_if_shown", "_call_archive_controls",
-            "_toggle_shortcut_overlay", "_on_escape_pressed")
+            "_toggle_shortcut_overlay", "_on_escape_pressed", "_loop_key")
 
 
-class Host(QWidget):
+class Host(MainWindowStudioMixin, QWidget):
     _SHORTCUT_BUTTONS = MainWindow._SHORTCUT_BUTTONS
 
 
@@ -58,8 +59,14 @@ def _host(archive=False):
     w._click_modes = ClickModeController(w)
     w._toggle_debug_panel = lambda: None
     w._toggle_error_log_panel = lambda: None
+    w._open_case_package = lambda: None
+    w._export_case_package = lambda: None
     w.radar_controls = FakeRadar()
     w._archive_controls = FakeArchive()
+    w.track_calls = []
+    for name in ("_add_track_point_at_marker", "_delete_selected_track_point",
+                 "_undo_track_edit", "_redo_track_edit"):
+        setattr(w, name, lambda n=name: w.track_calls.append(n))
     for attr in list(MainWindow._SHORTCUT_BUTTONS.values()) + ["btn_screenshot"]:
         btn = QToolButton(w)
         btn.setCheckable(attr != "btn_screenshot")
@@ -132,3 +139,17 @@ def test_question_mark_opens_the_list_and_esc_closes_it_first(app):
     assert w._click_modes.mode == "measure"     # the mode survives the first Esc
     w._on_escape_pressed()
     assert w._click_modes.mode == "none"
+
+
+def test_track_keys_exist_only_in_archive(app):
+    live = _host()
+    assert not {"track", "track_delete", "track_undo"} & set(live._shortcuts.bound)
+    w = _host(archive=True)
+    _press(w, "track")
+    assert w.btn_track.isChecked()
+    _press(w, "track_delete", 1)                  # Backspace
+    _press(w, "track_point_at_marker")
+    _press(w, "track_undo")
+    _press(w, "track_redo")
+    assert w.track_calls == ["_delete_selected_track_point", "_add_track_point_at_marker",
+                             "_undo_track_edit", "_redo_track_edit"]

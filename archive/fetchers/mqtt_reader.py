@@ -2,8 +2,10 @@
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -14,27 +16,54 @@ from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
 from core.scan_sector import ScanSector
 from network.vehicle_sync import _observation_from_payload
+from archive.session import last_moving_time, session_bounds
 from archive.vehicle_speed import VehicleSpeed, calculate_vehicle_speed
+from core import package_sources
+from core.qt_signals import emit_alive
+from data import thredds_paths as paths
 
 log = logging.getLogger(__name__)
 
 _ANNOTATIONS_PATH = "annotations"
 _TOPICS = ("vehicles", "annotations", "cones", "drawings", "scan_sectors")
+# THREDDS mirrors the API's storm.<topic>.<date> files (same records, same
+# format) but keeps only a rolling ~5 months, so the API stays as the fallback.
+# Tried first because the API answered 404 on every path (2026-11-11).
+_THREDDS_ANNOTATIONS_ROOT = paths.file_url(paths.FOFS_ANNOTATIONS)
 
 
-def _fetch_text(url: str) -> Optional[str]:
-    """Fetch an archive API file as text; return None on 404, raise on other errors."""
+def _fetch_text(url: str, *, api_key: bool = False) -> Optional[str]:
+    """Fetch an archive JSONL file as text; return None on 404, raise on other
+    errors. api_key=True adds the NSSL API's key; THREDDS never gets it."""
+    headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
+    if api_key and config.NSSL_API_KEY:
+        headers["X-API-Key"] = config.NSSL_API_KEY
     try:
-        headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
-        if config.NSSL_API_KEY:
-            headers["X-API-Key"] = config.NSSL_API_KEY
-        req = Request(url, headers=headers)
-        with urlopen(req, timeout=20, context=config.NSSL_SSL_CONTEXT) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except Exception as exc:
-        if "404" in str(exc) or "HTTP Error 404" in str(exc):
+        data = package_sources.read_url("mqtt history", Request(url, headers=headers), urlopen,
+                                        timeout=20, context=config.NSSL_SSL_CONTEXT)
+        return data.decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        if exc.code == 404:
             return None
         raise
+
+
+def _fetch_topic_text(topic: str, date_str: str) -> tuple[Optional[str], str]:
+    """THREDDS first, then the API. Returns (text or None, source) for logging.
+    Any THREDDS failure falls through to the API, which may still answer."""
+    thredds_error = None
+    try:
+        text = _fetch_text(f"{_THREDDS_ANNOTATIONS_ROOT}/storm.{topic}.{date_str}")
+        if text is not None:
+            return text, "THREDDS"
+    except Exception as exc:
+        thredds_error = exc
+        log.debug("ArchiveMQTTReader: THREDDS fetch failed for %s %s, trying API: %s", topic, date_str, exc)
+
+    text = _fetch_text(f"{config.NSSL_API_ROOT}/{_ANNOTATIONS_PATH}/storm.{topic}.{date_str}", api_key=True)
+    if text is None and thredds_error is not None:
+        raise RuntimeError(f"THREDDS failed ({thredds_error}) and the API has no {topic} file") from thredds_error
+    return text, "API"
 
 
 def _parse_timestamp(obj: dict) -> Optional[datetime]:
@@ -89,9 +118,23 @@ def _parse_jsonl(text: str) -> list[tuple[datetime, dict]]:
     return results
 
 
+def _expired(obj: dict, t: datetime) -> bool:
+    """Whether a record's expires_at is at or before t (no expiry: never)."""
+    text = obj.get("expires_at")
+    if not text:
+        return False
+    try:
+        expires = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires <= t
+
+
 class ArchiveMQTTReader(QObject):
     """
-    Fetches STORM archive JSONL files from the NSSL API and replays
+    Fetches STORM archive JSONL files (THREDDS, else the NSSL API) and replays
     vehicle positions, annotations, cones, drawings, and scan sectors in sync with
     the archive TimeController.
 
@@ -124,20 +167,23 @@ class ArchiveMQTTReader(QObject):
     scan_sector_received = pyqtSignal(object)
     scan_sectors_cleared = pyqtSignal()
     error               = pyqtSignal(str)
+    loaded              = pyqtSignal()   # main thread, once every topic has been fetched
     _load_complete      = pyqtSignal()   # internal — fires on bg thread, triggers main-thread replay
 
     def __init__(self, session_date: datetime, parent=None):
         super().__init__(parent)
         self._date_str = session_date.strftime("%Y%m%d")
+        # the session runs into the next UTC morning (archive/session.py),
+        # whose records are in the next day's files
+        start, self._cap = session_bounds(session_date)
+        self._next_date_str = (start + timedelta(days=1)).strftime("%Y%m%d")
         self._data: dict[str, list[tuple[datetime, dict]]] = {t: [] for t in _TOPICS}
         self._loaded = False
         self._vehicle_observations: dict[str, list] = {}
         self._pending_time: Optional[datetime] = None
         self._last_emit_time: Optional[datetime] = None
-        # track which annotation/cone/drawing ids have been emitted so we can
-        self._emitted_ids: dict[str, set[str]] = {
-            "annotations": set(), "cones": set(), "drawings": set()
-        }
+        # what's on the map now, per topic: id -> the record it was drawn from
+        self._shown: dict[str, dict[str, dict]] = {"annotations": {}, "cones": {}, "drawings": {}}
         # _load_complete is queued automatically by Qt (bg thread → main thread)
         self._load_complete.connect(self._on_load_complete)
 
@@ -151,36 +197,38 @@ class ArchiveMQTTReader(QObject):
             self._pending_time = archive_time
             return
 
-        # backward jump — remove anything placed after the new time, then re-emit from scratch.
+        # backward jump -- vehicles and scan sectors are re-sent from scratch
+        # (annotations, cones and drawings are brought to the new time below)
         if self._last_emit_time is not None and archive_time < self._last_emit_time:
             self.vehicles_cleared.emit()
             self.scan_sectors_cleared.emit()
-            # explicitly delete annotations/cones/drawings that are now in the future.
-            for ann_id in list(self._emitted_ids["annotations"]):
-                self.annotation_deleted.emit(ann_id, "")
-            for cone_id in list(self._emitted_ids["cones"]):
-                self.cone_deleted.emit(cone_id)
-            for drawing_id in list(self._emitted_ids["drawings"]):
-                self.drawing_deleted.emit(drawing_id)
-            self._emitted_ids = {"annotations": set(), "cones": set(), "drawings": set()}
 
         self._last_emit_time = archive_time
         self._emit_vehicles(archive_time)
-        self._emit_annotations(archive_time)
-        self._emit_cones(archive_time)
-        self._emit_drawings(archive_time)
+        self._sync_items("annotations", archive_time)
+        self._sync_items("cones", archive_time)
+        self._sync_items("drawings", archive_time)
         self._emit_scan_sectors(archive_time)
 
-    def first_vehicle_positions(self) -> list[tuple[str, float, float]]:
-        """Return (vehicle_id, lat, lon) tuples from the first vehicle timestamp."""
+    def vehicle_positions_near(self, target_time: datetime) -> list[tuple[str, float, float]]:
+        """Return (vehicle_id, lat, lon) tuples from the vehicle timestamp
+        closest to target_time.
+
+        Deliberately not the day's first GPS fix -- a deployment can stage
+        from a base far from the actual storm intercept and drive for hours
+        before it matters, so "nearest radar to the day's first position"
+        can point at entirely the wrong station. target_time should be the
+        archive session's requested start time, which is a much better
+        proxy for where the deployment actually was.
+        """
         msgs = self._data.get("vehicles", [])
         if not msgs:
             return []
-        first_time = msgs[0][0]
+        nearest_time = min((ts for ts, _ in msgs), key=lambda ts: abs(ts - target_time))
         result = []
         for ts, obj in msgs:
-            if ts > first_time:
-                break
+            if ts != nearest_time:
+                continue
             try:
                 obs = _observation_from_payload(obj)
                 result.append((obs.vehicle_id, obs.lat, obs.lon))
@@ -209,6 +257,19 @@ class ArchiveMQTTReader(QObject):
             average_seconds=30,
         )
 
+    def vehicle_histories(self) -> dict[str, list]:
+        """Each vehicle's whole recorded day of observations, time-ordered
+        (empty until loaded). Not to be modified."""
+        return self._vehicle_observations
+
+    def activity_times(self) -> list[datetime]:
+        """Evidence of the crew working, for sizing the session: the last
+        scan-sector/annotation/cone/drawing change, and each vehicle's last
+        time actually driving (a parked vehicle keeps reporting)."""
+        times = [rows[-1][0] for topic, rows in self._data.items() if topic != "vehicles" and rows]
+        times += [last_moving_time(history) for history in self._vehicle_observations.values()]
+        return [t for t in times if t is not None]
+
     def _on_load_complete(self) -> None:
         """Called on the main thread once background fetch finishes."""
         histories: dict[str, list] = {}
@@ -223,33 +284,49 @@ class ArchiveMQTTReader(QObject):
         if self._pending_time is not None:
             self.on_time_changed(self._pending_time)
             self._pending_time = None
+        self.loaded.emit()
 
 
     def _fetch_all(self) -> None:
         errors = []
-        for topic in _TOPICS:
-            url = (
-                f"{config.NSSL_API_ROOT}/{_ANNOTATIONS_PATH}/"
-                f"storm.{topic}.{self._date_str}"
-            )
-            try:
-                text = _fetch_text(url)
-                if text:
-                    self._data[topic] = _parse_jsonl(text)
-                    log.info(
-                        "ArchiveMQTTReader: loaded %d %s records",
-                        len(self._data[topic]), topic,
-                    )
-                else:
-                    log.info("ArchiveMQTTReader: no %s file for %s", topic, self._date_str)
-            except Exception as exc:
-                log.error("ArchiveMQTTReader: fetch failed for %s: %s", topic, exc)
-                errors.append(f"{topic}: {exc}")
+        # topics are independent, and a THREDDS miss plus API fallback can take
+        # 10 s or more each, so fetch them all at once, with the next
+        # morning's files alongside the session day's
+        with ThreadPoolExecutor(max_workers=2 * len(_TOPICS)) as pool:
+            futures = {
+                pool.submit(_fetch_topic_text, topic, date_str): (topic, date_str)
+                for topic in _TOPICS
+                for date_str in (self._date_str, self._next_date_str)
+            }
+            records: dict[str, list] = {topic: [] for topic in _TOPICS}
+            for future, (topic, date_str) in futures.items():
+                try:
+                    text, source = future.result()
+                    if text:
+                        parsed = _parse_jsonl(text)
+                        if date_str == self._next_date_str:
+                            parsed = [(ts, obj) for ts, obj in parsed if ts <= self._cap]
+                        records[topic] += parsed
+                        log.info(
+                            "ArchiveMQTTReader: loaded %d %s records for %s (%s)",
+                            len(parsed), topic, date_str, source,
+                        )
+                    else:
+                        log.info("ArchiveMQTTReader: no %s file for %s", topic, date_str)
+                except Exception as exc:
+                    if date_str == self._next_date_str:
+                        # the next morning is extra; don't fail the session over it
+                        log.warning("ArchiveMQTTReader: fetch failed for %s %s: %s", topic, date_str, exc)
+                        continue
+                    log.error("ArchiveMQTTReader: fetch failed for %s: %s", topic, exc)
+                    errors.append(f"{topic}: {exc}")
+            for topic, rows in records.items():
+                self._data[topic] = sorted(rows, key=lambda item: item[0])
 
         self._loaded = False  # set True on main thread via _load_complete signal
         if errors:
-            self.error.emit(f"Archive MQTT load errors: {'; '.join(errors)}")
-        self._load_complete.emit()
+            emit_alive(self, "error", f"Archive MQTT load errors: {'; '.join(errors)}")
+        emit_alive(self, "_load_complete")
 
 
     def _emit_vehicles(self, t: datetime) -> None:
@@ -268,65 +345,47 @@ class ArchiveMQTTReader(QObject):
             except Exception as exc:
                 log.debug("ArchiveMQTTReader: vehicle parse error: %s", exc)
 
-    def _emit_annotations(self, t: datetime) -> None:
-        """Apply annotation creates/deletes up to time t."""
-        for ts, obj in self._data["annotations"]:
+    def items_at(self, topic: str, t: datetime) -> dict[str, dict]:
+        """The annotations, cones or drawings that existed at time t, as
+        id -> record: each one from when it was issued (created_at), in its
+        latest version as of t (the crew edits by republishing the same id),
+        until it was deleted or expired (expires_at -- cones last an hour)."""
+        state: dict[str, dict] = {}
+        for ts, obj in self._data[topic]:
             if ts > t:
                 break
-            ann_id = obj.get("id", "")
-            if not ann_id:
+            item_id = obj.get("id", "")
+            if not item_id:
                 continue
             if obj.get("deleted"):
-                if ann_id in self._emitted_ids["annotations"]:
-                    self._emitted_ids["annotations"].discard(ann_id)
-                    self.annotation_deleted.emit(ann_id, obj.get("deleted_at", ""))
-            elif ann_id not in self._emitted_ids["annotations"]:
-                try:
-                    ann = Annotation.from_dict(obj)
-                    self._emitted_ids["annotations"].add(ann_id)
-                    self.annotation_received.emit(ann)
-                except Exception as exc:
-                    log.debug("ArchiveMQTTReader: annotation parse error: %s", exc)
+                state.pop(item_id, None)
+            else:
+                state[item_id] = obj
+        return {item_id: obj for item_id, obj in state.items() if not _expired(obj, t)}
 
-    def _emit_cones(self, t: datetime) -> None:
-        """Apply cone creates/deletes up to time t."""
-        for ts, obj in self._data["cones"]:
-            if ts > t:
-                break
-            cone_id = obj.get("id", "")
-            if not cone_id:
+    def _sync_items(self, topic: str, t: datetime) -> None:
+        """Bring the map's annotations, cones or drawings to time t: remove
+        what no longer exists, add or update the rest."""
+        make, received, deleted = {
+            "annotations": (Annotation.from_dict, self.annotation_received,
+                            lambda item_id: self.annotation_deleted.emit(item_id, "")),
+            "cones": (StormCone.from_dict, self.cone_received, self.cone_deleted.emit),
+            "drawings": (DrawingAnnotation.from_dict, self.drawing_received, self.drawing_deleted.emit),
+        }[topic]
+        wanted, shown = self.items_at(topic, t), self._shown[topic]
+        for item_id in [i for i in shown if i not in wanted]:
+            del shown[item_id]
+            deleted(item_id)
+        for item_id, obj in wanted.items():
+            if shown.get(item_id) is obj:
                 continue
-            if obj.get("deleted"):
-                if cone_id in self._emitted_ids["cones"]:
-                    self._emitted_ids["cones"].discard(cone_id)
-                    self.cone_deleted.emit(cone_id)
-            elif cone_id not in self._emitted_ids["cones"]:
-                try:
-                    cone = StormCone.from_dict(obj)
-                    self._emitted_ids["cones"].add(cone_id)
-                    self.cone_received.emit(cone)
-                except Exception as exc:
-                    log.debug("ArchiveMQTTReader: cone parse error: %s", exc)
-
-    def _emit_drawings(self, t: datetime) -> None:
-        """Apply drawing creates/deletes up to time t."""
-        for ts, obj in self._data["drawings"]:
-            if ts > t:
-                break
-            drawing_id = obj.get("id", "")
-            if not drawing_id:
+            try:
+                item = make(obj)
+            except Exception as exc:
+                log.debug("ArchiveMQTTReader: %s parse error: %s", topic, exc)
                 continue
-            if obj.get("deleted"):
-                if drawing_id in self._emitted_ids["drawings"]:
-                    self._emitted_ids["drawings"].discard(drawing_id)
-                    self.drawing_deleted.emit(drawing_id)
-            elif drawing_id not in self._emitted_ids["drawings"]:
-                try:
-                    drawing = DrawingAnnotation.from_dict(obj)
-                    self._emitted_ids["drawings"].add(drawing_id)
-                    self.drawing_received.emit(drawing)
-                except Exception as exc:
-                    log.debug("ArchiveMQTTReader: drawing parse error: %s", exc)
+            shown[item_id] = obj
+            received.emit(item)
 
     def _emit_scan_sectors(self, t: datetime) -> None:
         """Emit the most recent scan-sector state for each vehicle at or before t."""

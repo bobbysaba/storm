@@ -81,6 +81,7 @@ _SOUNDING_PROMPTS = {
     "hrrr": "HRRR sounding — click map",
     "obs": "observed sounding — click a station",
     "nssl": "NSSL soundings",
+    "coptersonde": "CopterSonde profiles",
 }
 
 

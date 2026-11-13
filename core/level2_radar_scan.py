@@ -80,7 +80,8 @@ class Level2RadarScan(RadarScan):
     tilt_deg : float
         Elevation angle of this sweep in degrees.
     available_tilts : list[float]
-        All elevation angles present in the parent Level-2 file (sorted).
+        Every sweep's elevation angle, in volume order (split cuts repeat
+        an angle), so an index here is a sweep index.
     available_products : list[str]
         pyart field names present in the sweep (subset of L2_PRODUCTS keys).
     pyart_field : str
@@ -125,7 +126,7 @@ class Level2RadarScan(RadarScan):
             gate_width_m=gate_width_m,
         )
         self.tilt_deg = tilt_deg
-        self.available_tilts = sorted(available_tilts)
+        self.available_tilts = list(available_tilts)
         self.available_products = available_products
         self.pyart_field = pyart_field
 

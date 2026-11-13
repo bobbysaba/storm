@@ -166,9 +166,12 @@ class MainWindowMapObjectsMixin:
                 annotation.label = dlg.result_label()
                 self._update_annotation(annotation)
             elif dlg.action() == "move":
-                self._moving_annotation_id = annotation_id
-                self.map_widget.set_annotation_draggable(annotation_id, True)
-                self._set_placement_prompt("drag the annotation to its new location", needs_click=False)
+                self._start_annotation_move(annotation_id)
+
+    def _start_annotation_move(self, annotation_id: str):
+        self._moving_annotation_id = annotation_id
+        self.map_widget.set_annotation_draggable(annotation_id, True)
+        self._set_placement_prompt("drag the annotation to its new location", needs_click=False)
 
     def _on_annotation_drag_end(self, annotation_id: str, lat: float, lon: float):
         annotation = self._annotations.get(annotation_id)
@@ -315,15 +318,21 @@ class MainWindowMapObjectsMixin:
             drawing.flipped = not drawing.flipped
             self._update_drawing(drawing)
         elif action == "move":
-            self._moving_drawing_id = drawing_id
-            self._moving_drawing_original_coordinates = [pt[:] for pt in drawing.coordinates]
-            self.map_widget.set_drawing_draggable(drawing_id, True)
-            self._set_placement_prompt("drag the drawing to its new location", needs_click=False)
+            self._start_drawing_move(drawing_id)
         elif action == "save":
             drawing.title = dlg.result_title()
             drawing.color = dlg.result_color()
             drawing.line_style = dlg.result_line_style()
             self._update_drawing(drawing)
+
+    def _start_drawing_move(self, drawing_id: str):
+        drawing = self._drawings.get(drawing_id)
+        if drawing is None:
+            return
+        self._moving_drawing_id = drawing_id
+        self._moving_drawing_original_coordinates = [pt[:] for pt in drawing.coordinates]
+        self.map_widget.set_drawing_draggable(drawing_id, True)
+        self._set_placement_prompt("drag the drawing to its new location", needs_click=False)
 
     def _on_drawing_drag_end(self, drawing_id: str, coordinates_json: str):
         drawing = self._drawings.get(drawing_id)
@@ -509,10 +518,16 @@ class MainWindowMapObjectsMixin:
                 cone.created_at = datetime.now(timezone.utc)
                 self._update_storm_cone(cone)
             elif dlg.action() == "move":
-                self._moving_cone_id = cone_id
-                self._moving_cone_original_location = (cone.lat, cone.lon)
-                self.map_widget.set_storm_cone_draggable(cone_id, True)
-                self._set_placement_prompt("drag the storm cone to its new location", needs_click=False)
+                self._start_storm_cone_move(cone_id)
+
+    def _start_storm_cone_move(self, cone_id: str):
+        cone = self._storm_cones.get(cone_id)
+        if cone is None:
+            return
+        self._moving_cone_id = cone_id
+        self._moving_cone_original_location = (cone.lat, cone.lon)
+        self.map_widget.set_storm_cone_draggable(cone_id, True)
+        self._set_placement_prompt("drag the storm cone to its new location", needs_click=False)
 
     def _on_storm_cone_drag_end(self, cone_id: str, lat: float, lon: float):
         cone = self._storm_cones.get(cone_id)

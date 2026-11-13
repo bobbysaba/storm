@@ -48,10 +48,7 @@ GPS_BAUD = 4800
 # path to previous deployment locations
 DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
-# pbkdf2-HMAC-SHA256 hashes (600 000 iterations) of the passphrases required
-VEHICLE_PASSPHRASE_HASH = "CeNUNJ5o6dIu9Jgi3CKTIw==:E70QJVtj0v5u91wuOJEQJPDG+CJML30lCW+2BqzcLhM="
-MONITOR_PASSPHRASE_HASH = "AYxyUvyUW9hzxWA7UMtNfA==:Bi6XDsi3+E52eLhEP7sT80Effgm3l6mAeKCEpNGNdqY="
-ARCHIVE_PASSPHRASE_HASH = "O3uHJWRbpiJXzOOqTNrGLA==:LecEzsMFUFlijFzJpTlz8PaWGtxuTVx+l0ShiguqoVE="
+# pbkdf2-HMAC-SHA256 hash (600 000 iterations) of the admin mode passphrase
 ADMIN_PASSPHRASE_HASH = "N44K/AWhoT+O08E33gdLvg==:EbVnqJ4r5oRxSR2BjtxlRwpUjJOJoUe0oiIfFJQNUbM="
 
 # accent color
@@ -114,6 +111,32 @@ MQTT_USE_TLS = True
 MQTT_CA_CERT = str(_AWS / "storm.pem")
 MQTT_CERT_FILE = str(_AWS / "storm.pem.crt")
 MQTT_KEY_FILE = str(_AWS / "storm-private.pem.key")
+
+
+def missing_mqtt_cert_files() -> list[str]:
+    """The MQTT certificate files that aren't on disk; vehicle, monitor and
+    archive modes won't launch until this is empty."""
+    return [f for f in (MQTT_CA_CERT, MQTT_CERT_FILE, MQTT_KEY_FILE) if not os.path.isfile(f)]
+
+# read-only viewer certificate, shipped with STORM: its AWS IoT policy
+# (certs/viewer/viewer-policy.json) only lets it subscribe, and only with a
+# "viewer-" client ID, so anyone can view but only aws/ holders publish
+VIEWER_MQTT_CA_CERT = str(_PROJ / "certs" / "AmazonRootCA1.pem")
+VIEWER_MQTT_CERT_FILE = str(_PROJ / "certs" / "viewer" / "viewer.pem.crt")
+VIEWER_MQTT_KEY_FILE = str(_PROJ / "certs" / "viewer" / "viewer-private.pem.key")
+VIEWER_MQTT_CLIENT_PREFIX = "viewer-"
+
+
+def viewer_cert_present() -> bool:
+    return all(os.path.isfile(f) for f in (VIEWER_MQTT_CA_CERT, VIEWER_MQTT_CERT_FILE, VIEWER_MQTT_KEY_FILE))
+
+
+def mqtt_cert_files(viewer: bool = False) -> tuple[str, str, str]:
+    """(CA, certificate, key) for the MQTT connection. VIEWER uses the shipped
+    read-only certificate when it's there, else the publisher one in aws/."""
+    if viewer and viewer_cert_present():
+        return VIEWER_MQTT_CA_CERT, VIEWER_MQTT_CERT_FILE, VIEWER_MQTT_KEY_FILE
+    return MQTT_CA_CERT, MQTT_CERT_FILE, MQTT_KEY_FILE
 
 # data-age thresholds per layer, in minutes: (warn, stale). Ages past "warn"
 # turn the drawer time label amber; past "stale" the toolbar button gets an

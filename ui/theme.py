@@ -32,6 +32,12 @@ QMainWindow, QWidget {
     color: $text_secondary;
 }
 
+/* Icon + label (responsive toolbar's full tier): Qt leaves ~9px of slack after
+   the label, so shift padding left to center the icon and label in the button. */
+#floatingToolbar QToolButton[labelled="true"] {
+    padding: 3px 3px 3px 9px;
+}
+
 #floatingToolbar QToolButton:hover {
     background-color: $bg_hover;
     border-color: $border_strong;
@@ -44,19 +50,61 @@ QMainWindow, QWidget {
     color: $bg_base;
 }
 
+/* Loop timeline, bottom centre (ui/widgets/loop_timeline.py). */
+#loopTimeline {
+    background-color: $bg_panel@0.95;
+    border-radius: 12px;
+    border: 1px solid $border_soft@0.55;
+}
+
+#loopTimeline QToolButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 7px;
+    font-size: 11px;
+    font-weight: 500;
+    color: $text_secondary;
+}
+
+#loopTimeline QToolButton:hover {
+    background-color: $bg_hover;
+    border-color: $border_strong;
+    color: $text_bright;
+}
+
+#loopTimeline QToolButton:checked {
+    background-color: $accent;
+    border-color: $accent;
+    color: $bg_base;
+}
+
+#loopTimeline QToolButton:disabled {
+    color: $text_disabled;
+}
+
+#loopTimeline QLabel#loopTimelineTime {
+    background-color: transparent;
+    color: $text_secondary;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#loopTimeline QLabel#loopTimelineTime[looping="true"] {
+    color: $warn;
+}
+
 /* Overflow (⋯) button of the responsive toolbar: no menu arrow. */
 #floatingToolbar QToolButton#toolbarMore::menu-indicator {
     image: none;
     width: 0px;
 }
 
-/* Drawer pinned open (right-click a toolbar button). */
-#floatingToolbar QToolButton[pinned="true"] {
-    border-color: $accent@0.45;
-}
-
-#floatingToolbar QToolButton[pinned="true"]:checked {
-    border-color: $accent;
+/* Drawer pinned open (right-click a toolbar button): ui/widgets/pin_dot.py. */
+QLabel#drawerPinDot {
+    background-color: $accent;
+    border: 1px solid $bg_panel;
+    border-radius: 3px;
 }
 
 /* Layer health (ui/layer_status.py): dot on toolbar buttons, drawer time labels. */
@@ -108,33 +156,29 @@ QLabel#layerStatusDot[layerState="error"] {
     color: $text_bright;
 }
 
-#floatingToolbar QWidget#radarDrawer,
-#floatingToolbar QWidget#hazardDrawer,
-#floatingToolbar QWidget#satelliteDrawer,
-#floatingToolbar QWidget#mapDrawer,
-#floatingToolbar QWidget#landcoverDrawer,
-#floatingToolbar QWidget#mesoanalysisDrawer,
-#floatingToolbar QWidget#deployLocsDrawer,
-#floatingToolbar QWidget#routingDrawer,
-#floatingToolbar QWidget#soundingDrawer,
-#floatingToolbar QWidget#surfaceDrawer {
+/* Pills paint their own background; the global QWidget rule would paint the
+   plain containers, dividers and sliders inside them $bg_base on top of it.
+   A leading dot matches that exact class only, so inputs and popups keep
+   their own backgrounds. Custom-painted widgets are named by class. */
+#floatingToolbar .QWidget,
+#floatingToolbar .QFrame,
+#floatingToolbar QSlider,
+#archiveControls .QWidget,
+#archiveControls .QFrame,
+#archiveControls QSlider,
+#archiveControls _HourAxis,
+#archiveControls _CoverageStrip {
     background: transparent;
-    border: none;
-    border-radius: 0;
-    padding: 0;
 }
 
-#floatingToolbar QWidget#radarDrawer > QWidget,
-#floatingToolbar QWidget#hazardDrawer > QWidget,
-#floatingToolbar QWidget#satelliteDrawer > QWidget,
-#floatingToolbar QWidget#mapDrawer > QWidget,
-#floatingToolbar QWidget#landcoverDrawer > QWidget,
-#floatingToolbar QWidget#mesoanalysisDrawer > QWidget,
-#floatingToolbar QWidget#deployLocsDrawer > QWidget,
-#floatingToolbar QWidget#routingDrawer > QWidget,
-#floatingToolbar QWidget#soundingDrawer > QWidget,
-#floatingToolbar QWidget#surfaceDrawer > QWidget {
-    background: transparent;
+/* Styled QFrames draw no VLine, so the _vdiv dividers get a 1px border in
+   the color each control set for them. */
+#floatingToolbar QFrame[frameShape="5"] {
+    border-left: 1px solid $border;
+}
+
+#archiveControls QFrame[frameShape="5"] {
+    border-left: 1px solid $divider;
 }
 
 #floatingToolbar QComboBox#radarSiteCombo,
@@ -354,7 +398,8 @@ QToolButton#spcDayPopupButton:checked {
 }
 
 /* ── Deploy Locs Drawer ───────────────────────────────── */
-#floatingToolbar QWidget#deployLocsDrawer QToolButton {
+#floatingToolbar QWidget#deployLocsDrawer QToolButton,
+#floatingToolbar QWidget#trackDrawer QToolButton {
     background-color: transparent;
     border: 1px solid $border;
     border-radius: 6px;
@@ -365,10 +410,16 @@ QToolButton#spcDayPopupButton:checked {
     padding: 3px 8px;
 }
 
-#floatingToolbar QWidget#deployLocsDrawer QToolButton:hover {
+#floatingToolbar QWidget#deployLocsDrawer QToolButton:hover,
+#floatingToolbar QWidget#trackDrawer QToolButton:hover {
     background-color: $info@0.08;
     border-color: $info;
     color: $text_bright;
+}
+
+#floatingToolbar QWidget#trackDrawer QToolButton:disabled {
+    border-color: $border_subtle;
+    color: $text_disabled;
 }
 
 #floatingToolbar QWidget#deployLocsDrawer QToolButton:checked {
@@ -1064,6 +1115,63 @@ QWidget#satPlaybackRow QToolButton:pressed {
 }
 
 /* ── Tooltips ─────────────────────────────────────────── */
+/* Popup menus (toolbar ⋯, map right-click, loop speed): one look, like the pills. */
+QMenu {
+    background-color: $bg_menu;
+    border: 1px solid $border_soft;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    color: $text_secondary;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 5px 18px 5px 10px;
+    border-radius: 5px;
+}
+
+QMenu::item:selected {
+    background-color: $info@0.18;
+    color: $text_bright;
+}
+
+QMenu::item:disabled {
+    color: $text_muted;
+}
+
+QMenu::item:checked {
+    color: $info;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: $divider;
+    margin: 4px 6px;
+}
+
+/* Menu bar (File / Edit / View / Help): a thin row on Windows and Linux;
+   macOS shows it in the system menu bar instead. */
+QMenuBar {
+    background-color: $bg_base;
+    border-bottom: 1px solid $border_subtle;
+    padding: 1px 4px;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    color: $text_secondary;
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 4px;
+}
+
+QMenuBar::item:selected {
+    background-color: $info@0.18;
+    color: $text_bright;
+}
+
 QToolTip {
     background-color: $bg_elevated;
     border: 1px solid $border;
@@ -1089,6 +1197,7 @@ QToolTip {
 #floatingToolbar QWidget#deployLocsDrawer QCheckBox,
 #floatingToolbar QWidget#routingDrawer QCheckBox,
 #floatingToolbar QWidget#soundingDrawer QCheckBox,
+#floatingToolbar QWidget#trackDrawer QCheckBox,
 #floatingToolbar QWidget#surfaceDrawer QCheckBox {
     background: transparent;
 }
@@ -1180,6 +1289,11 @@ QDialog#annotationDialog QLineEdit:focus {
     color: $bg_base;
 }
 
+#archiveControls QToolButton:disabled {
+    background-color: transparent;
+    color: $text_disabled;
+}
+
 #archiveControls QSlider::groove:horizontal {
     height: 4px;
     background: $border_subtle;
@@ -1208,6 +1322,7 @@ QDialog#annotationDialog QLineEdit:focus {
     font-size: 11px;
     font-weight: 600;
     padding: 1px 6px;
+    min-width: 40px;   /* not the global 120px: 40 + padding and border = the speed box's 54px */
 }
 
 #archiveControls QComboBox:hover {

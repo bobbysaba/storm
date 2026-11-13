@@ -28,7 +28,8 @@ _METHODS = (
     "_enter_route_pick", "_on_map_pick_for_route", "_exit_route_pick",
     "_on_annotation_tool_selected", "_exit_annotation_mode", "_exit_drawing_mode",
     "_cancel_drawing", "_on_drawing_click", "_on_annotation_place_click",
-    "_on_storm_motion_fix_click", "_enter_asos_bbox", "_exit_asos_bbox",
+    "_on_storm_motion_fix_click", "_enter_asos_bbox", "_exit_asos_bbox", "_exit_track_mode",
+    "_on_asos_box_cancelled",
 )
 
 # MapWidget setter → the click mode it switches on in the map page
@@ -74,7 +75,7 @@ class FakeRouting:
 class FakeSoundingControls:
     active_mode = "hrrr"
 
-    def reset_to_hrrr(self):
+    def reset_mode(self):
         pass
 
 
@@ -191,3 +192,44 @@ def test_closing_annotate_drawer_exits_tool_but_keeps_a_storm_motion_fix(win):
     win._pending_cone_motion_fix = {"lat": 35.0}
     win.annotation_tools.toggle_drawer(False)
     assert win._click_modes.mode == "storm_motion_fix"
+
+
+class FakeSurfaceControls:
+    def __init__(self):
+        self.enabled = True
+
+    def asos_enabled(self):
+        return self.enabled
+
+    def set_asos_enabled(self, enabled):
+        self.enabled = enabled
+
+
+class FakeLabel:
+    text = ""
+
+    def setText(self, text):
+        self.text = text
+
+
+def _asos_host(win, bbox):
+    win.surface_controls = FakeSurfaceControls()
+    win.status_msg_label = FakeLabel()
+    win._surface_fetcher = type("F", (), {"_asos_bbox": bbox})()
+    win._enter_asos_bbox()
+    assert win._click_modes.mode == "asos_bbox"
+
+
+def test_cancelling_the_first_asos_box_turns_asos_off(win):
+    _asos_host(win, bbox=None)
+    win._on_asos_box_cancelled()
+    assert win._click_modes.mode == "none" and "asos_bbox" not in win.map_widget.on
+    assert win.surface_controls.enabled is False
+    assert "canceled" in win.status_msg_label.text
+
+
+def test_cancelling_a_redraw_keeps_the_existing_box(win):
+    _asos_host(win, bbox=(-100.0, 33.0, -95.0, 37.0))
+    win._on_asos_box_cancelled()
+    assert win._click_modes.mode == "none"
+    assert win.surface_controls.enabled is True

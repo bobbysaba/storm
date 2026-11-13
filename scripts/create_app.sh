@@ -85,7 +85,11 @@ chmod +x "$MACOS_DIR/storm_launcher.sh"
 # macOS Finder (Sequoia+) silently refuses to launch shell-script app bundles.
 
 cat > /tmp/storm_wrapper.c << 'CWRAPPER'
+#include <mach-o/dyld.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#include <unistd.h>
 
 int main(void) {
     char self[4096];
@@ -118,9 +122,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>edu.ou.nssl.storm</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>__STORM_VERSION__</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>__STORM_VERSION__</string>
     <key>CFBundleExecutable</key>
     <string>STORM</string>
     <key>CFBundlePackageType</key>
@@ -134,6 +138,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
+STORM_VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION" 2>/dev/null || echo 0.0.0)"
+sed -i '' "s|__STORM_VERSION__|$STORM_VERSION|g" "$APP_BUNDLE/Contents/Info.plist"
 
 if [ -f "$PROJECT_DIR/storm.icns" ]; then
     cp "$PROJECT_DIR/storm.icns" "$RESOURCES_DIR/storm.icns"

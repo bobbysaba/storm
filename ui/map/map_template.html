@@ -147,6 +147,28 @@
       z-index: 200;
     }
 
+    /* damage paths (ARCHIVE > HAZARDS > DAMAGE PATHS): a bold rating line,
+       then times, size and position */
+    #damage-path-tooltip {
+      display: none;
+      position: absolute;
+      pointer-events: none;
+      background: rgba(15, 15, 26, 0.92);
+      border: 1px solid #49536F;
+      border-radius: 5px;
+      padding: 5px 9px;
+      font-family: "Helvetica Neue", sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.35;
+      color: #E8EDF5;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+      z-index: 200;
+    }
+    #damage-path-tooltip .title { font-weight: 700; }
+    #damage-path-tooltip .muted { color: #8E97AB; }
+
     #private-pin-menu {
       display: none;
       position: absolute;
@@ -287,6 +309,11 @@
       border-bottom-color: rgba(15, 15, 26, 0.96);
     }
 
+    /* trail and wind-barb readouts: vehicle and time, then the value */
+    .maplibregl-popup.storm-hover-tooltip { pointer-events: none; }
+    .storm-hover-tooltip .title { font-weight: 700; }
+    .storm-hover-tooltip .muted { color: #8A93A6; font-weight: 500; }
+
     .maplibregl-ctrl-top-right {
       top: 10px !important;
       right: 10px !important;
@@ -400,6 +427,7 @@
 
   <!-- ── Hazard Hover Tooltip ── -->
   <div id="hazard-tooltip"></div>
+  <div id="damage-path-tooltip"></div>
 
   <script>
     window.onerror = function(msg, src, line) {
@@ -432,6 +460,7 @@
     window.stormMeasureClick = _stormNoop;
     window.stormMeasureClear = _stormNoop;
     window.stormAddDrawing = _stormNoop;
+    window.stormSetAnnotationsVisible = _stormNoop;
     window.stormRemoveDrawing = _stormNoop;
     window.stormDrawingModeSet = _stormNoop;
     window.stormDrawingUpdatePreview = _stormNoop;
@@ -443,7 +472,15 @@
     window.stormSetSpcWatchesGeoJSON = _stormNoop;
     window.stormSetSpcWatchesVisible = _stormNoop;
     window.stormSetSpcMdsGeoJSON = _stormNoop;
+    window.stormSetTrackGeoJSON = _stormNoop;
+    window.stormSetTrackEditMode = _stormNoop;
+    window.stormSetTrackLayersVisible = _stormNoop;
+    window.stormSetTrackMarker = _stormNoop;
     window.stormSetSpcMdsVisible = _stormNoop;
+    window.stormSetDamagePaths = _stormNoop;
+    window.stormSetLidarLocations = _stormNoop;
+    window.stormSetLidarImage = _stormNoop;
+    window.stormClearLidarImage = _stormNoop;
     window.stormSetSatelliteFrame = _stormNoop;
     window.stormSetRadarGL = _stormNoop;
     window.stormHideRadarGL = _stormNoop;
@@ -494,7 +531,7 @@
     if (typeof QWebChannel !== "undefined") {
       new QWebChannel(qt.webChannelTransport, function(channel) {
         bridge = channel.objects.bridge;
-        // if map.on("load") already fired before bridge was ready, notify now.
+        // if the map was set up before the bridge was ready, notify now.
         if (window._stormMapLoaded) bridge.on_map_loaded();
       });
     }
@@ -932,6 +969,37 @@
       keyboard: true
     });
 
+    // Base map tiles from the network (no tiles/storm.mbtiles, ui/map/html.py)
+    // that can't be reached: say so on the map instead of leaving it blank,
+    // and keep retrying (Wi-Fi may come up after STORM starts). The notice
+    // clears once the source loads.
+    let basemapNotice = null;
+    let basemapRetry = null;
+    map.on("error", (e) => {
+      if (!e || e.sourceId !== "storm-tiles") return;
+      const source = map.getSource("storm-tiles");
+      if (!basemapNotice) {
+        basemapNotice = document.createElement("div");
+        basemapNotice.id = "basemap-notice";
+        basemapNotice.textContent = "Base map unavailable: no local map tiles (tiles/storm.mbtiles) " +
+          "and the online map can't be reached. Data layers still work.";
+        basemapNotice.style.cssText = "position:absolute;top:96px;left:50%;transform:translateX(-50%);" +
+          "z-index:5;max-width:460px;padding:5px 9px;border-radius:6px;border:1px solid #49536F;" +
+          "background:#0F0F1A;color:#E8EDF5;font:12px 'Helvetica Neue',sans-serif;text-align:center;" +
+          "pointer-events:none";
+        document.getElementById("map").appendChild(basemapNotice);
+      }
+      if (source && !source.loaded() && !basemapRetry && typeof source.load === "function") {
+        basemapRetry = setTimeout(() => { basemapRetry = null; source.load(); }, 20000);
+      }
+    });
+    map.on("sourcedata", (e) => {
+      if (basemapNotice && e.sourceId === "storm-tiles" && (e.tile || e.sourceDataType === "metadata")) {
+        basemapNotice.remove();
+        basemapNotice = null;
+      }
+    });
+
     map.addControl(new maplibregl.NavigationControl({
       showCompass: false,
       showZoom: true,
@@ -947,7 +1015,13 @@
       unit: "imperial"
     }), "bottom-left");
 
-    map.on("load", function() {
+    // STORM's own sources and layers (hazards, CWA, measure, route, ...).
+    // Built as soon as the map's style is ready -- NOT on MapLibre's "load",
+    // which also waits for the first basemap tiles: when a tile request was
+    // slow or never finished, "load" came late or not at all, while Python,
+    // told the page was ready, pushed data into sources that didn't exist.
+    // Python is told the map is ready only once this has run (_stormNotifyReady).
+    function _stormSetupMap() {
       console.log("STORM map loaded.");
       const glyphCheck = "__STORM_BASE__/static/fonts/Noto%20Sans%20Regular/0-255.pbf";
       fetch(glyphCheck).then(r => console.log("Glyph check:", r.status, glyphCheck))
@@ -1204,6 +1278,297 @@
           'text-halo-width': 1.5,
           'text-opacity': 0.9
         }
+      });
+
+      // Damage-survey paths (ARCHIVE > HAZARDS > DAMAGE PATHS; DAT or NCEI
+      // Storm Events), colored by EF rating: a dark casing, the line, white
+      // start and colored end dots, and a wide invisible line for hovering.
+      map.addSource('damage-paths', {type:'geojson', data:{type:'FeatureCollection', features:[]}});
+      map.addLayer({
+        id: 'damage-paths-hit', type: 'line', source: 'damage-paths',
+        filter: ['==', ['geometry-type'], 'LineString'],
+        layout: {'line-join':'round','line-cap':'round'},
+        paint: {'line-color':'#000000','line-opacity':0.01,'line-width':16}
+      }, 'road-label-motorway');
+      map.addLayer({
+        id: 'damage-paths-casing', type: 'line', source: 'damage-paths',
+        filter: ['==', ['geometry-type'], 'LineString'],
+        layout: {'line-join':'round','line-cap':'round'},
+        paint: {
+          'line-color': 'rgba(0,0,0,0.82)',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 6.0, 9, 8.0, 13, 10.0],
+          'line-opacity': 0.92
+        }
+      }, 'road-label-motorway');
+      map.addLayer({
+        id: 'damage-paths-line', type: 'line', source: 'damage-paths',
+        filter: ['==', ['geometry-type'], 'LineString'],
+        layout: {'line-join':'round','line-cap':'round'},
+        paint: {
+          'line-color': ['coalesce', ['get', 'ef_color'], '#bee8ff'],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 5, 3.8, 9, 5.2, 13, 6.8]
+        }
+      }, 'road-label-motorway');
+      map.addLayer({
+        id: 'damage-paths-start', type: 'circle', source: 'damage-paths',
+        filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'marker'], 'start']],
+        paint: {
+          'circle-color': '#ffffff',
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4.0, 9, 5.2, 13, 6.4],
+          'circle-stroke-width': 2,
+          'circle-stroke-color': ['coalesce', ['get', 'ef_color'], '#bee8ff']
+        }
+      }, 'road-label-motorway');
+      map.addLayer({
+        id: 'damage-paths-end', type: 'circle', source: 'damage-paths',
+        filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'marker'], 'end']],
+        paint: {
+          'circle-color': ['coalesce', ['get', 'ef_color'], '#bee8ff'],
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4.0, 9, 5.2, 13, 6.4],
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff'
+        }
+      }, 'road-label-motorway');
+      if (window._damagePathsData) map.getSource('damage-paths').setData(window._damagePathsData);
+
+      // Doppler lidar locations (archive LIDAR): every place a lidar scanned
+      // from, picked by clicking like a radar station; the picked one has a
+      // white ring. Their sweeps are an image layer ('lidar-image', added
+      // with the first sweep, above the radar).
+      map.addSource('lidar-locations', {type:'geojson', data:{type:'FeatureCollection', features:[]}});
+      map.addLayer({
+        id: 'lidar-locations-circle', type: 'circle', source: 'lidar-locations',
+        paint: {
+          'circle-radius': ['case', ['get', 'selected'], 8, 6.5],
+          'circle-color': '#9B8FFF',
+          'circle-stroke-width': ['case', ['get', 'selected'], 3, 1.5],
+          'circle-stroke-color': ['case', ['get', 'selected'], '#FFFFFF', '#0A0A0F'],
+          'circle-opacity': 0.95
+        }
+      });
+      map.addLayer({
+        id: 'lidar-locations-label', type: 'symbol', source: 'lidar-locations',
+        layout: {
+          'text-field': ['get', 'label'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 11,
+          'text-anchor': 'top',
+          'text-offset': [0, 1.1],
+          'text-optional': true             // the truck's stops sit close: colliding labels hide
+        },
+        paint: {'text-color': '#E8EDF5', 'text-halo-color': '#0A0A0F', 'text-halo-width': 2}
+      });
+      map.on('mouseenter', 'lidar-locations-circle', function() { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', 'lidar-locations-circle', function() { map.getCanvas().style.cursor = ''; });
+      if (window._lidarLocationsData) map.getSource('lidar-locations').setData(window._lidarLocationsData);
+
+      // Observation trails (archive VEHICLES > show trails; core/trails.py):
+      // recent path segments colored by one measured or derived quantity, in
+      // time-to-space mode also storm-centered range rings. Added before the
+      // storm track so the track draws on top.
+      map.addSource('obs-trails', {type:'geojson', data:{type:'FeatureCollection', features:[]}});
+      map.addLayer({
+        id: 'obs-trails-rings', type: 'line', source: 'obs-trails',
+        filter: ['==', ['get', 'kind'], 'ring'],
+        paint: {'line-color': '#E3E8F2', 'line-width': 1, 'line-opacity': 0.45, 'line-dasharray': [3, 3]}
+      });
+      // a dark outline under each trail, so its colors stand apart from
+      // roads and radar whatever their hue (core/trails.py PALETTES)
+      map.addLayer({
+        id: 'obs-trails-casing', type: 'line', source: 'obs-trails',
+        filter: ['==', ['get', 'kind'], 'trail'],
+        layout: {'line-cap': 'round', 'line-join': 'round'},
+        paint: {'line-color': '#05060A', 'line-opacity': 0.85,
+                'line-width': ['interpolate', ['linear'], ['zoom'], 6, 5, 12, 8.5]}
+      });
+      map.addLayer({
+        id: 'obs-trails-line', type: 'line', source: 'obs-trails',
+        filter: ['==', ['get', 'kind'], 'trail'],
+        layout: {'line-cap': 'round', 'line-join': 'round'},
+        paint: {'line-color': window._trailColor || '#FFFFFF',
+                'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.5, 12, 5]}
+      });
+      map.addLayer({
+        id: 'obs-trails-center', type: 'circle', source: 'obs-trails',
+        filter: ['==', ['get', 'kind'], 'center'],
+        paint: {'circle-radius': 4, 'circle-color': '#FFD400', 'circle-stroke-width': 1.5, 'circle-stroke-color': '#0A0A0F'}
+      });
+      // Wind barbs along the trails (core/trails.py _barbs). One icon per
+      // 5 kt, staff drawn toward north from the observation and rotated to
+      // the direction the wind blows from; half barb 5 kt, full 10, flag 50.
+      (function addBarbImages() {
+        var R = 2, S = 60, c = S / 2, L = 22, F = 9, STEP = 3.6;
+        for (var kt = 0; kt <= 200; kt += 5) {
+          var cv = document.createElement('canvas');
+          cv.width = cv.height = S * R;
+          var g = cv.getContext('2d');
+          g.scale(R, R);
+          g.lineCap = 'round'; g.lineJoin = 'round';
+          var paths = [], flags = [];
+          if (kt === 0) {
+            paths.push(function(){ g.beginPath(); g.arc(c, c, 4, 0, 2 * Math.PI); });
+          } else {
+            paths.push(function(){ g.beginPath(); g.moveTo(c, c); g.lineTo(c, c - L); });
+            var left = kt, y = c - L;
+            while (left >= 50) { (function(y0){ flags.push(function(){ g.beginPath(); g.moveTo(c, y0); g.lineTo(c + F, y0 - 3); g.lineTo(c, y0 + 5); g.closePath(); }); })(y); y += 6.5; left -= 50; }
+            while (left >= 10) { (function(y0){ paths.push(function(){ g.beginPath(); g.moveTo(c, y0); g.lineTo(c + F, y0 - 4); }); })(y); y += STEP; left -= 10; }
+            if (left >= 5) {
+              if (kt === 5) y += STEP;               // a lone half barb sits in from the tip
+              (function(y0){ paths.push(function(){ g.beginPath(); g.moveTo(c, y0); g.lineTo(c + F / 2, y0 - 2); }); })(y);
+            }
+          }
+          [['#0A0A0F', 3.6], ['#F2F5FA', 1.6]].forEach(function(style) {
+            g.strokeStyle = style[0]; g.lineWidth = style[1];
+            paths.forEach(function(draw) { draw(); g.stroke(); });
+            flags.forEach(function(draw) { draw(); g.fillStyle = '#F2F5FA'; g.fill(); g.stroke(); });
+          });
+          map.addImage('barb-' + kt, g.getImageData(0, 0, S * R, S * R), {pixelRatio: R});
+        }
+      })();
+      map.addLayer({
+        id: 'obs-trails-barbs', type: 'symbol', source: 'obs-trails',
+        filter: ['==', ['get', 'kind'], 'barb'],
+        layout: {
+          'icon-image': ['get', 'img'],
+          'icon-rotate': ['get', 'dir'],
+          'icon-rotation-alignment': 'map',
+          'icon-allow-overlap': true,
+          'icon-ignore-placement': true,
+          'icon-size': ['interpolate', ['linear'], ['zoom'], 6, 0.75, 11, 1.1]
+        }
+      });
+      if (window._trailData) map.getSource('obs-trails').setData(window._trailData);
+      var _trailPopup = new maplibregl.Popup({closeButton: false, closeOnClick: false, offset: 12,
+                                              anchor: 'left', maxWidth: 'none', className: 'storm-hover-tooltip'});
+      map.on('mousemove', 'obs-trails-barbs', function(e) {
+        if (!e.features || !e.features.length) return;
+        var p = e.features[0].properties;
+        _trailPopup.setLngLat(e.lngLat)
+          .setHTML('<div class="title">' + p.vehicle + ' <span class="muted">' + p.t + '</span></div>'
+                   + '<div>' + (p.sr ? 'Storm-relative wind ' : 'Wind ') + '<b>' + Math.round(p.dir) + '° at ' + p.kt + ' kt</b></div>')
+          .addTo(map);
+      });
+      map.on('mouseleave', 'obs-trails-barbs', function() { _trailPopup.remove(); });
+      map.on('mousemove', 'obs-trails-line', function(e) {
+        if (!e.features || !e.features.length) return;
+        if (map.queryRenderedFeatures(e.point, {layers: ['obs-trails-barbs']}).length) return;
+        var p = e.features[0].properties;
+        _trailPopup.setLngLat(e.lngLat)
+          .setHTML('<div class="title">' + p.vehicle + ' <span class="muted">' + p.t + '</span></div>'
+                   + '<div>' + (window._trailLabel ? window._trailLabel + ' ' : '') + '<b>' + Number(p.v).toFixed(1) + ' ' + (window._trailUnits || '') + '</b></div>')
+          .addTo(map);
+      });
+      map.on('mouseleave', 'obs-trails-line', function() { _trailPopup.remove(); });
+
+      // Storm track (archive TRACK): hand-placed storm centers joined by a
+      // dashed line, as in MESO-VIEW's track editor. Points: selected (cyan),
+      // nearest the clock (yellow), others red.
+      map.addSource('storm-track', {type:'geojson', data: window._trackGeoJSON ||
+        {type:'FeatureCollection', features:[]}});
+      map.addLayer({
+        id: 'storm-track-line', type: 'line', source: 'storm-track',
+        filter: ['==', ['geometry-type'], 'LineString'],
+        layout: {'line-join':'round', 'line-cap':'round'},
+        paint: {'line-color':'#FF3B3B', 'line-width':2.4, 'line-dasharray':[2, 1.4], 'line-opacity':0.9}
+      });
+      map.addLayer({
+        id: 'storm-track-points', type: 'circle', source: 'storm-track',
+        filter: ['==', ['geometry-type'], 'Point'],
+        paint: {
+          'circle-radius': ['match', ['get', 'state'], 'selected', 8, 'current', 7, 6],
+          'circle-color': ['match', ['get', 'state'], 'selected', '#00E5FF', 'current', '#FFD400', '#FF3B3B'],
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#0A0A0F'
+        }
+      });
+      // the reference marker: one per session, placed from the right-click
+      // menu; new and dragged points snap onto it unless Shift is held
+      map.addSource('storm-track-marker', {type:'geojson', data:{type:'FeatureCollection', features:[]}});
+      map.addLayer({
+        id: 'storm-track-marker-halo', type: 'circle', source: 'storm-track-marker',
+        paint: {
+          'circle-color': 'rgba(0,229,255,0.20)',
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 6, 9, 8, 13, 10],
+          'circle-opacity': 0.55
+        }
+      });
+      map.addLayer({
+        id: 'storm-track-marker-point', type: 'circle', source: 'storm-track-marker',
+        paint: {
+          'circle-color': '#00E5FF',
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, 4, 9, 5, 13, 6],
+          'circle-stroke-width': 1.75,
+          'circle-stroke-color': '#061018'
+        }
+      });
+      map.addLayer({
+        id: 'storm-track-marker-label', type: 'symbol', source: 'storm-track-marker',
+        layout: {
+          'text-field': ['get', 'label'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 5, 10, 9, 12, 13, 14],
+          'text-anchor': 'top',
+          'text-offset': [0, 0.9],
+          'text-allow-overlap': true,
+          'text-ignore-placement': true
+        },
+        paint: {'text-color':'#FFE28A', 'text-halo-color':'rgba(0,0,0,0.85)', 'text-halo-width':1.6}
+      });
+      if (window._trackMarker) window.stormSetTrackMarker(JSON.stringify(window._trackMarker));
+      if (window._trackLayersVisible) window.stormSetTrackLayersVisible.apply(null, window._trackLayersVisible);
+
+      map.on('mouseenter', 'storm-track-points', function() {
+        if (window._trackEditActive) map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'storm-track-points', function() {
+        if (window._trackEditActive && !window._trackDrag) map.getCanvas().style.cursor = 'crosshair';
+      });
+
+      // Drag a point to move it: the point and line follow the cursor here;
+      // on release Python gets the position and whether Alt was held (keep
+      // the point's time instead of taking the clock's).
+      window._trackDrag = null;
+      window._trackDragEnd = null;   // {x, y, t} where the last drag was released
+      map.on('mousedown', 'storm-track-points', function(e) {
+        if (!window._trackEditActive || !e.features || !e.features.length) return;
+        if (e.originalEvent && e.originalEvent.button !== 0) return;
+        e.preventDefault();   // no map pan for this gesture
+        window._trackDrag = {id: e.features[0].properties.point_id, moved: false};
+        if (bridge) bridge.on_track_point_select(window._trackDrag.id);
+      });
+      map.on('mousemove', function(e) {
+        var drag = window._trackDrag;
+        if (!drag) return;
+        drag.moved = true;
+        map.getCanvas().style.cursor = 'grabbing';
+        var data = window._trackGeoJSON;
+        if (!data) return;
+        var at = _snapToTrackMarker(e.lngLat, 18, e.originalEvent && e.originalEvent.shiftKey);
+        var coords = [];
+        data.features.forEach(function(f) {
+          if (f.geometry.type !== 'Point') return;
+          if (f.properties.point_id === drag.id) f.geometry.coordinates = [at.lon, at.lat];
+          coords.push(f.geometry.coordinates);
+        });
+        data.features.forEach(function(f) {
+          if (f.geometry.type === 'LineString') f.geometry.coordinates = coords;
+        });
+        var src = map.getSource('storm-track');
+        if (src) src.setData(data);
+      });
+      map.on('mouseup', function(e) {
+        var drag = window._trackDrag;
+        if (!drag) return;
+        window._trackDrag = null;
+        map.getCanvas().style.cursor = window._trackEditActive ? 'crosshair' : '';
+        if (!drag.moved) return;
+        // the browser may send a click for the drag itself at the release
+        // point, which must not add a point; often none comes, so it's
+        // recognized by place and time rather than a flag
+        window._trackDragEnd = {x: e.point.x, y: e.point.y, t: Date.now()};
+        var keepTime = !!(e.originalEvent && e.originalEvent.altKey);
+        var at = _snapToTrackMarker(e.lngLat, 18, e.originalEvent && e.originalEvent.shiftKey);
+        if (bridge) bridge.on_track_point_move(drag.id, at.lat, at.lon, keepTime);
       });
 
       // click-to-pick destination mode
@@ -1519,6 +1884,7 @@
         id: 'cwa-fill',
         type: 'fill',
         source: 'cwa',
+        filter: ['!=', ['geometry-type'], 'Point'],
         layout: { 'visibility': 'none' },
         paint: { 'fill-color': '#FFCC00', 'fill-opacity': 0 }
       });
@@ -1526,6 +1892,7 @@
         id: 'cwa-line',
         type: 'line',
         source: 'cwa',
+        filter: ['!=', ['geometry-type'], 'Point'],
         layout: { 'visibility': 'none' },
         paint: { 'line-color': '#00CFFF', 'line-width': 1.5, 'line-opacity': 0.9 }
       });
@@ -1533,6 +1900,7 @@
         id: 'cwa-label',
         type: 'symbol',
         source: 'cwa',
+        filter: ['==', ['geometry-type'], 'Point'],     // one label point per CWA (scripts/make_cwa_geojson.py)
         layout: {
           'visibility': 'none',
           'text-field': ['coalesce', ['get', 'WFO'], ['get', 'CWA']],
@@ -1586,7 +1954,23 @@
         ['cwa-fill','cwa-line','cwa-label'].forEach(function(lid) { if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', v); });
         if (!visible) { var tip = document.getElementById('hazard-tooltip'); if (tip) tip.style.display = 'none'; }
       };
-    });
+    }
+
+    // "The style is in": what addSource/addLayer need (MapLibre 4's
+    // Style._checkLoaded). Not map.isStyleLoaded(), which also waits for
+    // every source's tiles, like "load". Private field: re-check when
+    // upgrading static/maplibre-gl.js (bundled 4.1.3).
+    function _stormStyleReady() { return !!(map.style && map.style._loaded); }
+    var _stormSetupDone = false;
+    function _stormSetupOnce() {
+      if (_stormSetupDone || !_stormStyleReady()) return;
+      _stormSetupDone = true;
+      _stormSetupMap();
+      _stormNotifyReady();
+    }
+    map.on('style.load', _stormSetupOnce);
+    map.on('styledata', _stormSetupOnce);
+    map.on('load', _stormSetupOnce);
 
     map.on("error", function(e) {
       const err = e && e.error ? e.error : null;
@@ -1764,12 +2148,110 @@
       return '';
     }
 
+    // track point under (or within 5 px of) a screen point, so a near miss
+    // selects the point instead of adding another
+    function _trackPointHit(point) {
+      if (!map.getLayer('storm-track-points') ||
+          map.getLayoutProperty('storm-track-points', 'visibility') === 'none') return null;
+      var r = 5;
+      var hits = map.queryRenderedFeatures(
+        [[point.x - r, point.y - r], [point.x + r, point.y + r]], {layers: ['storm-track-points']});
+      if (!hits.length) return null;
+      hits.sort(function(f, g) {
+        var pf = map.project(f.geometry.coordinates), pg = map.project(g.geometry.coordinates);
+        return Math.hypot(pf.x - point.x, pf.y - point.y) - Math.hypot(pg.x - point.x, pg.y - point.y);
+      });
+      return hits[0].properties.point_id;
+    }
+
+    // a position within `px` screen pixels of the reference marker lands on it
+    // (MESO-VIEW: 20 px for a click, 18 for a drag)
+    function _snapToTrackMarker(lngLat, px, bypass) {
+      var m = window._trackMarker;
+      if (bypass || !m) return {lat: lngLat.lat, lon: lngLat.lng};
+      var a = map.project([lngLat.lng, lngLat.lat]);
+      var b = map.project([m.lon, m.lat]);
+      if (Math.hypot(a.x - b.x, a.y - b.y) <= px) return {lat: m.lat, lon: m.lon};
+      return {lat: lngLat.lat, lon: lngLat.lng};
+    }
+
+    function _trackHoverLabel(point) {
+      var id = _trackPointHit(point);
+      if (id === null || !window._trackGeoJSON) return null;
+      var f = window._trackGeoJSON.features.find(function(f) {
+        return f.geometry.type === 'Point' && f.properties.point_id === id;
+      });
+      if (!f) return null;
+      var p = f.properties;
+      return [p.time, 'Storm track ' + p.order, p.radar].filter(Boolean).join(' \u2502 ');
+    }
+
     function _showHoverTip(tip, label, e) {
       var mc = map.getContainer().getBoundingClientRect();
       tip.textContent = label;
       tip.style.left = (e.originalEvent.clientX - mc.left + 14) + 'px';
       tip.style.top  = (e.originalEvent.clientY - mc.top  - 10) + 'px';
       tip.style.display = 'block';
+    }
+
+    // starttime / endtime are epoch milliseconds
+    // (archive/fetchers/damage_paths_archive_fetcher.py)
+    function _fmtDamagePathTime(ms) {
+      if (ms == null) return '—';
+      var d = new Date(Number(ms));
+      if (isNaN(d.getTime())) return '—';
+      return d.toISOString().slice(0, 16).replace('T', ' ') + 'Z';
+    }
+
+    function _escHtml(text) {
+      return String(text).replace(/[&<>"]/g, function(c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+      });
+    }
+
+    // The lidar location under the cursor: when it scanned, and how its scan
+    // directions were set (several lines, in the hazard tooltip).
+    function _lidarLocationHover(tip, e) {
+      var hits = map.getLayer('lidar-locations-circle')
+        ? map.queryRenderedFeatures(e.point, {layers: ['lidar-locations-circle']}) : [];
+      if (!hits.length) {
+        if (tip.dataset.lidar) { tip.style.whiteSpace = ''; delete tip.dataset.lidar; }
+        return false;
+      }
+      tip.dataset.lidar = '1';
+      tip.style.whiteSpace = 'pre';
+      _showHoverTip(tip, (hits[0].properties || {}).hover || '', e);
+      return true;
+    }
+
+    // The damage path under the cursor: its rating and source, start and end
+    // times, length / width / peak wind, and the cursor's position.
+    function _damagePathHover(e) {
+      var tip = document.getElementById('damage-path-tooltip');
+      if (!tip) return false;
+      var hits = (map.getLayer('damage-paths-hit') &&
+                  map.getLayoutProperty('damage-paths-hit', 'visibility') !== 'none')
+        ? map.queryRenderedFeatures(e.point, {layers: ['damage-paths-hit']})
+        : [];
+      if (!hits.length) {
+        tip.style.display = 'none';
+        return false;
+      }
+      var p = hits[0].properties || {};
+      var length = p.length != null ? Number(p.length).toFixed(1) + ' mi' : '—';
+      var width = p.width != null ? Number(p.width).toFixed(0) + ' yd' : '—';
+      var wind = p.maxwind != null ? Number(p.maxwind).toFixed(0) + ' mph' : '—';
+      tip.innerHTML =
+        '<div class="title">' + _escHtml(p.ef_label || 'Damage path') +
+        ' <span class="muted">' + _escHtml(p.damage_source || '') + '</span></div>' +
+        '<div>' + _fmtDamagePathTime(p.starttime) + ' → ' + _fmtDamagePathTime(p.endtime) + '</div>' +
+        '<div>Length ' + length + '  ·  Width ' + width + '  ·  Wind ' + wind + '</div>' +
+        '<div class="muted">' + e.lngLat.lat.toFixed(4) + ', ' + e.lngLat.lng.toFixed(4) + '</div>';
+      var mc = map.getContainer().getBoundingClientRect();
+      tip.style.left = (e.originalEvent.clientX - mc.left + 14) + 'px';
+      tip.style.top  = (e.originalEvent.clientY - mc.top  - 10) + 'px';
+      tip.style.display = 'block';
+      return true;
     }
 
     map.on("mousemove", function(e) {
@@ -1807,9 +2289,27 @@
       }
 
       // don't interfere with vehicle marker tooltip
-      if (window._vehicleHovering) return;
+      if (window._vehicleHovering) {
+        var _dtip = document.getElementById('damage-path-tooltip');
+        if (_dtip) _dtip.style.display = 'none';
+        return;
+      }
 
       var _htip = document.getElementById('hazard-tooltip');
+      if (_htip && window._trackDrag) {
+        _htip.style.display = 'none';
+        return;
+      }
+      var _trackLabel = _htip ? _trackHoverLabel(e.point) : null;
+      if (_trackLabel) {
+        _showHoverTip(_htip, _trackLabel, e);
+        return;
+      }
+      if (_htip && _lidarLocationHover(_htip, e)) return;
+      if (_htip && _damagePathHover(e)) {
+        _htip.style.display = 'none';
+        return;
+      }
       if (_htip) {
         _nlcdHoverSeq++;
         var _hazardLayers = [
@@ -1912,6 +2412,35 @@
       }
     });
 
+    // one entry per unique text product under a point (overlapping polygons deduplicated)
+    function _stormHazardFeaturesAt(point) {
+      var spcClickLayers = ['spc-cat-fill', 'spc-tor-fill', 'spc-wind-fill', 'spc-hail-fill', 'spc-prob-fill', 'spc-prob-sig-base', 'spc-prob-sign', 'spc-prob-cig1', 'spc-prob-cig2', 'spc-prob-cig3', 'spc-sig-sig-base', 'spc-sig-sign', 'spc-sig-cig1', 'spc-sig-cig2', 'spc-sig-cig3', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) { return map.getLayer(l); });
+      if (spcClickLayers.length === 0) return [];
+      var spcHits = map.queryRenderedFeatures(point, {layers: spcClickLayers});
+      var _clickSeen = {};
+      var _clickFeatures = [];
+      spcHits.forEach(function(hit) {
+        var src = hit.source;
+        var props = hit.properties || {};
+        var key;
+        if (src === 'spc-cat')           key = 'spc-cat';
+        else if (src === 'spc-tor')      key = 'spc-tor';
+        else if (src === 'spc-wind')     key = 'spc-wind';
+        else if (src === 'spc-hail')     key = 'spc-hail';
+        else if (src === 'spc-prob')     key = 'spc-prob';
+        else if (src === 'spc-sig')      key = 'spc-sig';
+        else if (src === 'spc-mds')      key = 'spc-mds:'      + (props.name      || '');
+        else if (src === 'spc-watches')  key = 'spc-watches:'   + (props.watch_num || props.event || '');
+        else if (src === 'nws-warnings') key = 'nws-warnings:' + (props.event     || '') + ':' + (props.wfo || '');
+        else return;
+        if (!_clickSeen[key]) {
+          _clickSeen[key] = true;
+          _clickFeatures.push({source: src, properties: props});
+        }
+      });
+      return _clickFeatures;
+    }
+
     map.on("click", function(e) {
       if (window._stormSuppressNextClick) {
         window._stormSuppressNextClick = false;
@@ -1920,6 +2449,22 @@
       // route pick was already handled by the earlier listener — skip everything
       if (window._routePickConsumed) {
         window._routePickConsumed = false;
+        return;
+      }
+      // TRACK: a click on (or within a few px of) a point selects it,
+      // anywhere else places the storm center at the current frame
+      if (window._trackEditActive) {
+        var _dragEnd = window._trackDragEnd;
+        window._trackDragEnd = null;
+        if (_dragEnd && Date.now() - _dragEnd.t < 400 &&
+            Math.hypot(e.point.x - _dragEnd.x, e.point.y - _dragEnd.y) < 4) return;
+        var _hitId = _trackPointHit(e.point);
+        if (_hitId !== null) {
+          if (bridge) bridge.on_track_point_select(_hitId);
+          return;
+        }
+        var _at = _snapToTrackMarker(e.lngLat, 20, e.originalEvent && e.originalEvent.shiftKey);
+        if (bridge) bridge.on_track_point_add(_at.lat, _at.lon);
         return;
       }
       // in sounding mode: capture lat/lon and forward to Python — skip all other handling
@@ -1969,6 +2514,13 @@
           return;
         }
       }
+      if (map.getLayer('lidar-locations-circle')) {
+        const lidarHits = map.queryRenderedFeatures(e.point, {layers: ['lidar-locations-circle']});
+        if (lidarHits.length > 0 && lidarHits[0].properties && lidarHits[0].properties.key) {
+          if (bridge) bridge.on_lidar_location_click(lidarHits[0].properties.key);
+          return;
+        }
+      }
       const radarStationLayers = ['radar-stations-circle', 'radar-stations-label'].filter(function(l) {
         return map.getLayer(l) && map.getLayoutProperty(l, 'visibility') === 'visible';
       });
@@ -1987,37 +2539,10 @@
         }
       }
       // check SPC hazard polygon clicks (outlook + MDs) — lower priority than drawings/cones
-      var spcClickLayers = ['spc-cat-fill', 'spc-tor-fill', 'spc-wind-fill', 'spc-hail-fill', 'spc-prob-fill', 'spc-prob-sig-base', 'spc-prob-sign', 'spc-prob-cig1', 'spc-prob-cig2', 'spc-prob-cig3', 'spc-sig-sig-base', 'spc-sig-sign', 'spc-sig-cig1', 'spc-sig-cig2', 'spc-sig-cig3', 'spc-mds-fill', 'spc-watches-fill', 'nws-warnings-fill'].filter(function(l) { return map.getLayer(l); });
-      if (spcClickLayers.length > 0) {
-        var spcHits = map.queryRenderedFeatures(e.point, {layers: spcClickLayers});
-        if (spcHits.length > 0) {
-          // collect one entry per unique text product (deduplicate overlapping polygons).
-          var _clickSeen = {};
-          var _clickFeatures = [];
-          spcHits.forEach(function(hit) {
-            var src = hit.source;
-            var props = hit.properties || {};
-            var key;
-            if (src === 'spc-cat')           key = 'spc-cat';
-            else if (src === 'spc-tor')      key = 'spc-tor';
-            else if (src === 'spc-wind')     key = 'spc-wind';
-            else if (src === 'spc-hail')     key = 'spc-hail';
-            else if (src === 'spc-prob')     key = 'spc-prob';
-            else if (src === 'spc-sig')      key = 'spc-sig';
-            else if (src === 'spc-mds')      key = 'spc-mds:'      + (props.name      || '');
-            else if (src === 'spc-watches')  key = 'spc-watches:'   + (props.watch_num || props.event || '');
-            else if (src === 'nws-warnings') key = 'nws-warnings:' + (props.event     || '') + ':' + (props.wfo || '');
-            else return;
-            if (!_clickSeen[key]) {
-              _clickSeen[key] = true;
-              _clickFeatures.push({source: src, properties: props});
-            }
-          });
-          if (_clickFeatures.length > 0) {
-            if (bridge) bridge.on_feature_click(JSON.stringify(_clickFeatures));
-            return;
-          }
-        }
+      var _clickFeatures = _stormHazardFeaturesAt(e.point);
+      if (_clickFeatures.length > 0) {
+        if (bridge) bridge.on_feature_click(JSON.stringify(_clickFeatures));
+        return;
       }
       if (bridge) bridge.on_map_click(e.lngLat.lat, e.lngLat.lng);
     });
@@ -2174,6 +2699,9 @@
       el._stormMarker = new maplibregl.Marker({ element: el, anchor: "center" })
         .setLngLat([lon, lat])
         .addTo(map);
+      window._stormMarkerContextMenu(el, function() {
+        return el._stormMarker.getLngLat();
+      }, {kind: 'vehicle', id: id});
     };
 
     window.stormRemoveVehicle = function(id) {
@@ -2262,6 +2790,9 @@
           e.stopPropagation();
           if (bridge) bridge.on_annotation_click(id);
         });
+        window._stormMarkerContextMenu(forkEl, function() {
+          return map.getCenter();
+        }, {kind: 'annotation', id: id});
         map.getContainer().appendChild(forkEl);
         // store as a plain object (not a Marker) so stormRemoveAnnotation can clean it up
         window._stormAnnotations[id] = {
@@ -2333,6 +2864,9 @@
         }
         if (bridge) bridge.on_annotation_click(id);
       });
+      window._stormMarkerContextMenu(el, function() {
+        return window._stormAnnotations[id].getLngLat();
+      }, {kind: 'annotation', id: id});
       const marker = new maplibregl.Marker({element: el})
         .setLngLat([lon, lat])
         .addTo(map);
@@ -2558,6 +3092,12 @@
         var p = map.project([lon, lat]);
         _showPrivatePinMenu({x: p.x, y: p.y}, {lat: lat, lng: lon}, 'remove', id);
       });
+      el.addEventListener('contextmenu', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var p = map.project([lon, lat]);
+        _showPrivatePinMenu({x: p.x, y: p.y}, {lat: lat, lng: lon}, 'remove', id);
+      });
 
       var marker = new maplibregl.Marker({element: el, anchor: 'bottom'})
         .setLngLat([lon, lat])
@@ -2738,6 +3278,71 @@
       });
     }
 
+    window.stormAddPrivatePin = function(lat, lon) {
+      _addPrivatePin(lat, lon, null, true, '');
+    };
+
+    // what a right-click at a screen point is on, for the Qt menu; null for bare map
+    function _stormContextFeatureAt(point) {
+      // TRACK owns right-click: its point, its marker, or the empty map
+      if (window._trackEditActive) {
+        var trackId = _trackPointHit(point);
+        if (trackId !== null) return {kind: 'track_point', id: trackId};
+        if (window._trackMarker && map.getLayer('storm-track-marker-point') &&
+            map.queryRenderedFeatures([[point.x - 6, point.y - 6], [point.x + 6, point.y + 6]],
+                                      {layers: ['storm-track-marker-point']}).length) {
+          return {kind: 'track_marker'};
+        }
+        return null;
+      }
+      var drawLayers = [];
+      Object.keys(window._stormDrawings || {}).forEach(function(id) {
+        ['drawing-hit-', 'drawing-hit-fill-', 'drawing-lbl-'].forEach(function(pfx) {
+          if (map.getLayer(pfx + id)) drawLayers.push(pfx + id);
+        });
+      });
+      if (drawLayers.length > 0) {
+        var drawHits = map.queryRenderedFeatures(point, {layers: drawLayers});
+        if (drawHits.length > 0) {
+          return {kind: 'drawing', id: drawHits[0].properties.drawing_id};
+        }
+      }
+      var coneLayers = Object.keys(window._stormCones || {})
+        .map(function(id) { return 'storm-cone-fill-' + id; })
+        .filter(function(l) { return map.getLayer(l); });
+      if (coneLayers.length > 0) {
+        var coneHits = map.queryRenderedFeatures(point, {layers: coneLayers});
+        if (coneHits.length > 0) return {kind: 'cone', id: coneHits[0].properties.cone_id};
+      }
+      // surface plots are drawn on a canvas: take the nearest station within 24 px
+      if (window._stormSurfacePlotsVisible) {
+        var best = null, bestD = 24 * 24;
+        Object.keys(window._stormSurfaceRegistry || {}).forEach(function(id) {
+          var st = window._stormSurfaceRegistry[id];
+          var p = map.project([st.lon, st.lat]);
+          var d = (p.x - point.x) * (p.x - point.x) + (p.y - point.y) * (p.y - point.y);
+          if (d < bestD) { bestD = d; best = id; }
+        });
+        if (best) {
+          var reg = window._stormSurfaceRegistry[best];
+          return {kind: 'surface_station', id: best, label: reg.label, lat: reg.lat, lon: reg.lon};
+        }
+      }
+      var hazards = _stormHazardFeaturesAt(point);
+      if (hazards.length > 0) return {kind: 'hazard', features: hazards};
+      return null;
+    }
+
+    // a right-click outside any tool asks Python for the map menu (ui/widgets/map_context_menu.py)
+    window._stormRequestContextMenu = function(lat, lon, feature) {
+      _hidePrivatePinMenu();
+      if (bridge && bridge.on_context_menu) {
+        bridge.on_context_menu(lat, lon, feature ? JSON.stringify(feature) : '');
+      } else {
+        _showPrivatePinMenu(map.project([lon, lat]), {lat: lat, lng: lon}, 'add', null);
+      }
+    };
+
     map.on('contextmenu', function(e) {
       if (_privatePinsActiveTool()) {
         _hidePrivatePinMenu();
@@ -2747,8 +3352,20 @@
         e.originalEvent.preventDefault();
         e.originalEvent.stopPropagation();
       }
-      _showPrivatePinMenu(e.point, e.lngLat, 'add', null);
+      window._stormRequestContextMenu(e.lngLat.lat, e.lngLat.lng, _stormContextFeatureAt(e.point));
     });
+
+    // markers sit above the canvas, so each kind reports its own right-click
+    function _stormMarkerContextMenu(el, lngLatFn, feature) {
+      el.addEventListener('contextmenu', function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (_privatePinsActiveTool()) return;
+        var ll = lngLatFn();
+        window._stormRequestContextMenu(ll.lat, ll.lng, feature);
+      });
+    }
+    window._stormMarkerContextMenu = _stormMarkerContextMenu;
 
     map.on('click', _hidePrivatePinMenu);
     map.on('dragstart', _hidePrivatePinMenu);
@@ -3180,6 +3797,17 @@
       _restoreAsosMapInteractions();
     }
 
+    // The user backed out of drawing (Esc or right-click): tell Python so
+    // the ASOS button and the mode banner don't stay on with nothing to show.
+    function _userCancelledAsosBox() {
+      _cancelAsosBoxMode();
+      if (bridge && bridge.on_asos_box_cancelled) {
+        setTimeout(function() {
+          try { bridge.on_asos_box_cancelled(); } catch(ex) { console.log('ASOS cancel bridge error', ex); }
+        }, 0);
+      }
+    }
+
     window.stormSetAsosBoxMode = function(active) {
       var fc = document.getElementById('front-canvas');
       if (!fc) return;
@@ -3206,15 +3834,25 @@
         map.dragPan.disable();
         mc.style.cursor = 'crosshair';
 
+        // abandon a box half-drawn; draw mode itself stays on
+        var _abandonDrag = function() {
+          if (window._stormAsosMouseMoveDOM) window.removeEventListener('mousemove', window._stormAsosMouseMoveDOM);
+          if (window._stormAsosMouseUpDOM) window.removeEventListener('mouseup', window._stormAsosMouseUpDOM);
+          window._stormAsosMouseMoveDOM = null;
+          window._stormAsosMouseUpDOM = null;
+          window._stormAsosStart = null;
+          _clear();
+        };
+
         window.addEventListener('keydown', window._stormAsosKeyDownDOM = function(ev) {
-          if (ev.key === 'Escape') _cancelAsosBoxMode();
+          if (ev.key === 'Escape') _userCancelledAsosBox();
         });
-        window.addEventListener('blur', window._stormAsosBlurDOM = function() {
-          _cancelAsosBoxMode();
-        });
+        // losing focus (a dialog, another app) drops the drag only: leaving
+        // the mode here would leave Python's banner up with the map ignoring it
+        window.addEventListener('blur', window._stormAsosBlurDOM = _abandonDrag);
         mc.addEventListener('contextmenu', window._stormAsosContextMenuDOM = function(ev) {
           ev.preventDefault();
-          _cancelAsosBoxMode();
+          _userCancelledAsosBox();
         });
 
         mc.addEventListener('mousedown', window._stormAsosMouseDownDOM = function(ev) {
@@ -3247,13 +3885,16 @@
           window.addEventListener('mouseup', window._stormAsosMouseUpDOM = function(uev) {
             uev.preventDefault();
             var s  = window._stormAsosStart;
-            _cancelAsosBoxMode();
-            if (!s) return;
+            if (!s) { _cancelAsosBoxMode(); return; }
             var endPx  = { x: uev.clientX - rect.left, y: uev.clientY - rect.top };
             var endLL  = map.unproject([endPx.x, endPx.y]);
             var west   = Math.min(s[0], endLL.lng), east  = Math.max(s[0], endLL.lng);
             var south  = Math.min(s[1], endLL.lat), north = Math.max(s[1], endLL.lat);
-            if (Math.abs(east - west) < 0.01 || Math.abs(north - south) < 0.01) return;
+            if (Math.abs(east - west) < 0.01 || Math.abs(north - south) < 0.01) {
+              _abandonDrag();       // a click, not a box: stay in draw mode and try again
+              return;
+            }
+            _cancelAsosBoxMode();
             if (bridge && bridge.on_asos_bbox) {
               setTimeout(function() {
                 try { bridge.on_asos_bbox(west, south, east, north); }
@@ -3496,12 +4137,153 @@
       catch(e) { console.warn('scan sector setData failed', e); }
     };
 
+    // Observation trails: the features, and the band colors as MapLibre
+    // 'interpolate' stops (core/trails.py color_stops). Kept on window so a
+    // style reload (basemap switch) redraws them.
+    window.stormSetTrails = function(geojsonStr, stops, units, label) {
+      window._trailUnits = units || '';
+      window._trailLabel = label || '';
+      try { window._trailData = JSON.parse(geojsonStr); }
+      catch(e) { console.warn('stormSetTrails:', e); return; }
+      if (stops && stops.length >= 4)
+        window._trailColor = ['interpolate', ['linear'], ['get', 'v']].concat(stops);
+      if (window._trailColor && map.getLayer('obs-trails-line'))
+        map.setPaintProperty('obs-trails-line', 'line-color', window._trailColor);
+      var src = map.getSource('obs-trails');
+      if (src) src.setData(window._trailData);
+    };
+
+    // Damage paths: each line plus a start and an end point for the dots.
+    // Kept on window so a style reload (basemap switch) redraws them.
+    function _damagePathsWithEnds(fc) {
+      var out = [];
+      ((fc && fc.features) || []).forEach(function(f) {
+        if (!f || !f.geometry) return;
+        out.push(f);
+        if (f.geometry.type !== 'LineString') return;
+        var coords = f.geometry.coordinates || [];
+        if (!coords.length) return;
+        var props = f.properties || {};
+        out.push({type:'Feature', geometry:{type:'Point', coordinates: coords[0]},
+                  properties: Object.assign({}, props, {marker:'start'})});
+        out.push({type:'Feature', geometry:{type:'Point', coordinates: coords[coords.length - 1]},
+                  properties: Object.assign({}, props, {marker:'end'})});
+      });
+      return {type:'FeatureCollection', features: out};
+    }
+
+    window.stormSetDamagePaths = function(geojsonStr) {
+      try { window._damagePathsData = _damagePathsWithEnds(JSON.parse(geojsonStr)); }
+      catch(e) { console.warn('stormSetDamagePaths:', e); return; }
+      var src = map.getSource('damage-paths');
+      if (src) src.setData(window._damagePathsData);
+      if (!window._damagePathsData.features.length) {
+        var tip = document.getElementById('damage-path-tooltip');
+        if (tip) tip.style.display = 'none';
+      }
+    };
+
+    window.stormSetLidarLocations = function(geojsonStr) {
+      try { window._lidarLocationsData = JSON.parse(geojsonStr); }
+      catch(e) { console.warn('stormSetLidarLocations:', e); return; }
+      var src = map.getSource('lidar-locations');
+      if (src) src.setData(window._lidarLocationsData);
+    };
+
+    // One lidar sweep (ui/map/lidar_overlay.py), served by the scheme
+    // handler; kept just under the road layers, above the radar.
+    window.stormSetLidarImage = function(url, west, south, east, north) {
+      var coords = [[west, north], [east, north], [east, south], [west, south]];
+      try {
+        var src = map.getSource('lidar-image');
+        if (src) {
+          src.updateImage({url: url, coordinates: coords});
+        } else {
+          map.addSource('lidar-image', {type: 'image', url: url, coordinates: coords});
+          map.addLayer({id: 'lidar-image', type: 'raster', source: 'lidar-image',
+                        paint: {'raster-opacity': 0.9, 'raster-fade-duration': 0}});
+        }
+        try { map.moveLayer('lidar-image', 'road-unpaved'); } catch(_) {}
+        map.setLayoutProperty('lidar-image', 'visibility', 'visible');
+      } catch(e) { console.error('[STORM] lidar image error:', e.message || e); }
+    };
+
+    window.stormClearLidarImage = function() {
+      if (map.getLayer('lidar-image')) map.setLayoutProperty('lidar-image', 'visibility', 'none');
+    };
+
+    window.stormSetTrackGeoJSON = function(geojsonStr) {
+      try { window._trackGeoJSON = JSON.parse(geojsonStr); }   // kept for dragging and hover
+      catch(e) { console.warn('stormSetTrackGeoJSON:', e); return; }
+      if (window._trackDrag) return;   // the drag's release redraws it
+      var src = map.getSource('storm-track');
+      if (src) src.setData(window._trackGeoJSON);
+    };
+
+    window.stormSetTrackLayersVisible = function(lineVisible, pointsVisible) {
+      window._trackLayersVisible = [lineVisible, pointsVisible];
+      if (map.getLayer('storm-track-line'))
+        map.setLayoutProperty('storm-track-line', 'visibility', lineVisible ? 'visible' : 'none');
+      if (map.getLayer('storm-track-points'))
+        map.setLayoutProperty('storm-track-points', 'visibility', pointsVisible ? 'visible' : 'none');
+    };
+
+    window.stormSetTrackMarker = function(markerStr) {
+      var m = markerStr ? JSON.parse(markerStr) : null;
+      window._trackMarker = m;
+      var src = map.getSource('storm-track-marker');
+      if (!src) return;
+      src.setData({type: 'FeatureCollection', features: m ? [{
+        type: 'Feature',
+        geometry: {type: 'Point', coordinates: [m.lon, m.lat]},
+        properties: {label: m.label}
+      }] : []});
+    };
+
+    window.stormSetTrackEditMode = function(active) {
+      window._trackEditActive = !!active;
+      if (!active) window._trackDrag = null;
+      map.getCanvas().style.cursor = window._trackEditActive ? 'crosshair' : '';
+    };
+
     window.stormSetScanSectorsVisible = function(visible) {
       ['scan-sector-fill', 'scan-sector-line', 'scan-sector-point', 'scan-sector-label'].forEach(function(layerId) {
         if (!map.getLayer(layerId)) return;
         map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
       });
     };
+
+    // MAP > ANNOTATIONS: show or hide the crew's annotations -- drawings
+    // (fronts, boundaries, lines, areas), annotation markers and storm-motion
+    // cones with their time labels. Ones added while hidden stay hidden.
+    window._annotationsHidden = false;
+    function _applyAnnotationVisibility() {
+      var vis = window._annotationsHidden ? 'none' : 'visible';
+      (map.getStyle().layers || []).forEach(function(l) {
+        var id = l.id;
+        if ((id.indexOf('drawing-') === 0 && id.indexOf('drawing-preview') !== 0) || id.indexOf('storm-cone-') === 0) {
+          map.setLayoutProperty(id, 'visibility', vis);
+        }
+      });
+      Object.keys(window._stormAnnotations || {}).forEach(function(k) {
+        var m = window._stormAnnotations[k];
+        var el = m._isFork ? m._el : (m.getElement ? m.getElement() : null);
+        if (el) el.style.display = window._annotationsHidden ? 'none' : '';
+      });
+    }
+    window.stormSetAnnotationsVisible = function(visible) {
+      window._annotationsHidden = !visible;
+      _applyAnnotationVisibility();
+      map.triggerRepaint();       // fronts are painted on the front canvas each render
+    };
+    ['stormAddDrawing', 'stormAddAnnotation', 'stormAddStormCone'].forEach(function(name) {
+      var add = window[name];
+      window[name] = function() {
+        var result = add.apply(this, arguments);
+        if (window._annotationsHidden) _applyAnnotationVisibility();
+        return result;
+      };
+    });
 
     window.stormSetSoundingStations = function(geojsonStr) {
       var src = map.getSource('sounding-stations-src');
@@ -4574,9 +5356,17 @@
     };
 
 
-    // notify Python that MapLibre is fully loaded and all storm* functions
-    window._stormMapLoaded = true;
-    if (bridge) bridge.on_map_loaded();
+    // Tell Python the map is ready once both have happened: this script has
+    // defined every storm* function, and _stormSetupMap has built the map's
+    // sources and layers (whichever comes last sends it).
+    window._stormScriptDone = true;
+    function _stormNotifyReady() {
+      if (!window._stormScriptDone || !_stormSetupDone || window._stormMapLoaded) return;
+      window._stormMapLoaded = true;
+      if (bridge) bridge.on_map_loaded();
+    }
+    _stormNotifyReady();
+    if (!_stormSetupDone) _stormSetupOnce();   // the style may already be in
 
     (function() {
       var frontCanvas = document.getElementById('front-canvas');
@@ -4744,7 +5534,7 @@
         frontCtx.clearRect(0, 0, frontCanvas.width, frontCanvas.height);
         var dpr = window.devicePixelRatio || 1;
 
-        Object.values(window._stormDrawings || {}).forEach(function(d) {
+        Object.values(window._annotationsHidden ? {} : (window._stormDrawings || {})).forEach(function(d) {
           if (d.drawing_type !== 'polyline' && d.drawing_type !== 'polygon') {
             _drawFront(frontCtx, d, dpr);
           }

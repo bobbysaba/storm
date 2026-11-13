@@ -16,26 +16,79 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 import config
 from core.observation import Observation
+from data import endpoints
 
 log = logging.getLogger(__name__)
 
-OK_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ok_mesonet.json"
-OK_META_URL     = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
-WTM_API_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/wtx_mesonet.json"
-WTM_SITES_URL   = "https://api.mesonet.ttu.edu/mesoweb/sites/"
-KS_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ks_mesonet.json"
-CO_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/co_mesonet.json"
-CO_META_URL     = f"{config.NSSL_API_ROOT}/data/mesonet/co_metadata.json"
-NE_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/ne_mesonet.json"
-SD_API_URL      = f"{config.NSSL_API_ROOT}/data/mesonet/sd_mesonet.json"
+OK_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ok"])
+OK_META_URL     = endpoints.OK_MESONET_CURRENT
+WTM_API_URL     = endpoints.nssl_api(endpoints.NSSL_MESONETS["wtx"])
+WTM_SITES_URL   = endpoints.WTM_SITES
+KS_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ks"])
+CO_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["co"])
+CO_META_URL     = endpoints.nssl_api(endpoints.NSSL_CO_MESONET_METADATA)
+NE_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ne"])
+SD_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["sd"])
 
 # iem endpoints for ASOS
-IEM_METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/metar.geojson"
-IEM_CURRENTS_URL  = "https://mesonet.agron.iastate.edu/api/1/currents.json"
+IEM_METAR_GEOJSON = endpoints.IEM_METAR_GEOJSON
+IEM_CURRENTS_URL  = endpoints.IEM_CURRENTS
 IEM_CURRENTS_BATCH = 100   # stations per IEM request
 MAX_ASOS_STATIONS  = 400   # cap to keep map rendering fast
 
 _ASOS_STATIONS_FILE = pathlib.Path(__file__).parents[1] / "asos_stations.json"
+
+
+def load_asos_station_roster() -> dict[str, dict]:
+    """The ASOS/METAR station roster (station id -> {lat, lon, name}), read
+    from data/asos_stations.json, or built from IEM's metar.geojson and saved
+    there on first use. Shared by live ASOS and the archive's ASOS replay
+    (archive/fetchers/asos_archive_fetcher.py)."""
+    if _ASOS_STATIONS_FILE.exists():
+        try:
+            stations = json.loads(_ASOS_STATIONS_FILE.read_text("utf-8"))
+            log.info("ASOS: loaded %d stations from %s", len(stations), _ASOS_STATIONS_FILE)
+            return stations
+        except Exception as exc:
+            log.warning("ASOS: failed to read station file, re-fetching: %s", exc)
+
+    log.info("ASOS: fetching station metadata from IEM metar.geojson …")
+    req = Request(IEM_METAR_GEOJSON, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
+    try:
+        with urlopen(req, timeout=30, context=config.NSSL_SSL_CONTEXT) as resp:
+            raw = resp.read()
+    except HTTPError as exc:
+        raise SurfaceFetchError(f"HTTP {exc.code} from {IEM_METAR_GEOJSON}") from exc
+    except URLError as exc:
+        raise SurfaceFetchError(f"network error from {IEM_METAR_GEOJSON}: {exc.reason}") from exc
+    try:
+        fc = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError as exc:
+        raise SurfaceFetchError(f"ASOS station metadata from {IEM_METAR_GEOJSON} is not JSON") from exc
+
+    stations: dict[str, dict] = {}
+    for feat in fc.get("features", []):
+        props = feat.get("properties", {})
+        stid  = (props.get("station") or props.get("stid") or "").strip().upper()
+        if not stid:
+            continue
+        coords = (feat.get("geometry") or {}).get("coordinates")
+        if not coords or len(coords) < 2:
+            continue
+        lon, lat = float(coords[0]), float(coords[1])
+        name = (props.get("name") or stid).strip()
+        stations[stid] = {"lat": lat, "lon": lon, "name": name}
+
+    if not stations:
+        raise RuntimeError("IEM metar.geojson returned no station features")
+
+    try:
+        _ASOS_STATIONS_FILE.write_text(json.dumps(stations, separators=(",", ":")), "utf-8")
+        log.info("ASOS: saved %d stations to %s", len(stations), _ASOS_STATIONS_FILE)
+    except Exception as exc:
+        log.warning("ASOS: could not save station file: %s", exc)
+
+    return stations
 
 
 class SurfaceFetchError(RuntimeError):
@@ -558,45 +611,9 @@ class SurfaceFetcher(QObject):
 
     def _ensure_asos_stations(self) -> dict[str, dict]:
         """Return in-memory station dict, building/loading it if needed."""
-        if self._asos_stations is not None:
-            return self._asos_stations
-
-        if _ASOS_STATIONS_FILE.exists():
-            try:
-                self._asos_stations = json.loads(_ASOS_STATIONS_FILE.read_text("utf-8"))
-                log.info("ASOS: loaded %d stations from %s", len(self._asos_stations), _ASOS_STATIONS_FILE)
-                return self._asos_stations
-            except Exception as exc:
-                log.warning("ASOS: failed to read station file, re-fetching: %s", exc)
-
-        log.info("ASOS: fetching station metadata from IEM metar.geojson …")
-        raw = self._http_get(IEM_METAR_GEOJSON)
-        fc  = self._json_from_bytes(raw, "ASOS station metadata", IEM_METAR_GEOJSON)
-
-        stations: dict[str, dict] = {}
-        for feat in fc.get("features", []):
-            props = feat.get("properties", {})
-            stid  = (props.get("station") or props.get("stid") or "").strip().upper()
-            if not stid:
-                continue
-            coords = (feat.get("geometry") or {}).get("coordinates")
-            if not coords or len(coords) < 2:
-                continue
-            lon, lat = float(coords[0]), float(coords[1])
-            name = (props.get("name") or stid).strip()
-            stations[stid] = {"lat": lat, "lon": lon, "name": name}
-
-        if not stations:
-            raise RuntimeError("IEM metar.geojson returned no station features")
-
-        try:
-            _ASOS_STATIONS_FILE.write_text(json.dumps(stations, separators=(",", ":")), "utf-8")
-            log.info("ASOS: saved %d stations to %s", len(stations), _ASOS_STATIONS_FILE)
-        except Exception as exc:
-            log.warning("ASOS: could not save station file: %s", exc)
-
-        self._asos_stations = stations
-        return stations
+        if self._asos_stations is None:
+            self._asos_stations = load_asos_station_roster()
+        return self._asos_stations
 
     def _fetch_asos(self) -> list[dict]:
         """Fetch ASOS METARs via IEM currents API using a local station metadata file."""

@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+# Platform folders under FOFS/Mobile-Mesonet/data on THREDDS, by their
+# THREDDS names (thredds_vehicle_id passes them through unchanged). The
+# index (archive/fofs_index.py) finds new folders by itself; this list
+# names known vehicles inside odd folder names ("Probe_1"), and is the
+# roster probed when no index is available. Not every platform has data
+# every day; missing files are a fast 404.
+KNOWN_FOFS_PLATFORMS = (
+    "dltruck", "farfield", "hailcam", "mg1", "mg2", "mg3", "noxp_scout",
+    "probe1", "probe2", "probe3", "probe4", "probe5", "probe7", "probe9",
+    "windsonde1", "windsonde2",
+)
 
 _MQTT_TO_THREDDS = {
     "lid1": "dltruck",

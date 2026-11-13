@@ -41,6 +41,11 @@ class Sounding:
     v_wind:      np.ndarray  # m/s  (northward component)
     height:      np.ndarray  # m    (geopotential height MSL)
 
+    # how a mobile launch was placed: None keeps the set-location fallback,
+    # "unknown" stops it borrowing another launch's position
+    location_source: str | None = None
+    location_time:   datetime | None = None    # the position fix's time
+
     @property
     def wind_speed(self) -> np.ndarray:
         """Wind speed in m/s derived from U/V components."""
@@ -71,7 +76,7 @@ class SoundingSet:
     # populated only for observed / NSSL soundings:
     station_id:   str = ""      # e.g. "OUN" or "CLAMPS"
     station_name: str = ""      # e.g. "Norman, OK"
-    source:       str = "hrrr"  # "hrrr" | "obs" | "nssl"
+    source:       str = "hrrr"  # "hrrr" | "obs" | "nssl" | "clamps_tropoe" | "coptersonde"
 
     @property
     def is_observed(self) -> bool:
@@ -82,6 +87,24 @@ class SoundingSet:
     def is_nssl(self) -> bool:
         """True when this set came from the NSSL CLAMPS DL Truck."""
         return self.source == "nssl"
+
+    @property
+    def is_clamps_tropoe(self) -> bool:
+        """True for a CLAMPS AERI / MWR TROPoe retrieval: remote sensing, not
+        an in-situ launch, so kept apart from NSSL sondes (a different
+        comparison key, and the difference stays visible). No wind."""
+        return self.source == "clamps_tropoe"
+
+    @property
+    def is_coptersonde(self) -> bool:
+        """True for a PERiLS CopterSonde (UAS) ascent."""
+        return self.source == "coptersonde"
+
+    @property
+    def is_time_series(self) -> bool:
+        """Soundings at observed times (labeled by clock time), not HRRR
+        forecast hours."""
+        return self.source != "hrrr"
 
     def get(self, slot_offset: int):
         """Return the Sounding for a given hour offset, or None."""

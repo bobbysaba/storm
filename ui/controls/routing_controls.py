@@ -458,6 +458,12 @@ class RoutingControls(Drawer):
             if self._have_origin_text():
                 self._on_get_directions()
 
+    def set_point(self, which: str, lat: float, lon: float):
+        """Fill the start (``"origin"``) or destination (``"dest"``) with a map point,
+        as picking it on the map would."""
+        self._pick_mode = which
+        self.on_map_pick(lat, lon)
+
     def route_to_pin(self, lat: float, lon: float, label: str = ""):
         """Route from the current GPS fix to a private pin."""
         if self._gps_lat is None or self._gps_lon is None:

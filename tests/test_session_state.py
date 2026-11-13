@@ -67,7 +67,7 @@ def test_radar_round_trip(app, monkeypatch):
     src._btn_sync_vehicles.setChecked(True)
     state = src.save_state()
     assert state == {"data": True, "product": "N0U", "opacity": 70,
-                     "sync": True, "sync_vehicles": True}
+                     "sync_vehicles": True, "dealias": False}
 
     dst = RadarControls()
     toggled, products = [], []
@@ -79,28 +79,21 @@ def test_radar_round_trip(app, monkeypatch):
     assert dst.current_product() == "N0U" and dst.is_data_enabled()
     assert opacities == [0.7]
     assert products == ["N0U"] and toggled == [True]
-    assert dst.is_sync_enabled() and dst.is_sync_vehicles()
+    assert dst.is_sync_vehicles()
 
 
-def test_radar_sync_off_disables_vehicles(app, monkeypatch):
+def test_radar_ignores_old_saved_sync(app, monkeypatch):
     monkeypatch.setattr(RadarControls, "_refresh_product_availability", lambda self, site: None)
     rc = RadarControls()
-    sync, vehicles = [], []
-    rc.sync_toggled.connect(sync.append)
-    rc.sync_vehicles_toggled.connect(vehicles.append)
-    rc.restore_state({"sync": False, "sync_vehicles": True})
-    assert not rc.is_sync_enabled() and not rc.is_sync_vehicles()
-    assert not rc._btn_sync_vehicles.isEnabled()
-    assert sync == [False]
-    rc._btn_sync.setChecked(True)
-    assert rc.is_sync_vehicles() and vehicles[-1] is True
+    rc.restore_state({"sync": False, "sync_vehicles": True})   # SYNC was removed
+    assert rc.is_sync_vehicles() and "sync" not in rc.save_state()
 
 
 def test_satellite_round_trip_and_pending_meso(app):
     src = SatelliteControls()
     src._opacity_slider.setValue(40)
     src._btn_conus.setChecked(True)
-    assert src.save_state() == {"mode": "conus", "opacity": 40}
+    assert src.save_state() == {"mode": "conus", "opacity": 40, "band": "vis"}
 
     dst = SatelliteControls()
     modes = []
@@ -113,6 +106,21 @@ def test_satellite_round_trip_and_pending_meso(app):
     assert dst.current_mode() == ""
     dst.set_meso_available(2, True, {"north": 2})
     assert dst.current_mode() == "meso2" and modes == ["meso2"]
+
+
+def test_satellite_band_round_trip(app):
+    src = SatelliteControls()
+    src.configure_for_archive(True)
+    src._btn_ir.setChecked(True)
+    assert src.save_state()["band"] == "ir"
+
+    dst = SatelliteControls()
+    bands = []
+    dst.band_changed.connect(bands.append)
+    dst.restore_state(src.save_state())
+    assert dst.current_band() == "ir" and bands == ["ir"]
+    dst.restore_state({"band": "bogus"})
+    assert dst.current_band() == "ir"
 
 
 def test_satellite_pending_meso_falls_back_to_conus(app):
@@ -232,7 +240,7 @@ class _FakeButton(QObject):
 
 
 def _manager(settings, *keys, child=()):
-    mgr = DrawerManager(lambda: 2000, settings=settings)
+    mgr = DrawerManager(settings=settings)
     buttons = {}
     for key in keys + tuple(child):
         drawer = _FakeDrawer()
@@ -243,7 +251,7 @@ def _manager(settings, *keys, child=()):
 
 def test_open_keys_and_close_all(app, settings):
     mgr, b = _manager(settings, "radar", "hazards", "map", child=("route",))
-    mgr.set_mode("stack")
+    mgr.set_pinned("hazards", True)               # stays open beside radar
     b["hazards"].setChecked(True)
     b["radar"].setChecked(True)
     b["route"].setChecked(True)
@@ -252,13 +260,11 @@ def test_open_keys_and_close_all(app, settings):
     assert mgr.open_keys() == [] and not b["route"].isChecked()
 
 
-def test_reset_restores_default_pins_and_auto(app, settings):
+def test_reset_restores_default_pins(app, settings):
     mgr, _ = _manager(settings, "radar", "sounding", "prev_locs")
-    mgr.set_mode("stack")
     mgr.set_pinned("radar", True)
-    mgr.set_pinned("sounding", False)
+    mgr.set_pinned("sounding", True)
     mgr.reset()
-    assert mgr.mode == "auto"
     assert {k for k in ("radar", "sounding", "prev_locs") if mgr.is_pinned(k)} == set(DEFAULT_PINNED)
 
 
@@ -317,7 +323,8 @@ def _host(settings, monkeypatch, monitor=False, archive=False, launch_sat="", la
     h._init_mesoanalysis = lambda: h.inits.append("mesoanalysis")
     h._init_sfcoa = lambda: h.inits.append("sfcoa")
     h._drawers, h.buttons = _manager(settings, "radar", "hazards", "sounding", "surface", "sfcoa")
-    h._drawers.set_mode("stack")
+    for key in h.buttons:
+        h._drawers.set_pinned(key, True)          # pinned: several stay open, as saved
     return h
 
 

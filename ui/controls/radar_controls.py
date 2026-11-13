@@ -13,6 +13,8 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from ui import palette as P
 from ui.widgets.drawer import Drawer
 from ui.layer_status import StatusTimeLabel
+from data import thredds_paths as paths
+from core.qt_signals import emit_alive
 
 
 NEXRAD_SITES = [
@@ -83,7 +85,7 @@ NEXRAD_SITES = [
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
 OPTIONAL_PRODUCTS = [("N0C", "CORR COEFF"), ("N0K", "SPEC DIFF PHASE")]
 ALL_PRODUCTS = PRODUCTS + OPTIONAL_PRODUCTS
-THREDDS_CATALOG_ROOT = "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
+THREDDS_CATALOG_ROOT = f"{paths.catalog_root(paths.UCAR)}/{paths.UCAR_NEXRAD_LEVEL3}"
 class RadarControls(Drawer):
     """
     Toolbar widget containing:
@@ -100,8 +102,7 @@ class RadarControls(Drawer):
         fetch_requested()      — trigger immediate fetch
         frame_requested(int)   — user selected a specific cache frame index
         loop_toggled(bool)     — loop playback started/stopped
-        sync_toggled(bool)     — satellite (and vehicles) follow the radar loop
-        sync_vehicles_toggled(bool) — vehicles follow the loop too
+        sync_vehicles_toggled(bool) — vehicles follow the loop
     """
 
     radar_toggled   = pyqtSignal(bool)
@@ -115,8 +116,9 @@ class RadarControls(Drawer):
     speed_changed   = pyqtSignal(int)      # new interval in ms
     vad_requested   = pyqtSignal()         # VAD hodograph dialog requested
     opacity_changed = pyqtSignal(float)    # 0.1–1.0
-    sync_toggled    = pyqtSignal(bool)
     sync_vehicles_toggled = pyqtSignal(bool)
+    dealias_toggled = pyqtSignal(bool)     # archive velocity only
+    archive_data_toggled = pyqtSignal(bool)  # archive: fetch and draw the radar, or not
 
     # internal — emitted from the _refresh_product_availability background thread
     _products_refreshed = pyqtSignal(dict)  # {code: bool} availability map
@@ -179,7 +181,23 @@ class RadarControls(Drawer):
         self._tilt_combo.setToolTip("Radar tilt angle")
         self._tilt_combo.currentIndexChanged.connect(self._on_tilt_changed)
         self._tilt_combo.setVisible(False)
+        # each sweep's angle in volume order (set_archive_tilts)
+        self._sweep_angles: list[float] = []
         r1.addWidget(self._tilt_combo)
+
+        # archive WSR-88D velocity only (_refresh_dealias_visible)
+        self._btn_dealias = QToolButton()
+        self._btn_dealias.setText("DEALIAS")
+        self._btn_dealias.setCheckable(True)
+        self._btn_dealias.setFixedHeight(22)
+        self._btn_dealias.setObjectName("radarDealiasButton")
+        self._btn_dealias.setToolTip(
+            "Unfold aliased velocities (region-based). A sweep that can't be "
+            "dealiased is shown raw, and the archive bar says so"
+        )
+        self._btn_dealias.toggled.connect(self.dealias_toggled)
+        self._btn_dealias.setVisible(False)
+        r1.addWidget(self._btn_dealias)
 
         # checkbox sits immediately right of product selector
         self._chk_show_data = QCheckBox("show data")
@@ -299,17 +317,8 @@ class RadarControls(Drawer):
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         r2.addWidget(self._speed_combo)
 
-        # loop sync: satellite (SYNC) and vehicle markers (VEH) follow the radar loop
-        self._btn_sync = QToolButton()
-        self._btn_sync.setObjectName("radarSyncBtn")
-        self._btn_sync.setText("SYNC")
-        self._btn_sync.setCheckable(True)
-        self._btn_sync.setChecked(True)
-        self._btn_sync.setFixedHeight(26)
-        self._btn_sync.setToolTip("Satellite follows the radar loop")
-        self._btn_sync.toggled.connect(self._on_sync_toggled)
-        r2.addWidget(self._btn_sync)
-
+        # vehicle markers (VEH) follow the loop. Never shown: it holds the state
+        # (saved with the session) and the settings pill (gear) shows and changes it.
         self._btn_sync_vehicles = QToolButton()
         self._btn_sync_vehicles.setObjectName("radarSyncVehiclesBtn")
         self._btn_sync_vehicles.setText("VEH")
@@ -317,9 +326,10 @@ class RadarControls(Drawer):
         self._btn_sync_vehicles.setFixedHeight(26)
         self._btn_sync_vehicles.setToolTip("Vehicles follow the loop, shown where they were")
         self._btn_sync_vehicles.toggled.connect(self.sync_vehicles_toggled)
-        r2.addWidget(self._btn_sync_vehicles)
+        self._btn_sync_vehicles.hide()
 
         drawer_layout.addWidget(row2)
+        self._playback_row = row2
 
         layout.addWidget(self._drawer)
 
@@ -370,20 +380,33 @@ class RadarControls(Drawer):
         """Return whether radar data fetch/display is enabled."""
         return self._chk_show_data.isChecked()
 
+    def set_archive_data_enabled(self, enabled: bool) -> None:
+        self._chk_show_data.setChecked(enabled)
+
     def opacity(self) -> float:
         return self._opacity_slider.value() / 100.0
 
-    def is_sync_enabled(self) -> bool:
-        return self._btn_sync.isChecked()
-
     def is_sync_vehicles(self) -> bool:
-        return self._btn_sync.isChecked() and self._btn_sync_vehicles.isChecked()
+        return self._btn_sync_vehicles.isChecked()
+
+    def is_dealias(self) -> bool:
+        return self._btn_dealias.isChecked()
+
+    def set_dealias(self, enabled: bool) -> None:
+        self._btn_dealias.setChecked(enabled)
+
+    def _refresh_dealias_visible(self) -> None:
+        btn = getattr(self, "_btn_dealias", None)   # the product list is built first
+        visible = self._archive_mode and self._product == "velocity"
+        if btn is not None and btn.isHidden() == visible:
+            btn.setVisible(visible)
+            self.content_changed()
 
     def save_state(self) -> dict:
         return {"data": self.is_data_enabled(), "product": self._product,
                 "opacity": self._opacity_slider.value(),
-                "sync": self._btn_sync.isChecked(),
-                "sync_vehicles": self._btn_sync_vehicles.isChecked()}
+                "sync_vehicles": self._btn_sync_vehicles.isChecked(),
+                "dealias": self._btn_dealias.isChecked()}
 
     def restore_state(self, state: dict) -> None:
         """Re-select the product and opacity, then turn data on; all go through
@@ -391,10 +414,10 @@ class RadarControls(Drawer):
         opacity = state.get("opacity")
         if isinstance(opacity, int):
             self._opacity_slider.setValue(max(10, min(100, opacity)))
-        if isinstance(state.get("sync"), bool):
-            self._btn_sync.setChecked(state["sync"])
         if isinstance(state.get("sync_vehicles"), bool):
             self._btn_sync_vehicles.setChecked(state["sync_vehicles"])
+        if isinstance(state.get("dealias"), bool):
+            self._btn_dealias.setChecked(state["dealias"])
         idx = self._product_combo.findData(state.get("product"))
         if idx >= 0 and idx != self._product_combo.currentIndex():
             self._product_combo.setCurrentIndex(idx)
@@ -418,6 +441,24 @@ class RadarControls(Drawer):
         # sync internal product state to the combo selection
         current_code = self._product_combo.currentData() or ""
         self._product = current_code
+        self._refresh_dealias_visible()
+
+    def products(self) -> list[tuple[str, str]]:
+        """(code, label) for each product the picker offers and has data for."""
+        model = self._product_combo.model()
+        out = []
+        for i in range(self._product_combo.count()):
+            item = model.item(i)
+            if item is not None and not item.isEnabled():
+                continue
+            out.append((self._product_combo.itemData(i), self._product_combo.itemText(i)))
+        return out
+
+    def select_product(self, code: str) -> None:
+        """Pick ``code`` in the product box, as choosing it there does."""
+        idx = self._product_combo.findData(code)
+        if idx >= 0:
+            self._product_combo.setCurrentIndex(idx)
 
     def set_cache_size(self, n: int):
         """update slider range as scan cache grows; stay at live if already there."""
@@ -462,6 +503,29 @@ class RadarControls(Drawer):
         if self._btn_play.isChecked():
             self._btn_play.setChecked(False)   # triggers _on_play_toggled(False)
 
+    def set_sync_vehicles(self, enabled: bool) -> None:
+        self._btn_sync_vehicles.setChecked(enabled)
+
+    # ── playback API shared with the loop timeline ──
+    def request_frame(self, idx: int) -> None:
+        """Show frame ``idx`` as if the user picked it."""
+        idx = max(0, min(self._frame_slider.maximum(), int(idx)))
+        self.set_frame(idx)
+        self.frame_requested.emit(idx)
+
+    def speed_labels(self) -> list[str]:
+        return [self._speed_combo.itemText(i) for i in range(self._speed_combo.count())]
+
+    def speed_index(self) -> int:
+        return self._speed_combo.currentIndex()
+
+    def set_speed_index(self, index: int) -> None:
+        self._speed_combo.setCurrentIndex(index)
+
+    def set_playback_row_visible(self, visible: bool) -> None:
+        self._playback_row.setVisible(visible)
+        self.content_changed()
+
     def jump_to_latest(self) -> None:
         """Stop the loop and show the live frame."""
         self.stop_loop()
@@ -480,12 +544,46 @@ class RadarControls(Drawer):
 
     def configure_for_archive(self, enabled: bool) -> None:
         self._archive_mode = enabled
-        self._chk_show_data.setVisible(not enabled)
+        # archive: on from the start, and turning it off stops the fetching
+        # too (the lidar's "show on map"); live keeps its own off default
+        self._chk_show_data.blockSignals(True)
+        self._chk_show_data.setChecked(enabled)
+        self._chk_show_data.blockSignals(False)
+        self._chk_show_data.setText("show on map" if enabled else "show data")
+        self._chk_show_data.setToolTip(
+            "Fetch and draw the radar; off stops its downloads and clears it from the map" if enabled
+            else "enable or disable radar data fetch and display"
+        )
         playback_row = self._drawer.layout().itemAt(1).widget()
         if playback_row is not None:
             playback_row.setVisible(not enabled)
         self._tilt_combo.setVisible(enabled and self._tilt_combo.count() > 0)
+        self._btn_dealias.setVisible(enabled and self._product == "velocity")
+        self._btn_vad.setToolTip(
+            "Lidar wind profiles: the lidar truck and the CLAMPS trailers" if enabled
+            else "View VAD wind profile hodograph"
+        )
         self.content_changed()
+
+    def current_tilt_index(self) -> int:
+        """The chosen sweep's index in the volume, or -1 when none is listed."""
+        sweep = self._tilt_combo.currentData()
+        return int(sweep) if sweep is not None else self._tilt_combo.currentIndex()
+
+    def select_tilt(self, sweep_index: int) -> None:
+        """Select the entry for this sweep's angle, emitting tilt_changed."""
+        if self._tilt_combo.count():
+            self._tilt_combo.setCurrentIndex(self._tilt_row_for_sweep(sweep_index))
+
+    def _tilt_row_for_sweep(self, sweep_index: int) -> int:
+        if not 0 <= sweep_index < len(self._sweep_angles):
+            return 0
+        angle = self._sweep_angles[sweep_index]
+        return next(
+            (row for row in range(self._tilt_combo.count())
+             if self._sweep_angles[self._tilt_combo.itemData(row)] == angle),
+            0,
+        )
 
     def set_archive_products(self, products: list[tuple[str, str]]) -> None:
         if not products:
@@ -494,14 +592,22 @@ class RadarControls(Drawer):
         self._set_product_items(products, preserve_code=current or products[0][0])
 
     def set_archive_tilts(self, tilts: list[float], current_index: int | None = None) -> None:
+        """tilts: every sweep's elevation, in volume order. Each angle is
+        listed once (split cuts and SAILS rescans repeat 0.5° etc.), as its
+        first sweep; the decoder then uses the sweep at that angle that
+        carries the chosen product. current_index is a sweep index."""
+        self._sweep_angles = [round(float(deg), 1) for deg in tilts]
+        first_sweep: dict[float, int] = {}
+        for i, deg in enumerate(self._sweep_angles):
+            first_sweep.setdefault(deg, i)
         self._tilt_combo.blockSignals(True)
         self._tilt_combo.clear()
-        for deg in tilts:
-            self._tilt_combo.addItem(f"{deg:.1f}°")
+        for deg, sweep in sorted(first_sweep.items()):
+            self._tilt_combo.addItem(f"{deg:.1f}°", sweep)
         if self._tilt_combo.count():
-            idx = current_index if current_index is not None else 0
-            idx = max(0, min(idx, self._tilt_combo.count() - 1))
-            self._tilt_combo.setCurrentIndex(idx)
+            current = current_index if current_index is not None else 0
+            current = max(0, min(current, len(self._sweep_angles) - 1))
+            self._tilt_combo.setCurrentIndex(self._tilt_row_for_sweep(current))
         self._tilt_combo.blockSignals(False)
         self._tilt_combo.setVisible(self._archive_mode and self._tilt_combo.count() > 0)
         self.content_changed()
@@ -523,7 +629,7 @@ class RadarControls(Drawer):
             return
 
         # emit signal instead of QTimer.singleShot — PyQt6 AutoConnection safely
-        self._products_refreshed.emit(availability)
+        emit_alive(self, "_products_refreshed", availability)
 
     def _apply_product_items(self, availability: dict):
         """Slot — always runs on the main thread via the _products_refreshed signal."""
@@ -556,7 +662,7 @@ class RadarControls(Drawer):
             with urlopen(url, timeout=6) as resp:
                 xml_text = resp.read().decode("utf-8", errors="replace")
             root = ET.fromstring(xml_text)
-            ns = {"cat": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
+            ns = {"cat": paths.THREDDS_NS}
             # site catalogs typically contain day subcatalog refs, not dataset
             for ds in root.findall(".//cat:dataset", ns):
                 if ds.attrib.get("urlPath"):
@@ -576,6 +682,9 @@ class RadarControls(Drawer):
 
     def _on_data_enabled_toggled(self, checked: bool):
         """show data checkbox — controls whether data is actually fetched."""
+        if self._archive_mode:
+            self.archive_data_toggled.emit(checked)
+            return
         self.radar_toggled.emit(checked)
         if checked:
             self.fetch_requested.emit()
@@ -584,22 +693,18 @@ class RadarControls(Drawer):
         self._btn_play.setText("⏸" if checked else "▶")
         self.loop_toggled.emit(checked)
 
-    def _on_sync_toggled(self, checked: bool):
-        self._btn_sync_vehicles.setEnabled(checked)
-        self.sync_toggled.emit(checked)
-        if self._btn_sync_vehicles.isChecked():
-            self.sync_vehicles_toggled.emit(checked)
-
     def _on_product_changed(self, index: int):
         product = self._product_combo.itemData(index)
         if not product:
             return
         self._product = product
+        self._refresh_dealias_visible()
         self.product_changed.emit(product)
 
     def _on_tilt_changed(self, index: int):
         if index >= 0:
-            self.tilt_changed.emit(index)
+            sweep = self._tilt_combo.itemData(index)
+            self.tilt_changed.emit(int(sweep) if sweep is not None else index)
 
     def _on_slider_released(self):
         # emit frame_requested only when user releases the slider handle

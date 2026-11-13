@@ -9,6 +9,7 @@ from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QToolButton, QFrame, QFileDialog, QMenu,
+    QHBoxLayout,
 )
 from PyQt6.QtCore import Qt, QTimer, QSettings, pyqtSignal, QSize
 
@@ -30,10 +31,14 @@ from ui.controls.mesoanalysis_controls import MesoanalysisControls
 from ui.controls.sfcoa_controls import SfcoaControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
+from ui.widgets.pin_dot import PinDot
 from ui.sounding.controls import SoundingControls
 from ui.app.overlay_geometry import bottom_left_y_avoiding, stack_gap
 from ui.layer_status import LayerStatusBoard, LayerStatusDot
 from ui.widgets.annotation_tools import AnnotationTools
+from ui.widgets.loop_timeline import LoopTimeline
+from ui.widgets.settings_pill import SettingsPill
+from ui.launch.icons import toolbar_icon
 from ui.widgets.responsive_toolbar import ResponsiveToolbar
 import config
 from core.annotation import Annotation
@@ -46,6 +51,9 @@ from ui.app.main_window_debug import MainWindowDebugMixin
 from ui.app.main_window_map_helpers import MainWindowMapHelpersMixin
 from ui import palette as P
 from ui.app.main_window_archive import MainWindowArchiveMixin
+from ui.app.main_window_archive_surface import MainWindowArchiveSurfaceMixin
+from ui.app.main_window_clamps import MainWindowClampsMixin
+from ui.app.main_window_lidar import MainWindowLidarMixin
 from ui.app.main_window_radar import MainWindowRadarMixin
 from ui.app.main_window_hazards import MainWindowHazardsMixin
 from ui.app.main_window_overlays import MainWindowOverlaysMixin
@@ -54,21 +62,41 @@ from ui.app.main_window_map_objects import MainWindowMapObjectsMixin
 from ui.app.main_window_vehicles import MainWindowVehiclesMixin
 from ui.app.main_window_status import MainWindowStatusMixin
 from ui.app.main_window_loop import MainWindowLoopMixin
+from ui.app.main_window_context_menu import MainWindowContextMenuMixin
+from ui.app.main_window_palette import MainWindowPaletteMixin
+from ui.app.main_window_track import MainWindowTrackMixin
+from ui.app.main_window_trails import MainWindowTrailsMixin
+from ui.app.main_window_case import MainWindowCaseMixin
+from ui.app.main_window_studio import MainWindowStudioMixin
 from ui.app.main_window_util import NLCD_TILES_PATH, SATELLITE_TILES_PATH, _make_camera_icon
 
 log = logging.getLogger(__name__)
 
 
+# loop timeline width; the map's scale bar and LEGEND sit in the bottom-right corner
+TIMELINE_MAX_WIDTH = 720
+TIMELINE_RIGHT_CLEAR = 330
+
+
 class MainWindow(
     MainWindowArchiveMixin,
+    MainWindowArchiveSurfaceMixin,
+    MainWindowClampsMixin,
+    MainWindowLidarMixin,
     MainWindowRadarMixin,
     MainWindowHazardsMixin,
     MainWindowOverlaysMixin,
     MainWindowSoundingMixin,
+    MainWindowTrackMixin,
+    MainWindowTrailsMixin,
+    MainWindowCaseMixin,
+    MainWindowStudioMixin,
     MainWindowMapObjectsMixin,
     MainWindowVehiclesMixin,
     MainWindowStatusMixin,
     MainWindowLoopMixin,
+    MainWindowContextMenuMixin,
+    MainWindowPaletteMixin,
     MainWindowMapHelpersMixin,
     MainWindowDebugMixin,
     QMainWindow,
@@ -82,8 +110,10 @@ class MainWindow(
     _render_ready = pyqtSignal(object)
     # emitted from the archive-render thread when an archive scan PNG is ready.
     _archive_render_ready = pyqtSignal(object)
-    # emitted when the user aborts an archive loading session.
-    session_aborted = pyqtSignal()
+    # emitted from the sharp-render thread when a paused frame's sharp PNG is ready.
+    _archive_superres_ready = pyqtSignal(object)
+    # emitted from the lidar render thread when a sweep's PNG is ready (archive LIDAR).
+    _lidar_render_ready = pyqtSignal(object)
 
     _layout_pending = False
 
@@ -93,13 +123,17 @@ class MainWindow(
         monitor: bool = False,
         viewer: bool = False,
         archive_time=None,    # datetime | None
+        case_package=None,    # path of a case package to open once started (ARCHIVE)
     ):
         super().__init__()
+        self._setup_case_sources(archive_time is not None, case_package)
         self._debug = debug
         self._monitor = monitor
         self._viewer = viewer
         self._archive_time = archive_time    # None = live mode
         self._archive = archive_time is not None
+        import log_context
+        log_context.set_case(f"archive {archive_time:%Y-%m-%d}" if archive_time else "live")
         self._current_radar_scan = None
         self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
         self._mesoanalysis_fetcher = None
@@ -135,6 +169,12 @@ class MainWindow(
         self._init_map()
         self._init_toolbar()
         self._init_statusbar()
+        # bottom-centre loop bar, attached once the live loop exists (_init_loop_sync);
+        # ARCHIVE keeps its own bar
+        self.loop_timeline = None
+        if not self._archive:
+            self.loop_timeline = LoopTimeline(self._map_container)
+            self.loop_timeline.hide()
         self._init_click_modes()
         self._init_vehicle_panel()
         self._radar_station_sites = self._load_radar_station_sites()
@@ -192,6 +232,7 @@ class MainWindow(
 
         # wire map mousemove → status bar coordinate and zoom display
         self.map_widget.map_moved.connect(self._on_map_moved)
+        self.map_widget.context_menu_requested.connect(self._on_map_context_menu)
 
         # clock ticks every second
         self._clock_timer = QTimer()
@@ -226,20 +267,23 @@ class MainWindow(
         # screenshot button — persistent, bottom-right above zoom controls
         self._init_screenshot_button()
         self._init_scan_button()
+        self._init_settings()
 
         # layer order pill — floats above the bottom-left status pill
         self._layer_pill = LayerOrderPill(self._map_container)
         self._layer_pill.order_changed.connect(self._apply_layer_order)
         self._layer_pill.order_changed.connect(lambda _: self._layout_overlays())
         self._layer_pill.size_changed.connect(self._layout_overlays)
-        self._layer_pill.show()
 
         # extra startup layout passes avoid first-paint clipping in floating pills.
         QTimer.singleShot(0, self._layout_overlays)
         QTimer.singleShot(220, self._layout_overlays)
 
+        # menu bar first: its keyed entries are bound by _init_shortcuts
+        self._init_menu_bar()
         # keyboard shortcuts (ui/shortcuts.py); ctrl+d works even outside --debug
         self._init_shortcuts()
+        self._init_command_palette()
 
         # auto-init debug panel when launched with --debug flag
         if debug:
@@ -302,7 +346,8 @@ class MainWindow(
         """One-shot background fetch of current.json to pre-populate annotations on launch."""
         from urllib.request import urlopen, Request
 
-        url = f"{config.NSSL_API_ROOT}/current.json"
+        from data import endpoints
+        url = endpoints.nssl_api(endpoints.NSSL_CURRENT_OBS)
         try:
             headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
             if config.NSSL_API_KEY:
@@ -414,8 +459,9 @@ class MainWindow(
         "hazards": "hazard_controls", "surface": "surface_controls",
         "mesoanalysis": "mesoanalysis_controls", "sfcoa": "sfcoa_controls",
     }
-    # opening SOUNDING enters its map-click mode; don't do that on launch
-    _SESSION_SKIP_DRAWERS = ("sounding",)
+    # opening SOUNDING or TRACK enters a map-click mode; don't do that on launch
+    # (LIDAR is enabled only once the date's lidar files are found)
+    _SESSION_SKIP_DRAWERS = ("sounding", "track", "lidar")
 
     def _session_mode(self) -> str:
         return session_state.mode_key(self._monitor, self._viewer, self._archive)
@@ -479,13 +525,38 @@ class MainWindow(
                 btn.setChecked(True)
 
     def _on_reset_layout(self) -> None:
-        """MAP → RESET LAYOUT: close every drawer, default pins, AUTO, 100 % text."""
+        """Settings → RESET LAYOUT: close every drawer, default pins, 100 % text."""
         self._drawers.close_all()
         self._drawers.reset()
-        self.map_controls.set_drawer_mode(self._drawers.mode)
-        self.map_controls.set_text_scale(100)
+        self.settings_pill.set_text_scale(100)
         self._on_text_scale_changed(100)
         self._request_layout()
+
+    def _init_settings(self):
+        """Gear button, top right, and the settings pill it opens below it."""
+        self._settings_bar = QWidget(self._map_container)
+        self._settings_bar.setObjectName("floatingToolbar")
+        self._settings_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar = QHBoxLayout(self._settings_bar)
+        bar.setContentsMargins(4, 4, 4, 4)
+        self.btn_settings = QToolButton()
+        self.btn_settings.setCheckable(True)
+        self.btn_settings.setToolTip("Settings")
+        self.btn_settings.setIcon(toolbar_icon("gear", self._toolbar_icon_px()))
+        bar.addWidget(self.btn_settings)
+
+        pill = self.settings_pill = SettingsPill(text_scale.SCALES, self._map_container)
+        pill.set_text_scale(text_scale.percent())
+        pill.set_loop_available(False)   # until the live loop exists (_init_loop_sync)
+        self.btn_settings.toggled.connect(pill.toggle_drawer)
+        pill.geometry_changed.connect(self._request_layout)
+        pill.text_scale_chosen.connect(self._on_text_scale_changed)
+        pill.shortcuts_clicked.connect(self._toggle_shortcut_overlay)
+        pill.reset_clicked.connect(self._on_reset_layout)
+        rc = self.radar_controls
+        pill.vehicles_toggled.connect(rc.set_sync_vehicles)
+        rc.sync_vehicles_toggled.connect(pill.set_vehicles)
+        pill.set_vehicles(rc.is_sync_vehicles())
 
     def _on_auto_meso_caps_ready(self, sectors: dict):
         """One-shot: pick the closer meso sector once caps have been fetched."""
@@ -537,6 +608,9 @@ class MainWindow(
         self.btn_radar.toggled.connect(
             lambda on: self._set_radar_station_picker_visible(False) if not on else None
         )
+        if self._archive:
+            # next to RADAR: the lidar truck's and CLAMPS trailers' scans
+            self._init_lidar_toolbar(tb)
 
         self.btn_satellite = tb.add_button(
             "SATELLITE", "Show/hide GOES satellite imagery overlay", "satellite"
@@ -552,6 +626,9 @@ class MainWindow(
         self.hazard_controls = HazardControls(self._map_container)
         self.hazard_controls.setObjectName("floatingToolbar")
         self.btn_hazards.toggled.connect(self.hazard_controls.toggle_drawer)
+        if self._archive:
+            # damage surveys sit with the NWS products; wired in _init_archive_surface
+            self.btn_damage_paths = self.hazard_controls.add_damage_paths_button()
 
         self.outlook_panel = OutlookPanel(self._map_container)
         self.outlook_panel.closed.connect(self._layout_overlays)
@@ -564,6 +641,9 @@ class MainWindow(
         self.surface_controls = SurfaceControls(self._map_container)
         self.surface_controls.setObjectName("floatingToolbar")
         self.btn_surface.toggled.connect(self.surface_controls.toggle_drawer)
+        if self._archive:
+            self.btn_surface.setToolTip("Show/hide ASOS replay (stations inside a box you draw)")
+            self.surface_controls.configure_for_archive()
 
         if feature_flags.is_enabled("mesoanalysis"):
             self.btn_mesoanalysis = tb.add_button(
@@ -593,6 +673,8 @@ class MainWindow(
         self.sounding_controls.setObjectName("floatingToolbar")
         self.btn_sounding.toggled.connect(self.sounding_controls.toggle_drawer)
         self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
+        if self._archive:
+            self._init_track_toolbar(tb)
 
         # ── team ──
         tb.add_group()
@@ -634,6 +716,7 @@ class MainWindow(
         self.btn_route = self.map_controls.btn_route
         self.btn_nlcd = self.map_controls.btn_landcover
         self.btn_satellite_basemap = self.map_controls.btn_satellite_basemap
+        self.map_controls.btn_annotations.toggled.connect(self.map_widget.set_annotations_visible)
 
         self.routing_controls = RoutingControls(self._map_container)
         self.routing_controls.setObjectName("floatingToolbar")
@@ -659,7 +742,6 @@ class MainWindow(
         if self._archive:
             tb.set_available(self.btn_prev_locs, False)
             # no archive data sources for these — hide to prevent crashes.
-            tb.set_available(self.btn_surface, False)    # _surface_fetcher / _surface_layer absent
             tb.set_available(self.btn_annotate, False)   # _mqtt_client / _annotation_sync / _drawing_sync absent
             if hasattr(self, "btn_mesoanalysis"):
                 tb.set_available(self.btn_mesoanalysis, False)   # Satsquatch mesoanalysis is not archived
@@ -743,7 +825,7 @@ class MainWindow(
 
     def _init_drawer_manager(self):
         """Decide which drawers share the screen (see ui/app/drawer_manager.py)."""
-        self._drawers = DrawerManager(lambda: self._map_container.height(), parent=self)
+        self._drawers = DrawerManager(parent=self)
         entries = [
             ("radar", "radar_controls", "btn_radar"),
             ("prev_locs", "deploy_locs_controls", "btn_prev_locs"),
@@ -753,6 +835,8 @@ class MainWindow(
             ("sfcoa", "sfcoa_controls", "btn_sfcoa"),
             ("surface", "surface_controls", "btn_surface"),
             ("sounding", "sounding_controls", "btn_sounding"),
+            ("track", "track_controls", "btn_track"),
+            ("lidar", "raw_lidar_controls", "btn_raw_lidar"),
             ("annotate", "annotation_tools", "btn_annotate"),
             ("map", "map_controls", "btn_map"),
         ]
@@ -777,12 +861,6 @@ class MainWindow(
             lambda b, on: self._drawers.set_pinned(pin_keys[b], on),
         )
         self._refresh_drawer_pins()
-        self.map_controls.set_drawer_mode(self._drawers.mode)
-        self.map_controls.drawer_mode_changed.connect(self._drawers.set_mode)
-        self.map_controls.set_text_scale(text_scale.percent())
-        self.map_controls.text_scale_changed.connect(self._on_text_scale_changed)
-        self.map_controls.reset_layout_requested.connect(self._on_reset_layout)
-        self._drawers.mode_changed.connect(self._request_layout)
 
     def _show_drawer_pin_menu(self, key: str, button: QToolButton, pos):
         menu = QMenu(self)
@@ -800,10 +878,8 @@ class MainWindow(
             except KeyError:
                 continue
             pinned = self._drawers.is_pinned(key)
-            if btn.property("pinned") != pinned:
-                btn.setProperty("pinned", pinned)
-                btn.style().unpolish(btn)
-                btn.style().polish(btn)
+            dot = btn.findChild(PinDot) or PinDot(btn)
+            dot.setVisible(pinned)
             tip = btn.toolTip().removesuffix(" (pinned open)")
             btn.setToolTip(tip + (" (pinned open)" if pinned else ""))
 
@@ -879,13 +955,14 @@ class MainWindow(
     _SHORTCUT_BUTTONS = {
         "radar": "btn_radar", "satellite": "btn_satellite", "hazards": "btn_hazards",
         "surface": "btn_surface", "vehicles": "btn_vehicles", "sounding": "btn_sounding",
-        "measure": "btn_measure", "annotate": "btn_annotate",
+        "measure": "btn_measure", "annotate": "btn_annotate", "track": "btn_track",
     }
 
     def _init_shortcuts(self):
         """Bind the shortcut table for this launch mode and build the ? overlay."""
         mode = ARCHIVE if self._archive else LIVE
         sc = self._shortcuts = ShortcutRegistry(self, mode)
+        menu = getattr(self, "_menu_actions", {})
         for action, attr in self._SHORTCUT_BUTTONS.items():
             btn = getattr(self, attr, None)
             if btn is None:
@@ -894,20 +971,34 @@ class MainWindow(
             btn.setToolTip(sc.tooltip(action, btn.toolTip()))
 
         sc.bind("escape", self._on_escape_pressed)
-        sc.bind("loop", self.radar_controls.toggle_loop)
-        sc.bind("frame_prev", lambda: self.radar_controls.step_frame(-1))
-        sc.bind("frame_next", lambda: self.radar_controls.step_frame(1))
+        sc.bind("loop", lambda: self._loop_key("toggle_loop"))
+        sc.bind("frame_prev", lambda: self._loop_key("step_frame", -1))
+        sc.bind("frame_next", lambda: self._loop_key("step_frame", 1))
         for action, method in (("play", "toggle_play"), ("step_back", "step_back"),
                                ("step_forward", "step_forward"), ("skip_start", "skip_start"),
                                ("skip_end", "skip_end")):
             sc.bind(action, lambda m=method: self._call_archive_controls(m))
-        sc.bind("screenshot", lambda: self._click_if_shown(self.btn_screenshot))
+        sc.bind("screenshot", lambda: self._click_if_shown(self.btn_screenshot), menu.get("screenshot"))
         self.btn_screenshot.setToolTip(sc.tooltip("screenshot", self.btn_screenshot.toolTip()))
+        sc.bind("track_point_at_marker", self._add_track_point_at_marker)
+        sc.bind("track_delete", self._delete_selected_track_point)
+        sc.bind("track_undo", lambda: self._edit_undo(redo=False), menu.get("track_undo"))
+        sc.bind("track_redo", lambda: self._edit_undo(redo=True), menu.get("track_redo"))
         sc.bind("help", self._toggle_shortcut_overlay)
-        sc.bind("debug", self._toggle_debug_panel)
-        sc.bind("error_log", self._toggle_error_log_panel)
+        sc.bind("debug", self._toggle_debug_panel, menu.get("debug"))
+        sc.bind("error_log", self._toggle_error_log_panel, menu.get("error_log"))
+        sc.bind("case_open", self._open_case_package, menu.get("case_open"))
+        sc.bind("case_export", self._export_case_package, menu.get("case_export"))
+        sc.bind("studio", self._toggle_studio, menu.get("studio"))
 
         self._shortcut_overlay = ShortcutOverlay(mode, self._map_container)
+
+    def _loop_key(self, method, *args) -> None:
+        """Space and [ / ] drive whatever the timeline drives (radar without one)."""
+        if getattr(self, "loop_timeline", None) is not None:
+            self._loop_driver_call(method, *args)
+        else:
+            getattr(self.radar_controls, method)(*args)
 
     @staticmethod
     def _click_if_shown(btn) -> None:
@@ -940,6 +1031,7 @@ class MainWindow(
         cm.register("storm_motion_fix", self._exit_annotation_mode, self._on_storm_motion_fix_click)
         cm.register("drawing", self._exit_drawing_mode, self._on_drawing_click)
         cm.register("asos_bbox", self._exit_asos_bbox)
+        cm.register("track", self._exit_track_mode)
         cm.prompt_changed.connect(self._on_click_mode_prompt)
 
         self._mode_banner = QLabel(self._map_container)
@@ -962,6 +1054,13 @@ class MainWindow(
         return div
 
     def closeEvent(self, event):
+        self._closing = True
+        if self._archive:
+            self._cancel_studio_export()
+            if getattr(self, "_archive_raw_lidar", None) is not None:
+                self._archive_raw_lidar.cancel()      # its downloads can run to hundreds of MB
+            self._silence_archive_workers()
+            self._close_case_sources()
         _s = QSettings("NSSL", "STORM")
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
@@ -996,6 +1095,18 @@ class MainWindow(
             self._obs_watcher.stop()
         if hasattr(self, "_mqtt_client"):
             self._mqtt_client.disconnect()
+        if getattr(self, "_archive_radar", None) is not None:
+            self._archive_radar.shutdown()
+        if hasattr(self, "map_widget"):
+            # frees storm:// for the next window's map (session loop)
+            self.map_widget.shutdown()
+        if hasattr(self, "_archive_superres_timer"):
+            self._archive_superres_timer.stop()
+        # pool threads aren't daemons: without this they outlive the window
+        for name in ("_archive_render_executor", "_archive_superres_executor"):
+            executor = getattr(self, name, None)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
         self._cleanup_debug_panel()
 
         super().closeEvent(event)
@@ -1015,15 +1126,27 @@ class MainWindow(
         self.map_widget.setGeometry(r)
 
         # toolbar: shrink-wrap to content, center horizontally, float with margin
+        # gear — top-right corner, its settings pill drops below it
+        gear_w = 0
+        if hasattr(self, "_settings_bar"):
+            sb = self._settings_bar
+            sb.adjustSize()
+            gear_w = sb.width() + 4
+            sb.move(r.width() - sb.width() - MARGIN, MARGIN)
+            sb.raise_()
+
         if hasattr(self, "_floating_toolbar"):
-            # drops to icon-only, then the ⋯ menu, as the window narrows
-            self._floating_toolbar.fit(r.width() - 2 * MARGIN)
+            # drops to icon-only, then the ⋯ menu, as the window narrows; it
+            # stays centred, so it keeps clear of the gear on both sides
+            self._floating_toolbar.fit(r.width() - 2 * (MARGIN + gear_w))
             self._floating_toolbar.adjustSize()
             tb_w = self._floating_toolbar.width()
             tb_h = self._floating_toolbar.height()
             tb_x = max(0, (r.width() - tb_w) // 2)
             self._floating_toolbar.setGeometry(tb_x, MARGIN, tb_w, tb_h)
             self._floating_toolbar.raise_()
+            if hasattr(self, "_settings_bar"):
+                self._settings_bar.setFixedHeight(tb_h)   # level with the toolbar
 
             # stack open pills below the toolbar to avoid overlap
             _drop_y = MARGIN + tb_h + 4
@@ -1078,6 +1201,10 @@ class MainWindow(
                 _stack(self.surface_controls)
             if hasattr(self, "sounding_controls") and self.sounding_controls.occupies_space():
                 _stack(self.sounding_controls)
+            if hasattr(self, "track_controls") and self.track_controls.occupies_space():
+                _stack(self.track_controls)
+            if hasattr(self, "raw_lidar_controls") and self.raw_lidar_controls.occupies_space():
+                _stack(self.raw_lidar_controls)
             if hasattr(self, "annotation_tools") and self.annotation_tools.occupies_space():
                 _stack(self.annotation_tools)
             if hasattr(self, "map_controls") and self.map_controls.occupies_space():
@@ -1124,12 +1251,38 @@ class MainWindow(
                            OutlookPanel.PANEL_WIDTH, panel_h)
             op.raise_()
 
-        # archive controls bar — centered, pinned to bottom
+        # settings pill — under the gear, right-aligned, over the nav pill and outlook
+        if hasattr(self, "settings_pill") and self.settings_pill.occupies_space():
+            sp = self.settings_pill
+            if sp.layout() is not None:
+                sp.layout().activate()
+            sp.adjustSize()
+            sb = self._settings_bar
+            sp.setGeometry(r.width() - sp.width() - MARGIN, sb.geometry().bottom() + 5,
+                           sp.width(), sp.height())
+            sp.raise_()
+
+        # archive startup loading line — top-left, or under the toolbar's left
+        # end when the toolbar leaves no room beside it
+        if hasattr(self, "_archive_loading") and self._archive_loading.isVisible():
+            al = self._archive_loading
+            al.adjustSize()
+            al_y = MARGIN
+            if hasattr(self, "_floating_toolbar"):
+                tb_geo = self._floating_toolbar.geometry()
+                if tb_geo.left() < al.width() + 2 * MARGIN:
+                    al_y = tb_geo.bottom() + 5
+            al.move(MARGIN, al_y)
+            al.raise_()
+
+        # archive controls bar — centered, pinned to bottom; the Video Studio
+        # panel takes its place, full width, while open
         arc_bar_h = 0
         archive_rect = None
         if hasattr(self, "_archive_controls"):
-            ac = self._archive_controls
-            ac_w = min(r.width() - 2 * MARGIN, 680)
+            studio = self._studio_open()
+            ac = self._studio if studio else self._archive_controls
+            ac_w = r.width() - 2 * MARGIN if studio else min(r.width() - 2 * MARGIN, 680)
             ac.setFixedWidth(ac_w)
             ac.adjustSize()
             ac_h = ac.sizeHint().height()
@@ -1186,6 +1339,21 @@ class MainWindow(
             self._layer_pill._relayout()
             self._layer_pill.raise_()
 
+        # loop timeline — true bottom centre, narrowed to clear the corner overlays;
+        # when even its narrowest won't fit between them, it rises above the status pill
+        tl = getattr(self, "loop_timeline", None)
+        if tl is not None and tl.isVisible():
+            side = TIMELINE_RIGHT_CLEAR
+            tl_y = r.height() - tl.height() - MARGIN
+            if hasattr(self, "_status_left"):
+                side = max(side, self._status_left.geometry().right() + MARGIN)
+            narrowest = tl.minimumSizeHint().width()
+            tl_w = max(narrowest, min(TIMELINE_MAX_WIDTH, r.width() - 2 * side))
+            if tl_w > r.width() - 2 * side and hasattr(self, "_status_left"):
+                tl_y = min(tl_y, self._status_left.y() - tl.height() - 6)
+            tl.setGeometry((r.width() - tl_w) // 2, tl_y, tl_w, tl.height())
+            tl.raise_()
+
         # keep the drawer stack above the bottom overlays (see DrawerManager)
         if hasattr(self, "_drawers"):
             bottom = archive_rect[1] if archive_rect else r.height()
@@ -1240,6 +1408,7 @@ class MainWindow(
         if text_scale.set_percent(pct):
             self._floating_toolbar.set_icon_px(self._toolbar_icon_px())
             self._floating_toolbar.invalidate()
+            self.btn_settings.setIcon(toolbar_icon("gear", self._toolbar_icon_px()))
             self._request_layout()
 
     def _request_layout(self, *_args):
@@ -1265,12 +1434,19 @@ class MainWindow(
 
 
     def _on_escape_pressed(self):
-        """Esc closes the shortcut list, else leaves the map click mode, else closes the newest drawer."""
+        """Esc closes the shortcut list or settings, else leaves the map click mode,
+        else closes the newest drawer."""
         overlay = getattr(self, "_shortcut_overlay", None)
         if overlay is not None and not overlay.isHidden():
             overlay.hide()
             return
+        if getattr(self, "btn_settings", None) is not None and self.btn_settings.isChecked():
+            self.btn_settings.setChecked(False)
+            return
         if self._click_modes.exit():
+            return
+        if self._studio_open():
+            self._close_studio()
             return
         if hasattr(self, "_drawers"):
             self._drawers.close_newest(skip=("route",) if self._pill_route_expanded else ())

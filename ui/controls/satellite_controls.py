@@ -4,6 +4,9 @@ from PyQt6.QtWidgets import (
     QSlider, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QEvent
+from PyQt6.QtGui import QImage, QPixmap
+import numpy as np
+from core.goes_ir import IR_MAX_K, IR_MIN_K, ir_rgb
 from ui import palette as P
 from ui.widgets.drawer import Drawer
 from ui.layer_status import StatusTimeLabel
@@ -13,14 +16,20 @@ class SatelliteControls(Drawer):
     """
     Collapsible two-row drawer for GOES-East satellite overlay controls.
 
-    Row 1: CONUS / MESO-1 / MESO-2 mode buttons + opacity slider
-    Row 2: ⏮ ⏪ ▶/⏸ ⏩ ⏭  +  timeline slider  +  time label
+    One row: CONUS / MESO-1 / MESO-2 mode buttons + opacity slider. In
+    ARCHIVE, VIS / IR band buttons follow the sectors, with an IR color bar
+    under the row while IR is shown.
+
+    The playback widgets (⏮ ⏪ ▶/⏸ ⏩ ⏭, frame slider, time, speed) are never
+    shown: they hold the loop state, and the bottom loop timeline drives them
+    through the playback API (or the radar loop picks the frame).
 
     MESO buttons are disabled until SatelliteFetcher confirms sector exists.
     Playback controls are disabled until at least 2 frames are cached.
 
     Signals:
         mode_changed(str)      — "", "conus", "meso1", "meso2"
+        band_changed(str)      — "vis", "ir" (ARCHIVE only)
         opacity_changed(float) — 0.0–1.0
         frame_requested(int)   — user selected a specific cache frame index
         loop_toggled(bool)     — playback loop started/stopped
@@ -28,6 +37,7 @@ class SatelliteControls(Drawer):
     """
 
     mode_changed    = pyqtSignal(str)
+    band_changed    = pyqtSignal(str)
     opacity_changed = pyqtSignal(float)
     frame_requested = pyqtSignal(int)
     loop_toggled    = pyqtSignal(bool)
@@ -81,6 +91,20 @@ class SatelliteControls(Drawer):
 
         r1.addWidget(self._vdiv())
 
+        # band choice: archive only (live imagery is visible)
+        self._btn_vis = self._btn("VIS")
+        self._btn_vis.setChecked(True)
+        self._btn_vis.setToolTip("Visible (band 2) reflectance")
+        self._btn_ir = self._btn("IR")
+        self._btn_ir.setToolTip("Infrared (band 13) cloud-top temperature")
+        self._btn_vis.toggled.connect(lambda on: self._on_band_toggled("vis", on))
+        self._btn_ir.toggled.connect(lambda on: self._on_band_toggled("ir", on))
+        self._band_div = self._vdiv()
+        self._band_widgets = (self._btn_vis, self._btn_ir, self._band_div)
+        for w in self._band_widgets:
+            r1.addWidget(w)
+            w.hide()
+
         lbl = QLabel("OPACITY")
         lbl.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px; letter-spacing: 0.5px;")
         lbl.setFixedHeight(22)
@@ -98,6 +122,16 @@ class SatelliteControls(Drawer):
         r1.addWidget(self._opacity_slider)
         r1.addStretch(1)
         col.addWidget(row1)
+
+        self._ir_legend = self._make_ir_legend()
+        self._ir_legend.hide()
+        col.addWidget(self._ir_legend)
+
+        # why the day has no imagery (ARCHIVE before GOES-16, or a gap)
+        self._note = QLabel()
+        self._note.setStyleSheet(f"color: {P.TEXT_SECONDARY}; font-size: 11px;")
+        self._note.hide()
+        col.addWidget(self._note)
 
         row2 = QWidget()
         row2.setObjectName("satPlaybackRow")
@@ -121,9 +155,6 @@ class SatelliteControls(Drawer):
                   self._btn_fwd, self._btn_jump_end):
             b.setEnabled(False)
             r2.addWidget(b)
-        self._playback_tips = {b: b.toolTip() for b in (
-            self._btn_jump_start, self._btn_back, self._btn_play,
-            self._btn_fwd, self._btn_jump_end)}
         self._has_history = False
         self._synced = False
 
@@ -156,16 +187,8 @@ class SatelliteControls(Drawer):
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
         r2.addWidget(self._speed_combo)
 
-        # replaces the speed menu while the radar loop picks the frame
-        self._synced_label = QLabel("SYNCED TO RADAR")
-        self._synced_label.setStyleSheet(
-            f"color: {P.ACCENT}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
-        )
-        self._synced_label.setToolTip("Turn off SYNC in the radar drawer to loop satellite on its own")
-        self._synced_label.setVisible(False)
-        r2.addWidget(self._synced_label)
-
-        col.addWidget(row2)
+        row2.hide()   # holds the state only; never added to the drawer
+        self._playback_row = row2
         outer.addWidget(self._drawer)
 
     def _btn(self, label: str) -> QToolButton:
@@ -182,6 +205,32 @@ class SatelliteControls(Drawer):
         b.setToolTip(tip)
         b.setCheckable(checkable)
         return b
+
+    def _make_ir_legend(self) -> QWidget:
+        """-90 °C … 50 °C color bar of the IR color table."""
+        row = QWidget()
+        row.setObjectName("satIrLegend")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        width, height = 220, 10
+        kelvin = np.linspace(IR_MIN_K, IR_MAX_K, width, dtype=np.float32)
+        rgb = np.ascontiguousarray(np.repeat(ir_rgb(kelvin)[None, :, :], height, axis=0))
+        image = QImage(rgb.data, width, height, 3 * width, QImage.Format.Format_RGB888).copy()
+        bar = QLabel()
+        bar.setPixmap(QPixmap.fromImage(image))
+        bar.setFixedSize(width, height)
+        bar.setToolTip("Cloud-top temperature: grey above -30 °C, colors for colder tops")
+        style = f"color: {P.TEXT_SECONDARY}; font-size: 10px;"
+        cold = QLabel(f"{IR_MIN_K - 273.15:.0f} °C")
+        warm = QLabel(f"{IR_MAX_K - 273.15:.0f} °C")
+        for w in (cold, warm):
+            w.setStyleSheet(style)
+        lay.addWidget(cold)
+        lay.addWidget(bar)
+        lay.addWidget(warm)
+        lay.addStretch(1)
+        return row
 
     def _vdiv(self) -> QFrame:
         div = QFrame()
@@ -206,6 +255,16 @@ class SatelliteControls(Drawer):
                 self._set_mode("conus")
                 self.mode_changed.emit("conus")
 
+    def sector_buttons(self) -> dict[str, QToolButton]:
+        """Mode key -> its sector button (CONUS, MESO-1, MESO-2)."""
+        return {"conus": self._btn_conus, "meso1": self._btn_meso1, "meso2": self._btn_meso2}
+
+    def select_mode(self, mode: str) -> None:
+        """Switch to a sector through its button; a disabled sector is ignored."""
+        btn = self.sector_buttons().get(mode)
+        if btn is not None and btn.isEnabled():
+            btn.setChecked(True)
+
     def set_cache_size(self, n: int):
         """Update slider range as frame cache grows; stay at live if already there."""
         was_live = self.is_at_latest_frame()
@@ -225,12 +284,6 @@ class SatelliteControls(Drawer):
         if synced:
             self.stop_loop()
         self._apply_playback_enabled()
-        self._speed_combo.setVisible(not synced)
-        self._synced_label.setVisible(synced)
-        self.content_changed()
-        tip = "Synced to the radar loop (SYNC in the radar drawer)"
-        for b, own_tip in self._playback_tips.items():
-            b.setToolTip(tip if synced else own_tip)
 
     def is_synced(self) -> bool:
         return self._synced
@@ -264,6 +317,31 @@ class SatelliteControls(Drawer):
     def current_frame(self) -> int:
         return self._frame_slider.value()
 
+    def band_buttons(self) -> dict[str, QToolButton]:
+        """Band key -> its button; empty outside ARCHIVE, where they're hidden."""
+        if not self._btn_vis.isVisibleTo(self):
+            return {}
+        return {"vis": self._btn_vis, "ir": self._btn_ir}
+
+    def select_band(self, band: str) -> None:
+        btn = self.band_buttons().get(band)
+        if btn is not None and btn.isEnabled():
+            btn.setChecked(True)
+
+    def current_band(self) -> str:
+        return "ir" if self._btn_ir.isChecked() else "vis"
+
+    def set_unavailable(self, reason: str) -> None:
+        """No imagery for this day: sectors and bands off, with the reason."""
+        self._pending_mode = ""
+        self._set_mode("")
+        for btn in (*self.sector_buttons().values(), self._btn_vis, self._btn_ir):
+            btn.setEnabled(False)
+            btn.setToolTip(reason)
+        self._ir_legend.hide()
+        self._note.setText(reason)
+        self._note.show()
+
     def current_mode(self) -> str:
         if self._btn_conus.isChecked():
             return "conus"
@@ -277,7 +355,8 @@ class SatelliteControls(Drawer):
         return self._frame_slider.value() >= self._frame_slider.maximum()
 
     def save_state(self) -> dict:
-        return {"mode": self.current_mode(), "opacity": self._opacity_slider.value()}
+        return {"mode": self.current_mode(), "opacity": self._opacity_slider.value(),
+                "band": self.current_band()}
 
     def restore_state(self, state: dict, mode: bool = True) -> None:
         """Restore opacity and, unless ``mode`` is False, the CONUS/MESO choice.
@@ -285,6 +364,8 @@ class SatelliteControls(Drawer):
         opacity = state.get("opacity")
         if isinstance(opacity, int):
             self._opacity_slider.setValue(max(0, min(100, opacity)))
+        if state.get("band") in ("vis", "ir") and self._btn_ir.isEnabled():
+            (self._btn_ir if state["band"] == "ir" else self._btn_vis).setChecked(True)
         if not mode:
             return
         btn = {"conus": self._btn_conus, "meso1": self._btn_meso1,
@@ -303,6 +384,31 @@ class SatelliteControls(Drawer):
         if self._btn_play.isChecked():
             self._btn_play.setChecked(False)
 
+    def toggle_loop(self) -> None:
+        if self._btn_play.isEnabled():
+            self._btn_play.toggle()
+
+    def step_frame(self, delta: int) -> None:
+        btn = self._btn_back if delta < 0 else self._btn_fwd
+        if btn.isEnabled():
+            btn.click()
+
+    # ── playback API shared with the loop timeline ──
+    def request_frame(self, idx: int) -> None:
+        """Show frame ``idx`` as if the user picked it."""
+        idx = max(0, min(self._frame_slider.maximum(), int(idx)))
+        self.set_frame(idx)
+        self.frame_requested.emit(idx)
+
+    def speed_labels(self) -> list[str]:
+        return [self._speed_combo.itemText(i) for i in range(self._speed_combo.count())]
+
+    def speed_index(self) -> int:
+        return self._speed_combo.currentIndex()
+
+    def set_speed_index(self, index: int) -> None:
+        self._speed_combo.setCurrentIndex(index)
+
     def reset_cache_ui(self):
         self.stop_loop()
         self._frame_slider.blockSignals(True)
@@ -314,16 +420,15 @@ class SatelliteControls(Drawer):
         self._apply_playback_enabled()
 
     def configure_for_archive(self, enabled: bool):
-        row2 = self._drawer.layout().itemAt(1).widget()
-        if row2 is not None:
-            row2.setVisible(not enabled)
-        self.content_changed()
         if enabled:
             # meso buttons are disabled until live sectors are found; in archive
             self._btn_meso1.setEnabled(True)
             self._btn_meso1.setToolTip("Mesoscale sector 1")
             self._btn_meso2.setEnabled(True)
             self._btn_meso2.setToolTip("Mesoscale sector 2")
+            for w in self._band_widgets:
+                w.show()
+            self._ir_legend.setVisible(self._btn_ir.isChecked())
 
     def toggle_drawer(self, checked: bool):
         if not checked:
@@ -365,6 +470,25 @@ class SatelliteControls(Drawer):
                 self._btn_meso2.isChecked(),
             )):
                 self.mode_changed.emit("")
+
+    def _on_band_toggled(self, band: str, checked: bool):
+        if self._updating:
+            return
+        if not checked:
+            # one band is always chosen: unchecking the current one keeps it
+            if not (self._btn_vis.isChecked() or self._btn_ir.isChecked()):
+                self._updating = True
+                (self._btn_ir if band == "ir" else self._btn_vis).setChecked(True)
+                self._updating = False
+            return
+        self._updating = True
+        try:
+            self._btn_vis.setChecked(band == "vis")
+            self._btn_ir.setChecked(band == "ir")
+        finally:
+            self._updating = False
+        self._ir_legend.setVisible(band == "ir" and self._btn_ir.isVisibleTo(self))
+        self.band_changed.emit(band)
 
     def _on_play_toggled(self, checked: bool):
         self._btn_play.setText("⏸" if checked else "▶")

@@ -275,6 +275,19 @@ class HazardControls(Drawer):
 
         outer.addWidget(self._drawer)
 
+    def add_damage_paths_button(self) -> QToolButton:
+        """ARCHIVE: DAMAGE PATHS (NWS damage surveys) after the NWS buttons.
+        Checking it starts drawing a box on the map (MainWindow)."""
+        row = self._btn_cwa.parentWidget().layout()
+        at = row.indexOf(self._btn_cwa) + 1
+        row.insertWidget(at, self._vdiv())
+        self._btn_damage_paths = self._btn("DAMAGE PATHS")
+        self._btn_damage_paths.setToolTip(
+            "NWS damage-survey tornado paths inside a box you draw on the map\n"
+            "(Damage Assessment Toolkit, else NCEI Storm Events)")
+        row.insertWidget(at + 1, self._btn_damage_paths)
+        return self._btn_damage_paths
+
     def _btn(self, label: str) -> QToolButton:
         b = QToolButton()
         b.setProperty("hazardButton", True)
@@ -395,6 +408,26 @@ class HazardControls(Drawer):
                          ("nws_warnings", self._btn_nws_warnings), ("cwa", self._btn_cwa)):
             if state.get(key):
                 btn.setChecked(True)
+
+    def select_day(self, day: int) -> None:
+        idx = self._day_combo.findData(day)
+        if idx >= 0:
+            self._day_combo.setCurrentIndex(idx)
+
+    def spc_products(self) -> list[tuple[str, str]]:
+        """(key, label) for the SPC products the current day offers."""
+        return [(key, btn.text()) for key, btn in self._spc_buttons.items()
+                if not btn.isHidden() and btn.isEnabled()]
+
+    def select_spc_product(self, key: str) -> None:
+        btn = self._spc_buttons.get(key)
+        if btn is not None and not btn.isHidden() and btn.isEnabled():
+            btn.setChecked(True)
+
+    def overlay_buttons(self) -> dict[str, QToolButton]:
+        """The on/off overlays: watches, MDs, NWS warnings and CWA borders."""
+        return {"watches": self._btn_watches, "mds": self._btn_mds,
+                "nws_warnings": self._btn_nws_warnings, "cwa": self._btn_cwa}
 
     def _active_spc_mode(self) -> str:
         for key, btn in self._spc_buttons.items():

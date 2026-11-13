@@ -4,6 +4,8 @@ from datetime import datetime, timezone, timedelta
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from archive.session import session_bounds
+
 log = logging.getLogger(__name__)
 
 # how often the internal timer fires (wall-clock milliseconds).
@@ -27,10 +29,13 @@ class TimeController(QObject):
         play-mode ticking or a manual step/jump.  Always UTC-aware.
     playing_changed(bool)
         Emitted when play/pause state changes.
+    window_changed(datetime, datetime)
+        Emitted when the playable span (start, end) changes.
     """
 
     time_changed    = pyqtSignal(object)   # datetime (UTC-aware)
     playing_changed = pyqtSignal(bool)
+    window_changed  = pyqtSignal(object, object)   # (start, end) datetimes
 
     def __init__(self, start_time: datetime, parent=None):
         super().__init__(parent)
@@ -41,7 +46,11 @@ class TimeController(QObject):
         else:
             start_time = start_time.astimezone(timezone.utc)
 
-        self._current_time: datetime = start_time
+        # The session spans its UTC day and can run into the next morning
+        # (archive/session.py); until the day's activity is known the end
+        # sits at the latest possible point.
+        self._window_start, self._window_end = session_bounds(start_time)
+        self._current_time: datetime = self._clamp(start_time)
         self._speed_idx: int = 2          # default 10×
         self._playing: bool = False
 
@@ -66,13 +75,34 @@ class TimeController(QObject):
         return self._playing
 
 
+    @property
+    def window(self) -> tuple[datetime, datetime]:
+        return self._window_start, self._window_end
+
+    def set_window_end(self, end: datetime) -> None:
+        """Move the end of the playable span (e.g. once the day's activity is
+        known); pulls the current time back inside if needed."""
+        end = end.astimezone(timezone.utc)
+        end = max(end, self._window_start + timedelta(seconds=1))
+        if end == self._window_end:
+            return
+        self._window_end = end
+        self.window_changed.emit(self._window_start, self._window_end)
+        clamped = self._clamp(self._current_time)
+        if clamped != self._current_time:
+            self.pause()
+            self.set_time(clamped)
+
+    def _clamp(self, dt: datetime) -> datetime:
+        return max(self._window_start, min(self._window_end - timedelta(seconds=1), dt))
+
     def set_time(self, dt: datetime) -> None:
         """Jump to an arbitrary archive time."""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         else:
             dt = dt.astimezone(timezone.utc)
-        self._current_time = dt
+        self._current_time = self._clamp(dt)
         self._accum_ms = 0.0
         self.time_changed.emit(self._current_time)
 
@@ -135,16 +165,17 @@ class TimeController(QObject):
             self._current_time = self._current_time.replace(microsecond=0)
             self.time_changed.emit(self._current_time)
 
-    def seconds_since_midnight(self) -> int:
-        """Current archive time expressed as seconds since 00:00:00 UTC."""
-        midnight = self._current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        return int((self._current_time - midnight).total_seconds())
+    def window_seconds(self) -> int:
+        """Length of the playable span, in seconds."""
+        return int((self._window_end - self._window_start).total_seconds())
 
-    def set_seconds_since_midnight(self, secs: int) -> None:
-        """Jump to a position expressed as seconds since 00:00:00 UTC of the
-        current session date."""
-        midnight = self._current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        self.set_time(midnight + timedelta(seconds=max(0, min(86399, secs))))
+    def seconds_since_start(self) -> int:
+        """Current archive time as seconds since the session's 00:00:00 UTC."""
+        return int((self._current_time - self._window_start).total_seconds())
+
+    def set_seconds_since_start(self, secs: int) -> None:
+        """Jump to a position given as seconds since the session's 00:00:00 UTC."""
+        self.set_time(self._window_start + timedelta(seconds=secs))
 
 
     def _ms_per_archive_second(self) -> float:
@@ -158,14 +189,9 @@ class TimeController(QObject):
         self._advance(archive_seconds)
 
     def _advance(self, archive_seconds: float) -> None:
-        new_time = self._current_time + timedelta(seconds=archive_seconds)
-        # clamp to same UTC day.
-        midnight_next = self._current_time.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(days=1)
-        midnight_prev = self._current_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        new_time = max(midnight_prev, min(midnight_next - timedelta(seconds=1), new_time))
-        if new_time == self._current_time:
-            return
-        self._current_time = new_time
-        self.time_changed.emit(self._current_time)
+        new_time = self._clamp(self._current_time + timedelta(seconds=archive_seconds))
+        if new_time != self._current_time:
+            self._current_time = new_time
+            self.time_changed.emit(self._current_time)
+        if self._playing and new_time >= self._window_end - timedelta(seconds=1):
+            self.pause()  # reached the end of the session

@@ -119,22 +119,29 @@ Choose one of three mutually exclusive roles for this session:
 
 | Mode | Description |
 |------|-------------|
-| **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires a vehicle passphrase. |
-| **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires a monitor passphrase. |
-| **VIEWER** | Fully offline / no-network mode — no MQTT, no obs publishing. Map, radar, satellite, and SPC/NWS hazards still function. |
-| **ARCHIVE** | Replay a past session — enter a UTC date/time and STORM fetches and plays back historical radar, satellite, hazards, soundings, and MQTT vehicle positions synchronized to a central time controller. Requires a passphrase. See [Section 8](#8-archive-mode). |
+| **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires the MQTT certificate files. |
+| **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires the MQTT certificate files. |
+| **VIEWER** | Open to anyone — sees the team's vehicles, annotations, drawings, cones and scan sectors live, but can't publish. Map, radar, satellite, and SPC/NWS hazards work as in the other modes. |
+| **ARCHIVE** | Replay a past session — enter a UTC date/time and STORM fetches and plays back historical radar, satellite, hazards, soundings, and MQTT vehicle positions synchronized to a central time controller. Requires the MQTT certificate files. See [Section 8](#8-archive-mode). |
 
 #### Archive Config (ARCHIVE mode only)
 
 When ARCHIVE is selected, the vehicle-specific fields (ID, icon, data directory) are hidden and replaced with:
 
 **Archive Start Time (UTC)**
-A date/time picker (calendar popup + time fields) for choosing the UTC start time of the replay session. STORM will fetch historical data beginning at this timestamp. All data products (radar, satellite, hazards, soundings, vehicle positions) replay from this time.
+A date/time field for the UTC start time of the replay session. Type the date and time, or open a calendar from the field's arrow or the calendar button beside it. All data products (radar, satellite, hazards, soundings, vehicle positions) replay from this time. Picking a day in a calendar keeps the time of day.
+
+While ARCHIVE is selected, STORM looks for dates with data in the background (the ring beside the calendar button shows how many catalogs it has checked) and **shades those days** in both calendars. Click the calendar's year to jump to a year from a grid; years with data are outlined. The dates found are kept for a day (an hour for this year's), so the next launch shades the calendar at once. A day without shading isn't proof there's no data: a catalog that couldn't be reached stays unknown. Today, the dates come from the FOFS mobile mesonet vehicles.
+
+Under the field:
+
+- **Browse available cases…** opens a window to find dates by campaign (VORTEX2, TORUS, PERiLS, LIFT…), years, months and vehicles. Check vehicles to see the dates when *all of* them (or *any of* them) have data. A year-by-month grid counts the matching dates (click a month to list only its dates), and the list shows each date, newest first, with the vehicles that have data that day. Double-click a date, or select it and press *Use this date*, to set the archive date; the time is kept. The window fills in while the background search runs.
+- **Open case…** chooses a case package (see [Menu Bar and Case Packages](#menu-bar-and-case-packages)). The date and time move to the case, a line under the links names it (station, time frame, tracks, packed files), and *Launch* opens it. Choosing another date, or *Clear*, drops it.
 
 **Passphrase**
-Archive mode requires a passphrase for authentication (separate from vehicle/monitor passphrases).
+VEHICLE, MONITOR and ARCHIVE launch only when the MQTT certificate files (`storm.pem`, `storm.pem.crt`, `storm-private.pem.key`) are in the `aws/` folder; LAUNCH shows which ones are missing. VIEWER needs none: it connects with the read-only viewer certificate shipped in `certs/viewer/`, whose AWS IoT policy (`certs/viewer/viewer-policy.json`) only lets it subscribe. Only admin mode asks for a passphrase, and only when its box is checked.
 
-The archive start time is not saved between sessions — each archive launch requires an explicit selection.
+The archive start time is not saved between sessions — each archive launch requires an explicit selection, except after *File > Change Day…*, which reopens the launch window on the last session's date.
 
 ---
 
@@ -208,9 +215,35 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 | **Scroll wheel** | Zoom in / zoom out |
 | **Click + drag** | Pan the map |
 | **Click a feature** | Open info popup (SPC outlook, watch, warning, annotation, etc.) |
-| **Right-click** | Finish current drawing or measurement |
+| **Right-click** | Open the map menu (see [Right-Click Menu](#right-click-menu)) |
+| **Double-click** | Finish a drawing in progress |
 | **Hover over feature** | Show tooltip |
 | **Hover over road** | Show road name/reference and surface class when available |
+
+### Right-Click Menu
+
+Right-clicking the map opens a menu at the cursor. On bare map it offers:
+
+- **Sounding here ▸** — HRRR, nearest RAOB, or CLAMPS when a CLAMPS sounding has been fetched within 150 km
+- **Route to here / Route from here** — opens ROUTE with the point filled in (in VEHICLE, *Route to here* routes from your GPS fix)
+- **Measure from here** — turns on MEASURE with the first point placed
+- **Place annotation ▸** and **Draw ▸** — place one annotation, or start a front, polyline or polygon at the point
+- **Nearest radar site ▸** — the closest three sites; picking one switches the radar
+- **Copy lat/lon** and **Add private pin**
+
+On a feature, its own items come first: **Open text** for a warning, watch or MD; **Edit / Move / Delete** for an annotation, drawing or cone (Delete asks first, since it is published to the team); **Follow / Center / Timeseries** for a vehicle; **Sounding from nearest RAOB** for a surface station. Items hidden in the current mode are left out: VIEWER has no routing, and ARCHIVE treats map objects as read-only. While a map tool (drawing, measuring, sounding) is active, right-click does nothing.
+
+### Command Palette
+
+**Ctrl+K** (**⌘K** on macOS) opens a search box over the map. Type to filter, **↑ / ↓** to move, **Enter** to run, **Esc** to close. It finds:
+
+- every action and drawer (with its key shown, if it has one), and every menu bar entry;
+- radar sites (nearest first when this truck is on the map) and products;
+- satellite sectors, SPC days and products, and hazard toggles;
+- vehicles (center or follow) and the five ranked deployment locations nearest you;
+- places (3 or more characters, when online), through the same geocoder as ROUTE.
+
+The last ten commands run are listed first. Only commands available in the current mode are shown, and typing in the box never triggers map shortcuts.
 
 ### Map Layers (Render Order, bottom to top)
 
@@ -263,6 +296,9 @@ Choose from pre-configured NEXRAD sites (e.g., KTLX, KOUN, KVNX, KDYX, KFWS, etc
 
 **Show Data Checkbox**
 Enables or disables radar fetching. When unchecked, radar is hidden from the map but site/product selections are preserved.
+
+**VAD Button**
+Opens the VAD wind-profile window (hodograph and time-height) for the current radar site's recent NEXRAD VAD profiles. In ARCHIVE it shows the session's Doppler-lidar wind profiles instead (see *CLAMPS and CopterSonde* in Archive Mode).
 
 #### Playback Controls
 
@@ -329,6 +365,7 @@ Selecting one clears the others. Clicking the already-active button deactivates 
 | **WATCHES** | SPC Tornado and Severe Thunderstorm Watch county polygons |
 | **MDs** | SPC Mesoscale Discussion polygons with number labels |
 | **NWS WARNINGS** | Active NWS warnings (all VTEC phenomenons) |
+| **DAMAGE PATHS** | ARCHIVE only: NWS damage-survey tornado paths inside a box you draw (see *ASOS Replay and Damage Paths* in Archive Mode) |
 
 These can be enabled in any combination, independent of the SPC product selection.
 
@@ -427,6 +464,17 @@ This controls live GOES weather satellite imagery. The offline USGS satellite ba
 
 MESO-1 and MESO-2 buttons are disabled until the satellite system confirms those sectors are available. Hover over MESO-1 or MESO-2 buttons to preview the sector boundary on the map as a semi-transparent overlay.
 
+#### VIS / IR (ARCHIVE only)
+
+In ARCHIVE mode, **VIS** and **IR** buttons follow the sector buttons:
+
+| Button | Shows |
+|--------|-------|
+| **VIS** | Band 2 visible reflectance, in grey (the default) |
+| **IR** | Band 13 infrared cloud-top temperature: grey from warm (dark) to -30 °C (light), then blue, green, yellow, red and purple for colder tops, and white below -90 °C. A color bar under the row shows the scale. |
+
+IR works at night and picks out deep convection; VIS shows more detail by day. Both are also in the command palette (Ctrl+K: "Satellite infrared", "Satellite visible"). The choice is saved with the session.
+
 #### Opacity Slider
 
 Controls satellite image transparency from 0% (invisible) to 100% (fully opaque). Default is 70%. Useful for seeing underlying map features through the imagery.
@@ -470,8 +518,9 @@ Select which data source to use for Skew-T log-P soundings. Only one source is a
 | **HRRR** | NCEP HRRR model via open-meteo (no API key) | Click anywhere on the map |
 | **OBS** | Observed radiosondes via IEM RAOB API | Radiosonde station markers appear; click one |
 | **NSSL** | NSSL CLAMPS DL truck soundings via NSSL API | CLAMPS markers appear when data is available; click one |
+| **COPTERSONDE** | ARCHIVE only: PERiLS CopterSonde (UAS) ascents | The day's launch sites appear in a list next to the button; pick one |
 
-In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
+ARCHIVE has no HRRR source; its NSSL button reads the lidar truck's sondes and falls back to CLAMPS TROPoe retrievals (see *CLAMPS and CopterSonde* in Archive Mode). In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
 
 See [Section 10](#10-point-soundings) for full dialog documentation.
 
@@ -506,6 +555,8 @@ When **ASOS** is enabled for the first time, the map enters bounding-box mode:
 4. Station plots render on the map. Large boxes may briefly pause the UI while plots are prepared.
 
 Toggling ASOS off and back on reuses the last selected bounding box. To replace it, click the **new box** link in the surface status text, then draw a new domain.
+
+In ARCHIVE the drawer shows ASOS only, replayed on the archive clock (see *ASOS Replay and Damage Paths* in Archive Mode).
 
 #### Station Model Display
 
@@ -723,7 +774,7 @@ Drawings are meteorological features sketched on the map — synced to all vehic
 
 1. Click the front type or shape button — it highlights and the map enters drawing mode (crosshair cursor).
 2. Click the map to place the first point, then continue clicking to trace the line.
-3. **Finish:** Right-click anywhere or press **Escape**.
+3. **Finish:** Double-click the last point.
 4. A dialog prompts for a title. Polylines and polygons also provide color and line-style controls.
 5. The feature appears on the map with the appropriate symbol and a title label at its center.
 
@@ -795,7 +846,7 @@ Measures great-circle distances on the map.
 3. Move the mouse — a preview line and live distance label follow the cursor.
 4. Click an end point — the segment is fixed.
 5. Continue clicking to measure additional segments (multi-segment path).
-6. **Finish:** Right-click or press **Escape**.
+6. **Finish:** Press **Escape**.
 7. Distance is shown in miles (e.g., "47.3 mi") with total path length.
 
 **Clear:** A **Clear** button removes all measurement geometry from the map.
@@ -1029,7 +1080,9 @@ Archive mode lets you replay any past session at a chosen UTC date and time. All
 
 ### Entering Archive Mode
 
-Select **ARCHIVE** in the launch dialog, enter the passphrase, and choose a UTC start date/time using the calendar picker. Click **LAUNCH**. A loading dialog appears while STORM prefetches the initial data for each layer before playback begins.
+Select **ARCHIVE** in the launch dialog and choose a UTC start date/time using the calendar picker. Click **LAUNCH**. The map opens straight away; a small indicator at the top left lists what is still loading (hazards, satellite, vehicle tracks, radar) and disappears when everything has arrived. The map is usable meanwhile.
+
+The session runs from 00Z on the chosen date to 06Z the next morning, trimmed to 30 minutes after the day's last activity (driving, or an annotation, cone, drawing or sector change from 12Z on) once vehicles and MQTT history have loaded.
 
 The window title and status pill display the current archive timestamp while in this mode: `[ARCHIVE YYYY-MM-DD HH:MMZ]`.
 
@@ -1037,48 +1090,44 @@ The window title and status pill display the current archive timestamp while in 
 
 ### Archive Controls Bar
 
-A controls bar appears at the top of the map window in archive mode (it is not visible in live modes).
+A controls bar sits at the bottom of the map window in archive mode (it is not visible in live modes).
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  ⏮  ⏪  ▶  ⏩  ⏭   ──────── scrubber ────────   1×▾   Radar: OK  Sat: OK │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  21:04:30Z │ 16:04 CT / 15:04 MT        Radar: … │ Sat: … │ OBS: …         │
+│  ──────────────────────── time slider ───────────────────────────────    │
+│  00Z    02Z    04Z   …   (radar scan ticks, coverage, hour labels)        │
+│  -1m  -10  ▶  +10  +1m │ ⏮  ⏭ │ SPEED 1×▾ │ JUMP                         │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Playback Buttons
 
 | Button | Action |
 |--------|--------|
-| ⏮ | Jump to the session start time |
-| ⏪ | Step back 30 seconds of archive time |
-| ▶ / ⏸ | Start / pause automatic playback |
-| ⏩ | Step forward 30 seconds of archive time |
-| ⏭ | Jump to the current real-world time (end of archive) |
+| -1m / +1m | Step back / forward 1 minute |
+| -10 / +10 | Step back / forward 10 seconds (**Left** / **A**, **Right** / **D**) |
+| ▶ / ⏸ | Start / pause automatic playback (**Space**) |
+| ⏮ / ⏭ | Previous / next radar scan (enabled once the station's scan list has loaded) |
+| JUMP | Type a time to jump to |
 
-#### Timeline Scrubber
+**Home** / **End** jump to the start / end of the session. Playback pauses at the end of the session.
 
-Drag the slider to jump to any time within the archive session. The scrubber position represents seconds elapsed since midnight UTC of the session date.
+#### Time Slider
+
+The slider spans the whole session (00Z to as late as 06Z the next morning). Drag to preview a time; the data loads when you let go. Under it, short ticks mark each radar scan, a strip shows where instruments such as lidar have data, and labels mark the hours.
 
 #### Speed Selector
 
-A dropdown next to the scrubber controls the playback speed multiplier:
-
-| Setting | Meaning |
-|---------|---------|
-| 1× | Real-time (1 second of wall clock = 1 second of archive time) |
-| 5× | 5 seconds of archive time per wall-clock second |
-| 10× | — |
-| 30× | — |
-| 60× | — |
-| 120× | — |
-| 300× | 5 minutes of archive time per wall-clock second |
+The SPEED box sets the playback multiplier: 1× (real time), 5×, 10×, 30×, 60×, 120× or 300× (5 minutes of archive time per second).
 
 #### Layer Status Indicators
 
 | Indicator | What It Shows |
 |-----------|---------------|
-| **Radar:** | Current radar fetch status ("OK", "waiting", "no data") |
-| **Sat:** | Current satellite fetch status |
+| **Radar:** | Product, tilt and scan time of the frame on screen; for velocity, `· dealiased` or `· not dealiased` |
+| **Sat:** | Satellite status: `off` until SATELLITE is turned on, then the sector, band and frame time; `none` on a day with no GOES imagery (hover for why) |
+| **OBS:** | Vehicle data source: `probing`, `1-second (n)`, `catalog (n)`, `partial n/m`, `MQTT fallback`, or `no data for this date` |
 
 These update as each fetcher resolves data for the current archive timestamp.
 
@@ -1089,12 +1138,81 @@ These update as each fetcher resolves data for the current archive timestamp.
 | Layer | Source | Behavior |
 |-------|--------|----------|
 | NEXRAD Radar | Unidata THREDDS archive | Fetches Level 2 or Level 3 scans nearest to the current archive time |
-| GOES Satellite | IEM WMS historical endpoint | Fetches the frame nearest to the current archive time |
+| GOES Satellite | NOAA GOES-16 / GOES-19 archive on AWS | Listed and fetched only once SATELLITE is turned on; shows the newest frame at or before the archive time, VIS or IR. Visible CONUS frames download only the part of the file covering the map's CONUS view (about 30 of 66 MB). Before 28 Feb 2017 (no GOES-16) the drawer is disabled and **Sat:** reads `none`. |
 | SPC/NWS Hazards | Archived GeoJSON products | Fetched once at session start for the session date |
-| Soundings | open-meteo HRRR archive | Fetched on demand (map click), using archive time as valid time |
+| Soundings | IEM RAOB (OBS); lidar truck sondes, the NSSL API, then CLAMPS TROPoe (NSSL); PERiLS CopterSonde | Fetched on demand, up to the archive clock on its UTC day. No model (HRRR) soundings in ARCHIVE |
+| Lidar wind profiles | CLAMPS / lidar truck VAD and CSM winds on NSSL THREDDS | Loaded for the whole session the first time VAD is pressed, then kept |
+| CLAMPS trailers | Trailer met tower or MWR surface fields on NSSL THREDDS | Loaded at session start for the session span, replayed on the clock as map markers |
+| Doppler lidar scans | Lidar truck and CLAMPS trailer PPI / CSM files on NSSL THREDDS | Found at session start and loaded in the background; a picked lidar's sweeps are drawn as the clock reaches them |
 | Vehicle Positions | MQTT message log | Historical vehicle obs replayed in time order |
+| ASOS | IEM ASOS history | Stations inside a drawn box, fetched once for the session, replayed on the clock |
+| Damage Paths | NWS Damage Assessment Toolkit, else NCEI Storm Events | Tornado paths inside a drawn box, within a day of the session date |
 
 Each layer updates automatically as the archive clock advances. Data fetches are triggered when the clock crosses boundaries (e.g., every radar scan interval).
+
+---
+
+### Storm Tracks
+
+**TRACK** (**T**, archive only) marks a storm's position at each radar frame. Opening the drawer enters track mode:
+
+- **Click** the map to place the point for the radar frame on screen (clicking again at the same frame moves it).
+- **Drag** a point to move it to the current frame's time; hold **Alt** to keep its own time.
+- **Right-click** to add, move, rename or remove the reference marker, or to select or delete the point under the cursor. **P** places a point at the marker.
+- **Delete** / **Backspace** removes the selected point; **Ctrl+Z** / **Ctrl+Shift+Z** undo and redo (also UNDO / REDO in the drawer). CLEAR removes every point and can be undone.
+
+The drawer shows the point count and the storm motion: **Mean** over the whole track (2 points needed) and **Now**, at the clock. **TABLE** lists every point's exact time and position; it follows the map, and double-clicking a row pauses and moves the clock there. **Line**, **Points** and **Keep on map** choose what stays drawn when the drawer is closed.
+
+Every edit saves the track to `storm_tracks/storm_YYYYMMDD_track.csv` next to `main.py` (one file per case date; git-ignored). The next archive session on that date opens it automatically. **IMPORT** replaces the track with a CSV (STORM's or MESO-VIEW's columns; undoable), **EXPORT** saves a copy elsewhere, and **FOLDER** shows the folder.
+
+When a track has motion, the sounding viewer plots it as an **OBS** marker on the hodograph and adds an **SRH obs** column (0–500 m, 0–1 km, 0–3 km).
+
+### Observation Trails
+
+At the bottom of the VEHICLES panel in archive mode, **show trails** draws each platform's recent path (one-second FOFS data where there is some, else the recorded MQTT positions), colored by a quantity:
+
+- the quantity: measured fields or derived ones (θ, θv, θe, θw, mixing ratio, u / v, radial and tangential wind);
+- the window: the last 5, 10, 15, 30 or 60 minutes before the clock;
+- **wind barbs** along the trail;
+- **time-to-space** and **storm-relative** barbs, which need a storm track's motion (the *Storm-relative needs a track ▸* link opens TRACK).
+
+A color bar with units sits under the options. Hover a trail for its readout. Trail settings aren't saved with the session.
+
+### Velocity Dealiasing and Sharp Radar
+
+With velocity on screen in archive mode, a **DEALIAS** button appears after the tilt picker in the RADAR drawer. It unfolds aliased velocities with a region-based method (the same approach as Py-ART's). The archive bar's Radar status says whether the frame is `dealiased` or `not dealiased` — the latter when the scan records no Nyquist velocity or dealiasing failed; a raw field is never labeled dealiased. The choice is saved with the session's radar settings.
+
+When the clock has been still for half a second, the frame on screen is re-rendered sharper (up to 4096 px, stepping down on slower machines). The first pause per station can take several seconds; later ones are quicker, and the 12 most recent sharp frames are kept, so scrubbing back shows them at once.
+
+### ASOS Replay and Damage Paths
+
+Both are picked by drawing a box on the map, like live ASOS: turn the button on, then drag a box. **Esc** or a right-click backs out, and with nothing loaded the button turns off again. Neither needs the NSSL servers.
+
+**SURFACE > ASOS** fetches the ASOS/AWOS history of every station inside the box (up to 400) from IEM for the whole session — its UTC day and the next morning to 06Z — and shows each station's latest report at the archive clock as a station plot. The center dot is colored by the report's age at the clock (green ≤ 70 min, yellow ≤ 90 min, red older), so a station that stopped reporting turns red as playback moves on. Stepping back before a station's first report removes it. The drawer's status line says how many stations are loading and loaded. **new ASOS bbox** draws another box; the stations shown stay until it is drawn. **show plots** hides the plots without turning ASOS off. With a storm track, trails in *time-to-space* mode include the ASOS stations as well (their pressure is sea-level, so pressure-based quantities stay blank for them). The regional mesonets aren't archived, so the SURFACE drawer shows ASOS only.
+
+**HAZARDS > DAMAGE PATHS** finds NWS damage-survey tornado paths inside the box, surveyed within a day of the session date. They come from the Damage Assessment Toolkit (DAT); where it has none (common before about 2015), from NCEI Storm Events, whose paths are straight lines from each tornado's start to its end point. Paths are colored by EF rating (EF0 teal, EF1 green, EF2 yellow, EF3 orange, EF4 red, EF5 purple, unrated light blue), with a white dot at the start and a colored dot at the end. Hovering a path shows its rating and source, start and end times (UTC), length, width and peak wind. The status line says how many were found and from which source. To search another box, turn DAMAGE PATHS off and on again. The first NCEI search of a year downloads that year's Storm Events file (tens of MB); later searches reuse it.
+
+Both sources are recorded for case packages (*ASOS observations*, *Damage paths*), so a package can carry them; opening one doesn't redraw the boxes.
+
+---
+
+### CLAMPS and CopterSonde
+
+These come from NSSL's THREDDS server (the CLAMPS trailers, the NSSL lidar truck and the PERiLS campaign folders). Each is there only for the days the instruments were deployed; most dates have none.
+
+**Lidar wind profiles (RADAR > VAD).** The first press loads every lidar wind source for the session (its UTC day and the next morning to 06Z): VAD and continuous-scan (CSM) winds from the lidar truck's two lidars, and VAD winds from the CLAMPS1 and CLAMPS2 trailers. When more than one has data, pick the instrument from a list (with its number of profiles). The VAD window opens on the latest profile at or before the archive clock; the scrubber and the time-height view cover the whole session. CSM files can be about 100 MB and a day of CSM winds holds thousands of profiles, so the first load can take a while; later presses reuse it. Cells with a failed fit, fill values or (for CSM winds) too little lidar signal are left out.
+
+**NSSL soundings.** SOUNDINGS > NSSL tries, in order: the lidar truck's radiosondes on THREDDS (from April 2022), the NSSL API, then CLAMPS TROPoe retrievals, and shows the first with profiles on the clock's day up to the clock. A sonde launch is placed on the lidar truck's recorded track (one-second data, else MQTT) when it has a fix within a minute of launch; otherwise the header says the launch position is unknown. TROPoe profiles are temperature and humidity retrieved from a trailer's AERI and/or microwave radiometer every few minutes. They have no wind (the hodograph reads "no wind") and come from one trailer only. When nothing is found, the status line names the sources that had nothing and any that failed.
+
+**CopterSonde (SOUNDINGS > COPTERSONDE).** PERiLS CopterSonde ascents (2022 and 2023 IOP days) on the clock's day up to the clock, one list entry per launch site and aircraft. Picking a site opens its ascents in the sounding viewer. They reach a few hundred metres, so most parameters stay blank.
+
+**CLAMPS trailers on the map.** Each trailer's surface observations (temperature, dewpoint from humidity, pressure, wind) replay on the archive clock as a lidar marker labeled CLAMPS1 / CLAMPS2, with time series and trails like the mobile mesonet. A trailer leaves the map once its latest report is five minutes old. CLAMPS2's met tower is used when it has the day (2016–2021, without wind direction: its files say the trailer's heading isn't applied); otherwise the radiometer's surface sensors (to 2023). Days whose sensors recorded nothing show no trailer.
+
+**Doppler lidar scans (LIDAR).** The lidar truck's and the CLAMPS trailers' low-angle sweeps (PPI scans, and the sector sweeps in their continuous-scan files), drawn on the map like a radar's. LIDAR, next to RADAR, is enabled once the date is known to have lidar files. They load in the background once the first radar image and the vehicle tracks are in ("Loading lidar scans…" in the indicator). While LIDAR is open, every place a lidar scanned from this session is marked with a purple dot: a trailer's site, or each stop of the truck (labeled *Truck 1*, *Truck 2*…). Hovering a dot tells when it scanned and how its scan directions were set; clicking it pauses the clock at its first scan. Its sweeps are then drawn as the clock reaches them, each held until the next (up to 10 minutes), its scanning periods show as a purple strip under the time slider, and the drawer's button (hover for its position and distance from the radar; click to center the map on it) names it. The drawer also picks the field (velocity, intensity, backscatter, as recorded), hides the scans (**show on map**), and sets a **min intensity**: cells whose intensity (the files' SNR + 1) is below it are hidden, which clears the noise beyond the aerosol layer (about 1.005–1.02 usually does it; all the way left shows every cell). **WINDS** opens the lidar wind profiles, as RADAR > VAD does.
+
+Only sweeps below 45° count: the 60–70° rings many files hold are wind-profile (VAD) scans, so on many days LIDAR reads "No lidar PPI scans this session". The truck's files carry no position, so its scans are placed from its one-second track (else its MQTT track), fix by fix within a minute. Its scan directions are relative to the truck and turned to north by the heading in its files; when a file has none, the heading comes from the truck's compass in its mesonet data and an amber ⚠ says so (hover for the estimate). With neither, the scans can't be oriented: a red ⚠, and the stop is listed but its scans aren't drawn. Velocity is shown as recorded, positive away from the lidar, with no correction for the truck's motion. Files over 150 MB load only once their lidar is picked; files over 768 MB (some trailer continuous-scan days run to 1–2 GB) aren't downloaded, and the status line says so. Downloads are kept in `~/.cache/storm/raw_lidar` (up to 3 GB, least recently used removed first).
+
+All of these are recorded for case packages (*CLAMPS winds, sondes and TROPoe*, *CLAMPS surface met*, *Raw lidar scans*, *CopterSonde profiles*).
 
 ---
 
@@ -1103,7 +1221,50 @@ Each layer updates automatically as the archive clock advances. Data fetches are
 - Vehicle positions are read from stored MQTT message logs — only vehicles that were active and publishing during the original session will appear.
 - Real-time MQTT sync (annotations, drawings) is inactive in archive mode.
 - Local file watcher (Track A) and GPS reader (Track B) are inactive.
-- Network connectivity is still required — archive data is fetched from remote servers at playback time.
+- Network connectivity is still required — archive data is fetched from remote servers at playback time — unless the case was opened from a case package that holds the data (below).
+
+---
+
+### Menu Bar and Case Packages
+
+The menu bar has **File**, **Edit**, **View** and **Help**. On macOS it sits in the system menu bar at the top of the screen; on Windows and Linux it is a thin row above the toolbar. Every entry is also in the command palette (**Ctrl+K** / **⌘K**).
+
+| Menu | Entries |
+|------|---------|
+| File | Open Case Package… (**Ctrl+O**), Export Case Package… (**Ctrl+Shift+E**), Show Case Packages Folder, Video Studio (**Ctrl+Shift+V**), Change Day… (archive mode only); Save Map Screenshot… (**Ctrl+S**) |
+| Edit | Undo / Redo Track Edit (**Ctrl+Z** / **Ctrl+Shift+Z**, archive mode only; Undo / Redo Studio Edit while the Video Studio is open) |
+| View | Error Log (**Ctrl+E**), Debug Panel (**Ctrl+D**) |
+| Help | STORM User Guide, About STORM |
+
+A **case package** is a ZIP holding one archive case: the date's storm track, the case settings (date, session window, clock, radar station, product, tilt and dealiasing), the address and SHA-256 checksum of every source file the session loaded and, optionally, the data files themselves.
+
+**Export** (*File > Export Case Package…*) first asks what to include: the storm track and each type of data the session loaded (radar volumes, one-second mesonet, recorded vehicles and annotations, soundings, satellite, hazards…), each with its file count and size, all ticked by default. The **time frame** (UTC) limits radar and satellite scans to that span; daily files and everything else are packed whole. It starts at the storm track's span with 30 minutes either side, or the hour either side of the clock when the date has no track; *Whole session* packs everything. *Include scans not yet loaded* adds the scans the catalogs list for the frame that you hadn't played through, so the case opens offline with nothing missing. Packing runs in the background with a progress bar and Cancel; the package goes to `data/case_packages/<date>/` by default. A file that changed upstream since you viewed it is packed with both checksums recorded.
+
+**Open** (*File > Open Case Package…*) imports the package's track (asking first if the date already has a different one; Edit > Undo Track Edit brings yours back), switches to its radar station, product and tilt, moves the clock to its time, and loads the packed files from the package instead of downloading them. Anything the package doesn't hold is downloaded from its source as usual. A package for another date offers to close this session and open STORM on that date, without going back to the launch window. The launch window's *Open case…* opens one too. To open a case with no network at all, start STORM with it:
+
+```bash
+python main.py --case data/case_packages/20240427/STORM_case_20240427_KFDR_2030Z.zip
+```
+
+This skips the launch window and serves the packed files before anything is downloaded.
+
+**Change Day** (*File > Change Day…*) closes the archive session and brings back the launch window, set to ARCHIVE on the session's date, without quitting STORM. The admin passphrase isn't asked again. Sounding, VAD and other windows from the session close with it. Closing the launch window then quits.
+
+### Video Studio
+
+*File > Video Studio* (**Ctrl+Shift+V**) makes a movie of the case. The studio takes the archive bar's place at the bottom of the window; **Esc** or **Close Studio** brings the bar back. The movie stays in the studio while STORM is open; **Save** keeps it as a project file (`data/studio/<date>/<name>.json` by default) that **Open…** reopens.
+
+A movie is a row of **keyframes**. Each records the case clock, the map view (center, zoom, rotation, tilt) and the radar on screen (station, product, tilt). Between two keyframes the clock runs at a steady speed and the camera pans and zooms to the next view.
+
+- **Case clock** strip (top): the whole session, with the radar scans as ticks and the keyframes as diamonds. Click or drag to set the clock; scroll for the next or previous radar scan (Shift: a minute). The box beside it takes a typed UTC time.
+- **Add Keyframe** (**K**) records the clock and the map at the playhead: after the last keyframe at the end of the movie, in place of a keyframe when the playhead is on one, or splitting the move it's in.
+- **Timeline**: one clip per move (case span, speed and camera easing), dashed boxes for pauses, the keyframes and the red playhead. Drag a keyframe to retime it (later keyframes follow; **Alt** moves it alone); click or drag elsewhere to scrub, and the map shows that moment; right-click for go to, update, duplicate, easing and delete. **Ctrl** + scroll zooms the timeline.
+- **Inspector** (the selected keyframe): its case time, the radar it switches to (*Use current* takes the radar now on screen), *Retake* (the clock and map as they are now), and the move to the next keyframe: speed (60× = a minute of case per second of video; *Use for all* gives every move this speed), camera easing, and a pause before it. ½× / 2× and the movie length beside **Movie** stretch or squeeze the whole movie.
+- **Play** previews the movie on the map (the map draws as fast as data arrives); *loop* repeats it.
+- **Output**: MP4 (H.264), GIF (at most 960 px wide) or numbered PNG frames; the map's size, 720p, 1080p or 4K (rendered natively at that size, showing the same area); 24, 30 or 60 fps; the clock step (*smooth*, every minute, every 5 minutes or each radar scan: stepped movies hold the data between steps like a radar loop and export much faster); and captions (case time, the radar line, the legend).
+- **Save Frame…** saves a PNG of the map once it has finished drawing, with the chosen captions. **Export Movie…** renders every frame complete: each frame waits for its radar scan (in its sharp render), satellite and trails before it is captured. A progress window shows the time left and can cancel.
+
+Keys while the studio is open: **Space** play / pause, **K** add keyframe, **[** / **]** previous / next keyframe, **←** / **→** a frame (**Shift**: a second), **Home** / **End**, **Delete** the selected keyframe, **,** / **.** previous / next radar scan, **Ctrl+Z** / **Ctrl+Shift+Z** undo / redo. They replace the archive playback keys until the studio closes. A field changes on scroll only after it's clicked into.
 
 ---
 
@@ -1374,7 +1535,7 @@ Run `python main.py --help` for the full list. Key options:
 --log-level LEVEL              Logging verbosity: DEBUG, INFO, WARNING, ERROR (default: WARNING)
 ```
 
-> **Note:** Mode selection (VEHICLE, MONITOR, VIEWER, ARCHIVE) is handled exclusively through the launch dialog to enforce passphrase authentication. There are no command-line flags for mode selection.
+> **Note:** Mode selection (VEHICLE, MONITOR, VIEWER, ARCHIVE) is handled exclusively through the launch dialog, which checks for the certificate files (and the admin passphrase). There are no command-line flags for mode selection.
 
 ### Disable Features
 
@@ -1464,7 +1625,18 @@ Missing certificates cause MQTT to fail silently — all other features remain o
 | **Escape** | Cancel active drawing / annotation placement / measurement mode |
 | **Ctrl+D** | Toggle debug panel |
 | **Ctrl+E** | Toggle error log panel |
-| **Right-click** | Finish drawing or measurement in progress |
+| **Ctrl+K** | Command palette |
+| **Ctrl+S** | Save map screenshot |
+| **Ctrl+O** / **Ctrl+Shift+E** | Open / export a case package (archive mode) |
+| **Ctrl+Z** / **Ctrl+Shift+Z** | Undo / redo a storm track edit (archive mode; studio edits while the Video Studio is open) |
+| **Ctrl+Shift+V** | Open / close the Video Studio (archive mode); its own keys are listed under [Video Studio](#video-studio) |
+| **T** | Storm track drawer (archive mode); **P** point at the marker, **Delete** remove the selected point |
+| **Space** | Play / pause the radar loop (live) or archive playback |
+| **[** / **]** | Previous / next radar frame (live); step back / forward (archive, also **←** / **→**, **A** / **D**) |
+| **Home** / **End** | Jump to the start / end of the archive session |
+| **?** | Show / hide the shortcut list |
+| **Right-click** | Map menu |
+| **Double-click** | Finish a drawing in progress |
 
 ---
 
@@ -1600,7 +1772,7 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 | Deployment Locations | ✅ Enabled | `--disable-deploy-locs` or missing data file |
 | Radar Playback (loop mode) | ✅ Enabled | `--disable-radar` |
 | Satellite Playback (loop mode) | ✅ Enabled | n/a |
-| Archive Mode (session replay) | ✅ Enabled | Requires passphrase; selected at launch |
+| Archive Mode (session replay) | ✅ Enabled | Requires the MQTT certificate files; selected at launch |
 | Archive Radar Playback (Level 2/3) | ✅ Enabled in archive mode | n/a |
 | Archive Satellite Playback | ✅ Enabled in archive mode | n/a |
 | Archive Hazard Products | ✅ Enabled in archive mode | n/a |

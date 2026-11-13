@@ -1,7 +1,6 @@
 
 import logging
 import os
-import sqlite3
 import threading
 import zlib
 import base64
@@ -9,6 +8,8 @@ from urllib.parse import unquote
 
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
+
+from core import mbtiles
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         # satellite frame PNGs keyed by (mode, frame id); oldest evicted per mode.
         self._sat_lock = threading.Lock()
         self._sat_frames: dict[tuple[str, str], bytes] = {}
+        # the lidar sweep on the map (archive LIDAR): (id, PNG)
+        self._lidar_png: tuple[str, bytes] = ("", b"")
 
     def set_radar_png(self, data: bytes) -> None:
         """Store the latest rendered radar PNG.  Thread-safe; called from any thread."""
@@ -101,6 +104,11 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             for key in same_mode[:max(0, len(same_mode) - SAT_FRAMES_PER_MODE)]:
                 del self._sat_frames[key]
 
+    def set_lidar_png(self, image_id: str, data: bytes) -> None:
+        """Store the lidar sweep PNG served at /lidar/<image_id>.png."""
+        with self._sat_lock:
+            self._lidar_png = (image_id, data)
+
     def set_sfcoa_mbtiles(self, key: str, path: str) -> None:
         key = str(key or "").strip()
         path = str(path or "").strip()
@@ -127,6 +135,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_satellite_tile(job, path)
         elif path.startswith("/satellite/"):
             self._serve_satellite_frame(job, path[len("/satellite/"):])
+        elif path.startswith("/lidar/"):
+            self._serve_lidar_png(job, path[len("/lidar/"):])
         elif path.startswith("/radar/gl/"):
             self._serve_radar_gl(job, path[len("/radar/gl/"):])
         elif path.startswith("/radar/overlay.png"):
@@ -175,7 +185,7 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
 
         try:
             # open a new connection per request — safe across WebEngine IO threads
-            conn = sqlite3.connect(self._mbtiles_path)
+            conn = mbtiles.connect(self._mbtiles_path)
             try:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -222,7 +232,7 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
 
         y_tms = (1 << z) - 1 - y
         try:
-            conn = sqlite3.connect(self._nlcd_mbtiles_path)
+            conn = mbtiles.connect(self._nlcd_mbtiles_path)
             try:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -262,7 +272,7 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
 
         y_tms = (1 << z) - 1 - y
         try:
-            conn = sqlite3.connect(self._satellite_mbtiles_path)
+            conn = mbtiles.connect(self._satellite_mbtiles_path)
             try:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -305,7 +315,7 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
 
         y_tms = (1 << z) - 1 - y
         try:
-            conn = sqlite3.connect(mbtiles_path)
+            conn = mbtiles.connect(mbtiles_path)
             try:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -361,6 +371,16 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         with self._sat_lock:
             data = self._sat_frames.get((mode, frame_id))
         if data is None:
+            job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        self._reply(job, b"image/png", data)
+
+
+    def _serve_lidar_png(self, job: QWebEngineUrlRequestJob, name: str):
+        image_id = name[:-4] if name.endswith(".png") else name
+        with self._sat_lock:
+            current, data = self._lidar_png
+        if image_id != current or not data:
             job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
             return
         self._reply(job, b"image/png", data)

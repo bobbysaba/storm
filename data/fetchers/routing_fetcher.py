@@ -10,10 +10,12 @@ from urllib.error import HTTPError, URLError
 import config
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from data import endpoints
+
 log = logging.getLogger(__name__)
 
-_ORS_BASE        = "https://api.openrouteservice.org/v2/directions/driving-car"
-_NOMINATIM_BASE  = "https://nominatim.openstreetmap.org/search"
+_ORS_BASE        = endpoints.OPENROUTESERVICE_DRIVING
+_NOMINATIM_BASE  = endpoints.NOMINATIM_SEARCH
 _USER_AGENT      = "STORM-App/1.0 (storm-chasing field operations)"
 _REQUEST_TIMEOUT = 15  # seconds
 
@@ -139,6 +141,14 @@ def _geocode_address(address: str) -> tuple[str, float, float]:
         raise ValueError(f"No results found for \"{address}\"")
     hit = data[0]
     return hit.get("display_name", address), float(hit["lat"]), float(hit["lon"])
+
+
+def search_places(query: str, limit: int = 5) -> list[tuple[str, float, float]]:
+    """Up to ``limit`` Nominatim matches for ``query`` as (name, lat, lon). Blocks."""
+    params = urlencode({"format": "json", "q": query, "limit": limit})
+    data = _get_json(f"{_NOMINATIM_BASE}?{params}")
+    return [(hit.get("display_name", query), float(hit["lat"]), float(hit["lon"]))
+            for hit in (data or [])]
 
 
 def _fetch_route(

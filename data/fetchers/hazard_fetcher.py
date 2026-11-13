@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from data import endpoints
+
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 20
@@ -21,8 +23,10 @@ POLL_INTERVAL_ACTIVE  = 120   # watches / MDs / NWS warnings — change througho
 POLL_INTERVAL_OUTLOOK = 900   # SPC categorical + probability — updates on a fixed schedule
 SPC_CACHE_TTL         = 900   # in-memory cache TTL (aligned with outlook poll interval)
 
-_SPC_WX_BASE = "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks/SPC_wx_outlks/MapServer"
-_SPC_QUERY_SUFFIX = "where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
+# geometryPrecision=4 (~11 m) has the server round coordinates, which otherwise
+# arrive as e.g. -89.58000000034633 and roughly double every payload.
+_SPC_WX_BASE = endpoints.NWS_SPC_OUTLOOK_LAYERS
+_SPC_QUERY_SUFFIX = "where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326&geometryPrecision=4"
 SPC_URLS = {
     "cat":  f"{_SPC_WX_BASE}/1/query?{_SPC_QUERY_SUFFIX}",
     "tor":  f"{_SPC_WX_BASE}/3/query?{_SPC_QUERY_SUFFIX}",
@@ -63,30 +67,32 @@ def _empty_spc_payload() -> tuple[str, str, str, str, str, str]:
     )
 
 SPC_MD_URL = (
-    "https://mapservices.weather.noaa.gov/vector/rest/services/outlooks"
-    "/spc_mesoscale_discussion/MapServer/0/query"
-    "?where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326"
+    f"{endpoints.NWS_SPC_MD_LAYERS}/0/query"
+    "?where=1%3D1&outFields=*&returnGeometry=true&f=geojson&outSR=4326&geometryPrecision=4"
 )
 
 # wwa MapServer — active NWS warnings (sig='W').  Layer 0 serves storm-based polygon geometry
 WWA_WARNINGS_URL = (
-    "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA"
-    "/watch_warn_adv/MapServer/0/query"
+    f"{endpoints.NWS_WWA_LAYERS}/0/query"
     "?where=sig%3D%27W%27"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
-    "&returnGeometry=true&f=geojson&outSR=4326"
+    "&returnGeometry=true&f=geojson&outSR=4326&geometryPrecision=4"
 )
 
 # wwa MapServer — county-level polygons for active SPC watches (TO=tornado, SV=severe tstorm).
 WWA_WATCHES_URL = (
-    "https://mapservices.weather.noaa.gov/eventdriven/rest/services/WWA"
-    "/watch_warn_adv/MapServer/1/query"
+    f"{endpoints.NWS_WWA_LAYERS}/1/query"
     "?where=sig%3D%27A%27%20AND%20(phenom%3D%27TO%27%20OR%20phenom%3D%27SV%27)"
     "&outFields=prod_type,phenom,event,wfo,onset,ends,expiration,url"
-    "&returnGeometry=true&f=geojson&outSR=4326"
+    "&returnGeometry=true&f=geojson&outSR=4326&geometryPrecision=4"
 )
 
 _EMPTY_FC_STR = '{"type":"FeatureCollection","features":[]}'
+
+
+def _fc_json(features: list) -> str:
+    """Serialize features as a compact FeatureCollection (matches _EMPTY_FC_STR when empty)."""
+    return json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":"))
 
 
 def _norm(s: Any) -> str:
@@ -182,9 +188,6 @@ class HazardFetcher(QObject):
         # optional user-selected set of allowed NWS phenom codes (e.g. {'TO','SV'}).
         self._nws_filter: set[str] | None = None
 
-        # nws warnings bbox — set from MBTiles domain at startup
-        self._nws_bbox = (-116.0, 28.0, -82.0, 49.0)
-
         # in-memory cache — stores pre-serialized JSON strings
         self._spc_cache_by_day: dict[int, tuple[str, str, str, str, str, str]] = {}
         self._spc_cache_time_by_day: dict[int, float] = {}
@@ -202,9 +205,8 @@ class HazardFetcher(QObject):
         # per-URL SHA-256 hashes for change detection — skip map push when unchanged
         self._response_hashes: dict[str, str] = {}
 
-        # etag conditional-request support — store server ETag + last raw bytes per URL
+        # etag conditional-request support — store server ETag per URL
         self._etags: dict[str, str] = {}
-        self._raw_cache: dict[str, bytes] = {}
 
         # connectivity tracking — go offline after 2 consecutive failed poll cycles
         self._consecutive_failures = 0
@@ -243,8 +245,6 @@ class HazardFetcher(QObject):
     def set_spc_mds_enabled(self, enabled: bool):
         self._spc_mds_enabled = bool(enabled)
 
-    def set_nws_bbox(self, lon_min: float, lat_min: float, lon_max: float, lat_max: float):
-        self._nws_bbox = (lon_min, lat_min, lon_max, lat_max)
 
 
     def is_spc_fresh(self) -> bool:
@@ -315,7 +315,7 @@ class HazardFetcher(QObject):
                     f for f in (data.get("features") or [])
                     if str((f.get("properties") or {}).get("phenom", "")).upper() in _filt
                 ]
-                self.nws_received.emit(json.dumps({"type": "FeatureCollection", "features": feats}))
+                self.nws_received.emit(_fc_json(feats))
                 return
             except Exception:
                 pass
@@ -423,7 +423,8 @@ class HazardFetcher(QObject):
 
         Returns (bytes, changed).  changed=False means the response is
         byte-for-byte identical to the previous fetch (HTTP 304 from the server
-        or a local SHA-256 match); callers can skip parsing entirely.
+        or a local SHA-256 match); callers must skip parsing, as bytes are
+        empty after a 304.
         """
         headers = {
             "User-Agent": "STORM/1.0 (contact: support)",
@@ -442,11 +443,10 @@ class HazardFetcher(QObject):
                 new_etag = resp.headers.get("ETag")
                 if new_etag:
                     self._etags[url] = new_etag
-                self._raw_cache[url] = raw
         except HTTPError as exc:
             if exc.code == 304:
-                # server confirms nothing changed — return cached bytes, unchanged.
-                return self._raw_cache.get(url, b""), False
+                # server confirms nothing changed — callers skip parsing, so no bytes needed.
+                return b"", False
             raise
 
         h = hashlib.sha256(raw).hexdigest()
@@ -486,7 +486,7 @@ class HazardFetcher(QObject):
             active = [f for f in feats if self._feature_active(f, now)]
             if len(active) == len(feats):
                 return  # nothing expired
-            self._nws_cache = json.dumps({"type": "FeatureCollection", "features": active})
+            self._nws_cache = _fc_json(active)
             self._nws_cache_time = now
             # emit updated raw phenoms
             raw_phenoms = {
@@ -514,7 +514,7 @@ class HazardFetcher(QObject):
             active = [f for f in feats if self._feature_active(f, now)]
             if len(active) == len(feats):
                 return  # nothing expired yet
-            filtered = json.dumps({"type": "FeatureCollection", "features": active})
+            filtered = _fc_json(active)
             setattr(self, cache_attr, filtered)
             setattr(self, cache_time_attr, now)
             signal.emit(filtered)
@@ -562,7 +562,7 @@ class HazardFetcher(QObject):
                             "geometry": f.get("geometry"),
                             "properties": props,
                         })
-                    cat_str = json.dumps({"type": "FeatureCollection", "features": feats})
+                    cat_str = _fc_json(feats)
                     any_changed = True
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                 log.warning("SPC categorical fetch failed: %s", exc)
@@ -589,7 +589,7 @@ class HazardFetcher(QObject):
                             "geometry": f.get("geometry"),
                             "properties": props,
                         })
-                    s = json.dumps({"type": "FeatureCollection", "features": feats})
+                    s = _fc_json(feats)
                     if key == "wind":
                         wind_str = s
                     elif key == "hail":
@@ -639,7 +639,7 @@ class HazardFetcher(QObject):
                             if (bf.get("properties") or {}).get("LABEL") != "SIGN"
                         ]
                         base_feats.extend(sig_feats)
-                        merged = json.dumps({"type": "FeatureCollection", "features": base_feats})
+                        merged = _fc_json(base_feats)
                         if key == "wind":
                             wind_str = merged
                         elif key == "hail":
@@ -675,7 +675,7 @@ class HazardFetcher(QObject):
                                 if (bf.get("properties") or {}).get("LABEL") != "SIGN"
                             ]
                             base_feats.extend(sig_feats)
-                            merged = json.dumps({"type": "FeatureCollection", "features": base_feats})
+                            merged = _fc_json(base_feats)
                             if key == "wind":
                                 wind_str = merged
                             elif key == "hail":
@@ -704,7 +704,7 @@ class HazardFetcher(QObject):
                             "geometry": f.get("geometry"),
                             "properties": props,
                         })
-                    sig_str = json.dumps({"type": "FeatureCollection", "features": sig_feats})
+                    sig_str = _fc_json(sig_feats)
                     any_changed = True
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
                 log.warning("SPC day %s significant fetch failed: %s", day, exc)
@@ -742,7 +742,7 @@ class HazardFetcher(QObject):
                 props["nws_color"]   = _nws_color_for_phenom(phenom)
                 props["warning_url"] = str(props.get("url", "")).strip()
                 feats.append({"type": "Feature", "geometry": geom, "properties": props})
-            raw_str = json.dumps({"type": "FeatureCollection", "features": feats})
+            raw_str = _fc_json(feats)
         except Exception as exc:
             log.warning("NWS warnings fetch failed: %s", exc)
             self.fetch_error.emit(f"NWS warnings fetch failed: {exc}")
@@ -764,7 +764,7 @@ class HazardFetcher(QObject):
                 f for f in feats
                 if str((f.get("properties") or {}).get("phenom", "")).upper() in _filt
             ]
-            self.nws_received.emit(json.dumps({"type": "FeatureCollection", "features": emit_feats}))
+            self.nws_received.emit(_fc_json(emit_feats))
         else:
             self.nws_received.emit(raw_str)
 
@@ -804,7 +804,7 @@ class HazardFetcher(QObject):
                     props["watch_color"] = "#4169E1"
                     props["event"]       = "Severe Thunderstorm Watch"
                 feats.append({"type": "Feature", "geometry": geom, "properties": props})
-            out_str = json.dumps({"type": "FeatureCollection", "features": feats})
+            out_str = _fc_json(feats)
         except Exception as exc:
             log.warning("SPC watches fetch failed: %s", exc)
             self.fetch_error.emit(f"SPC watches fetch failed: {exc}")
@@ -832,7 +832,7 @@ class HazardFetcher(QObject):
                     "geometry": f.get("geometry"),
                     "properties": props,
                 })
-            out_str = json.dumps({"type": "FeatureCollection", "features": feats})
+            out_str = _fc_json(feats)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             log.warning("SPC MD fetch failed: %s", exc)
             self.fetch_error.emit(f"SPC MD fetch failed: {exc}")

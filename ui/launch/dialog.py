@@ -2,28 +2,35 @@
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QApplication, QMessageBox, QSizePolicy, QWidget,
-    QDateTimeEdit, QAbstractButton, QSpinBox, QComboBox, QCheckBox,
+    QDateTimeEdit, QSpinBox, QComboBox, QCheckBox, QScrollArea, QCalendarWidget,
 )
-from PyQt6.QtCore import Qt, QSettings, QTimer, QSize, QDateTime, QPointF
-from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF
+from PyQt6.QtCore import (
+    Qt, QSettings, QTimer, QSize, QDate, QDateTime, QPointF, QRectF, QObject, QEvent, pyqtSignal,
+)
+from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF, QPen, QTextCharFormat
 
 import config as _config
 from ui.launch.icons import combo_down_arrow_qss, _svg_pixmap
 from ui.launch.styles import (
-    _DIALOG_STYLE, _ICON_SELECTED_STYLE, _LOG_BTN_STYLE, _MODE_BTN_SELECTED_STYLE,
-    _MODE_BTN_STYLE, _UPD_AVAILABLE, _UPD_CHECKING, _UPD_CURRENT, _UPD_ERROR,
-    _UPD_SUCCESS, _UPD_WARNING,
+    _CAL_BTN_STYLE, _DIALOG_STYLE, _ICON_SELECTED_STYLE, _LINK_BTN_STYLE, _LOG_BTN_STYLE,
+    _MODE_BTN_SELECTED_STYLE, _MODE_BTN_STYLE, _UPD_AVAILABLE, _UPD_CHECKING, _UPD_CURRENT,
+    _UPD_ERROR, _UPD_SUCCESS, _UPD_WARNING, _YEAR_GRID_STYLE,
 )
+from ui.launch.availability import AvailabilityWorker
+from ui.launch.date_finder import FindDatesDialog
 from ui.launch.update_dialogs import _CondaUpdateDialog, _LogViewerDialog, UpdateWorker
 from ui import palette as P
+
+log = logging.getLogger(__name__)
 
 
 
@@ -41,6 +48,238 @@ def _verify_pbkdf2(passphrase: str, stored: str) -> bool:
     return hmac.compare_digest(dk, expected_dk)
 
 
+def _triangle_icon(pts: list, color: str, w: int = 10, h: int = 10) -> QIcon:
+    """A small filled triangle from fractional (x, y) points in [0, 1]."""
+    px = QPixmap(w, h)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
+    p.end()
+    return QIcon(px)
+
+
+_LEFT = [(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)]
+_RIGHT = [(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)]
+
+
+def _calendar_glyph_icon(color: str = P.TEXT_LABEL, w: int = 16, h: int = 16) -> QIcon:
+    """A line-drawn calendar: body, header rule and two binder rings."""
+    px = QPixmap(w, h)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.2)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    body = QRectF(1.5, 3.5, w - 3.0, h - 5.0)
+    p.drawRoundedRect(body, 1.5, 1.5)
+    p.drawLine(QPointF(body.left(), body.top() + 3.2), QPointF(body.right(), body.top() + 3.2))
+    p.drawLine(QPointF(w * 0.32, 1.0), QPointF(w * 0.32, 4.4))
+    p.drawLine(QPointF(w * 0.68, 1.0), QPointF(w * 0.68, 4.4))
+    p.end()
+    return QIcon(px)
+
+
+class _CircularProgress(QWidget):
+    """A small ring beside the archive date: how many catalogs the
+    background date scan has checked."""
+
+    def __init__(self, parent=None, diameter: int = 20):
+        super().__init__(parent)
+        self.setFixedSize(diameter, diameter)
+        self._value = 0
+        self._maximum = 0
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        self._maximum = max(0, maximum)
+        self.update()
+
+    def setValue(self, value: int) -> None:
+        self._value = value
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+        track = QPen(QColor(P.BORDER))
+        track.setWidth(3)
+        painter.setPen(track)
+        painter.drawArc(rect, 0, 360 * 16)
+        fraction = (self._value / self._maximum) if self._maximum else 0.0
+        arc = QPen(QColor(P.ACCENT))
+        arc.setWidth(3)
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc)
+        # from 12 o'clock, clockwise (Qt angles run counterclockwise from 3 o'clock)
+        painter.drawArc(rect, 90 * 16, -round(360 * 16 * fraction))
+        painter.end()
+
+
+class _AvailabilityCalendar(QCalendarWidget):
+    """A calendar that shades the days with archive data."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._known_dates = frozenset()
+        self.setMinimumSize(322, 260)
+        self.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self.setMaximumDate(QDate.currentDate())     # no case is in the future
+        weekday = QTextCharFormat()
+        weekday.setForeground(QColor(P.TEXT_LABEL))
+        for day in Qt.DayOfWeek:
+            self.setWeekdayTextFormat(day, weekday)
+
+    def set_known_dates(self, dates):
+        self._known_dates = frozenset(dates)
+        self.updateCells()
+
+    def paintCell(self, painter, rect, date):
+        # each cell drawn once (tinting over Qt's own cell washes out the
+        # number and the selection); inset tiles keep runs of days apart
+        current_month = date.year() == self.yearShown() and date.month() == self.monthShown()
+        enabled = self.isEnabled() and self.minimumDate() <= date <= self.maximumDate()
+        available = date.toPyDate() in self._known_dates
+        selected = date == self.selectedDate() and enabled
+        background = P.BG_SUNKEN_3
+        foreground = P.TEXT if current_month else P.TEXT_LABEL
+        border = None
+        if not enabled:
+            foreground = P.TEXT_DISABLED
+        elif selected:
+            background, foreground = P.ACCENT, P.BG_BASE
+        elif available:
+            background = P.AVAILABLE if current_month else P.AVAILABLE_DIM
+            foreground = P.TEXT_BRIGHT if current_month else P.TEXT_LABEL
+            border = P.AVAILABLE_EDGE if current_month else P.AVAILABLE_EDGE_DIM
+        if enabled and not selected and date == QDate.currentDate():
+            border = P.TEXT_LABEL
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(rect, QColor(P.BG_SUNKEN_3))
+        tile = QRectF(rect).adjusted(2, 2, -2, -2)
+        painter.setPen(QPen(QColor(border), 1) if border else Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(tile, 4, 4)
+        font = painter.font()
+        font.setPixelSize(12)
+        font.setBold(selected or (available and enabled))
+        painter.setFont(font)
+        painter.setPen(QColor(foreground))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(date.day()))
+        painter.restore()
+
+
+class _ClickConsumer(QObject):
+    """Takes a widget's click (or Space / Enter) and calls on_click instead:
+    the calendar's year button opens the year grid rather than Qt's year
+    spin box."""
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+
+    def eventFilter(self, obj, event):
+        mouse = event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton
+        key = event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter)
+        if mouse or key:
+            self._on_click()
+            return True
+        return False
+
+
+class _YearGridPopup(QWidget):
+    """A dozen years to jump to from the calendar's year button; years with
+    data are outlined. Never pages past this year."""
+
+    yearPicked = pyqtSignal(int)
+
+    _COLUMNS = 4
+    _ROWS = 3
+    _COUNT = _COLUMNS * _ROWS
+
+    def __init__(self, current_year: int, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("yearGridPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(_YEAR_GRID_STYLE)
+        self._known_years = frozenset()
+        self._current_year = current_year
+        self._max_year = QDate.currentDate().year()
+        self._start_year = self._clamp_start(current_year - 5)
+        self._buttons: list[QPushButton] = []
+        self._build_ui()
+        self._refresh()
+
+    def _clamp_start(self, start: int) -> int:
+        return min(start, self._max_year - self._COUNT + 1)
+
+    def _nav_button(self, points, tip, delta) -> QToolButton:
+        btn = QToolButton()
+        btn.setObjectName("yearNavBtn")
+        btn.setIcon(_triangle_icon(points, P.TEXT_LABEL))
+        btn.setIconSize(QSize(9, 9))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(tip)
+        btn.clicked.connect(lambda: self._shift(delta))
+        return btn
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+        nav = QHBoxLayout()
+        nav.setSpacing(4)
+        nav.addWidget(self._nav_button(_LEFT, "Earlier years", -self._COUNT))
+        self._range_lbl = QLabel()
+        self._range_lbl.setObjectName("yearRangeLbl")
+        self._range_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nav.addWidget(self._range_lbl, 1)
+        self._next_btn = self._nav_button(_RIGHT, "Later years", self._COUNT)
+        nav.addWidget(self._next_btn)
+        outer.addLayout(nav)
+
+        grid = QGridLayout()
+        grid.setSpacing(5)
+        for i in range(self._COUNT):
+            btn = QPushButton()
+            btn.setObjectName("yearCell")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked, idx=i: self._pick(idx))
+            grid.addWidget(btn, i // self._COLUMNS, i % self._COLUMNS)
+            self._buttons.append(btn)
+        outer.addLayout(grid)
+
+    def _shift(self, delta: int):
+        self._start_year = self._clamp_start(self._start_year + delta)
+        self._refresh()
+
+    def _pick(self, idx: int):
+        self.yearPicked.emit(self._start_year + idx)
+        self.hide()
+
+    def set_known_years(self, years):
+        self._known_years = frozenset(years)
+        self._refresh()
+
+    def _refresh(self):
+        self._range_lbl.setText(f"{self._start_year} – {self._start_year + self._COUNT - 1}")
+        self._next_btn.setEnabled(self._start_year + self._COUNT - 1 < self._max_year)
+        for i, btn in enumerate(self._buttons):
+            year = self._start_year + i
+            btn.setText(str(year))
+            btn.setProperty("available", year in self._known_years)
+            btn.setProperty("selected", year == self._current_year)
+            btn.setToolTip("Dates with data" if year in self._known_years else "No dates found yet")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+
 class LaunchDialog(QDialog):
     """
     Pre-launch configuration dialog.  Reads previous settings from
@@ -48,8 +287,21 @@ class LaunchDialog(QDialog):
     is pre-populated automatically.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, mode: str | None = None, archive_time: datetime | None = None,
+                 verified_modes=()):
+        """mode / archive_time preset the form (Change Day reopens it in
+        ARCHIVE on the last date); verified_modes holds "admin" once its passphrase
+        was already given in this STORM run, so it isn't asked again."""
         super().__init__(parent)
+        self._verified_modes = frozenset(verified_modes)
+        # _post_layout_adjust() runs after every content-size change
+        # (switching modes, opening the data section, ...); these flags make
+        # its re-centering happen until the user drags the window, not after
+        self._user_moved_window = False
+        self._recentering_window = False
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.timeout.connect(self._post_layout_adjust)
         self.setWindowTitle("STORM")
         self.setMinimumWidth(380)
         self.setWindowFlags(
@@ -75,14 +327,53 @@ class LaunchDialog(QDialog):
             "auto_obs_ne":       s.value("launch/auto_obs_ne",       False, type=bool),
             "radar_resolution":  s.value("launch/radar_resolution",  -1,    type=int),
         }
+        if mode:
+            saved["mode"] = mode
         self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # archive dates: one background scan, restarted when the date changes
+        self._availability = AvailabilityWorker()
+        self._availability.updated.connect(self._on_availability_updated)
+        self.destroyed.connect(self._availability.close)
+        self._availability_generation = 0
+        self._availability_snapshot = None
+        self._availability_timer = QTimer(self)
+        self._availability_timer.setSingleShot(True)
+        self._availability_timer.setInterval(250)
+        self._availability_timer.timeout.connect(self._request_availability)
+        self._year_click_filters: list = []
+        self._year_grid_popup: _YearGridPopup | None = None
+        self._calendar_popup: _AvailabilityCalendar | None = None
+        self._date_finder: FindDatesDialog | None = None
+        self._case_package_path: Path | None = None
+        self._case_package_day = None
         self._build_ui(saved)
+        if archive_time is not None:
+            self._archive_dt_edit.setDateTime(QDateTime(
+                archive_time.year, archive_time.month, archive_time.day,
+                archive_time.hour, archive_time.minute, archive_time.second))
+        if "admin" in self._verified_modes:
+            self._admin_check.setChecked(True)
+        self._archive_dt_edit.dateChanged.connect(self._schedule_availability)
         self._start_update_check()
 
 
     def _build_ui(self, saved: dict):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(32, 32, 32, 28)
+        # the form scrolls on a short screen; the launch/update footer stays put
+        frame = QVBoxLayout(self)
+        frame.setContentsMargins(0, 0, 0, 0)
+        frame.setSpacing(0)
+        self._form_scroll = QScrollArea()
+        self._form_scroll.setObjectName("launchFormScroll")
+        self._form_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._form_scroll.setWidgetResizable(True)
+        self._form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._form = QWidget()
+        self._form.setObjectName("launchForm")
+        self._form.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._form_scroll.setWidget(self._form)
+        frame.addWidget(self._form_scroll)
+        root = QVBoxLayout(self._form)
+        root.setContentsMargins(32, 32, 32, 12)
         root.setSpacing(0)
 
         # title
@@ -246,20 +537,6 @@ class LaunchDialog(QDialog):
         root.addWidget(self._admin_passphrase_row)
         root.addSpacing(4)
 
-        # passphrase row (hidden in viewer mode; shown for archive mode)
-        self._passphrase_row = QWidget()
-        pw_layout = QVBoxLayout(self._passphrase_row)
-        pw_layout.setContentsMargins(0, 0, 0, 0)
-        pw_layout.setSpacing(6)
-        self._passphrase_label = QLabel("PASSPHRASE")
-        self._passphrase_label.setObjectName("fieldLabel")
-        pw_layout.addWidget(self._passphrase_label)
-        self._passphrase_input = QLineEdit()
-        self._passphrase_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self._passphrase_input.setPlaceholderText("Enter passphrase")
-        pw_layout.addWidget(self._passphrase_input)
-        root.addWidget(self._passphrase_row)
-
         self._archive_section = QWidget()
         av_layout = QVBoxLayout(self._archive_section)
         av_layout.setContentsMargins(0, 10, 0, 0)
@@ -272,6 +549,7 @@ class LaunchDialog(QDialog):
         self._archive_dt_edit = QDateTimeEdit()
         self._archive_dt_edit.setDisplayFormat("yyyy-MM-dd  HH:mm:ss")
         self._archive_dt_edit.setCalendarPopup(True)
+        self._archive_dt_edit.setCalendarWidget(_AvailabilityCalendar(self._archive_dt_edit))
         # default to yesterday at 20:00 UTC as a sensible starting point.
         now_utc = datetime.now(timezone.utc)
         yesterday = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
@@ -281,13 +559,50 @@ class LaunchDialog(QDialog):
                 yesterday.hour, yesterday.minute, yesterday.second,
             )
         )
-        av_layout.addWidget(self._archive_dt_edit)
+        dt_row = QHBoxLayout()
+        dt_row.setSpacing(6)
+        dt_row.addWidget(self._archive_dt_edit, 1)
+        dt_row.addWidget(self._build_calendar_button())
+        self._archive_scan_progress = _CircularProgress(self)
+        self._archive_scan_progress.setToolTip("Finding dates with data…")
+        self._archive_scan_progress.hide()
+        dt_row.addWidget(self._archive_scan_progress)
+        av_layout.addLayout(dt_row)
         self._init_calendar_icons()
 
-        arc_hint = QLabel("All data products will replay from this UTC time.")
+        arc_hint = QLabel("All data products will replay from this UTC time. "
+                          "Shaded calendar days have data.")
         arc_hint.setObjectName("hint")
         arc_hint.setWordWrap(True)
         av_layout.addWidget(arc_hint)
+
+        # one link per line: side by side they don't fit the form's width
+        links = QVBoxLayout()
+        links.setSpacing(7)
+        self._find_dates_btn = self._link_button(
+            "Browse available cases…", "Find dates with data by campaign, years, months and vehicles",
+            self._open_date_finder)
+        self._open_case_btn = self._link_button(
+            "Open case…", "Open a case package: its date, storm track, settings and packed data",
+            self._on_open_case_clicked)
+        for btn in (self._find_dates_btn, self._open_case_btn):
+            links.addWidget(btn, 0, Qt.AlignmentFlag.AlignLeft)
+        av_layout.addSpacing(4)
+        av_layout.addLayout(links)
+
+        case_row = QHBoxLayout()
+        case_row.setSpacing(6)
+        self._case_label = QLabel("")
+        self._case_label.setObjectName("hint")
+        self._case_label.setWordWrap(True)
+        self._case_label.setToolTip("Launch opens this case: its storm track, settings and packed data")
+        case_row.addWidget(self._case_label, 1)
+        self._case_clear_btn = self._link_button("Clear", "Don't open this case", self._clear_case_package)
+        case_row.addWidget(self._case_clear_btn, 0, Qt.AlignmentFlag.AlignTop)
+        self._case_label.hide()
+        self._case_clear_btn.hide()
+        av_layout.addLayout(case_row)
+        self._archive_dt_edit.dateTimeChanged.connect(self._on_archive_dt_changed_for_case)
 
         self._archive_section.setVisible(False)
         root.addWidget(self._archive_section)
@@ -423,7 +738,14 @@ class LaunchDialog(QDialog):
         if any_data:
             self._toggle_data_section()
 
-        root.addSpacing(20)
+        root.addSpacing(4)
+
+        # Keep launch/update controls reachable while a long form scrolls.
+        self._footer = QWidget()
+        root = QVBoxLayout(self._footer)
+        root.setContentsMargins(32, 14, 32, 20)
+        root.setSpacing(0)
+        frame.addWidget(self._footer)
 
         # launch button
         btn_row = QHBoxLayout()
@@ -461,58 +783,263 @@ class LaunchDialog(QDialog):
         root.addLayout(log_row)
 
         # defer adjustSize until the event loop starts so the full layout is
-        QTimer.singleShot(0, self._post_layout_adjust)
+        self._layout_timer.start(0)
 
 
     def _post_layout_adjust(self):
-        """Resize to content then re-center within the available screen area."""
-        self.adjustSize()
+        """Honor wrapped content height; scroll the form on smaller screens.
+
+        QWidget.adjustSize() caps top-level windows at a fraction of the screen
+        and can squeeze nested layouts below their height-for-width. Compute the
+        form's height explicitly instead of pumping a nested event loop.
+        """
+        self._form.setMinimumHeight(0)
+        layout = self._form.layout()
+        layout.invalidate()
+        layout.activate()
+        width = max(self.minimumWidth(), self._form.minimumSizeHint().width())
+        height = layout.heightForWidth(width)
+        if height < 0:                       # no height-for-width in the form
+            height = layout.sizeHint().height()
+        footer_height = self._footer.sizeHint().height()
+        screen = self.screen().availableGeometry()
+        max_height = max(240, screen.height() - 60)
+        scrolls = height + footer_height > max_height
+        scrollbar = self._form_scroll.verticalScrollBar().sizeHint().width() if scrolls else 0
+        self._form.setMinimumHeight(height)
+        self.resize(width + scrollbar, min(height + footer_height, max_height))
+        self.layout().activate()
+        self._form.layout().activate()
+        if not self._user_moved_window:
+            self._recenter()
+
+    def _recenter(self):
         screen = QApplication.primaryScreen().availableGeometry()
         x = screen.x() + max(0, (screen.width()  - self.width())  // 2)
         y = screen.y() + max(0, (screen.height() - self.height()) // 2)
-        self.move(x, y)
+        self._recentering_window = True
+        try:
+            self.move(x, y)
+        finally:
+            self._recentering_window = False
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self._recentering_window:
+            self._user_moved_window = True
 
 
     def _init_calendar_icons(self):
-        """Inject custom white triangle icons into the calendar popup widgets."""
-
-        def _tri_icon(pts, color, w=10, h=10):
-            px = QPixmap(w, h)
-            px.fill(Qt.GlobalColor.transparent)
-            p = QPainter(px)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setBrush(QColor(color))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawPolygon(QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
-            p.end()
-            return QIcon(px)
-
-        # dropdown arrow on the QDateTimeEdit itself
+        """Arrow icons on the date field and its calendar."""
         _drop = self._archive_dt_edit.findChild(QToolButton)
         if _drop:
-            _drop.setIcon(_tri_icon([(0.1, 0.2), (0.9, 0.2), (0.5, 0.85)], P.TEXT_LABEL, 10, 8))
+            _drop.setIcon(_triangle_icon([(0.1, 0.2), (0.9, 0.2), (0.5, 0.85)], P.TEXT_LABEL, 10, 8))
             _drop.setIconSize(QSize(10, 8))
+        self._style_calendar_nav_icons(self._archive_dt_edit.calendarWidget())
 
-        # calendar prev/next month nav arrows
-        cal = self._archive_dt_edit.calendarWidget()
-        _prev = cal.findChild(QToolButton, "qt_calendar_prevmonth")
-        _next = cal.findChild(QToolButton, "qt_calendar_nextmonth")
+    def _style_calendar_nav_icons(self, calendar: QCalendarWidget):
+        """Month arrows, and the year button opening the year grid instead
+        of Qt's editable year spin box."""
+        _prev = calendar.findChild(QToolButton, "qt_calendar_prevmonth")
+        _next = calendar.findChild(QToolButton, "qt_calendar_nextmonth")
         if _prev:
-            _prev.setIcon(_tri_icon([(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)], P.WHITE))
+            _prev.setIcon(_triangle_icon(_LEFT, P.WHITE))
             _prev.setIconSize(QSize(10, 10))
         if _next:
-            _next.setIcon(_tri_icon([(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)], P.WHITE))
+            _next.setIcon(_triangle_icon(_RIGHT, P.WHITE))
             _next.setIconSize(QSize(10, 10))
-
-        # year spinbox up/down arrows
-        _spin = cal.findChild(QSpinBox, "qt_calendar_yearedit")
+        _spin = calendar.findChild(QSpinBox, "qt_calendar_yearedit")
         if _spin:
-            _btns = _spin.findChildren(QAbstractButton)
-            if len(_btns) >= 2:
-                _btns[0].setIcon(_tri_icon([(0.1, 0.85), (0.9, 0.85), (0.5, 0.15)], P.TEXT_LABEL, 10, 8))
-                _btns[0].setIconSize(QSize(10, 8))
-                _btns[1].setIcon(_tri_icon([(0.1, 0.15), (0.9, 0.15), (0.5, 0.85)], P.TEXT_LABEL, 10, 8))
-                _btns[1].setIconSize(QSize(10, 8))
+            # should Qt still show it, it isn't a text field
+            _spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+            _spin.setReadOnly(True)
+            _spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            _spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _year_btn = calendar.findChild(QToolButton, "qt_calendar_yearbutton")
+        if _year_btn is not None:
+            _year_btn.setToolTip("Choose a year")
+            consumer = _ClickConsumer(lambda c=calendar, b=_year_btn: self._open_year_grid(c, b), calendar)
+            _year_btn.installEventFilter(consumer)
+            self._year_click_filters.append(consumer)
+
+    def _open_year_grid(self, calendar: QCalendarWidget, anchor: QToolButton):
+        if self._year_grid_popup is not None:
+            self._year_grid_popup.hide()
+            self._year_grid_popup.deleteLater()
+        popup = _YearGridPopup(calendar.yearShown(), parent=self)
+        popup.set_known_years(d.year for d in self._known_dates())
+        popup.yearPicked.connect(lambda year, c=calendar: c.setCurrentPage(year, c.monthShown()))
+        popup.move(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        popup.show()
+        self._year_grid_popup = popup
+
+    def _link_button(self, text: str, tip: str, slot) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setToolTip(tip)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFlat(True)
+        btn.setStyleSheet(_LINK_BTN_STYLE)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _build_calendar_button(self) -> QToolButton:
+        btn = QToolButton()
+        btn.setIcon(_calendar_glyph_icon())
+        btn.setIconSize(QSize(16, 16))
+        btn.setToolTip("Choose a date (shaded days have data)")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedSize(32, 32)
+        btn.setStyleSheet(_CAL_BTN_STYLE)
+        btn.clicked.connect(self._open_date_picker)
+        self._cal_btn = btn
+        return btn
+
+    def _open_date_picker(self):
+        """A calendar under the button, on the archive field's date."""
+        if self._calendar_popup is None:
+            popup = _AvailabilityCalendar(self)
+            popup.setWindowFlags(Qt.WindowType.Popup)
+            popup.setGridVisible(False)
+            popup.setStyleSheet(_DIALOG_STYLE)
+            popup.clicked.connect(self._on_date_picked)
+            self._calendar_popup = popup
+            self._style_calendar_nav_icons(popup)
+        self._calendar_popup.setSelectedDate(self._archive_dt_edit.date())
+        self._calendar_popup.set_known_dates(self._known_dates())
+        self._calendar_popup.move(self._cal_btn.mapToGlobal(self._cal_btn.rect().bottomLeft()))
+        self._calendar_popup.show()
+
+    def _set_archive_date(self, day: QDate):
+        """A new date at the same time of day."""
+        self._archive_dt_edit.setDateTime(QDateTime(day, self._archive_dt_edit.time()))
+
+    def _on_date_picked(self, qdate):
+        self._set_archive_date(qdate)
+        if self._calendar_popup is not None:
+            self._calendar_popup.hide()
+
+    def _open_date_finder(self):
+        if self._date_finder is None:
+            self._date_finder = FindDatesDialog(self)
+            self._date_finder.date_chosen.connect(
+                lambda d: self._set_archive_date(QDate(d.year, d.month, d.day)))
+        self._date_finder.set_snapshot(self._availability_snapshot)
+        self._date_finder.set_current_date(self._archive_dt_edit.date().toPyDate())
+        self._date_finder.show()
+        self._date_finder.raise_()
+        self._date_finder.activateWindow()
+
+    # -- case package ---------------------------------------------------------
+
+    def _on_open_case_clicked(self):
+        """Choose a case package: the date and time move to the case, and
+        Launch opens it (its track, settings and packed data)."""
+        from core import case_package  # noqa: PLC0415
+        folder = case_package.PACKAGES_ROOT
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Case Package", str(folder if folder.is_dir() else Path.home()),
+            "STORM case package (*.zip)")
+        if path:
+            self._choose_case_package(Path(path))
+
+    def _choose_case_package(self, path: Path):
+        from core import case_package  # noqa: PLC0415
+        try:
+            manifest, tracks = case_package.read(path)
+            case = manifest["case"]
+            when = datetime.fromisoformat(case["archive_time"].replace("Z", "+00:00"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, "Open Case Package", f"{path.name}: {exc}")
+            return
+        self._case_package_path = None          # the date change below mustn't clear it
+        self._archive_dt_edit.setDateTime(QDateTime(when.year, when.month, when.day,
+                                                    when.hour, when.minute, when.second))
+        self._case_package_path = path
+        self._case_package_day = when.date()
+        packed = len(manifest.get("data", []))
+        frame = manifest.get("time_frame")
+        span = f"{frame['start'][11:16]}–{frame['end'][11:16]} UTC" if frame else "whole session"
+        n_tracks = len(tracks)
+        self._case_label.setText(
+            f"Case: {path.name}\n"
+            f"{case.get('radar_station') or 'No radar'} · {span} · "
+            f"{n_tracks} track{'s' if n_tracks != 1 else ''} · {packed} file{'s' if packed != 1 else ''}")
+        self._case_label.show()
+        self._case_clear_btn.show()
+        self._layout_timer.start(0)
+
+    def _clear_case_package(self):
+        self._case_package_path = None
+        self._case_label.hide()
+        self._case_clear_btn.hide()
+        self._layout_timer.start(0)
+
+    def _on_archive_dt_changed_for_case(self, qdt):
+        # another date means not this case any more
+        if self._case_package_path is not None and qdt.date().toPyDate() != self._case_package_day:
+            self._clear_case_package()
+
+    # -- archive dates: one background scan, newest sources first ---------------
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_availability()
+
+    def hideEvent(self, event):
+        self._availability_generation += 1
+        self._availability_timer.stop()
+        self._availability.cancel()
+        if self._date_finder is not None:
+            self._date_finder.close()
+        super().hideEvent(event)
+
+    def _schedule_availability(self, *_):
+        self._availability_generation += 1
+        self._availability.cancel()
+        self._availability_timer.stop()
+        if self._selected_mode == "archive":
+            self._render_availability()
+            if self.isVisible():
+                self._availability_timer.start()
+
+    def _request_availability(self):
+        if self.isVisible() and self._selected_mode == "archive":
+            self._availability.request(self._availability_generation)
+
+    def _on_availability_updated(self, generation, snapshot):
+        if generation != self._availability_generation or self._selected_mode != "archive":
+            return
+        # failed checks go to the log, once each
+        previous = self._availability_snapshot
+        seen = {(pid, e) for pid, r in previous.platforms.items() for e in r.errors} if previous else set()
+        for pid, result in snapshot.platforms.items():
+            for error in result.errors:
+                if (pid, error) not in seen:
+                    log.warning("Archive availability [%s]: %s", pid, error)
+        self._availability_snapshot = snapshot
+        if self._date_finder is not None:
+            self._date_finder.set_snapshot(snapshot)
+        self._render_availability()
+
+    def _known_dates(self):
+        snapshot = self._availability_snapshot
+        return snapshot.dates if snapshot is not None else frozenset()
+
+    def _render_availability(self):
+        snapshot = self._availability_snapshot
+        dates = self._known_dates()
+        self._archive_dt_edit.calendarWidget().set_known_dates(dates)
+        if self._calendar_popup is not None:
+            self._calendar_popup.set_known_dates(dates)
+        if self._year_grid_popup is not None:
+            self._year_grid_popup.set_known_years({d.year for d in dates})
+        running = snapshot is None or snapshot.checked < snapshot.total
+        self._archive_scan_progress.setVisible(running)
+        self._archive_scan_progress.setRange(0, snapshot.total if snapshot else 0)
+        self._archive_scan_progress.setValue(snapshot.checked if snapshot else 0)
+        self._archive_scan_progress.setToolTip(
+            f"Finding dates with data · {snapshot.checked}/{snapshot.total} catalogs checked"
+            if snapshot else "Finding dates with data…")
 
 
     def _set_fields_locked(self, locked: bool):
@@ -533,12 +1060,9 @@ class LaunchDialog(QDialog):
         for key, btn in self._mode_btns.items():
             btn.setStyleSheet(_MODE_BTN_SELECTED_STYLE if key == mode else _MODE_BTN_STYLE)
         vehicle_mode = (mode == "vehicle")
-        viewer_mode  = (mode == "viewer")
         archive_mode = (mode == "archive")
 
         self._vehicle_section.setVisible(vehicle_mode)
-        # archive: show passphrase (for server auth) but hide vehicle fields
-        self._passphrase_row.setVisible(not viewer_mode)
         # archive-specific date/time picker; data-on-launch hidden in archive mode
         self._archive_section.setVisible(archive_mode)
         if hasattr(self, "_data_section"):
@@ -547,20 +1071,12 @@ class LaunchDialog(QDialog):
                 self._data_section.setVisible(False)
                 self._data_toggle_btn.setText("▸  DATA CONFIGURATION")
 
-        if not viewer_mode:
-            if archive_mode:
-                lbl = "ARCHIVE PASSPHRASE"
-            elif vehicle_mode:
-                lbl = "VEHICLE PASSPHRASE"
-            else:
-                lbl = "MONITOR PASSPHRASE"
-            self._passphrase_label.setText(lbl)
-        self._passphrase_input.clear()
         if self.isVisible():
             self._post_layout_adjust()
+        self._schedule_availability()
 
     def _on_admin_toggled(self, checked: bool):
-        self._admin_passphrase_row.setVisible(checked)
+        self._admin_passphrase_row.setVisible(checked and "admin" not in self._verified_modes)
         if not checked:
             self._admin_passphrase_input.clear()
         if self.isVisible():
@@ -570,7 +1086,7 @@ class LaunchDialog(QDialog):
         visible = not self._data_section.isVisible()
         self._data_section.setVisible(visible)
         self._data_toggle_btn.setText("▾  DATA ON LAUNCH" if visible else "▸  DATA ON LAUNCH")
-        QTimer.singleShot(0, self.adjustSize)
+        self._layout_timer.start(0)
 
     def _toggle_layer(self, key: str):
         self._selected_layers.discard(key) if key in self._selected_layers else self._selected_layers.add(key)
@@ -656,7 +1172,7 @@ class LaunchDialog(QDialog):
                 self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
                 self._update_btn.setStyleSheet(_UPD_WARNING)
                 self._update_btn.setWordWrap(True)
-                QTimer.singleShot(0, self._post_layout_adjust)
+                self._layout_timer.start(0)
         elif success:
             self._update_btn.setText("✓   UPDATED — RESTARTING...")
             self._update_btn.setStyleSheet(_UPD_SUCCESS)
@@ -695,7 +1211,7 @@ class LaunchDialog(QDialog):
                 self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
                 self._update_btn.setStyleSheet(_UPD_WARNING)
                 self._update_btn.setWordWrap(True)
-                QTimer.singleShot(0, self._post_layout_adjust)
+                self._layout_timer.start(0)
             return
 
         if success:
@@ -715,7 +1231,7 @@ class LaunchDialog(QDialog):
             self._update_btn.setText(f"⚠   DEPS CHANGED — RUN:\n{_cmd}\nTHEN RESTART")
             self._update_btn.setStyleSheet(_UPD_WARNING)
             self._update_btn.setWordWrap(True)
-            QTimer.singleShot(0, self._post_layout_adjust)
+            self._layout_timer.start(0)
 
     def _restart_app(self):
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -737,26 +1253,22 @@ class LaunchDialog(QDialog):
     def _on_launch(self):
         mode = getattr(self, "_selected_mode", "vehicle")
 
-        # validate passphrase for vehicle, monitor, and archive modes
-        if mode not in ("viewer",):
-            passphrase = self._passphrase_input.text()
-            if mode == "vehicle":
-                stored = _config.VEHICLE_PASSPHRASE_HASH
-            elif mode == "archive":
-                stored = _config.ARCHIVE_PASSPHRASE_HASH
-            else:
-                stored = _config.MONITOR_PASSPHRASE_HASH
-            if not _verify_pbkdf2(passphrase, stored):
+        # vehicle, monitor, and archive modes need the MQTT certificate files
+        if mode != "viewer":
+            missing = _config.missing_mqtt_cert_files()
+            if missing:
+                names = "\n".join(f"  \u2022 {os.path.basename(f)}" for f in missing)
                 QMessageBox.warning(
                     self,
-                    "Incorrect Passphrase",
-                    "The passphrase you entered is incorrect.",
+                    "Missing Certificate Files",
+                    f"{mode.upper()} mode needs the MQTT certificate files in\n\n"
+                    f"  {os.path.dirname(_config.MQTT_CA_CERT)}\n\n"
+                    f"These were not found:\n\n{names}\n\n"
+                    "Only VIEWER mode can launch without them.",
                 )
-                self._passphrase_input.clear()
-                self._passphrase_input.setFocus()
                 return
 
-        if self._admin_check.isChecked():
+        if self._admin_check.isChecked() and "admin" not in self._verified_modes:
             if not _config.ADMIN_PASSPHRASE_HASH:
                 QMessageBox.warning(
                     self,
@@ -857,6 +1369,10 @@ class LaunchDialog(QDialog):
             qt_dt.time().second(),
             tzinfo=timezone.utc,
         )
+
+    def case_package(self) -> "Path | None":
+        """The case package chosen to open at launch (ARCHIVE only)."""
+        return self._case_package_path if self.archive() else None
 
     def vehicle_icon(self) -> str:
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":

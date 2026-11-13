@@ -3,6 +3,7 @@
 import json
 import threading
 from PyQt6.QtCore import QSettings
+from data import endpoints
 from data.fetchers.hazard_fetcher import HazardFetcher
 
 
@@ -28,25 +29,6 @@ class MainWindowHazardsMixin:
         self._hazard_fetcher.connectivity_changed.connect(self._on_hazard_connectivity)
 
         self.map_widget.feature_clicked.connect(self._on_spc_feature_clicked)
-
-        # seed NWS bbox from MBTiles domain extent so warnings are filtered
-        try:
-            import sqlite3 as _sqlite3
-            from ui.map.widget import TILES_PATH as _TILES_PATH
-            _conn = _sqlite3.connect(_TILES_PATH)
-            _row = _conn.execute(
-                "SELECT value FROM metadata WHERE name='bounds'"
-            ).fetchone()
-            _conn.close()
-            if _row:
-                _lon_min, _lat_min, _lon_max, _lat_max = (
-                    float(x) for x in _row[0].split(",")
-                )
-                self._hazard_fetcher.set_nws_bbox(
-                    _lon_min, _lat_min, _lon_max, _lat_max
-                )
-        except Exception:
-            pass
 
         # load persisted NWS filter selections from QSettings and apply.
         try:
@@ -304,14 +286,14 @@ class MainWindowHazardsMixin:
                     sdate = ts.strftime("%Y-%m-%d")
                     edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
                     url = (
-                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+                        f"{endpoints.IEM_AFOS}"
                         f"?pil={pil}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
                     )
                 else:
-                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil={pil}&limit=1&fmt=text"
+                    url = f"{endpoints.IEM_AFOS}?pil={pil}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "mcd":
-                url = f"https://www.spc.noaa.gov/products/md/md{identifier}.txt"
+                url = endpoints.spc_md_text(identifier)
                 text = _fetch(url)
             elif kind == "watch":
                 # identifier is "NNNN" in live mode or "NNNN|ISO_TS" in archive mode.
@@ -326,11 +308,11 @@ class MainWindowHazardsMixin:
                     sdate = (ts - _td2(days=1)).strftime("%Y-%m-%d")
                     edate = (ts + _td2(days=1)).strftime("%Y-%m-%d")
                     url = (
-                        "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
+                        f"{endpoints.IEM_AFOS}"
                         f"?pil=SEL{sel_digit}&limit=1&fmt=text&sdate={sdate}&edate={edate}"
                     )
                 else:
-                    url = f"https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py?pil=SEL{sel_digit}&limit=1&fmt=text"
+                    url = f"{endpoints.IEM_AFOS}?pil=SEL{sel_digit}&limit=1&fmt=text"
                 text = _fetch(url)
             elif kind == "warning":
                 if not identifier:
@@ -349,7 +331,7 @@ class MainWindowHazardsMixin:
                     if year and wfo and phenom and sig and etn_raw:
                         etn_int = int(etn_raw.lstrip("0") or "0")
                         api_url = (
-                            "https://mesonet.agron.iastate.edu/json/vtec_event.py"
+                            f"{endpoints.IEM_VTEC_EVENT}"
                             f"?wfo={wfo}&year={year}&phenomena={phenom}"
                             f"&significance={sig}&etn={etn_int}"
                         )

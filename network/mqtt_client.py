@@ -28,9 +28,12 @@ class MQTTClient(QObject):
     disconnected     = pyqtSignal(int)
     message_received = pyqtSignal(str, bytes)
 
-    def __init__(self, client_id: str = "", parent=None):
+    def __init__(self, client_id: str = "", read_only: bool = False, parent=None):
+        """read_only drops every publish: AWS IoT disconnects a client whose
+        certificate (the viewer one) isn't allowed to publish."""
         super().__init__(parent)
         self._client_id = client_id
+        self._read_only = read_only
         self._client: mqtt.Client | None = None
         self._lock = threading.Lock()
 
@@ -110,6 +113,9 @@ class MQTTClient(QObject):
         retain: if True the broker stores the last message and delivers it to
                 new subscribers immediately on subscribe.
         """
+        if self._read_only:
+            log.debug("MQTT: read-only, not publishing to %s", topic)
+            return
         with self._lock:
             client = self._client
             if client is None:
