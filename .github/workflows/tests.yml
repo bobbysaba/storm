@@ -28,9 +28,9 @@ jobs:
       QTWEBENGINE_DISABLE_SANDBOX: "1"
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # same Qt WebEngine libraries setup.py installs on Linux
+      # same Qt WebEngine and multimedia libraries setup.py installs on Linux
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: |
@@ -42,7 +42,12 @@ jobs:
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
             libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
-            libgl1 libegl1
+            libgl1 libegl1 libpulse0
+
+      # the Linux runner has no GPU: give MapLibre WebGL through Chromium's software renderer
+      - name: Software WebGL
+        if: runner.os == 'Linux'
+        run: echo "QTWEBENGINE_CHROMIUM_FLAGS=--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader" >> "$GITHUB_ENV"
 
       - uses: conda-incubator/setup-miniconda@v3
         with:
@@ -50,6 +55,12 @@ jobs:
           environment-file: envs/storm.yml
           activate-environment: storm
           conda-remove-defaults: true
+
+      # the Qt 6.10 wheels are built against the VS 2022 C++ runtime (14.4x)
+      # and fail to load QtCore next to conda-forge's VS 2026 one (14.5x)
+      - name: Windows C++ runtime
+        if: runner.os == 'Windows'
+        run: conda install -y -c conda-forge "vc14_runtime<14.50"
 
       - name: Install pytest
         run: conda install -y -c conda-forge pytest
@@ -59,6 +70,13 @@ jobs:
           python --version
           python -c "import PyQt6.QtCore as q; print('PyQt', q.PYQT_VERSION_STR, 'Qt', q.QT_VERSION_STR)"
 
+      - name: Windows DLL details
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter "msvcp140*.dll" "$env:CONDA\envs\storm", "$env:WINDIR\System32" -ErrorAction SilentlyContinue |
+            ForEach-Object { "{0}  {1}" -f $_.VersionInfo.FileVersion, $_.FullName }
+
       - name: Tests
         run: python -m pytest -q -p no:cacheprovider
 
@@ -67,8 +85,8 @@ jobs:
     name: headless (python 3.11)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - run: pip install ./headless pytest

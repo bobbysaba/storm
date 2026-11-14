@@ -57,6 +57,8 @@ def _run_on_map_page(script: str, attempts: int = 3) -> dict:
                              capture_output=True, text=True, timeout=90)
         lines = [line for line in out.stdout.splitlines() if line.startswith("RESULT ")]
         if lines:
+            # None: the script threw, usually because the map never loaded
+            assert lines[-1] != "RESULT None", f"the script on the map page failed\n{out.stdout[-2000:]}"
             return json.loads(lines[-1][len("RESULT "):])
     raise AssertionError(f"map_ready never fired in {attempts} tries (last exit {out.returncode})\n"
                          f"{out.stdout[-2000:]}\n{out.stderr[-2000:]}")

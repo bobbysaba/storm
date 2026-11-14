@@ -168,7 +168,7 @@ def _apt_has(pkg):
 
 
 def install_linux_deps():
-    """Install Qt6 WebEngine system dependencies on Linux."""
+    """Install Qt6 WebEngine and multimedia system dependencies on Linux."""
     print("Installing Qt6 WebEngine system dependencies...")
     if shutil.which("apt-get"):
         # fresh installs (WSL especially) ship with empty package lists
@@ -183,7 +183,7 @@ def install_linux_deps():
             "libxcb-cursor0", "libxcb-icccm4", "libxcb-image0",
             "libxcb-keysyms1", "libxcb-randr0", "libxcb-render-util0",
             "libxcb-shape0", "libxcb-xinerama0", "libxcb-xkb1",
-            "libgl1", "libegl1", "desktop-file-utils",
+            "libgl1", "libegl1", "libpulse0", "desktop-file-utils",
         ])
     elif shutil.which("dnf"):
         subprocess.check_call([
@@ -193,7 +193,7 @@ def install_linux_deps():
             "libxkbcommon", "libxkbcommon-x11",
             "xcb-util", "xcb-util-cursor", "xcb-util-image",
             "xcb-util-keysyms", "xcb-util-renderutil", "xcb-util-wm", "libxcb",
-            "desktop-file-utils",
+            "pulseaudio-libs", "desktop-file-utils",
         ])
     elif shutil.which("yum"):
         subprocess.check_call([
@@ -203,7 +203,7 @@ def install_linux_deps():
             "libxkbcommon", "libxkbcommon-x11",
             "xcb-util", "xcb-util-cursor", "xcb-util-image",
             "xcb-util-keysyms", "xcb-util-renderutil", "xcb-util-wm", "libxcb",
-            "desktop-file-utils",
+            "pulseaudio-libs", "desktop-file-utils",
         ])
     else:
         print("WARNING: Could not detect package manager (apt/dnf/yum).")

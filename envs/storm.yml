@@ -1,7 +1,8 @@
 name: storm
 channels:
   - conda-forge
-  - defaults
+  # never Anaconda's channel, even where .condarc lists it (Miniconda, Anaconda)
+  - nodefaults
 dependencies:
   - python=3.14
   # Scientific / meteorology stack
