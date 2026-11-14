@@ -1,0 +1,76 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: app (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        # login shell so the conda env is active in every step
+        shell: bash -el {0}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      # Chromium's sandbox can't start on the CI runners
+      QTWEBENGINE_DISABLE_SANDBOX: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # same Qt WebEngine libraries setup.py installs on Linux
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libxss1 libasound2t64 libatk-bridge2.0-0 \
+            libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 \
+            libxrandr2 libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libgl1 libegl1
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: envs/storm.yml
+          activate-environment: storm
+          conda-remove-defaults: true
+
+      - name: Install pytest
+        run: conda install -y -c conda-forge pytest
+
+      - name: Versions
+        run: |
+          python --version
+          python -c "import PyQt6.QtCore as q; print('PyQt', q.PYQT_VERSION_STR, 'Qt', q.QT_VERSION_STR)"
+
+      - name: Tests
+        run: python -m pytest -q -p no:cacheprovider
+
+  # the vehicle publisher runs on Raspberry Pi OS Bookworm, which ships 3.11
+  headless:
+    name: headless (python 3.11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ./headless pytest
+      # the app's conftest imports Qt, which the headless publisher doesn't use
+      - run: python -m pytest -q -p no:cacheprovider --noconftest tests/test_headless.py

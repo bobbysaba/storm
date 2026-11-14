@@ -63,7 +63,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## Requirements
 
-- Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
+- Python 3.14 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm`
 - macOS or Windows
 

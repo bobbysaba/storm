@@ -693,7 +693,10 @@ class _RangeFile(io.RawIOBase):
         self._fetch_blocks(0, 4)      # the superblock and, usually, most metadata
 
     def close(self) -> None:
-        self._session.close()
+        # also runs at garbage collection when __init__ failed before the session existed
+        session = getattr(self, "_session", None)
+        if session is not None:
+            session.close()
         super().close()
 
     def readable(self) -> bool:

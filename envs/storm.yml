@@ -3,24 +3,24 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
+  - python=3.14
   # Scientific / meteorology stack
   - metpy=1.7.1
-  - scipy=1.17.1
-  - numpy=2.4.2
-  - matplotlib-base=3.10.8
-  - pandas=3.0.1
-  - xarray=2026.2.0
-  - cartopy=0.25.0
-  - pyproj=3.7.2
-  - shapely=2.1.2
-  - pillow=12.1.1
+  - scipy=1.18.1
+  - numpy=2.5.4
+  - matplotlib-base=3.10.9
+  - pandas=3.1.1
+  - xarray=2026.9.0
+  - cartopy=0.26.0
+  - pyproj=3.8.0
+  - shapely=2.2.0
+  - pillow=13.0.0
   - h5py
   - h5netcdf
   # Networking
-  - paho-mqtt=2.1.0
-  - requests=2.32.5
-  - boto3=1.42.59
+  - paho-mqtt=2.2.0
+  - requests=2.34.2
+  - boto3=1.43.127
   # Utilities
   - pyserial
   - pynmea2

@@ -143,9 +143,7 @@ def _make_nws_ref_cmap():
         "nws_ref",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    cmap.set_over(_rgba255(115, 10, 1, 255))
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0), over=_rgba255(115, 10, 1, 255))
 
 
 def _make_nws_vel_cmap():
@@ -181,9 +179,7 @@ def _make_nws_vel_cmap():
         colors,
         N=1024
     )
-    cmap.set_under(alpha=0)
-    cmap.set_over(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0), over=(0, 0, 0, 0))
 
 
 def _make_nws_cc_cmap():
@@ -205,8 +201,7 @@ def _make_nws_cc_cmap():
         "nws_cc",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 def _make_nws_zdr_cmap():
@@ -224,8 +219,7 @@ def _make_nws_zdr_cmap():
         "nws_zdr",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 def _make_nws_sw_cmap():
@@ -243,8 +237,7 @@ def _make_nws_sw_cmap():
         "nws_sw",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 def _make_nws_phi_cmap():
@@ -260,8 +253,7 @@ def _make_nws_phi_cmap():
         "nws_phi",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 def _make_nws_kdp_cmap():
@@ -285,8 +277,7 @@ def _make_nws_kdp_cmap():
         "nws_kdp",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 def _make_nws_cfp_cmap():
@@ -302,8 +293,7 @@ def _make_nws_cfp_cmap():
         "nws_cfp",
         [(pos, rgba) for pos, rgba in colors]
     )
-    cmap.set_under(alpha=0)
-    return cmap
+    return cmap.with_extremes(under=(0, 0, 0, 0))
 
 
 # built on first use (see _mpl_colors)

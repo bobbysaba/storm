@@ -79,7 +79,7 @@ python main.py
 ## 2. Installation & Requirements
 
 ### Prerequisites
-- Python 3.11 via conda (Miniforge, Miniconda, or Anaconda)
+- Python 3.14 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm` (created via `python setup.py` or `conda env create -f envs/storm.yml`)
 - The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately)
 - Optional offline base-layer MBTiles files: `storm_nlcd.mbtiles` for NLCD land cover and `satellite.mbtiles` for USGS imagery
