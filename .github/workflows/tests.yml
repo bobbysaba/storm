@@ -69,7 +69,7 @@ jobs:
             ForEach-Object { "{0}  {1}" -f $_.VersionInfo.FileVersion, $_.FullName }
 
       - name: Tests
-        run: python -m pytest -q -p no:cacheprovider
+        run: python -m pytest -q -rxs -p no:cacheprovider
 
   # the vehicle publisher runs on Raspberry Pi OS Bookworm, which ships 3.11
   headless:
