@@ -259,6 +259,6 @@ def test_readers_hand_over_whole_day_histories():
 
 def test_trail_layers_sit_under_the_storm_track():
     from pathlib import Path
-    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text()
+    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text(encoding="utf-8")
     assert html.index("id: 'obs-trails-barbs'") < html.index("id: 'storm-track-line'")
     assert "window.stormSetTrails = function" in html

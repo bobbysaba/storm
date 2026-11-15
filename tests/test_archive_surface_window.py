@@ -363,7 +363,7 @@ def test_set_damage_paths_sends_the_collection():
 
 
 def test_map_template_has_damage_layers_and_hover():
-    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text()
+    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text(encoding="utf-8")
     for layer in ("damage-paths-hit", "damage-paths-casing", "damage-paths-line",
                   "damage-paths-start", "damage-paths-end"):
         assert f"id: '{layer}'" in html

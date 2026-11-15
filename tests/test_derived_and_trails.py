@@ -154,7 +154,7 @@ def test_trail_colors_are_readable_on_the_map_and_outlined():
         color = trails.palette(kind)
         for i in range(11):
             assert trails.contrast(color(i / 10), trails.MAP_BACKGROUND) >= trails.MIN_CONTRAST, (kind, i)
-    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text()
+    html = (Path(__file__).resolve().parents[1] / "ui" / "map" / "map_template.html").read_text(encoding="utf-8")
     assert html.index("id: 'obs-trails-casing'") < html.index("id: 'obs-trails-line'")
 
 

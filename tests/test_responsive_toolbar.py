@@ -217,16 +217,32 @@ def test_button_content_is_centered(app, tier):
     tb.parent().show()
     img = tb.grab().toImage()
     rows = range(6, img.height() - 6)
+    seen = {}
     for key, btn in b.items():
         if btn.isChecked():
             continue
         g = btn.geometry()
         ink = [x for x in range(g.x(), g.x() + g.width())
                if any(img.pixelColor(x, y).lightness() > 110 for y in rows)]
-        left = ink[0] - g.x()
-        right = g.x() + g.width() - 1 - ink[-1]
+        seen[key] = (ink[0] - g.x(), g.x() + g.width() - 1 - ink[-1], btn)
+    for key, (left, right, btn) in seen.items():
         # icon shapes leave a pixel or two of side bearing
-        assert abs(left - right) <= 3, (key, left, right)
+        assert abs(left - right) <= 3, (key, left, right, _layout_report(img, seen, rows))
+
+
+def _layout_report(img, seen, rows) -> str:
+    """Every button's sizes and inked columns, for a failure on a platform
+    whose style can't be run here (Windows 11)."""
+    out = []
+    for key, (left, right, btn) in seen.items():
+        g = btn.geometry()
+        cols = "".join("#" if any(img.pixelColor(x, y).lightness() > 110 for y in rows) else "."
+                       for x in range(g.x(), g.x() + g.width()))
+        out.append(f"{key}: w={g.width()} hint={btn.sizeHint().width()} min={btn.minimumSizeHint().width()} "
+                   f"text={btn.fontMetrics().horizontalAdvance(btn.text())} font={btn.font().family()!r}/"
+                   f"{btn.font().pixelSize()} hover={btn.underMouse()} focus={btn.hasFocus()} "
+                   f"left={left} right={right}\n  {cols}")
+    return f"style={QApplication.style().name()}\n" + "\n".join(out)
 
 
 @pytest.mark.parametrize("tier", [FULL, ICONS])
