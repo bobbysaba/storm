@@ -1,6 +1,9 @@
 """Shared test fixtures."""
 import pytest
 
+import qt_compat
+qt_compat.use_windows_icu()
+
 # QtWebEngine must load before any QApplication exists, and several test
 # modules create one at import, so whichever collects first would decide.
 import PyQt6.QtWebEngineWidgets  # noqa: F401

@@ -10,6 +10,8 @@ import net_compat
 import argparse
 import faulthandler
 import runtime_flags
+import qt_compat
+qt_compat.use_windows_icu()      # before anything below imports Qt
 from dataclasses import replace
 from datetime import datetime, timezone
 from ui.launch.dialog import LaunchDialog

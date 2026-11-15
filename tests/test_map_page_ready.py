@@ -26,10 +26,18 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 app = QApplication(["storm-test"])
 from ui.map.widget import MapWidget
-w = MapWidget()
-w.resize(640, 480)
-w.show()
 SCRIPT = sys.argv[2]
+# asked of a blank page first: on the map page, once MapLibre holds its
+# context, a new canvas gets none even where WebGL works
+WEBGL = "(function() { var c = document.createElement('canvas');" \
+        " return !!(c.getContext('webgl2') || c.getContext('webgl')); })()"
+
+def load_map():
+    global w
+    w = MapWidget()
+    w.resize(640, 480)
+    w.show()
+    w.map_ready.connect(ready)
 
 def ready():
     def got(value):
@@ -37,7 +45,16 @@ def ready():
         os._exit(0)     # a normal exit can hang tearing down QtWebEngine
     w.page().runJavaScript(SCRIPT, got)
 
-w.map_ready.connect(ready)
+def checked(webgl):
+    if not webgl:
+        print("NO-WEBGL", flush=True)
+        os._exit(0)
+    probe.deleteLater()
+    load_map()
+
+probe = PyQt6.QtWebEngineWidgets.QWebEngineView()
+probe.loadFinished.connect(lambda _ok: probe.page().runJavaScript(WEBGL, checked))
+probe.setHtml("<html></html>")
 QTimer.singleShot(30000, lambda: os._exit(1))
 app.exec()
 """
@@ -50,17 +67,20 @@ def _run_on_map_page(script: str, attempts: int = 3) -> dict:
     Headless Chromium now and then loses its GPU context while the page
     starts ("Context lost during MakeCurrent") and the page never gets
     ready -- about one run in twenty under pytest, independent of STORM's
-    code -- so a run that never reports is retried in a fresh process."""
+    code -- so a run that never reports is retried in a fresh process. So
+    is one whose script threw (None): the widget's stall fallback reported
+    ready although the map never loaded. With no WebGL at all (CI runners
+    without a GPU) MapLibre can't run, and the test is skipped."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
     for _attempt in range(attempts):
         out = subprocess.run([sys.executable, "-c", _CHILD, str(ROOT), script], cwd=ROOT, env=env,
                              capture_output=True, text=True, timeout=90)
+        if "NO-WEBGL" in out.stdout.splitlines():
+            pytest.skip("no WebGL here, so the map can't load")
         lines = [line for line in out.stdout.splitlines() if line.startswith("RESULT ")]
-        if lines:
-            # None: the script threw, usually because the map never loaded
-            assert lines[-1] != "RESULT None", f"the script on the map page failed\n{out.stdout[-2000:]}"
+        if lines and lines[-1] != "RESULT None":
             return json.loads(lines[-1][len("RESULT "):])
-    raise AssertionError(f"map_ready never fired in {attempts} tries (last exit {out.returncode})\n"
+    raise AssertionError(f"the map page never answered in {attempts} tries (last exit {out.returncode})\n"
                          f"{out.stdout[-2000:]}\n{out.stderr[-2000:]}")
 
 
