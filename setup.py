@@ -250,7 +250,7 @@ def create_shortcuts_linux(conda):
     with open(desktop_file, "w") as f:
         f.write(f"[Desktop Entry]\n"
                 f"Name=STORM\n"
-                f"Comment=Severe-weather Tactical Operations and Response Manager\n"
+                f"Comment=Severe Thunderstorm Observation and Reconnaissance Monitor\n"
                 f"Exec={launcher}\n"
                 f"Icon={icon}\n"
                 f"Terminal=false\n"
