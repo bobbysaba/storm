@@ -1,5 +1,5 @@
 """
-GPU radar rendering prototype (PERFORMANCE_PLAN.md step 4).
+GPU radar rendering prototype.
 
 Instead of reprojecting and colouring a scan in Python, send the map the raw
 8-bit gate codes, an azimuth -> radial table and the 256-entry colour table as

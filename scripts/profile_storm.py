@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 0 of PERFORMANCE_PLAN.md: measure what dominates on this machine.
+Measure what dominates startup and radar rendering on this machine.
 
 Run it on the target hardware from the repo root:
 

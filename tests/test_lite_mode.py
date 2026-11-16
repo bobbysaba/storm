@@ -1,4 +1,4 @@
-"""Tests for lite mode and the Chromium flag builder (PERFORMANCE_PLAN.md steps 2 and 3)."""
+"""Tests for lite mode and the Chromium flag builder."""
 
 from types import SimpleNamespace
 

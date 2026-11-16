@@ -2,7 +2,7 @@
 import sys
 from dataclasses import dataclass
 
-# lite mode caps (PERFORMANCE_PLAN.md step 3)
+# lite mode caps
 LITE_RENDER_GRID_START = 512
 LITE_RENDER_GRID_MAX = 768
 LITE_STATION_CELL_DEG = 0.25

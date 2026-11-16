@@ -1,4 +1,4 @@
-"""Shared loop time for live playback (FEATURE_PLAN.md step 2).
+"""Shared loop time for live playback.
 
 The radar loop drives: each frame it shows publishes that frame's time here, and
 satellite and vehicles follow. With radar off, the satellite loop drives and only

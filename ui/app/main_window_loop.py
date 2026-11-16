@@ -1,4 +1,4 @@
-"""Live loop sync: satellite and vehicles follow the radar loop (FEATURE_PLAN.md step 2)."""
+"""Live loop sync: satellite and vehicles follow the radar loop."""
 
 import logging
 from datetime import datetime, timezone
