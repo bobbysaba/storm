@@ -12,6 +12,27 @@ _AWS_CANDIDATES = (_PROJ / "aws", _PROJ / ".aws")
 # get the files for the aws credentials
 _AWS = next((p for p in _AWS_CANDIDATES if p.exists()), _AWS_CANDIDATES[0])
 
+def _load_dotenv() -> None:
+    """Read KEY=VALUE lines from an untracked ``.env`` in the project folder into
+    the environment. Real environment variables win. Holds the API keys and the
+    admin passphrase hash, which are kept out of the repository."""
+    path = _PROJ / ".env"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 # pull the application version
 VERSION: str = (_PROJ / "VERSION").read_text().strip()
 
@@ -48,27 +69,25 @@ GPS_BAUD = 4800
 # path to previous deployment locations
 DEPLOY_LOCS_FILE = str(_PROJ / "locs" / "deployment_locations.csv")
 
-# pbkdf2-HMAC-SHA256 hash (600 000 iterations) of the admin mode passphrase
-ADMIN_PASSPHRASE_HASH = "N44K/AWhoT+O08E33gdLvg==:EbVnqJ4r5oRxSR2BjtxlRwpUjJOJoUe0oiIfFJQNUbM="
+# pbkdf2-HMAC-SHA256 hash (600 000 iterations) of the admin mode passphrase.
+# Not in the repo: set STORM_ADMIN_PASSPHRASE_HASH (environment or .env). Empty
+# means admin mode is not configured.
+ADMIN_PASSPHRASE_HASH = os.environ.get("STORM_ADMIN_PASSPHRASE_HASH", "")
 
 # accent color
 ACCENT_COLOR = "#00CFFF"
 
 # openRouteService API key (used by routing_fetcher.py)
-ORS_API_KEY = os.environ.get(
-    "ORS_API_KEY",
-    "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjlhZTYwOTkzMzcwMTRlYjg5YTcxMjlkYmU0MGI1NTRmIiwiaCI6Im11cm11cjY0In0=",
-)
+# (not in the repo: set ORS_API_KEY in the environment or .env)
+ORS_API_KEY = os.environ.get("ORS_API_KEY", "")
 
 # Shared NSSL API settings for authenticated data endpoints.
 NSSL_API_ROOT = os.environ.get(
     "NSSL_API_ROOT",
     "https://api.nssl.noaa.gov",
 ).rstrip("/")
-NSSL_API_KEY = os.environ.get(
-    "NSSL_API_KEY",
-    "bde39a474528766ea566fa21d7a0b89a8fb72a0391aa76a6bca6c26b88652aa0",
-)
+# Not in the repo: set NSSL_API_KEY in the environment or .env.
+NSSL_API_KEY = os.environ.get("NSSL_API_KEY", "")
 
 # api.nssl.noaa.gov serves its TLS chain without the Sectigo intermediate CA.
 # macOS/curl paper over this via AIA fetching, but Python's ssl module does

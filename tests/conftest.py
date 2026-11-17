@@ -10,6 +10,15 @@ import PyQt6.QtWebEngineWidgets  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def test_api_keys(monkeypatch):
+    """Tests never depend on the developer's local .env: the NSSL API key is
+    a fixed fake, so header checks pass with or without a real key."""
+    import config
+    monkeypatch.setattr(config, "NSSL_API_KEY", "test-nssl-key")
+    monkeypatch.setattr(config, "ORS_API_KEY", "test-ors-key")
+
+
+@pytest.fixture(autouse=True)
 def isolated_fofs_index(monkeypatch, tmp_path):
     """No test reaches the live THREDDS catalog or the user's real index
     cache: loaders see no index (and fall back to each file's usual
