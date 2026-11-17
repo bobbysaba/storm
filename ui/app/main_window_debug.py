@@ -82,7 +82,7 @@ class MainWindowDebugMixin:
         lines.append(f"tracked vehicles: {list(self._vehicles.keys())}")
         spl = getattr(self, "_station_layer", None)
         if spl:
-            lines.append(f"station plot cache: {list(spl._cache.keys())}")
+            lines.append(f"station plots shown: {list(spl._shown.keys())}")
 
         self._debug_pill.set_status("\n".join(lines))
 
