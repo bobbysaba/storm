@@ -33,7 +33,7 @@ from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.widgets.pin_dot import PinDot
 from ui.sounding.controls import SoundingControls
-from ui.app.overlay_geometry import bottom_left_y_avoiding, stack_gap
+from ui.app.overlay_geometry import bar_beside, bottom_left_y_avoiding, rectangles_overlap, stack_gap
 from ui.layer_status import LayerStatusBoard, LayerStatusDot
 from ui.widgets.annotation_tools import AnnotationTools
 from ui.widgets.loop_timeline import LoopTimeline
@@ -1275,19 +1275,26 @@ class MainWindow(
             al.move(MARGIN, al_y)
             al.raise_()
 
-        # archive controls bar — centered, pinned to bottom; the Video Studio
-        # panel takes its place, full width, while open
+        # archive controls bar — centered, pinned to bottom; pushed right of the
+        # status chip (and narrowed if need be) when centring would hit it. The
+        # Video Studio panel takes its place, full width, while open
         arc_bar_h = 0
         archive_rect = None
         if hasattr(self, "_archive_controls"):
             studio = self._studio_open()
             ac = self._studio if studio else self._archive_controls
             ac_w = r.width() - 2 * MARGIN if studio else min(r.width() - 2 * MARGIN, 680)
+            ac_x = max(MARGIN, (r.width() - ac_w) // 2)
+            if not studio and hasattr(self, "_status_left"):
+                self._status_left.adjustSize()
+                beside = bar_beside(r.width(), MARGIN, ac_w, ac.minimumSizeHint().width(),
+                                    MARGIN + self._status_left.width())
+                if beside is not None:
+                    ac_x, ac_w = beside
             ac.setFixedWidth(ac_w)
             ac.adjustSize()
             ac_h = ac.sizeHint().height()
             arc_bar_h = ac_h + MARGIN
-            ac_x = max(MARGIN, (r.width() - ac_w) // 2)
             ac.setGeometry(ac_x, r.height() - arc_bar_h, ac_w, ac_h)
             archive_rect = (ac_x, r.height() - arc_bar_h, ac_w, ac_h)
             ac.raise_()
@@ -1338,6 +1345,18 @@ class MainWindow(
             self._layer_pill.move(MARGIN, lp_y)
             self._layer_pill._relayout()
             self._layer_pill.raise_()
+
+        # archive status popover — opens above the status chip, over the layer
+        # pill; wider than the chip, so it rises above the bar it would overlap
+        if hasattr(self, "_archive_status") and self._archive_status.popover.isVisible():
+            pop = self._archive_status.popover
+            pop.adjustSize()
+            pop_y = _status_y - 6 - pop.height()
+            if archive_rect and rectangles_overlap((MARGIN, pop_y, pop.width(), pop.height()),
+                                                   archive_rect):
+                pop_y = archive_rect[1] - 6 - pop.height()
+            pop.move(MARGIN, max(MARGIN, pop_y))
+            pop.raise_()
 
         # loop timeline — true bottom centre, narrowed to clear the corner overlays;
         # when even its narrowest won't fit between them, it rises above the status pill

@@ -1,6 +1,7 @@
 import gzip
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -262,6 +263,10 @@ def test_idle_parse_is_released(fetcher, monkeypatch):
 # A5: seeks
 
 def test_a_seek_drops_stale_queued_work_and_fetches_the_new_scan_first(fetcher, monkeypatch):
+    # one worker, so downloads start in the order they were queued: with two,
+    # one can stall before recording its start while the other runs ahead
+    fetcher._pool.shutdown()
+    fetcher._pool = ThreadPoolExecutor(max_workers=1)
     times = [_SCAN_TIME + timedelta(minutes=5 * i) for i in range(40)]
     fetcher._index = list(times)
     fetcher._index_pos = {t: i for i, t in enumerate(times)}

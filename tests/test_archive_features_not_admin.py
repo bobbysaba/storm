@@ -36,9 +36,9 @@ def _host(vehicles):
     host._radar_station_awaiting_dense_obs = False
     host._archive_mqtt = SimpleNamespace(vehicle_metadata=lambda: dict(vehicles))
     host.statuses = []
-    host._archive_controls = SimpleNamespace(
-        set_obs_status=lambda text, active=False: host.statuses.append(text),
-        set_precision_mode=lambda on: None)
+    host._archive_controls = SimpleNamespace(set_precision_mode=lambda on: None)
+    host._archive_status = SimpleNamespace(
+        set_obs_status=lambda text, active=False: host.statuses.append(text))
     host._time_ctrl = SimpleNamespace(time_changed=SimpleNamespace(connect=lambda slot: None),
                                       current_time=host._archive_time)
     host._on_archive_dense_vehicle_position = lambda obs: None

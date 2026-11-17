@@ -128,6 +128,7 @@ class CommandPalette(QFrame):
                 border: 1px solid $border_soft@0.7;
                 border-radius: 12px;
             }
+            QFrame#commandPalette .QWidget { background: transparent; }
             QFrame#commandPalette QLineEdit {
                 background: $bg_sunken;
                 border: 1px solid $border;

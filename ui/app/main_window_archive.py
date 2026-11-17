@@ -51,9 +51,9 @@ class MainWindowArchiveMixin:
         # archive controls bar at bottom of screen.
         self._archive_controls = ArchiveControls(self._time_ctrl, self._map_container)
         self._archive_controls.setObjectName("archiveControls")
-        self._archive_controls.set_radar_status("Radar: waiting")
-        self._archive_controls.set_satellite_status("Sat: off")
-        self._archive_controls.set_obs_status("OBS: probing")
+        self._archive_status.set_radar_status("Radar: waiting")
+        self._archive_status.set_satellite_status("Sat: off")
+        self._archive_status.set_obs_status("OBS: probing")
         self._archive_controls.show()
 
         # mqtt reader — vehicles, annotations, cones, drawings.
@@ -315,7 +315,7 @@ class MainWindowArchiveMixin:
 
         total = self._archive_vehicle_obs.roster_size
         if not vehicle_ids:
-            self._archive_controls.set_obs_status(
+            self._archive_status.set_obs_status(
                 "OBS: no data for this date"
                 if self._archive_vehicle_obs_from_catalog
                 else "OBS: MQTT fallback"
@@ -328,7 +328,7 @@ class MainWindowArchiveMixin:
             status = f"OBS: {source} ({len(vehicle_ids)})"
         else:
             status = f"OBS: {source} partial {len(vehicle_ids)}/{total}"
-        self._archive_controls.set_obs_status(status, active=True)
+        self._archive_status.set_obs_status(status, active=True)
         self._archive_vehicle_obs.on_time_changed(self._time_ctrl.current_time)
         self._layout_overlays()
 
@@ -405,10 +405,10 @@ class MainWindowArchiveMixin:
             self._current_radar_scan = None
             self._radar_settled_scan = None
             self.status_msg_label.setText("")
-            if hasattr(self, "_archive_controls"):
-                self._archive_controls.set_radar_status("Radar: off")
-        elif hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status("Radar: loading" if self._archive_radar else "Radar: waiting")
+            if hasattr(self, "_archive_status"):
+                self._archive_status.set_radar_status("Radar: off")
+        elif hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status("Radar: loading" if self._archive_radar else "Radar: waiting")
         if self._archive_radar is not None:
             self._archive_radar.set_active(on)
 
@@ -480,15 +480,15 @@ class MainWindowArchiveMixin:
             scan = result["scan"]
             if "error" in result:
                 self._layer_status["radar"].mark_error(f"render error: {result['error']}")
-                if hasattr(self, "_archive_controls"):
-                    self._archive_controls.set_radar_status("Radar: render error", error=True)
+                if hasattr(self, "_archive_status"):
+                    self._archive_status.set_radar_status("Radar: render error", error=True)
             else:
                 self._radar_overlay.inject(result["png"], result["bounds"])
                 self._layer_status["radar"].mark_success(scan.scan_time)
                 if hasattr(self, "radar_controls"):
                     self.radar_controls.set_scan_time(scan.scan_time.strftime("%H:%MZ"), scan.scan_time)
-                if hasattr(self, "_archive_controls"):
-                    self._archive_controls.set_radar_status(
+                if hasattr(self, "_archive_status"):
+                    self._archive_status.set_radar_status(
                         f"Radar: {scan.pyart_field} {scan.tilt_deg:.1f}deg "
                         f"{scan.scan_time.strftime('%H:%MZ')}{_velocity_status_tag(scan)}"
                     )
@@ -609,9 +609,9 @@ class MainWindowArchiveMixin:
         self._archive_sat_has_data = True
         self._layer_status["satellite"].mark_success(frame.timestamp)
         self.satellite_controls.set_scan_time(frame.time_str, frame.timestamp)
-        if hasattr(self, "_archive_controls"):
+        if hasattr(self, "_archive_status"):
             band = "IR" if getattr(frame, "band", "vis") == "ir" else "VIS"
-            self._archive_controls.set_satellite_status(
+            self._archive_status.set_satellite_status(
                 f"Sat: AWS {frame.mode.upper()} {band} {frame.time_str}"
             )
         self._layout_overlays()
@@ -674,14 +674,14 @@ class MainWindowArchiveMixin:
     def _on_archive_tilt_changed(self, tilt_idx: int) -> None:
         if self._archive_radar:
             self._archive_radar.set_tilt_index(tilt_idx)
-        if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status(f"Radar: loading tilt {tilt_idx}")
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status(f"Radar: loading tilt {tilt_idx}")
 
     def _on_archive_product_changed(self, pyart_field: str) -> None:
         if self._archive_radar:
             self._archive_radar.set_product(pyart_field)
-        if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status(f"Radar: loading {pyart_field}")
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status(f"Radar: loading {pyart_field}")
 
     def _apply_archive_velocity_options(self) -> None:
         from archive.fetchers.radar_archive_fetcher import VelocityOptions
@@ -692,14 +692,14 @@ class MainWindowArchiveMixin:
 
     def _on_archive_dealias_toggled(self, enabled: bool) -> None:
         self._apply_archive_velocity_options()
-        if self.radar_controls.current_product() == "velocity" and hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status(
+        if self.radar_controls.current_product() == "velocity" and hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status(
                 "Radar: dealiasing…" if enabled else "Radar: loading raw velocity"
             )
 
     def _on_archive_radar_error(self, msg: str) -> None:
-        if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status("Radar: error", error=True)
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status("Radar: error", error=True)
         self._layer_status["radar"].mark_error(msg)
 
     def _renudge_archive_clock(self) -> None:
@@ -725,8 +725,8 @@ class MainWindowArchiveMixin:
     def _on_archive_radar_loading_changed(self, loading: bool) -> None:
         station = self._archive_radar.station if self._archive_radar is not None else ""
         self.status_msg_label.setText(f"Radar: loading {station}…" if loading else "")
-        if loading and hasattr(self, "_archive_controls"):
-            self._archive_controls.set_radar_status(f"Radar: loading {station}…")
+        if loading and hasattr(self, "_archive_status"):
+            self._archive_status.set_radar_status(f"Radar: loading {station}…")
 
     # Worker signals go to bound methods, not lambdas capturing the window: the
     # window is then the receiver, and Qt drops deliveries once it's gone.
@@ -773,12 +773,12 @@ class MainWindowArchiveMixin:
         self._layer_status["satellite"].set_source_active("mode", False)
         self.map_widget.clear_satellite_frame()
         self.map_widget.set_satellite_visible(False)
-        if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_satellite_status("Sat: none", tooltip=reason)
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_satellite_status("Sat: none", tooltip=reason)
 
     def _on_archive_satellite_error(self, msg: str) -> None:
-        if hasattr(self, "_archive_controls"):
-            self._archive_controls.set_satellite_status("Sat: error", error=True)
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_satellite_status("Sat: error", error=True)
         self._layer_status["satellite"].mark_error(msg)
 
     def _on_archive_spc_mode_changed(self, mode: str) -> None:

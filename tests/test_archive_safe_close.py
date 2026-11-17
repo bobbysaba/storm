@@ -135,8 +135,8 @@ def test_auto_pick_waits_for_one_second_positions_when_mqtt_has_none(app, monkey
     assert host.started == [] and host._radar_station_awaiting_dense_obs
 
     host._archive_vehicle_obs = _loaded_dense([("p1", 41.0, -98.5)])
-    host._archive_controls = SimpleNamespace(set_obs_status=lambda *a, **k: None,
-                                             set_precision_mode=lambda on: None)
+    host._archive_controls = SimpleNamespace(set_precision_mode=lambda on: None)
+    host._archive_status = SimpleNamespace(set_obs_status=lambda *a, **k: None)
     host._time_ctrl = SimpleNamespace(current_time=_utc(21))
     host._layout_overlays = lambda: None
     host._on_archive_vehicle_obs_loaded({"p1"})

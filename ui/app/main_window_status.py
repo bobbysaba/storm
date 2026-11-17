@@ -21,6 +21,73 @@ log = logging.getLogger("ui.app.main_window")
 class MainWindowStatusMixin:
 
     def _init_statusbar(self):
+        # in-ops update indicator — hidden until an update is detected
+        self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
+        self.update_indicator.setFlat(True)
+        self.update_indicator.setProperty("pillRole", "action")
+        set_pill_status(self.update_indicator, "accent")
+        self.update_indicator.setToolTip("Click to apply update and restart STORM")
+        self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_indicator.setVisible(False)
+        self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
+
+        # shown while the radar or satellite loop is off the live frame; click for live
+        self.loop_chip = QPushButton("")
+        self.loop_chip.setObjectName("loopChip")
+        self.loop_chip.setFlat(True)
+        self.loop_chip.setProperty("pillRole", "badge")
+        set_pill_status(self.loop_chip, "warn")
+        self.loop_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.loop_chip.setToolTip("Map is showing a past loop frame. Click to return to live")
+        self.loop_chip.setVisible(False)
+
+        # gps fix status — vehicle mode only (hidden in monitor/viewer/archive)
+        self.gps_indicator = QLabel("● NO GPS FIX")
+        self.gps_indicator.setProperty("pillRole", "badge")
+        set_pill_status(self.gps_indicator, "error")
+        show_gps = not (self._monitor or self._viewer or self._archive)
+        self.gps_indicator.setVisible(show_gps)
+
+        self.conn_indicator = QLabel("● AWS OFFLINE")
+        self.conn_indicator.setProperty("pillRole", "badge")
+        set_pill_status(self.conn_indicator, "error")
+
+        self.date_label = QLabel("-- --- ----")
+        self.clock_label = QLabel("--:--:-- UTC")
+        self.clock_label.setProperty("pillRole", "clock")
+
+        # keep hazard_indicator as a hidden member so existing callers don't break
+        self.hazard_indicator = QLabel("● DATA OFFLINE")
+        self.hazard_indicator.setVisible(False)
+
+        if self._archive:
+            self._init_archive_status()
+        else:
+            self._init_status_pill(show_gps)
+
+        from ui.map.html import basemap_source
+        if basemap_source() == "online":
+            self.status_msg_label.setText("Map: online tiles (no tiles/storm.mbtiles)")
+            self.status_msg_label.setToolTip("The base map loads from OpenFreeMap while connected. "
+                                             "Put storm.mbtiles in the tiles folder to use it offline.")
+
+    def _init_archive_status(self):
+        """ARCHIVE: a coordinates chip and a status popover in place of the
+        pill (ui/widgets/archive_status.py). GPS, AWS and the wall clock mean
+        nothing on a replay, so those members stay unparented and unshown."""
+        from ui.widgets.archive_status import ArchiveStatus
+        self._archive_status = ArchiveStatus(config.VERSION, self._map_container)
+        self._archive_status.layout_requested.connect(self._layout_overlays)
+        pop = self._archive_status.popover
+        self._status_left = self._archive_status.chip
+        self.coord_label = self._status_left.coord_label
+        self.status_msg_label = pop.status_msg_label
+        self.vehicle_count_label = pop.vehicle_count_label
+        self.net_indicator = pop.net_indicator
+        pop.loop_slot.insertWidget(1, self.loop_chip)
+        pop.update_slot.addWidget(self.update_indicator)
+
+    def _init_status_pill(self, show_gps: bool):
         # row 0: version anchor | [update indicator] | status message
         self._status_left = QWidget(self._map_container)
         self._status_left.setObjectName("statusOverlayLeft")
@@ -35,25 +102,10 @@ class MainWindowStatusMixin:
         version_label = QLabel(f"STORM v{config.VERSION}")
         set_pill_status(version_label, "muted")
         row0.addWidget(version_label)
-
-        # in-ops update indicator — hidden until an update is detected
-        self.update_indicator = QPushButton("↑ UPDATE AVAILABLE")
-        self.update_indicator.setFlat(True)
-        self.update_indicator.setProperty("pillRole", "action")
-        set_pill_status(self.update_indicator, "accent")
-        self.update_indicator.setToolTip("Click to apply update and restart STORM")
-        self.update_indicator.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_indicator.setVisible(False)
-        self.update_indicator.clicked.connect(self._on_update_indicator_clicked)
         row0.addWidget(self.update_indicator)
 
         self.status_msg_label = QLabel("")
         set_pill_status(self.status_msg_label, "label")
-        from ui.map.html import basemap_source
-        if basemap_source() == "online":
-            self.status_msg_label.setText("Map: online tiles (no tiles/storm.mbtiles)")
-            self.status_msg_label.setToolTip("The base map loads from OpenFreeMap while connected. "
-                                             "Put storm.mbtiles in the tiles folder to use it offline.")
         row0.addWidget(self.status_msg_label)
         row0.addStretch()
 
@@ -66,11 +118,8 @@ class MainWindowStatusMixin:
         self.coord_label.setMinimumWidth(self.coord_label.fontMetrics().horizontalAdvance(coord_probe) + 8)
         self.vehicle_count_label = QLabel("VEHICLES: 0")
 
-        # mode badge: VEHICLE / MONITOR / VIEWER / ARCHIVE — always leftmost in row 1
-        if self._archive:
-            mode_badge = QLabel("● ARCHIVE")
-            set_pill_status(mode_badge, "mode_archive")
-        elif self._monitor:
+        # mode badge: VEHICLE / MONITOR / VIEWER — always leftmost in row 1
+        if self._monitor:
             mode_badge = QLabel("● MONITOR")
             set_pill_status(mode_badge, "mode_monitor")
         elif self._viewer:
@@ -95,19 +144,9 @@ class MainWindowStatusMixin:
         row2.setContentsMargins(0, 0, 0, 0)
         row2.setSpacing(8)
 
-        # gps fix status — vehicle mode only (hidden in monitor/viewer)
-        self.gps_indicator = QLabel("● NO GPS FIX")
-        self.gps_indicator.setProperty("pillRole", "badge")
-        set_pill_status(self.gps_indicator, "error")
-        self.gps_indicator.setVisible(not (self._monitor or self._viewer))
         row2.addWidget(self.gps_indicator)
-
-        if not (self._monitor or self._viewer):
+        if show_gps:
             row2.addWidget(self._status_divider())
-
-        self.conn_indicator = QLabel("● AWS OFFLINE")
-        self.conn_indicator.setProperty("pillRole", "badge")
-        set_pill_status(self.conn_indicator, "error")
         row2.addWidget(self.conn_indicator)
         row2.addWidget(self._status_divider())
 
@@ -118,36 +157,20 @@ class MainWindowStatusMixin:
         row2.addWidget(self.net_indicator)
 
         row2.addStretch()
-
-        # shown while the radar or satellite loop is off the live frame; click for live
-        self.loop_chip = QPushButton("")
-        self.loop_chip.setObjectName("loopChip")
-        self.loop_chip.setFlat(True)
-        self.loop_chip.setProperty("pillRole", "badge")
-        set_pill_status(self.loop_chip, "warn")
-        self.loop_chip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.loop_chip.setToolTip("Map is showing a past loop frame. Click to return to live")
-        self.loop_chip.setVisible(False)
         row2.addWidget(self.loop_chip)
-
-        self.date_label = QLabel("-- --- ----")
         row2.addWidget(self.date_label)
-
         row2.addWidget(self._status_divider())
-
-        self.clock_label = QLabel("--:--:-- UTC")
-        self.clock_label.setProperty("pillRole", "clock")
         row2.addWidget(self.clock_label)
-
-        # keep hazard_indicator as a hidden member so existing callers don't break
-        self.hazard_indicator = QLabel("● DATA OFFLINE")
-        self.hazard_indicator.setVisible(False)
 
         pill.addLayout(row0)
         pill.addLayout(row1)
         pill.addLayout(row2)
 
     def update_coordinates(self, lat: float, lon: float):
+        if self._archive:
+            from ui.widgets.archive_status import format_coordinates
+            self.coord_label.setText(format_coordinates(lat, lon))
+            return
         self.coord_label.setText(f"LAT: {lat:>9.4f}  LON: {lon:>10.4f}")
 
     def _on_map_moved(self, lat: float, lon: float, _zoom: float):
@@ -182,6 +205,8 @@ class MainWindowStatusMixin:
             self.net_indicator.setText("● NO INTERNET")
             set_pill_status(self.net_indicator, "error")
         self.net_indicator.setVisible(True)
+        if hasattr(self, "_archive_status"):
+            self._archive_status.set_net_state(state)
         self._layout_overlays()
 
     def _update_gps_indicator(self):

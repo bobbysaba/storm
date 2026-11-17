@@ -65,7 +65,7 @@ class _Radar:
         self.options.append(options)
 
 
-class _ArchiveBar:
+class _ArchiveStatus:
     def __init__(self):
         self.status = []
 
@@ -77,7 +77,7 @@ class _Window(MainWindowArchiveMixin):
     def __init__(self, controls):
         self.radar_controls = controls
         self._archive_radar = _Radar()
-        self._archive_controls = _ArchiveBar()
+        self._archive_status = _ArchiveStatus()
 
 
 def test_toggling_dealias_sets_the_fetchers_options(controls):
@@ -89,14 +89,14 @@ def test_toggling_dealias_sets_the_fetchers_options(controls):
     controls.set_dealias(True)
     controls.set_dealias(False)
     assert window._archive_radar.options == [VelocityOptions(dealias=True), VelocityOptions()]
-    assert window._archive_controls.status == ["Radar: dealiasing…", "Radar: loading raw velocity"]
+    assert window._archive_status.status == ["Radar: dealiasing…", "Radar: loading raw velocity"]
 
 
 def test_toggling_dealias_on_reflectivity_leaves_the_status_alone(controls):
     window = _Window(controls)
     window._on_archive_dealias_toggled(True)
     assert window._archive_radar.options == [VelocityOptions()]  # button state, not the arg
-    assert window._archive_controls.status == []
+    assert window._archive_status.status == []
 
 
 def test_a_new_fetcher_gets_the_drawers_choice(controls):

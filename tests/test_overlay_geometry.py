@@ -2,10 +2,27 @@
 
 from ui.app.overlay_geometry import (
     bottom_left_y_avoiding,
+    bar_beside,
     drawers_to_close,
     rectangles_overlap,
     stack_extent,
 )
+
+
+def test_bar_stays_centred_when_clear_of_left_overlay():
+    assert bar_beside(1600, 8, 680, 420, left_clear=177) == (460, 680)
+
+
+def test_bar_shifts_right_of_left_overlay_instead_of_stacking():
+    assert bar_beside(900, 8, 680, 420, left_clear=177) == (185, 680)
+
+
+def test_bar_narrows_to_fit_beside_left_overlay():
+    assert bar_beside(700, 8, 680, 420, left_clear=177) == (185, 507)
+
+
+def test_bar_that_cannot_fit_beside_left_overlay_is_left_to_stack():
+    assert bar_beside(600, 8, 680, 420, left_clear=177) is None
 
 
 def test_bottom_left_overlay_stays_at_bottom_when_clear():

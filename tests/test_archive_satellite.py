@@ -542,6 +542,7 @@ def _host():
             self.map_widget = _Recorder()
             self.status_msg_label = _Recorder()
             self._archive_controls = _Recorder()
+            self._archive_status = _Recorder()
             self.status = _Recorder()
             self._layer_status = {"satellite": self.status}
             self.active = []
@@ -571,7 +572,7 @@ def test_unavailable_reads_none_not_error():
     h = _host()
     h._on_archive_satellite_unavailable("No GOES-16 imagery before 28 Feb 2017")
     assert ("set_satellite_status", ("Sat: none",), {"tooltip": "No GOES-16 imagery before 28 Feb 2017"}) \
-        in h._archive_controls.calls
+        in h._archive_status.calls
     assert ("set_source_active", ("mode", False), {}) in h.status.calls
     assert not any(name == "mark_error" for name, _, _ in h.status.calls)
     assert ("set_unavailable", ("No GOES-16 imagery before 28 Feb 2017",), {}) in h.satellite_controls.calls

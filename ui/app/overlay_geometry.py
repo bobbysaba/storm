@@ -36,6 +36,27 @@ def bottom_left_y_avoiding(
     return y
 
 
+def bar_beside(
+    container_width: int,
+    margin: int,
+    width: int,
+    min_width: int,
+    left_clear: int,
+) -> tuple[int, int] | None:
+    """x, width for a bottom-centred bar beside a bottom-left overlay ending
+    at ``left_clear``: centred when that clears it, else pushed right just
+    past it, narrowed down to ``min_width`` if need be; None when even that
+    won't fit beside it (the caller stacks)."""
+    x = max(margin, (container_width - width) // 2)
+    if x >= left_clear + margin:
+        return x, width
+    x = left_clear + margin
+    width = min(width, container_width - x - margin)
+    if width < min_width:
+        return None
+    return x, width
+
+
 def stack_gap(height: int, gap: int = 6) -> int:
     """Gap below a stacked overlay; shrinks with a drawer that is sliding closed."""
     return min(height, gap)

@@ -67,6 +67,7 @@ _get_archive_vehicle_history
 _hide_vehicle
 _import_case_track
 _init_annotations
+_init_archive_status
 _init_click_modes
 _init_data_inputs
 _init_debug_panel
@@ -89,6 +90,7 @@ _init_screenshot_button
 _init_sfcoa
 _init_shortcuts
 _init_stations
+_init_status_pill
 _init_statusbar
 _init_storm_cone
 _init_surface_obs

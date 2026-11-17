@@ -92,9 +92,9 @@ def _obs_loaded(window) -> bool:
 
 
 def _status(window) -> dict:
-    c = window._archive_controls
+    pop = window._archive_status.popover
     scan = window._current_radar_scan
-    return {"radar": c._radar_status.text(), "obs": c._obs_status.text(),
+    return {"radar": pop.radar_label.text(), "obs": pop.obs_label.text(),
             "radar_scan": scan.scan_time.strftime("%H:%M:%SZ") if scan is not None else None,
             "clock": window._time_ctrl.current_time.strftime("%Y-%m-%d %H:%M:%SZ")}
 

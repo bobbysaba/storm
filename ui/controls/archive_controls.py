@@ -207,28 +207,6 @@ class ArchiveControls(QWidget):
 
         row1.addStretch()
 
-        self._radar_status = QLabel("Radar: --")
-        self._radar_status.setStyleSheet(
-            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
-        row1.addWidget(self._radar_status)
-
-        row1.addWidget(self._vdiv())
-
-        self._sat_status = QLabel("Sat: --")
-        self._sat_status.setStyleSheet(
-            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
-        row1.addWidget(self._sat_status)
-
-        row1.addWidget(self._vdiv())
-
-        self._obs_status = QLabel("OBS: MQTT")
-        self._obs_status.setStyleSheet(
-            f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
-        row1.addWidget(self._obs_status)
-
         root.addLayout(row1)
 
         # seconds since the session start, to the window's end (which can be
@@ -314,28 +292,6 @@ class ArchiveControls(QWidget):
         d.setFrameShape(QFrame.Shape.VLine)
         d.setStyleSheet(f"color: {P.DIVIDER}; margin: 3px 0;")
         return d
-
-    def set_radar_status(self, text: str, error: bool = False) -> None:
-        self._radar_status.setText(text)
-        color = P.ERROR_SOFT_2 if error else P.TEXT_LABEL
-        self._radar_status.setStyleSheet(
-            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
-
-    def set_satellite_status(self, text: str, error: bool = False, tooltip: str = "") -> None:
-        self._sat_status.setText(text)
-        self._sat_status.setToolTip(tooltip)
-        color = P.ERROR_SOFT_2 if error else P.TEXT_LABEL
-        self._sat_status.setStyleSheet(
-            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
-
-    def set_obs_status(self, text: str, active: bool = False) -> None:
-        self._obs_status.setText(text)
-        color = P.OK if active else P.TEXT_LABEL
-        self._obs_status.setStyleSheet(
-            f"color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;"
-        )
 
     def set_available_scan_times(self, iso_times: list[str]) -> None:
         """The radar station's scan index (ISO UTC strings, chronological;
