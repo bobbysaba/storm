@@ -2,7 +2,9 @@
 
 **Severe Thunderstorm Observation and Reconnaissance Monitor**
 
-A desktop application for storm chasing situational awareness. It runs on a laptop in the field and is built for low-bandwidth conditions: offline map tiles, compressed radar data and efficient MQTT messaging. STORM shows live radar, satellite, hazards, surface observations, soundings and your team's vehicles on one map, and can replay a past session on a single synchronized clock.
+A coordinated field operations tool for real-time situational awareness and field data analysis. STORM handles real-time hazards, offline maps and cross-vehicle coordination for large fleets. It runs on a laptop in the field and is built for low-bandwidth conditions: offline map tiles, compressed radar data and efficient MQTT messaging. It shows live radar, satellite, hazards, surface observations, soundings and your team's vehicles on one map, and can replay a past session on a single synchronized clock.
+
+Although STORM is designed around NSSL operations, the codebase can be adapted to other project domains, data collection platforms and needs.
 
 **Full documentation is under development and coming soon.** It will cover installing, every mode, every feature, keyboard shortcuts, command-line options and troubleshooting. This README covers what you need to get STORM running.
 
@@ -69,7 +71,7 @@ They are handed out by the STORM team and are never in the repository. To reques
 
 ## API keys
 
-Some data comes from authenticated services: the NSSL API (surface observations, CLAMPS soundings, SFCOA, archive data) and openRouteService (routing). The keys are not in the repository. Copy `.env.example` to `.env` in the project folder and fill in the values you were given. A real environment variable of the same name takes precedence.
+Some data comes from authenticated services: the NSSL API (surface observations, CLAMPS soundings, SFCOA, archive data) and openRouteService (routing). The keys are not in the repository. Copy `.env.example` to `.env` in the project folder and fill in the values you were given. To request an NSSL API key, use the contact form (coming soon with the documentation site), along with the certificate files. An openRouteService key can be created for free at openrouteservice.org. A real environment variable of the same name takes precedence.
 
 ## Updating
 
