@@ -8,7 +8,7 @@ abstract: >-
   and team communication over constrained networks.
 authors:
   - family-names: Saba
-    given-names: Bobby
+    given-names: Robert
     # orcid: "https://orcid.org/0009-0007-6492-8501"
     affiliation: "University of Oklahoma / CIWRO / NSSL"
 repository-code: "https://github.com/bobbysaba/storm"
