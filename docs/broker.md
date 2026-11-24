@@ -37,8 +37,10 @@ Not yet tested by us: Mosquitto (the server steps under Option 1), hosted
 brokers (HiveMQ Cloud, EMQX, AWS IoT Core; NSSL's AWS IoT broker ran 2.x
 in the field but hasn't been tried with 3.0 yet), a
 broker on another machine or across the internet, a real Raspberry Pi, and
-Windows or Linux as the broker's host. They follow the same MQTT v5
-standard, so they should work, but if you hit a problem, `check_broker.py`
+Windows or Linux as the broker's host. Any broker that meets the
+requirements at the top of this page should work with the right settings
+(MQTT v5, QoS 1, retained messages on wildcard subscriptions, TLS and
+logins), but HiveMQ is the only one we have run STORM against. If you hit a problem, `check_broker.py`
 and [When it doesn't connect](#when-it-doesnt-connect) are the place to
 start, and a report helps the next team.
 

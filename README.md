@@ -69,7 +69,7 @@ Pick **VIEWER** in the launch window to confirm everything works.
 
 ## Quickstart: point it at your broker
 
-STORM shares vehicles, annotations, drawings and cones through an MQTT broker your team runs (Mosquitto, EMQX, HiveMQ, AWS IoT Core…). 3.0 was tested end to end against HiveMQ; the others aren't tested yet (see [what has been tested](docs/broker.md#what-has-been-tested)). No broker yet? [`docs/broker.md`](docs/broker.md) sets one up: on your laptop to try STORM, on a small server, or as a hosted service. Tell STORM which one in `storm.toml`; passwords and API keys go in `.env`:
+STORM shares vehicles, annotations, drawings and cones through an MQTT broker your team runs (Mosquitto, EMQX, HiveMQ, AWS IoT Core…). 3.0 was tested end to end against HiveMQ only. Any broker that meets [what STORM needs](docs/broker.md) (MQTT v5, QoS 1, retained messages on wildcard subscriptions, TLS and logins) should work with the right settings, but the others haven't been tried (see [what has been tested](docs/broker.md#what-has-been-tested)). No broker yet? [`docs/broker.md`](docs/broker.md) sets one up: on your laptop to try STORM, on a small server, or as a hosted service. Tell STORM which one in `storm.toml`; passwords and API keys go in `.env`:
 
 ```bash
 cp storm.example.toml storm.toml
@@ -107,6 +107,14 @@ Once one laptop works, every other vehicle gets the same setup. Install STORM on
 Vehicle ID, icon and logger folder are picked in each laptop's launch window, so the files stay the same everywhere. A vehicle with a different logger picks its layout there too, from the layouts `storm.toml` names. Check each laptop with **VIEWER** (the pill should read **● MQTT OK**).
 
 A headless Pi takes its broker settings from the same `storm.toml`: pass it to `install.sh` with `--profile-file`; its certificates go in its own `certs/`, and its password in `storm-headless.toml` or `STORM_MQTT_PASSWORD` (Pis don't read `.env`). See [`headless/README.md`](headless/README.md).
+
+## Profiles
+
+A **profile** is a ready-made `storm.toml` for a known setup: the broker, data sources, logger layouts, map home and archive sources a team uses, in one file you copy. `profiles/nssl.toml` is the one that ships, and it is the model for your own.
+
+- **Use one:** `cp profiles/nssl.toml storm.toml`. A headless Pi takes the same file with `install.sh --profile nssl`, or `--profile-file PATH` for a file that isn't in `profiles/`.
+- **Write your own:** start from `storm.example.toml`, get the broker working, then add `[[sources]]`, `[obs_columns]` layouts, `[map]`, `[units]` and `[archive]` as you need them (the order the pages below follow). Keep the file in your team's own git repository, or hand it out with `.env` as above; it holds no secrets.
+- **Keep it anywhere:** a profile doesn't need to live in this repository. `STORM_CONFIG` points STORM at a `storm.toml` in any folder, and `install.sh --profile-file` takes one from any path. A team's code provider and its certificates stay in its own folder.
 
 ## Outside the US
 

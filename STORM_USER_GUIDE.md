@@ -340,7 +340,7 @@ Opens the VAD wind-profile window (hodograph and time-height) for the current ra
 
 While the radar shows a past frame (playing the loop, or stepped back from the live frame), the other layers follow its time:
 
-- **Satellite** (SYNC on) shows the newest frame at or before the radar frame's time. The satellite drawer's own playback controls are off and show **SYNCED TO RADAR**. If no satellite frame is close enough (10 min for CONUS, 3 min for MESO), the satellite dims and its time reads `no frame`. For CONUS, the loop waits up to 1.5 s for the new time's tiles before stepping.
+- **Satellite** (SYNC on) shows the newest frame at or before the radar frame's time. The satellite drawer's own playback controls (slider, step, play and jump buttons) are greyed out while it follows the radar. If no satellite frame is close enough (10 min for CONUS, 3 min for MESO), the satellite dims and its time reads `no frame`. For CONUS, the loop waits up to 1.5 s for the new time's tiles before stepping.
 - **Vehicles** (VEH on) move to where they were at that time, drawn faded with a small clock badge. A vehicle with no fix yet at that time is hidden. Follow mode and station plots pause while vehicles show past positions. STORM keeps the last 90 minutes of positions in memory, starting from launch.
 - A **◷ LOOP HH:MMZ** chip appears next to the clock in the status bar. Click it to return to the live frame.
 
@@ -702,8 +702,11 @@ Provides turn-by-turn driving directions rendered on the map.
 
 #### Setting Origin and Destination
 
-- **Origin:** Type an address, lat/lon pair, or click **Use My Location** to use the current GPS position.
-- **Destination:** Type an address or lat/lon pair, or click a point on the map while the destination field is focused.
+Each of the **FROM** and **TO** fields takes an address, city or `lat,lon` pair, and has three small buttons beside it:
+
+- **⊕** (pick on map): click it, then click a point on the map to fill the field.
+- **Current GPS location**: fills the field with your vehicle's GPS fix. Greyed out until there is a fix.
+- **Vehicle picker**: a menu of the vehicles STORM is tracking; picking one fills the field with its position. Greyed out until a vehicle is known.
 
 Click **Get Directions** to fetch the route. The route geometry is drawn on the map as a colored line, and the directions list appears below with each maneuver's distance and turn arrow (↑, ←, →, ↖, ↗, ↩, etc.).
 
@@ -1575,6 +1578,7 @@ Every payload, with its fields, units, QoS, retain flag and expiry, is in [`docs
 
 - Annotations, drawings, cones and scan sectors are retained on the broker, deletes included, so on connect (and on every reconnect) the current ones arrive at once and anything deleted while you were away disappears. This needs a broker that sends retained messages on wildcard subscriptions, as Mosquitto, EMQX and HiveMQ do. AWS IoT Core doesn't: on NSSL's broker scan sectors still arrive (each one within a few seconds, once its vehicle publishes), but annotations, drawings and cones from before you connected don't. A setup with `[mqtt] shared_items_url` loads those from that URL at launch instead (NSSL's profile: the NSSL API's `current.json`), and the **↻ Refresh** button in the annotation drawer re-fetches it (the button only shows with it set). See [`docs/wire-format.md`](docs/wire-format.md#retained-messages).
 - Annotations, drawings and scan sectors expire from the broker at the team's daily reset (`daily_reset_utc` in `storm.toml`, 08:00 UTC unless changed), cones after an hour, vehicle positions after three hours.
+- STORM was tested end to end against a HiveMQ broker only. Other brokers that meet the requirements in [`docs/broker.md`](docs/broker.md) should work with the right settings, but haven't been tried.
 - Disconnect/reconnect is handled automatically — STORM continuously attempts to reconnect with exponential backoff.
 - If `--disable-mqtt` is passed, all sync features are disabled and the vehicle panel shows only locally-observed vehicles.
 - In MONITOR mode, **File > Record Broker Traffic** writes everything the broker sends to `recordings/` for ARCHIVE to replay; `python -m archive.recorder` does the same without the GUI. See [Recorded Team Traffic](#recorded-team-traffic).
@@ -1739,13 +1743,19 @@ Secrets, one `KEY=VALUE` per line (copy `.env.example`): `STORM_MQTT_PASSWORD`, 
 
 ### config.py
 
-`config.py` holds constants that are the same for every install:
+`config.py` holds the few constants that aren't per-team settings (those are in `storm.toml`, `docs/configuration.md`):
 
 | Constant | Description |
 |----------|-------------|
 | `ACCENT_COLOR` | UI accent color (default: `"#00CFFF"`, cyan) |
-| `VEHICLE_ID` | Default vehicle ID (overridden by launch dialog) |
-| `OBS_FILE_DIR` | Default data directory path (overridden by launch dialog); its file and columns are `[obs_columns]` |
+| `VEHICLE_ID`, `VEHICLE_ICON` | Defaults for the launch window's vehicle ID and icon (overridden there) |
+| `OBS_FILE_DIR`, `OBS_FILE_LAYOUT` | Defaults for the logger folder and its `[obs_columns]` layout (overridden by the launch window); the file's columns are `[obs_columns]` |
+| `OBS_FILE_POLL_S` | How often the logger file is read for the local display (default 1 s) |
+| `OBS_MQTT_PUBLISH_S` | How often your vehicle's obs are published for the others (default 5 s) |
+| `GPS_BAUD` | Serial baud rate for a GPS receiver (default 4800) |
+| `LAYER_AGE_THRESHOLDS_MIN` | Per layer, the data age (minutes) at which its time label turns amber and its toolbar button gets an amber dot |
+| `ADMIN_PASSPHRASE_HASH`, `ORS_API_KEY` | Read from `STORM_ADMIN_PASSPHRASE_HASH` and `ORS_API_KEY` in the environment or `.env`; never stored in the file |
+| `HOME_LAT`, `HOME_LON` | The map home from `[map]` in `storm.toml` |
 
 ### Persistent Session State (QSettings)
 
