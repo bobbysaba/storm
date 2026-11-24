@@ -11,13 +11,16 @@ class SoundingControls(Drawer):
     Presents mutually-exclusive source buttons:
         [HRRR]  — click anywhere on map to fetch HRRR point sounding (live only)
         [OBS]   — radiosonde station dots appear; click one to fetch observed data
-        [NSSL]  — NSSL mobile soundings (archive: lidar truck sondes, then
-                  CLAMPS TROPoe retrievals)
-        [COPTERSONDE] — PERiLS CopterSonde ascents, picked by site (archive only)
+        [NSSL]  — a provider's soundings, named by it (NSSL: the lidar
+                  truck's sondes; in archive then its retrievals)
+        [UAS]   — a provider's uncrewed-aircraft ascents, picked by site,
+                  named by it (archive only; NSSL: COPTERSONDE)
+        then one button per sounding source (data/sources.py), live only;
+        its mode is "source:<id>"
     """
 
-    mode_changed   = pyqtSignal(str)   # "hrrr", "obs", "nssl" or "coptersonde"
-    coptersonde_selected = pyqtSignal(object)   # SoundingSet of the picked site
+    mode_changed   = pyqtSignal(str)   # "hrrr", "obs", "provider", "uas" or "source:<id>"
+    uas_selected   = pyqtSignal(object)   # SoundingSet of the picked site
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -46,34 +49,35 @@ class SoundingControls(Drawer):
 
         self._btn_hrrr = self._btn("HRRR")
         self._btn_obs  = self._btn("OBS")
-        self._btn_nssl = self._btn("NSSL")
-        self._btn_copter = self._btn("COPTERSONDE")
-        self._btn_copter.setToolTip("PERiLS CopterSonde (UAS) ascents on this day")
-        self._copter_combo = QComboBox()
-        self._copter_combo.setToolTip("CopterSonde launch site")
-        self._copter_combo.currentIndexChanged.connect(self._on_copter_selected)
+        self._btn_provider = self._btn("PROVIDER")
+        self._btn_uas = self._btn("UAS")
+        self._uas_combo = QComboBox()
+        self._uas_combo.setToolTip("Launch site")
+        self._uas_combo.currentIndexChanged.connect(self._on_uas_selected)
         self._buttons = {"hrrr": self._btn_hrrr, "obs": self._btn_obs,
-                         "nssl": self._btn_nssl, "coptersonde": self._btn_copter}
+                         "provider": self._btn_provider, "uas": self._btn_uas}
 
         self._btn_hrrr.setChecked(True)   # default source
 
         self._btn_hrrr.toggled.connect(lambda on: self._on_mode_toggled("hrrr", on))
         self._btn_obs.toggled.connect( lambda on: self._on_mode_toggled("obs",  on))
-        self._btn_nssl.toggled.connect(lambda on: self._on_mode_toggled("nssl", on))
-        self._btn_copter.toggled.connect(lambda on: self._on_mode_toggled("coptersonde", on))
+        self._btn_provider.toggled.connect(lambda on: self._on_mode_toggled("provider", on))
+        self._btn_uas.toggled.connect(lambda on: self._on_mode_toggled("uas", on))
 
         self._hrrr_div = self._vdiv()
         row.addWidget(self._btn_hrrr)
         row.addWidget(self._hrrr_div)
         row.addWidget(self._btn_obs)
-        row.addWidget(self._vdiv())
-        row.addWidget(self._btn_nssl)
-        self._copter_div = self._vdiv()
-        row.addWidget(self._copter_div)
-        row.addWidget(self._btn_copter)
-        row.addWidget(self._copter_combo)
+        self._provider_div = self._vdiv()
+        row.addWidget(self._provider_div)
+        row.addWidget(self._btn_provider)
+        self._uas_div = self._vdiv()
+        row.addWidget(self._uas_div)
+        row.addWidget(self._btn_uas)
+        row.addWidget(self._uas_combo)
+        self._row = row
         row.addStretch(1)
-        for w in (self._copter_div, self._btn_copter, self._copter_combo):
+        for w in (self._uas_div, self._btn_uas, self._uas_combo):
             w.hide()
 
         col.addWidget(btn_row)
@@ -112,7 +116,7 @@ class SoundingControls(Drawer):
                 btn.blockSignals(True)
                 btn.setChecked(False)
                 btn.blockSignals(False)
-        self._show_copter_combo()
+        self._show_uas_combo()
 
         self.mode_changed.emit(mode)
 
@@ -124,11 +128,39 @@ class SoundingControls(Drawer):
         self._default_mode = "hrrr" if available else "obs"
         self.reset_mode()
 
-    def set_coptersonde_available(self, available: bool):
-        """Show COPTERSONDE (archive mode)."""
-        self._copter_div.setVisible(available)
-        self._btn_copter.setVisible(available)
-        self._show_copter_combo()
+    def set_provider_available(self, label: str | None):
+        """A provider's soundings (live_sounding_fetcher, or ARCHIVE's
+        archive_sounding_fetcher), on a button named *label* ("NSSL");
+        hidden when None."""
+        if label:
+            self._btn_provider.setText(label)
+        self._provider_div.setVisible(bool(label))
+        self._btn_provider.setVisible(bool(label))
+        self.content_changed()
+
+    def set_uas_available(self, label: str | None, tooltip: str = ""):
+        """A provider's uncrewed-aircraft ascents (archive mode), on a button
+        named *label* (NSSL's: COPTERSONDE); hidden when None."""
+        if label:
+            self._btn_uas.setText(label)
+            self._btn_uas.setToolTip(tooltip or "Uncrewed-aircraft (UAS) ascents on this day")
+        self._uas_div.setVisible(bool(label))
+        self._btn_uas.setVisible(bool(label))
+        self._show_uas_combo()
+        self.content_changed()
+
+    def add_source_button(self, mode: str, short: str, name: str, missing_key: str = ""):
+        """A button for a sounding source; greyed out, naming the variable,
+        when its API key isn't set."""
+        btn = self._btn(short)
+        btn.setToolTip(f"{name}: needs {missing_key} in .env" if missing_key else name)
+        btn.setEnabled(not missing_key)
+        btn.toggled.connect(lambda on: self._on_mode_toggled(mode, on))
+        self._buttons[mode] = btn
+        # before the stretch
+        at = self._row.count() - 1
+        self._row.insertWidget(at, self._vdiv())
+        self._row.insertWidget(at + 1, btn)
         self.content_changed()
 
     def reset_mode(self):
@@ -138,34 +170,34 @@ class SoundingControls(Drawer):
             btn.blockSignals(True)
             btn.setChecked(mode == self._default_mode)
             btn.blockSignals(False)
-        self._show_copter_combo()
+        self._show_uas_combo()
 
-    def set_coptersondes(self, sets: dict):
-        """List the day's CopterSonde sites ({site: SoundingSet}) and emit the
+    def set_uas_sets(self, sets: dict):
+        """List the day's UAS launch sites ({site: SoundingSet}) and emit the
         first, or the one already picked if it's still there."""
-        previous = self._copter_combo.currentText()
-        self._copter_combo.blockSignals(True)
-        self._copter_combo.clear()
+        previous = self._uas_combo.currentText()
+        self._uas_combo.blockSignals(True)
+        self._uas_combo.clear()
         for site, sset in sorted(sets.items()):
-            self._copter_combo.addItem(site, sset)
-        index = self._copter_combo.findText(previous)
-        self._copter_combo.setCurrentIndex(index if index >= 0 else 0)
-        self._copter_combo.blockSignals(False)
-        self._show_copter_combo()
+            self._uas_combo.addItem(site, sset)
+        index = self._uas_combo.findText(previous)
+        self._uas_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._uas_combo.blockSignals(False)
+        self._show_uas_combo()
         self.content_changed()
         if sets:
-            self._on_copter_selected()
+            self._on_uas_selected()
 
-    def _show_copter_combo(self):
-        self._copter_combo.setVisible(
-            self._btn_copter.isVisibleTo(self) and self._active_mode == "coptersonde"
-            and self._copter_combo.count() > 0
+    def _show_uas_combo(self):
+        self._uas_combo.setVisible(
+            self._btn_uas.isVisibleTo(self) and self._active_mode == "uas"
+            and self._uas_combo.count() > 0
         )
 
-    def _on_copter_selected(self, _index=None):
-        sset = self._copter_combo.currentData()
-        if sset is not None and self._active_mode == "coptersonde":
-            self.coptersonde_selected.emit(sset)
+    def _on_uas_selected(self, _index=None):
+        sset = self._uas_combo.currentData()
+        if sset is not None and self._active_mode == "uas":
+            self.uas_selected.emit(sset)
 
     @property
     def active_mode(self) -> str:

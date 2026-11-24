@@ -4,6 +4,7 @@ import logging
 import json
 from datetime import datetime, timezone
 from PyQt6.QtCore import QTimer
+import config
 from ui.click_mode import kind_of
 from ui.dialogs.annotation_dialog import (
     AnnotationPlaceDialog, AnnotationEditDialog, AnnotationMoveConfirmDialog,
@@ -36,6 +37,10 @@ class MainWindowMapObjectsMixin:
         # tool selection → set cursor mode
         self.annotation_tools.tool_selected.connect(self._on_annotation_tool_selected)
         self.annotation_tools.refresh_requested.connect(self._on_refresh_current_json)
+        # retained messages cover late joiners on most brokers; NSSL's AWS IoT
+        # broker doesn't send them on wildcard subscriptions, so a setup
+        # with [mqtt] shared_items_url offers a re-fetch instead
+        self.annotation_tools.set_refresh_visible(getattr(self, "_fetch_startup_items", None) is not None)
 
         # map click → place annotation (if tool is active)
         self.map_widget.map_clicked.connect(self._on_map_click)
@@ -142,7 +147,8 @@ class MainWindowMapObjectsMixin:
             for fid in existing_forks:
                 self._delete_annotation(fid)
             self._click_modes.exit()
-            self._place_annotation(Annotation.new(type_key="fork", lat=lat, lon=lon))
+            self._place_annotation(Annotation.new(type_key="fork", lat=lat, lon=lon,
+                                                  creator=config.VEHICLE_ID))
             return
         dlg = AnnotationPlaceDialog(type_key, lat, lon, viewer_mode=self._viewer, parent=self)
         if dlg.exec() == AnnotationPlaceDialog.DialogCode.Accepted:
@@ -151,6 +157,7 @@ class MainWindowMapObjectsMixin:
                 lat=lat,
                 lon=lon,
                 label=dlg.result_label(),
+                creator=config.VEHICLE_ID,
             )
             self._place_annotation(annotation)
 
@@ -287,6 +294,7 @@ class MainWindowMapObjectsMixin:
             title=title,
             color=color,
             line_style=line_style,
+            creator=config.VEHICLE_ID,
         )
         dlg = DrawingPlaceConfirmDialog(drawing_type, len(pts), parent=self)
         if dlg.exec() != DrawingPlaceConfirmDialog.DialogCode.Accepted:
@@ -495,6 +503,7 @@ class MainWindowMapObjectsMixin:
             heading=heading,
             speed_kts=speed_kts,
             valid_at=scan_time,
+            creator=config.VEHICLE_ID,
         )
         self._click_modes.exit()
         self._place_storm_cone(cone)
@@ -565,7 +574,7 @@ class MainWindowMapObjectsMixin:
         if dlg.exec() != StormConePlaceConfirmDialog.DialogCode.Accepted:
             self._set_placement_prompt("storm cone — click and drag to place", needs_click=False)
             return
-        cone = StormCone.new(lat, lon, **self._pending_cone_params)
+        cone = StormCone.new(lat, lon, creator=config.VEHICLE_ID, **self._pending_cone_params)
         self._pending_cone_params = None
         self._click_modes.exit()
         self._clear_placement_prompt()

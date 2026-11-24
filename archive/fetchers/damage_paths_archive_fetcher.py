@@ -28,7 +28,6 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-import config
 from core import package_sources
 from core.qt_signals import emit_alive
 from data import endpoints
@@ -227,7 +226,7 @@ def fetch_dat_damage_paths(
     url = _arcgis_query_url(west, south, east, north, day, tolerance_days)
     request = Request(url, headers={"User-Agent": _USER_AGENT})
     payload = package_sources.read_url(
-        "damage paths", request, urlopen, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT,
+        "damage paths", request, urlopen, timeout=_REQUEST_TIMEOUT,
     ).decode("utf-8")
     fc = json.loads(payload)
     if not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
@@ -250,7 +249,7 @@ def _ncei_details_url(year: int) -> str:
     base = NCEI_EVENT_CSV_BASE_URL.rstrip("/")
     request = Request(base + "/", headers={"User-Agent": _USER_AGENT})
     html = package_sources.read_url(
-        "damage paths", request, urlopen, timeout=_NCEI_TIMEOUT, context=config.NSSL_SSL_CONTEXT,
+        "damage paths", request, urlopen, timeout=_NCEI_TIMEOUT,
     ).decode("utf-8", errors="replace")
     pattern = re.compile(rf"StormEvents_details-ftp_v1\.0_d{int(year)}_c(\d{{8}})\.csv\.gz")
     matches = sorted(set(pattern.findall(html)))
@@ -338,7 +337,7 @@ def _ncei_tornadoes(year: int) -> list[dict]:
         url = _ncei_details_url(year)
         request = Request(url, headers={"User-Agent": _USER_AGENT})
         raw = package_sources.read_url(
-            "damage paths", request, urlopen, timeout=_NCEI_TIMEOUT, context=config.NSSL_SSL_CONTEXT,
+            "damage paths", request, urlopen, timeout=_NCEI_TIMEOUT,
         )
         text = gzip.decompress(raw).decode("utf-8", errors="replace")
         features = []

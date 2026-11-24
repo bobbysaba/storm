@@ -1,10 +1,15 @@
 
+import logging
+
 import numpy as np
 import metpy.calc as mpcalc
 from metpy.units import units
 
+from core import units as display_units
 from core.sounding import Sounding
 from ui.sounding.theme import _MUTED
+
+log = logging.getLogger(__name__)
 
 
 _THRESHOLDS: dict[str, list] = {
@@ -35,19 +40,6 @@ _THRESHOLDS: dict[str, list] = {
     "sfc_the":   [(320, _MUTED), (335, "#f9ca24"), (350, "#f0932b"), (365, "#eb4d4b")],
     "pw":        [(0, _MUTED), (25,  "#f9ca24"), (38,  "#4fc3f7"), (50,  "#74b9ff")],
 }
-
-
-def _threshold_color(key: str, value) -> str | None:
-    thresholds = _THRESHOLDS.get(key)
-    if not thresholds or value is None:
-        return None
-    if not np.isfinite(value):
-        return None
-    color = thresholds[0][1]
-    for threshold, c in thresholds:
-        if value >= threshold:
-            color = c
-    return color
 
 
 def _finite_float(value) -> float | None:
@@ -82,7 +74,7 @@ _SCALAR_PARAMS = [
     ("lr03",    "LR 0-3 km",  "°C/km", _MUTED),
     ("sfc_the", "SFC θe",     "K",     "#ff9f43"),
     ("pw",      "PW",         "mm",    "#4ecdc4"),
-    ("conv_t",  "Conv Temp",  "°F",    "#ff9f43"),
+    ("conv_t",  "Conv Temp",  display_units.temp_label(), "#ff9f43"),
     ("stp",     "STP",        "",      "#fd79a8"),
     ("scp",     "SCP",        "",      "#b39ddb"),
     ("ehi",     "EHI",        "",      "#fd79a8"),
@@ -160,3 +152,122 @@ def _vt_cape_cin(pres, temp, dewp, parcel_profile, init_pres, init_temp, init_de
     except Exception:
         cape, cin = mpcalc.cape_cin(pres, temp, dewp, parcel_profile)
         return float(cape.to("J/kg").m), float(cin.to("J/kg").m)
+
+
+def _key_params(snd: Sounding) -> dict:
+    """Calculate a compact set of params for comparison strip display."""
+    out: dict = {}
+    try:
+        pres = snd.pressure    * units.hPa
+        temp = snd.temperature * units.degC
+        dewp = snd.dewpoint    * units.degC
+        wind_valid = (
+            np.isfinite(snd.pressure) & np.isfinite(snd.height)
+            & np.isfinite(snd.u_wind) & np.isfinite(snd.v_wind)
+        )
+        wind_pres    = snd.pressure[wind_valid] * units.hPa
+        wind_u_ms    = snd.u_wind[wind_valid]   * units("m/s")
+        wind_v_ms    = snd.v_wind[wind_valid]   * units("m/s")
+        wind_hgt     = snd.height[wind_valid]   * units.m
+        wind_hgt_agl = (snd.height[wind_valid] - snd.height[0]) * units.m
+
+        # SB CAPE
+        try:
+            sb_p = mpcalc.parcel_profile(pres, temp[0], dewp[0])
+            sb_cape, _ = _vt_cape_cin(pres, temp, dewp, sb_p,
+                                      pres[0:1], temp[0:1], dewp[0:1])
+            out["sbcape"] = sb_cape
+        except Exception:
+            out["sbcape"] = None
+
+        # ML CAPE
+        try:
+            ml_p2, ml_t2, ml_td2 = mpcalc.mixed_parcel(pres, temp, dewp,
+                                                         depth=100 * units.hPa)
+            ml_par = mpcalc.parcel_profile(pres, ml_t2, ml_td2)
+            ml_cape, _ = _vt_cape_cin(
+                pres, temp, dewp, ml_par,
+                ml_p2.reshape(1) if hasattr(ml_p2, "reshape") else ml_p2,
+                ml_t2.reshape(1) if hasattr(ml_t2, "reshape") else ml_t2,
+                ml_td2.reshape(1) if hasattr(ml_td2, "reshape") else ml_td2,
+            )
+            out["mlcape"] = ml_cape
+        except Exception:
+            out["mlcape"] = None
+
+        # MU CAPE
+        try:
+            mu_res = mpcalc.most_unstable_parcel(pres, temp, dewp, depth=300 * units.hPa)
+            mu_par = mpcalc.parcel_profile(pres, mu_res[1], mu_res[2])
+            mu_cape, _ = _vt_cape_cin(
+                pres, temp, dewp, mu_par,
+                mu_res[0].reshape(1) if hasattr(mu_res[0], "reshape") else mu_res[0],
+                mu_res[1].reshape(1) if hasattr(mu_res[1], "reshape") else mu_res[1],
+                mu_res[2].reshape(1) if hasattr(mu_res[2], "reshape") else mu_res[2],
+            )
+            out["mucape"] = mu_cape
+        except Exception:
+            out["mucape"] = None
+
+        # SRH + shear (need Bunkers)
+        try:
+            if wind_valid.sum() >= 4:
+                rm, _, _ = mpcalc.bunkers_storm_motion(
+                    wind_pres, wind_u_ms, wind_v_ms, wind_hgt)
+                srh01, _, _ = mpcalc.storm_relative_helicity(
+                    wind_hgt_agl, wind_u_ms, wind_v_ms, depth=1 * units.km,
+                    storm_u=rm[0].to("m/s"), storm_v=rm[1].to("m/s"))
+                srh03, _, _ = mpcalc.storm_relative_helicity(
+                    wind_hgt_agl, wind_u_ms, wind_v_ms, depth=3 * units.km,
+                    storm_u=rm[0].to("m/s"), storm_v=rm[1].to("m/s"))
+                out["srh01"] = float(srh01.to("m**2/s**2").m)
+                out["srh03"] = float(srh03.to("m**2/s**2").m)
+        except Exception:
+            out.setdefault("srh01", None)
+            out.setdefault("srh03", None)
+
+        # 0-6 km shear
+        try:
+            if wind_valid.sum() >= 2:
+                us, vs = mpcalc.bulk_shear(
+                    wind_pres, wind_u_ms, wind_v_ms,
+                    height=wind_hgt_agl, depth=6 * units.km)
+                out["shear06"] = float(np.sqrt(us**2 + vs**2).to("knots").m)
+        except Exception:
+            out.setdefault("shear06", None)
+
+        # STP
+        try:
+            ml_lcl_m = None
+            if out.get("mlcape") is not None:
+                ml_lcl_p, _ = mpcalc.lcl(
+                    ml_p2.reshape(1)[0] if hasattr(ml_p2, "reshape") else ml_p2,
+                    ml_t2.reshape(1)[0] if hasattr(ml_t2, "reshape") else ml_t2,
+                    ml_td2.reshape(1)[0] if hasattr(ml_td2, "reshape") else ml_td2,
+                )
+                ml_lcl_m = float(np.interp(
+                    ml_lcl_p.to("hPa").m, snd.pressure[::-1], snd.height[::-1]
+                )) - snd.height[0]
+            if (out.get("mlcape") and ml_lcl_m is not None
+                    and out.get("srh01") and out.get("shear06")):
+                lcl_term   = max(0.0, (2000.0 - ml_lcl_m) / 1000.0)
+                shear_term = min(out["shear06"] / 20.0, 1.5)
+                out["stp"] = max(0.0,
+                    (out["mlcape"] / 1500.0) * lcl_term
+                    * (out["srh01"] / 150.0) * shear_term)
+        except Exception:
+            out.setdefault("stp", None)
+
+        # SCP
+        try:
+            if (out.get("mucape") and out.get("srh01") and out.get("shear06")):
+                out["scp"] = max(0.0,
+                    (out["mucape"] / 1000.0) * (out["srh01"] / 50.0)
+                    * (out["shear06"] / 20.0))
+        except Exception:
+            out.setdefault("scp", None)
+
+    except Exception as e:
+        log.debug("_key_params failed: %s", e)
+
+    return out

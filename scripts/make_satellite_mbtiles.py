@@ -4,8 +4,18 @@ Download USGS National Map satellite imagery and package into an MBTiles file.
 
 Source : USGS National Map — USGSImageryOnly (public domain, no API key required)
 Output : tiles/satellite.mbtiles  (JPEG raster tiles, TMS y-axis, zoom 0-12)
-Runtime: roughly 20-40 minutes on a decent connection with 20 workers
+Runtime: roughly 20-40 minutes for the central US on a decent connection
+
+USGS imagery covers the US only. Pick your area with --bbox (the default is
+the central US box STORM's shipped tiles cover); an interrupted run resumes:
+
+    python scripts/make_satellite_mbtiles.py --bbox -125,24,-66,50 --maxzoom 10
+
+Tile count grows 4x per zoom level: zoom 12 over the whole CONUS is about
+7 million tiles, so lower --maxzoom for big areas.
 """
+
+import argparse
 
 import math
 import os
@@ -106,8 +116,27 @@ def _already_done(conn: sqlite3.Connection) -> set:
     return {(z, x, (1 << z) - 1 - y_tms) for z, x, y_tms in cur.fetchall()}
 
 
+def _args():
+    parser = argparse.ArgumentParser(description="Build tiles/satellite.mbtiles from USGS imagery.")
+    parser.add_argument("--bbox", default=f"{WEST},{SOUTH},{EAST},{NORTH}", metavar="W,S,E,N",
+                        help="area in degrees (default: %(default)s)")
+    parser.add_argument("--maxzoom", type=int, default=MAX_ZOOM, choices=range(1, 17), metavar="Z",
+                        help="highest zoom (default: %(default)s)")
+    parser.add_argument("--output", default=OUTPUT, help="MBTiles file to write (default: tiles/satellite.mbtiles)")
+    args = parser.parse_args()
+    try:
+        west, south, east, north = (float(v) for v in args.bbox.split(","))
+    except ValueError:
+        parser.error("--bbox takes four numbers: west,south,east,north")
+    if not (-180 <= west < east <= 180 and -85 <= south < north <= 85):
+        parser.error("--bbox must be west,south,east,north with west < east and south < north")
+    return west, south, east, north, args.maxzoom, args.output
+
+
 def main():
-    output = os.path.normpath(OUTPUT)
+    global WEST, SOUTH, EAST, NORTH, MAX_ZOOM
+    WEST, SOUTH, EAST, NORTH, MAX_ZOOM, out = _args()
+    output = os.path.normpath(out)
     print(f"Output : {output}")
     print(f"Bounds : {WEST},{SOUTH} → {EAST},{NORTH}")
     print(f"Zooms  : {MIN_ZOOM}–{MAX_ZOOM}")

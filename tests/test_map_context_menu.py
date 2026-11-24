@@ -53,10 +53,11 @@ def test_nearest_radar_sites_lists_the_closest_three():
     assert radar.children[0].label.startswith("KTLX")
 
 
-def test_clamps_only_when_in_range_and_live():
-    assert find(build_menu(_ctx(clamps=True)), "sounding_clamps") is not None
-    assert find(build_menu(_ctx()), "sounding_clamps") is None
-    assert find(build_menu(_ctx(ARCHIVE, clamps=True)), "sounding_clamps") is None
+def test_provider_sounding_only_when_in_range_and_live():
+    item = find(build_menu(_ctx(provider_sounding="NSSL")), "sounding_provider")
+    assert item is not None and item.label == "NSSL"
+    assert find(build_menu(_ctx()), "sounding_provider") is None
+    assert find(build_menu(_ctx(ARCHIVE, provider_sounding="NSSL")), "sounding_provider") is None
 
 
 def test_no_sounding_menu_without_a_source():

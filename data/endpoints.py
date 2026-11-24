@@ -1,17 +1,13 @@
 """Where STORM's data comes from, apart from THREDDS: the AWS open-data
-buckets and every web API, in one place.
+buckets and every public web API, in one place.
 
-THREDDS folders are in data/thredds_paths.py. When a provider moves an
-endpoint, change it here; the fetchers build their URLs from this file.
-Run `python scripts/check_data_sources.py` to check that every endpoint
-here (and every THREDDS folder) still answers.
-
-The NSSL API's root comes from config.NSSL_API_ROOT (it can be overridden
-with the NSSL_API_ROOT environment variable); only its paths are here.
+THREDDS folders are in data/thredds_paths.py; the NSSL API and NSSL's
+THREDDS folders are in providers/nssl/. When a source moves an endpoint,
+change it here; the fetchers build their URLs from this file. Run
+`python scripts/check_data_sources.py` to check that every endpoint here
+(and every THREDDS folder) still answers.
 """
 from __future__ import annotations
-
-import config
 
 # ---- AWS open data (archive mode) -----------------------------------------------------
 NEXRAD_LEVEL2_BUCKET = "https://unidata-nexrad-level2.s3.amazonaws.com"   # <YYYY>/<MM>/<DD>/<SITE>/
@@ -21,25 +17,6 @@ GOES19_BUCKET = "noaa-goes19"
 
 def s3_bucket_url(bucket: str) -> str:
     return f"https://{bucket}.s3.amazonaws.com"
-
-
-# ---- NSSL API (root: config.NSSL_API_ROOT) ---------------------------------------------
-NSSL_CURRENT_OBS = "current.json"
-NSSL_MESONETS = {                       # live surface obs, by network
-    "ok": "data/mesonet/ok_mesonet.json",
-    "wtx": "data/mesonet/wtx_mesonet.json",
-    "ks": "data/mesonet/ks_mesonet.json",
-    "co": "data/mesonet/co_mesonet.json",
-    "ne": "data/mesonet/ne_mesonet.json",
-    "sd": "data/mesonet/sd_mesonet.json",
-}
-NSSL_CO_MESONET_METADATA = "data/mesonet/co_metadata.json"
-NSSL_SONDE_INDEX = "data/sonde/index.json"                  # CLAMPS / lidar-truck soundings
-
-
-def nssl_api(path: str) -> str:
-    """A full NSSL API URL for one of the paths above."""
-    return f"{config.NSSL_API_ROOT.rstrip('/')}/{path.lstrip('/')}"
 
 
 # ---- Iowa Environmental Mesonet (IEM) -----------------------------------------------------
@@ -83,15 +60,8 @@ NCEI_STORM_EVENTS_CSV = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csv
 OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
-# ---- other surface networks (station lists) ------------------------------------------------------
-OK_MESONET_CURRENT = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
-WTM_SITES = "https://api.mesonet.ttu.edu/mesoweb/sites/"
-
 # ---- live satellite fallback ------------------------------------------------------------------
 NOWCOAST_SATELLITE_WMS = "https://nowcoast.noaa.gov/geoserver/satellite/wms"
-
-# ---- mesoanalysis tiles -------------------------------------------------------------------------
-SATSQUATCH_TILES = "https://tiledata.satsquatch.com/tilesdata"
 
 # ---- routing ---------------------------------------------------------------------------------------
 OPENROUTESERVICE_DRIVING = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -110,12 +80,6 @@ def all_endpoints() -> list[tuple[str, str]]:
         ("AWS NEXRAD Level 2", f"{NEXRAD_LEVEL2_BUCKET}/?list-type=2&max-keys=1"),
         ("AWS GOES-16", f"{s3_bucket_url(GOES16_BUCKET)}/?list-type=2&max-keys=1"),
         ("AWS GOES-19", f"{s3_bucket_url(GOES19_BUCKET)}/?list-type=2&max-keys=1"),
-        ("NSSL API current obs", nssl_api(NSSL_CURRENT_OBS)),
-        ("NSSL API CO mesonet metadata", nssl_api(NSSL_CO_MESONET_METADATA)),
-        ("NSSL API sonde index", nssl_api(NSSL_SONDE_INDEX)),
-    ]
-    out += [(f"NSSL API {net.upper()} mesonet", nssl_api(path)) for net, path in NSSL_MESONETS.items()]
-    out += [
         ("IEM METAR stations", f"{IEM_METAR_GEOJSON}?only_new=1"),
         ("IEM ASOS currents", f"{IEM_CURRENTS}?station=OMA"),
         ("IEM soundings", f"{IEM_RAOB}?ts=202405171200&station=KOAX"),
@@ -138,10 +102,7 @@ def all_endpoints() -> list[tuple[str, str]]:
         ("open-meteo forecast", f"{OPEN_METEO_FORECAST}?latitude=41&longitude=-96&hourly=temperature_2m&forecast_days=1"),
         ("open-meteo historical", f"{OPEN_METEO_HISTORICAL}?latitude=41&longitude=-96&hourly=temperature_2m"
                                   "&start_date=2024-05-17&end_date=2024-05-17"),
-        ("Oklahoma Mesonet stations", OK_MESONET_CURRENT),
-        ("West Texas Mesonet sites", WTM_SITES),
         ("nowCOAST satellite WMS", f"{NOWCOAST_SATELLITE_WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities"),
-        ("SatSquatch mesoanalysis tiles", f"{SATSQUATCH_TILES}/"),
         ("OpenRouteService", OPENROUTESERVICE_DRIVING),
         ("Nominatim", f"{NOMINATIM_SEARCH}?q=Norman%2C+OK&format=json&limit=1"),
         ("OpenFreeMap base map", OPENFREEMAP_TILEJSON),

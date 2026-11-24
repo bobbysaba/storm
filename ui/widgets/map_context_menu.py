@@ -51,7 +51,7 @@ class MenuContext:
     feature: dict | None = None
     hrrr: bool = False                    # a point model sounding can be fetched
     raob: dict | None = None              # nearest radiosonde (sounding_utils.nearest_obs_station)
-    clamps: bool = False                  # the last CLAMPS launch is in range of this point
+    provider_sounding: str = ""           # the provider's label when its last launch is in range of this point
     radar_sites: tuple[tuple[str, float], ...] = ()   # (site id, distance km), nearest first
     annotations: bool = False             # annotation and drawing tools are running
     cones: bool = False                   # storm cones are running
@@ -59,8 +59,9 @@ class MenuContext:
     vehicle_timeseries: bool = False      # this vehicle has met history to plot
 
 
-def _km_to_mi(km: float) -> float:
-    return km * 0.621371
+def _dist(km: float) -> str:
+    from core import units  # noqa: PLC0415
+    return f"{units.dist(km):.0f} {units.dist_label()}"
 
 
 def _sounding_menu(ctx: MenuContext, lat: float, lon: float) -> Item | None:
@@ -70,11 +71,11 @@ def _sounding_menu(ctx: MenuContext, lat: float, lon: float) -> Item | None:
     if ctx.raob:
         r = ctx.raob
         items.append(Item(
-            f"Nearest RAOB: {r['station_id']} ({_km_to_mi(r['distance_km']):.0f} mi)",
+            f"Nearest RAOB: {r['station_id']} ({_dist(r['distance_km'])})",
             "sounding_raob", (r["station_id"],),
         ))
-    if ctx.clamps and ctx.mode != ARCHIVE:
-        items.append(Item("CLAMPS", "sounding_clamps"))
+    if ctx.provider_sounding and ctx.mode != ARCHIVE:
+        items.append(Item(ctx.provider_sounding, "sounding_provider"))
     if not items:
         return None
     return Item("Sounding here", children=tuple(items))
@@ -176,7 +177,7 @@ def build_menu(ctx: MenuContext) -> list[Item]:
 
     if ctx.radar_sites:
         items.append(Item("Nearest radar site", children=tuple(
-            Item(f"{site}  ({_km_to_mi(km):.0f} mi)", "radar_site", (site,))
+            Item(f"{site}  ({_dist(km)})", "radar_site", (site,))
             for site, km in ctx.radar_sites[:3]
         )))
 

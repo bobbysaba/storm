@@ -1,0 +1,224 @@
+# NSSL's STORM setup. Copy to storm.toml in the STORM folder:
+#
+#   cp profiles/nssl.toml storm.toml
+#
+# Publishing (VEHICLE, MONITOR) needs the team certificates in
+# providers/nssl/certs/team/, handed out by the STORM team; VIEWER uses the
+# read-only viewer certificate shipped in providers/nssl/certs/viewer/. The
+# NSSL API layers also need NSSL_API_KEY in .env (ask the STORM team). See
+# docs/configuration.md for every key.
+
+# NSSL's AWS IoT Core broker. AWS IoT only accepts certificate logins.
+[mqtt]
+host = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
+port = 8883
+tls = "mutual"
+ca_cert = "providers/nssl/certs/AmazonRootCA1.pem"
+cert_file = "providers/nssl/certs/team/storm.pem.crt"
+key_file = "providers/nssl/certs/team/storm-private.pem.key"
+# the viewer certificate's policy only allows storm/*, so keep this
+topic_root = "storm"
+# shared items clear at 08 UTC (2-3 a.m. Central), between Plains field days
+daily_reset_utc = 8
+# AWS IoT doesn't send retained messages on wildcard subscriptions, so the
+# day's shared items come from the NSSL API at startup (and the annotation
+# drawer's Refresh); needs NSSL_API_KEY
+shared_items_url = "https://api.nssl.noaa.gov/current.json"
+
+# The shipped viewer certificate: its AWS IoT policy
+# (providers/nssl/certs/viewer/viewer-policy.json) only lets it subscribe,
+# and only with a "viewer-" client ID.
+[mqtt.viewer]
+cert_file = "providers/nssl/certs/viewer/viewer.pem.crt"
+key_file = "providers/nssl/certs/viewer/viewer-private.pem.key"
+client_id_prefix = "viewer-"
+
+# The map opens on Norman, OK, also the fallback position while your vehicle
+# has none (ARCHIVE's first radar site, a new scan sector).
+[map]
+home_lat = 35.22
+home_lon = -97.44
+zoom = 6
+# ARCHIVE's clocks beside UTC: Central and Mountain, for Plains field days
+time_zones = ["America/Chicago", "America/Denver"]
+# PREV LOCS: NSSL's past deployment locations
+deployment_locations = "providers/nssl/locs/deployment_locations.csv"
+
+# How STORM asks NSSL's servers, wherever the URL comes from (the mesonets
+# below, recorded history, shared items, the provider's layers). Both leave
+# the Sectigo intermediate out of their TLS chains, so trust it here; the API
+# also wants its key (ask the STORM team; it goes in .env).
+[[auth]]
+url = "https://api.nssl.noaa.gov"
+api_key_env = "NSSL_API_KEY"
+ca_cert = "providers/nssl/certs/sectigo_public_server_authentication_ca_dv_r36.pem"
+
+[[auth]]
+url = "https://data.nssl.noaa.gov"
+ca_cert = "providers/nssl/certs/sectigo_public_server_authentication_ca_dv_r36.pem"
+
+# NSSL's data layers (providers/nssl/): the FOFS mobile mesonet, CLAMPS and the
+# lidar truck from NSSL's public THREDDS server; live CLAMPS
+# soundings from the NSSL API, which needs NSSL_API_KEY. The regional
+# mesonets and SFCOA are [[sources]] below.
+[providers.nssl]
+enabled = true
+# NSSL is this setup's own team: its drawer's vehicles start on and aren't
+# tagged "NSSL", and its recorded traffic's pre-3.0 vehicle IDs (lid1, p1)
+# read as their FOFS folder names (dltruck, probe1). A new vehicle's ID is its
+# FOFS folder name: providers/nssl/ADDING_A_VEHICLE.md has the steps
+team = true
+
+# The regional mesonets in SURFACE, from the NSSL API: the [[auth]] table
+# above adds the key and CA (without NSSL_API_KEY their buttons are off).
+# Every key is in docs/data-sources.md.
+[[sources]]
+id = "ok"
+kind = "station_obs"
+name = "Oklahoma Mesonet"
+short = "OK"
+url = "https://api.nssl.noaa.gov/data/mesonet/ok_mesonet.json"
+# {"time": ..., "data": {"tair": {"acme": 26.5, ...}, ...}}
+shape = "columns"
+rows = "data"
+time = "time"
+fields = { temperature_c = "tair", dewpoint_c = "tdew", wind_speed_ms = "wspd", wind_dir_deg = "wdir" }
+# the public station list, which also has each station's sea-level pressure:
+# read it every cycle
+stations_url = "https://www.mesonet.org/data/public/mesonet/current/current.csv.txt"
+stations_format = "csv"
+stations_refresh_min = 5
+station_fields = { station = "STID", lat = "LAT", lon = "LON", name = "NAME", pressure_mb = "PRES" }
+
+[[sources]]
+id = "wtm"
+kind = "station_obs"
+name = "West Texas Mesonet"
+short = "WTM"
+url = "https://api.nssl.noaa.gov/data/mesonet/wtx_mesonet.json"
+rows = "results"
+fields = { station = "mid", time = "utc", temperature_c = "temp1p5m", dewpoint_c = "dp1p5m", wind_speed_ms = "wspd10m", wind_dir_deg = "wdir10m", station_pressure_mb = "pres" }
+stations_url = "https://api.mesonet.ttu.edu/mesoweb/sites/"
+stations_rows = "results"
+station_fields = { station = "mesonet_id", lat = "latitude", lon = "longitude", name = "name", elevation_m = "elevation" }
+units = { elevation_m = "ft" }
+
+[[sources]]
+id = "ks"
+kind = "station_obs"
+name = "Kansas Mesonet"
+short = "KS"
+url = "https://api.nssl.noaa.gov/data/mesonet/ks_mesonet.json"
+rows = "results"
+fields = { station = "station", name = "meta.name", lat = "meta.lat", lon = "meta.lon", time = "timestamp", temperature_c = "TEMP2MAVG", humidity_pct = "RELHUM2MAVG", wind_speed_ms = "WSPD10MAVG", wind_dir_deg = "WDIR10M", pressure_mb = "SLPAVG" }
+units = { pressure_mb = "kPa" }
+
+[[sources]]
+id = "co"
+kind = "station_obs"
+name = "Colorado Mesonet"
+short = "CO"
+url = "https://api.nssl.noaa.gov/data/mesonet/co_mesonet.json"
+# {"stations": [...], "<station>": {...}, ...}
+shape = "keyed"
+fields = { time = "time", temperature_c = "t", dewpoint_c = "dewpt", wind_speed_ms = "windSpeed", wind_dir_deg = "windDir" }
+units = { temperature_c = "F", dewpoint_c = "F", wind_speed_ms = "mph" }
+stations_url = "https://api.nssl.noaa.gov/data/mesonet/co_metadata.json"
+stations_shape = "keyed"
+station_fields = { station = "station", lat = "lat", lon = "lon", name = "name" }
+
+[[sources]]
+id = "ne"
+kind = "station_obs"
+name = "Nebraska Mesonet"
+short = "NE"
+url = "https://api.nssl.noaa.gov/data/mesonet/ne_mesonet.json"
+rows = "data"
+fields = { station = "id", name = "name", lat = "latitude", lon = "longitude", time = "timestamp", temperature_c = "data.temperature.twoMeter", dewpoint_c = "data.dewPoint.twoMeter", pressure_mb = "data.pressure.seaLevel", wind_speed_ms = ["data.wind.tenMeter.speed.avg", "data.wind.threeMeter.speed.avg"], wind_dir_deg = ["data.wind.tenMeter.direction.avg", "data.wind.threeMeter.direction.avg"] }
+
+[[sources]]
+id = "sd"
+kind = "station_obs"
+name = "South Dakota Mesonet"
+short = "SD"
+url = "https://api.nssl.noaa.gov/data/mesonet/sd_mesonet.json"
+fields = { station = "nwsid", name = "name", lat = "lat", lon = "lon", elevation_m = "elev [m]", time = "date_time [ISO8601]", temperature_c = "TA [C]", dewpoint_c = "TD [C]", wind_speed_ms = "US [m/s]", wind_dir_deg = "UD [deg]", station_pressure_mb = "PA [mbar]" }
+
+# SFCOA mesoanalysis contours from the NSSL API (the [[auth]] table above adds
+# the key and CA). Its toolbar button sits under the overflow menu.
+[[sources]]
+id = "sfcoa"
+kind = "contours"
+name = "SFCOA mesoanalysis contours"
+short = "SFCOA"
+url = "https://api.nssl.noaa.gov/data/sfcoa"
+# the server still writes .mbtiles; drop this line when it writes .pmtiles
+tiles = "mbtiles"
+
+# NSSL's two vehicle loggers. The launch window lists both under LOGGER FILE;
+# headless picks one with layout = "fofs" or "gps_ka". ARCHIVE's own
+# vehicle_obs folders, if any, are read with the first.
+[obs_columns.fofs]
+label = "FOFS mesonet logger"
+# YYYYMMDD.txt, picked over a prefixed file for the same day
+file = "*{date}.txt"
+lat = "lat"
+lon = "lon"
+date = "gps_date"            # DDMMYY
+time = "gps_time"            # HHMMSS
+date_format = "%d%m%y"
+time_format = "%H%M%S"
+temperature_c = "t_fast"
+dewpoint_c = "dewpoint"
+wind_speed_ms = "sfc_wspd"
+wind_dir_deg = "sfc_wdir"
+pressure_mb = "pressure"
+heading_deg = "compass_dir"
+
+[obs_columns.gps_ka]
+label = "GPS Ka (position only)"
+# GPS_<id>_YYYYMMDD.txt; the logger keeps writing the file it opened, past
+# midnight, so the newest one
+file = "*_????????.txt"
+lat = "Latitude"
+lon = "Longitude"
+date = "ddmmyy"
+time = "hhmmss[UTC]"
+date_format = "%d%m%y"
+time_format = "%H%M%S"
+temperature_c = ""
+dewpoint_c = ""
+wind_speed_ms = ""
+wind_dir_deg = ""
+pressure_mb = ""
+heading_deg = ""
+
+# ARCHIVE: NSSL's recorded traffic on THREDDS, then your own recordings/
+# folder. Vehicle obs are the FOFS mesonet files (the provider, the default
+# with it on). See docs/archive-data.md.
+[archive]
+history = [
+  "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/STORM/annotations",
+  "recordings",
+]
+
+# The case finder's campaigns:
+[[archive.campaigns]]
+name = "VORTEX2"
+years = [2009, 2010]
+
+[[archive.campaigns]]
+name = "RiVorS"
+years = [2017]
+
+[[archive.campaigns]]
+name = "TORUS"
+years = [2019, 2022, 2023]
+
+[[archive.campaigns]]
+name = "PERiLS"
+years = [2022, 2023]
+
+[[archive.campaigns]]
+name = "LIFT"
+years = [2024, 2025, 2026]

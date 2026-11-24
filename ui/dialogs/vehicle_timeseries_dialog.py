@@ -7,13 +7,14 @@ from PyQt6.QtWidgets import (
     QScrollArea, QWidget, QHBoxLayout, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPalette, QColor
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
+from core import units
 from core.observation import Observation
 from core.vehicle_history import VehicleHistory
+from ui.sounding.theme import _force_bg
 
 log = logging.getLogger(__name__)
 
@@ -60,27 +61,6 @@ _GAP_S = 30  # NaN gap-break threshold (seconds)
 _REDRAW_INTERVAL_MS = 1000  # live updates redraw at most this often
 
 
-def _force_bg(widget):
-    bg  = QColor(_FIG_BG)
-    txt = QColor(_TEXT)
-    pal = widget.palette()
-    for role in (
-        QPalette.ColorRole.Window, QPalette.ColorRole.Base,
-        QPalette.ColorRole.AlternateBase, QPalette.ColorRole.Button,
-        QPalette.ColorRole.Midlight, QPalette.ColorRole.Light,
-        QPalette.ColorRole.Mid, QPalette.ColorRole.Dark,
-        QPalette.ColorRole.Shadow,
-    ):
-        pal.setColor(role, bg)
-    for role in (
-        QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText,
-        QPalette.ColorRole.Text, QPalette.ColorRole.BrightText,
-    ):
-        pal.setColor(role, txt)
-    widget.setPalette(pal)
-    widget.setAutoFillBackground(True)
-
-
 class _HistoryIndex:
     """Plot-array index -> Observation, built on demand from a VehicleHistory."""
 
@@ -103,8 +83,8 @@ def _build_history_arrays(history: VehicleHistory) -> tuple:
 
     t = history.times.copy()
     cols = [
-        history.column("temperature_c") * 9/5 + 32,
-        history.column("dewpoint_c") * 9/5 + 32,
+        units.temp(history.column("temperature_c")),
+        units.temp(history.column("dewpoint_c")),
         history.column("wind_speed_ms") * 1.94384,
         history.column("wind_dir_deg"),
         history.column("pressure_mb"),
@@ -125,7 +105,7 @@ def _build_history_arrays(history: VehicleHistory) -> tuple:
 def _build_arrays(obs_list) -> tuple:
     """Convert an observation list to numpy arrays with NaN gap-breaks.
 
-    Returns (times, temp_f, dewp_f, wspd_kt, wdir_deg, pres_mb, idx_to_obs).
+    Returns (times, temp, dewp ([units]), wspd_kt, wdir_deg, pres_mb, idx_to_obs).
     idx_to_obs maps plot-array index → original Observation (NaN rows omitted).
     """
     if isinstance(obs_list, VehicleHistory):
@@ -149,9 +129,9 @@ def _build_arrays(obs_list) -> tuple:
         idx = len(times_l)
         idx_to_obs[idx] = o
         times_l.append(o.timestamp)
-        temp_l.append(o.temperature_c * 9/5 + 32
+        temp_l.append(units.temp(o.temperature_c)
                       if o.temperature_c is not None else np.nan)
-        dewp_l.append(o.dewpoint_c * 9/5 + 32
+        dewp_l.append(units.temp(o.dewpoint_c)
                       if o.dewpoint_c is not None else np.nan)
         wspd_l.append(o.wind_speed_ms * 1.94384
                       if o.wind_speed_ms is not None else np.nan)
@@ -476,7 +456,7 @@ class VehicleTimeseriesDialog(QDialog):
                     t_max = times[-1]
 
         # axis labels
-        ax1.set_ylabel('°F', color=_MUTED, fontsize=9)
+        ax1.set_ylabel(units.temp_label(), color=_MUTED, fontsize=9)
         ax1.tick_params(labelbottom=False)
 
         ax2.set_ylabel('kt', color=_MUTED, fontsize=9)
@@ -630,9 +610,9 @@ class VehicleTimeseriesDialog(QDialog):
             if ts_str is None:
                 ts_str = obs.timestamp.strftime('%H:%M:%S UTC')
 
-            t_v  = (f"{obs.temperature_c * 9/5 + 32:.0f}°F"
+            t_v  = (f"{units.temp(obs.temperature_c):.0f}{units.temp_label()}"
                     if obs.temperature_c is not None else "--")
-            td_v = (f"{obs.dewpoint_c * 9/5 + 32:.0f}°F"
+            td_v = (f"{units.temp(obs.dewpoint_c):.0f}{units.temp_label()}"
                     if obs.dewpoint_c is not None else "--")
             ws_v = (f"{obs.wind_speed_ms * 1.94384:.0f}kt"
                     if obs.wind_speed_ms is not None else "--")

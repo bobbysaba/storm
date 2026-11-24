@@ -47,7 +47,7 @@ class Drawer(QWidget):
         self._stop_animation()
         if checked:
             # measure on the next event-loop turn so content rebuilt in the
-            # same turn (e.g. SFCOA product grid) is in the size hint
+            # same turn (e.g. the contours drawer's field grid) is in the size hint
             self._open_pending = True
             QTimer.singleShot(0, self._animate_open)
             self.opened.emit()

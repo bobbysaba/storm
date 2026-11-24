@@ -57,7 +57,6 @@ def test_providers_are_called_on_refresh_and_failures_skipped():
     reg.add_provider("good", good)
     reg.add_provider("bad", bad)
     reg.add_provider("dupe", lambda: [_cmd("a", "Alpha again")])
-    assert reg.provider_names() == ["good", "bad", "dupe"]
     assert reg.commands == []
     reg.refresh()
     assert [c.title for c in reg.commands] == ["Alpha", "Beta"]

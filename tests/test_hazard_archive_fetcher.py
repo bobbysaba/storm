@@ -12,11 +12,13 @@ import zipfile
 
 import json
 
+import requests
+
 from archive.fetchers.hazard_archive_fetcher import (
     _archive_spc_shapefile_zip_url,
     _normalize_archive_spc_geojson,
-    _parse_outlook_shapefile_zip,
 )
+from archive.fetchers.spc_shapefiles import parse_outlook_zip
 
 
 def _build_shp(polygons):
@@ -72,7 +74,7 @@ _SPC_OUTLOOK_PRJ_WKT = (
 def _build_outlook_zip(day, cycle_str, per_suffix, *, include_prj=True):
     """per_suffix: {suffix: [(ring, dn), ...]} -> zip bytes matching the
     real day{N}otlk_{cycle}_{suffix}.shp/.dbf(.prj) naming
-    _parse_outlook_shapefile_zip looks for. Rings are given in the same
+    parse_outlook_zip looks for. Rings are given in the same
     projected (LCC easting/northing) coordinates a real .shp carries --
     not lon/lat -- since include_prj=True (the default, matching every
     real archive zip) means they get reprojected same as production."""
@@ -105,7 +107,7 @@ def test_categorical_dn_maps_to_the_expected_risk_label():
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "cat": [(_TRIANGLE, 2), (_TRIANGLE, 4), (_TRIANGLE, 6)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     labels = [f["properties"]["LABEL"] for f in by_suffix["cat"]]
     assert labels == ["MRGL", "ENH", "HIGH"]
 
@@ -117,7 +119,7 @@ def test_unmapped_categorical_dn_is_dropped_not_mislabeled():
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "cat": [(_TRIANGLE, 0), (_TRIANGLE, 3)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     assert len(by_suffix["cat"]) == 1
     assert by_suffix["cat"][0]["properties"]["LABEL"] == "SLGT"
 
@@ -126,7 +128,7 @@ def test_probabilistic_dn_passes_through_for_spc_prob_label_to_read():
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "wind": [(_TRIANGLE, 15), (_TRIANGLE, 5)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     assert [f["properties"]["DN"] for f in by_suffix["wind"]] == [15, 5]
 
 
@@ -143,7 +145,7 @@ def test_sig_layer_dn_zero_placeholder_is_dropped_but_real_sig_polygon_kept():
         "sigtorn": [(_TRIANGLE, 0)],
         "sighail": [(_TRIANGLE, 10)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     assert by_suffix["sigwind"] == []
     assert by_suffix["sigtorn"] == []
     assert len(by_suffix["sighail"]) == 1
@@ -152,13 +154,13 @@ def test_sig_layer_dn_zero_placeholder_is_dropped_but_real_sig_polygon_kept():
 
 def test_missing_member_pair_is_absent_not_a_crash():
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {"cat": [(_TRIANGLE, 2)]})
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     assert "wind" not in by_suffix
     assert "cat" in by_suffix
 
 
 def test_bad_zip_bytes_return_empty_not_a_crash():
-    assert _parse_outlook_shapefile_zip(b"not a zip file") == {}
+    assert parse_outlook_zip(b"not a zip file") == {}
 
 
 def _normalize(kind, features, **kwargs):
@@ -168,7 +170,7 @@ def _normalize(kind, features, **kwargs):
 
 def test_shapefile_categorical_features_get_the_cat_property_the_frontend_colors_by():
     # Regression test: _fetch_outlook's shapefile-fallback branch used to
-    # serialize _parse_outlook_shapefile_zip's raw features directly,
+    # serialize parse_outlook_zip's raw features directly,
     # which carry DN/LABEL but never props["cat"] -- the property
     # spc-cat-fill's paint expression (ui/map/map_template.html) actually
     # matches on. Every shapefile-sourced categorical feature silently
@@ -178,7 +180,7 @@ def test_shapefile_categorical_features_get_the_cat_property_the_frontend_colors
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "cat": [(_TRIANGLE, 2), (_TRIANGLE, 4), (_TRIANGLE, 6)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     fc = _normalize("categorical", by_suffix["cat"], day=1, product="categorical")
     assert [f["properties"]["cat"] for f in fc["features"]] == ["MRGL", "ENH", "HIGH"]
 
@@ -193,7 +195,7 @@ def test_shapefile_probabilistic_features_get_a_percent_string_label():
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "wind": [(_TRIANGLE, 15), (_TRIANGLE, 5)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     fc = _normalize("wind", by_suffix["wind"], day=1, product="wind")
     assert [f["properties"]["LABEL"] for f in fc["features"]] == ["15", "5"]
 
@@ -202,7 +204,7 @@ def test_shapefile_significant_features_are_force_labeled_sign_after_normalizing
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {
         "sighail": [(_TRIANGLE, 10)],
     })
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     fc = _normalize("significant", by_suffix["sighail"], day=1, product="hail", force_label="SIGN")
     assert fc["features"][0]["properties"]["LABEL"] == "SIGN"
 
@@ -229,7 +231,7 @@ def test_shapefile_geometry_is_reprojected_from_lcc_to_lon_lat():
     ]
 
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {"cat": [(ring_lcc, 2)]})
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     ring_out = by_suffix["cat"][0]["geometry"]["coordinates"][0]
 
     for lon, lat in ring_out:
@@ -243,7 +245,7 @@ def test_missing_prj_refuses_to_guess_a_coordinate_system(caplog):
     # parser has no basis to assume -- better to surface nothing (and
     # log why) than silently emit geometry at the wrong location.
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {"cat": [(_TRIANGLE, 2)]}, include_prj=False)
-    assert _parse_outlook_shapefile_zip(zip_bytes) == {}
+    assert parse_outlook_zip(zip_bytes) == {}
     assert "no .prj found" in caplog.text
 
 
@@ -275,7 +277,7 @@ def test_jagged_grid_contour_boundary_is_smoothed_not_left_staircased():
     assert len(ring_lcc) > 60
 
     zip_bytes = _build_outlook_zip(1, "20190608_2000", {"cat": [(ring_lcc, 2)]})
-    by_suffix = _parse_outlook_shapefile_zip(zip_bytes)
+    by_suffix = parse_outlook_zip(zip_bytes)
     ring_out = by_suffix["cat"][0]["geometry"]["coordinates"][0]
 
     assert len(ring_out) < len(ring_lcc) / 3  # the zigzag should collapse away
@@ -323,7 +325,7 @@ def test_pre_2020_outlook_falls_back_to_the_cycle_shapefile_zip(monkeypatch):
             return _Resp(content=zip_bytes)
         return _Resp(status_code=404)
 
-    monkeypatch.setattr(haf.requests, "get", fake_get)
+    monkeypatch.setattr(requests, "get", fake_get)
     fetcher = haf.ArchiveHazardFetcher(datetime(2019, 6, 8, tzinfo=timezone.utc))
     got = []
     fetcher.spc_received.connect(lambda *payload: got.append(payload))
@@ -349,7 +351,7 @@ def test_2020_outlook_found_as_geojson_never_asks_for_the_zip(monkeypatch):
         urls.append(url)
         return _Resp(text='{"type":"FeatureCollection","features":[]}')
 
-    monkeypatch.setattr(haf.requests, "get", fake_get)
+    monkeypatch.setattr(requests, "get", fake_get)
     fetcher = haf.ArchiveHazardFetcher(datetime(2024, 5, 17, tzinfo=timezone.utc))
     fetcher._fetch_outlook(1, datetime(2024, 5, 17, 13, 0, tzinfo=timezone.utc))
 
@@ -360,7 +362,7 @@ def test_non_zip_md_reply_is_not_cached_so_the_next_change_retries(monkeypatch):
     from datetime import datetime, timezone
     from archive.fetchers import hazard_archive_fetcher as haf
 
-    monkeypatch.setattr(haf.requests, "get", lambda url, **kw: _Resp(content=b"Too many requests"))
+    monkeypatch.setattr(requests, "get", lambda url, **kw: _Resp(content=b"Too many requests"))
     fetcher = haf.ArchiveHazardFetcher(datetime(2024, 5, 17, tzinfo=timezone.utc))
     emitted = []
     fetcher.spc_mds_received.connect(emitted.append)

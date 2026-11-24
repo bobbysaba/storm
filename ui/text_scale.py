@@ -37,7 +37,7 @@ def percent() -> int:
 
 
 def _settings(settings: QSettings | None) -> QSettings:
-    return settings if settings is not None else QSettings("NSSL", "STORM")
+    return settings if settings is not None else QSettings()
 
 
 def saved_percent(settings: QSettings | None = None) -> int:

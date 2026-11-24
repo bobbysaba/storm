@@ -7,6 +7,7 @@ import zipfile
 
 import pytest
 
+import settings
 from core import package_sources, provenance
 from ui.app import main_window_case
 
@@ -141,11 +142,14 @@ class _Stream:
         return self._chunks.pop(0) if self._chunks else b""
 
 
-def test_export_download_sends_the_api_key_only_to_the_api(monkeypatch):
+def test_export_download_sends_the_servers_key_only_to_it(monkeypatch):
+    import dataclasses
     import urllib.request
+    from data.auth import Auth
     seen = []
-    monkeypatch.setattr(main_window_case.config, "NSSL_API_KEY", "secret")
-    monkeypatch.setattr(main_window_case.config, "NSSL_API_ROOT", "https://api.example")
+    monkeypatch.setenv("EXAMPLE_KEY", "secret")
+    monkeypatch.setattr(settings, "SETTINGS", dataclasses.replace(
+        settings.SETTINGS, auth=(Auth(url="https://api.example", api_key_env="EXAMPLE_KEY"),)))
 
     def fake_urlopen(request, timeout, context):
         seen.append((request.full_url, request.get_header("X-api-key")))

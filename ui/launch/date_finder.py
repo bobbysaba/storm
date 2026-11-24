@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from archive.catalog import CAMPAIGN_YEARS, MESONET, platforms_by_site
+from archive.catalog import INSTRUMENTS, RECORDED, VEHICLES, campaign_years, platforms_by_site
 from ui import palette as P
 from ui.launch.icons import combo_down_arrow_qss
 from ui.launch.styles import _DIALOG_STYLE, _FINDER_STYLE
@@ -158,6 +158,8 @@ class FindDatesDialog(QDialog):
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         self.setStyleSheet(_DIALOG_STYLE + combo_down_arrow_qss() + _FINDER_STYLE)
         self._sites = sites if sites is not None else platforms_by_site()
+        # [[archive.campaigns]] in storm.toml
+        self._campaign_years = campaign_years()
         self._snapshot = None
         self._by_site: dict[str, frozenset[date]] = {}
         self._picked_month = None
@@ -182,9 +184,11 @@ class FindDatesDialog(QDialog):
         left.addWidget(self._field("CAMPAIGN"))
         self._campaign = QComboBox()
         self._campaign.addItem("Any campaign", None)
-        for name, years in CAMPAIGN_YEARS.items():
+        for name, years in self._campaign_years.items():
             self._campaign.addItem(f"{name}  ({', '.join(map(str, years))})", name)
-        self._campaign.setToolTip("Limit the dates to a field campaign's years")
+        self._campaign.setToolTip("Limit the dates to a field campaign's years "
+                                  "([[archive.campaigns]] in storm.toml)")
+        self._campaign.setEnabled(bool(self._campaign_years))
         left.addWidget(self._campaign)
 
         left.addSpacing(4)
@@ -326,12 +330,17 @@ class FindDatesDialog(QDialog):
         return btn
 
     def _build_instrument_items(self):
-        mesonet = sorted(s for s, plats in self._sites.items() if {p.family for p in plats} == {MESONET})
-        others = sorted(s for s in self._sites if s not in mesonet)
+        # each site under its platforms' heading: instruments, recorded
+        # traffic, the user's vehicles, then any provider's own (NSSL's
+        # MOBILE MESONET)
+        by_group = {}
+        for site, plats in self._sites.items():
+            by_group.setdefault(plats[0].group, []).append(site)
+        order = [INSTRUMENTS, RECORDED, VEHICLES]
+        headings = sorted(by_group, key=lambda g: (order.index(g) if g in order else len(order), g))
         self._instruments.blockSignals(True)
-        for heading, sites in (("INSTRUMENTS", others), ("MOBILE MESONET", mesonet)):
-            if not sites:
-                continue
+        for heading in headings:
+            sites = sorted(by_group[heading])
             head = QListWidgetItem(heading)
             head.setFlags(Qt.ItemFlag.NoItemFlags)
             head.setForeground(QColor(P.TEXT_MUTED))
@@ -390,7 +399,7 @@ class FindDatesDialog(QDialog):
         return self._year_from.currentData(), self._year_to.currentData()
 
     def _on_campaign_changed(self):
-        years = CAMPAIGN_YEARS.get(self._campaign.currentData())
+        years = self._campaign_years.get(self._campaign.currentData())
         lo, hi = (min(years), max(years)) if years else (FIRST_YEAR, QDate.currentDate().year())
         hi = min(hi, QDate.currentDate().year())
         for combo, year in ((self._year_from, lo), (self._year_to, hi)):
@@ -415,7 +424,7 @@ class FindDatesDialog(QDialog):
     def _filters(self, with_instruments=True):
         chosen = self.chosen_sites() if with_instruments else ()
         return dict(chosen=chosen, require_all=self._mode_all.isChecked(), years=self._year_range(),
-                    months=self._months(), campaign_years=CAMPAIGN_YEARS.get(self._campaign.currentData()))
+                    months=self._months(), campaign_years=self._campaign_years.get(self._campaign.currentData()))
 
     def matching_dates(self) -> frozenset[date]:
         return match_dates(self._by_site, **self._filters())

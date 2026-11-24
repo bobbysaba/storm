@@ -94,15 +94,15 @@ class TestSoundingSet:
             soundings=[], source="obs",
         )
         assert sset.is_observed is True
-        assert sset.is_nssl is False
+        assert sset.is_provider is False
 
-    def test_is_nssl(self):
+    def test_is_provider(self):
         sset = SoundingSet(
             lat=0, lon=0, elevation=0,
             fetch_time=datetime.now(timezone.utc),
-            soundings=[], source="nssl",
+            soundings=[], source="provider",
         )
-        assert sset.is_nssl is True
+        assert sset.is_provider is True
         assert sset.is_observed is False
 
     def test_default_source_is_hrrr(self):
@@ -113,4 +113,4 @@ class TestSoundingSet:
         )
         assert sset.source == "hrrr"
         assert sset.is_observed is False
-        assert sset.is_nssl is False
+        assert sset.is_provider is False

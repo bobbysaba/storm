@@ -119,8 +119,8 @@ def test_restart_returns_to_loading(app):
 
 def test_no_thresholds_never_stale(app):
     clock = FakeClock()
-    status = LayerStatus("sfcoa", "SFCOA", None, None, clock)
-    status.set_source_active("sfcoa", True)
+    status = LayerStatus("contours", "SFCOA", None, None, clock)
+    status.set_source_active("contours", True)
     status.mark_success(T0 - timedelta(hours=5))
     assert status.state == OK
 

@@ -23,7 +23,7 @@ def app():
 _hosts = []
 
 
-def _build(meso=True, sfcoa=True, archive=False):
+def _build(meso=True, contour=True, archive=False):
     """Same buttons and groups as MainWindow._init_toolbar, themed like the window."""
     host = QWidget()
     host.setStyleSheet(DARK_THEME)
@@ -35,9 +35,9 @@ def _build(meso=True, sfcoa=True, archive=False):
     b["hazards"] = tb.add_button("HAZARDS", "hazards", "hazards")
     b["surface"] = tb.add_button("SURFACE", "surface", "surface")
     if meso:
-        b["meso"] = tb.add_button("MESO", "meso", "meso", overflow=True)
-    if sfcoa:
-        b["sfcoa"] = tb.add_button("SFCOA", "sfcoa", "sfcoa", overflow=True)
+        b["lidar"] = tb.add_button("LIDAR", "lidar", "lidar", overflow=True)
+    if contour:
+        b["contours"] = tb.add_button("SFCOA", "contours", "contours", overflow=True)
     tb.add_group()
     b["sounding"] = tb.add_button("SOUNDING", "sounding", "sounding")
     tb.add_group()
@@ -47,7 +47,7 @@ def _build(meso=True, sfcoa=True, archive=False):
     tb.add_group()
     b["map"] = tb.add_button("MAP", "map", "map")
     if archive:
-        for key in ("prev_locs", "surface", "annotate", "meso", "sfcoa"):
+        for key in ("prev_locs", "surface", "annotate", "lidar", "contours"):
             if key in b:
                 tb.set_available(b[key], False)
     tb.finish()
@@ -81,19 +81,19 @@ def test_fit_switches_tiers(app):
 
     assert tb.fit(w[FULL] - 1) == ICONS
     assert b["radar"].toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
-    assert not b["meso"].isHidden()
+    assert not b["lidar"].isHidden()
 
     seen = []
     tb.overflow_changed.connect(seen.append)
     assert tb.fit(w[ICONS] - 1) == OVERFLOW
-    assert b["meso"].isHidden() and b["sfcoa"].isHidden() and b["prev_locs"].isHidden()
+    assert b["lidar"].isHidden() and b["contours"].isHidden() and b["prev_locs"].isHidden()
     assert not b["radar"].isHidden()
     assert not tb.more_button.isHidden()
-    assert seen == [{b["meso"], b["sfcoa"], b["prev_locs"]}]
+    assert seen == [{b["lidar"], b["contours"], b["prev_locs"]}]
 
     # widening brings them back
     assert tb.fit(w[FULL] + 50) == FULL
-    assert not b["meso"].isHidden() and tb.more_button.isHidden()
+    assert not b["lidar"].isHidden() and tb.more_button.isHidden()
     assert seen[-1] == set()
 
 
@@ -108,7 +108,7 @@ def test_unavailable_buttons_stay_hidden(app):
     w = tb.measured_widths()
     for tier_w in (w[FULL], w[ICONS] - 1, 10):
         tb.fit(tier_w)
-        for key in ("prev_locs", "surface", "annotate", "meso", "sfcoa"):
+        for key in ("prev_locs", "surface", "annotate", "lidar", "contours"):
             assert b[key].isHidden()
     # archive has nothing left to overflow
     assert OVERFLOW not in w
@@ -116,7 +116,7 @@ def test_unavailable_buttons_stay_hidden(app):
 
 
 def test_empty_group_drops_its_separator(app):
-    tb, b = _build(meso=False, sfcoa=False)
+    tb, b = _build(meso=False, contour=False)
     tb.set_available(b["vehicles"], False)
     tb.set_available(b["prev_locs"], False)
     tb.set_available(b["annotate"], False)
@@ -129,27 +129,27 @@ def test_empty_group_drops_its_separator(app):
 def test_overflow_menu_clicks_real_button(app):
     tb, b = _build()
     clicks = []
-    b["meso"].clicked.connect(lambda: clicks.append("meso"))
+    b["lidar"].clicked.connect(lambda: clicks.append("lidar"))
     tb.fit(tb.measured_widths()[ICONS] - 1)
     tb._rebuild_menu()
     actions = {a.text(): a for a in tb._more_menu.actions()}
-    assert set(actions) == {"MESO", "SFCOA", "PREV LOCS"}
-    actions["MESO"].trigger()
-    assert clicks == ["meso"]
-    assert b["meso"].isChecked()
+    assert set(actions) == {"LIDAR", "SFCOA", "PREV LOCS"}
+    actions["LIDAR"].trigger()
+    assert clicks == ["lidar"]
+    assert b["lidar"].isChecked()
     tb._rebuild_menu()
-    assert {a.text(): a for a in tb._more_menu.actions()}["MESO"].isChecked()
+    assert {a.text(): a for a in tb._more_menu.actions()}["LIDAR"].isChecked()
 
 
-@pytest.mark.parametrize("meso,sfcoa", [(True, True), (True, False), (False, False)])
+@pytest.mark.parametrize("meso,contour", [(True, True), (True, False), (False, False)])
 @pytest.mark.parametrize("archive", [False, True])
-def test_fits_1024_at_largest_text_scale(app, tmp_path, meso, sfcoa, archive):
+def test_fits_1024_at_largest_text_scale(app, tmp_path, meso, contour, archive):
     """The narrowest tier fits a 1024px window (8px margin each side) at 130 %."""
     settings = QSettings(str(tmp_path / "storm.ini"), QSettings.Format.IniFormat)
     text_scale.install(app, settings)
     text_scale.set_percent(130, settings)
     try:
-        tb, _ = _build(meso, sfcoa, archive)
+        tb, _ = _build(meso, contour, archive)
         tb.set_icon_px(round(14 * 1.3))
         assert min(tb.measured_widths().values()) <= 1024 - 16
     finally:
@@ -166,19 +166,19 @@ def test_overflow_menu_pins(app):
         (pinned.add if on else pinned.discard)(btn)
 
     # SFCOA has no drawer entry here, so it gets no pin toggle
-    tb.set_pin_handlers(lambda btn: (btn in pinned) if btn is not b["sfcoa"] else None,
+    tb.set_pin_handlers(lambda btn: (btn in pinned) if btn is not b["contours"] else None,
                         set_pinned)
     tb.fit(tb.measured_widths()[ICONS] - 1)
     tb._rebuild_menu()
     pins = {a.text(): a for a in tb._more_menu.actions() if a.text().startswith("Pin ")}
-    assert set(pins) == {"Pin MESO", "Pin PREV LOCS"}
-    assert pins["Pin PREV LOCS"].isChecked() and not pins["Pin MESO"].isChecked()
+    assert set(pins) == {"Pin LIDAR", "Pin PREV LOCS"}
+    assert pins["Pin PREV LOCS"].isChecked() and not pins["Pin LIDAR"].isChecked()
 
-    pins["Pin MESO"].trigger()
+    pins["Pin LIDAR"].trigger()
     pins["Pin PREV LOCS"].trigger()
-    assert calls == [("MESO", True), ("PREV LOCS", False)]
+    assert calls == [("LIDAR", True), ("PREV LOCS", False)]
     # pin toggles don't open the drawer
-    assert not b["meso"].isChecked()
+    assert not b["lidar"].isChecked()
 
 
 def test_overflow_menu_without_pin_handlers(app):

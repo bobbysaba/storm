@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 
 from ui.app.overlay_geometry import drawers_to_close
+from ui.session_state import renamed
 
 DEFAULT_PINNED: tuple[str, ...] = ()
 
@@ -37,7 +38,7 @@ class DrawerManager(QObject):
 
     def __init__(self, settings: QSettings | None = None, parent=None):
         super().__init__(parent)
-        self._settings = settings if settings is not None else QSettings("NSSL", "STORM")
+        self._settings = settings if settings is not None else QSettings()
         self._entries: dict[str, DrawerEntry] = {}
         self._open_order: list[str] = []
         self._pinned: set[str] = self._load_pins()
@@ -45,7 +46,7 @@ class DrawerManager(QObject):
     def _load_pins(self) -> set[str]:
         s = self._settings
         if s.contains(_PINNED_KEY):
-            return set(s.value(_PINNED_KEY, [], type=list) or [])
+            return set(renamed(s.value(_PINNED_KEY, [], type=list) or []))
         pinned = set(DEFAULT_PINNED)
         if s.contains(_PINNED_KEY_V1):
             pinned = set(s.value(_PINNED_KEY_V1, [], type=list) or []) - _V1_DEFAULT

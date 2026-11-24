@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from archive.fetchers import clamps_surface_archive_fetcher as sfc
-from archive.fetchers.clamps_surface_playback import ClampsSurfacePlayback
+from providers.nssl.archive import clamps_surface_archive_fetcher as sfc
+from providers.nssl.archive.clamps_surface_playback import ClampsSurfacePlayback
 from core.observation import Observation
-from data import thredds_paths as paths
+from providers.nssl import paths
 from tests.clamps_fakes import FakeThredds, surface_file
 
 UTC = timezone.utc

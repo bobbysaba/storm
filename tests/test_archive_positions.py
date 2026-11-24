@@ -47,7 +47,7 @@ def test_compass_headings_come_only_from_fixes_with_one():
 
 
 def test_fofs_compass_dir_is_read_as_the_heading():
-    from archive.fetchers.vehicle_obs_archive_fetcher import _measurement
+    from providers.nssl.archive.vehicle_obs_archive_fetcher import _measurement
     assert _measurement({"compass_dir": "123.4"}, "compass_dir") == 123.4
     assert _measurement({"compass_dir": "361.0"}, "compass_dir") == 1.0
     assert _measurement({"compass_dir": "-999"}, "compass_dir") is None

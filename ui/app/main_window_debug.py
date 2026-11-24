@@ -5,7 +5,6 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QLabel, QDockWidget, QVBoxLayout, QWidget
 
-import config
 from ui.widgets.debug_pill import DebugPill
 from ui import palette as P
 
@@ -52,10 +51,10 @@ class MainWindowDebugMixin:
         lines.append("─── MQTT ────────────────────────────────")
         mqtt = getattr(self, "_mqtt_client", None)
         if mqtt:
-            connected = self.conn_indicator.text() == "● AWS OK"
+            broker = self._mqtt_settings
             lines.append(
-                f"host: {config.MQTT_HOST or '(not configured)'}:{config.MQTT_PORT}  "
-                f"connected: {connected}"
+                f"host: {broker.host or '(not configured)'}:{broker.port}  tls: {broker.tls}  "
+                f"connected: {self._mqtt_connected}"
             )
         else:
             lines.append("mqtt client not initialized")

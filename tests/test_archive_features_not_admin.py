@@ -1,5 +1,5 @@
 """Archive mode's one-second observations are for every archive user, not
-only admin mode (which turns on just the live mesoanalysis overlays)."""
+only admin mode."""
 import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -11,7 +11,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QObject
 from PyQt6.QtWidgets import QApplication
 
-import feature_flags
 import runtime_flags
 from archive.fetchers import vehicle_obs_archive_fetcher as vof
 from ui.app.main_window import MainWindow
@@ -82,5 +81,9 @@ def test_status_when_nothing_was_published_for_the_date(app, monkeypatch):
     assert host.statuses == ["OBS: no data for this date"]
 
 
-def test_only_mesoanalysis_needs_admin_mode():
-    assert [k for k, f in feature_flags.FEATURES.items() if f.admin_only] == ["mesoanalysis"]
+def test_without_a_vehicle_obs_source_status_says_mqtt(app, nssl_provider_off):
+    host = _host({"p1": "probe"})
+    host._start_archive_vehicle_obs()
+    assert getattr(host, "_archive_vehicle_obs", None) is None
+    assert host.statuses == ["OBS: MQTT fallback"]
+    assert not host._archive_vehicle_obs_started         # nothing to wait for

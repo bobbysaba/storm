@@ -9,7 +9,7 @@ from urllib.parse import unquote
 from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
 from PyQt6.QtWebEngineCore import QWebEngineUrlRequestJob, QWebEngineUrlSchemeHandler
 
-from core import mbtiles
+from core import mbtiles, pmtiles
 
 log = logging.getLogger(__name__)
 
@@ -66,8 +66,9 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         # in-memory store for station plot PNGs — keyed by station id.
         self._plots_lock = threading.Lock()
         self._plots: dict[str, bytes] = {}
-        self._sfcoa_mbtiles_lock = threading.Lock()
-        self._sfcoa_mbtiles: dict[str, str] = {}
+        # a contours source's tile files (.mbtiles path or open .pmtiles), by key
+        self._contour_lock = threading.Lock()
+        self._contour_tiles: dict[str, str | pmtiles.PMTilesFile] = {}
         # satellite frame PNGs keyed by (mode, frame id); oldest evicted per mode.
         self._sat_lock = threading.Lock()
         self._sat_frames: dict[tuple[str, str], bytes] = {}
@@ -109,13 +110,21 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         with self._sat_lock:
             self._lidar_png = (image_id, data)
 
-    def set_sfcoa_mbtiles(self, key: str, path: str) -> None:
+    def set_contour_tiles(self, key: str, path: str) -> None:
+        """Serve /contourtiles/<key>/z/x/y.pbf from a .pmtiles or .mbtiles file."""
         key = str(key or "").strip()
         path = str(path or "").strip()
         if not key or not path:
             return
-        with self._sfcoa_mbtiles_lock:
-            self._sfcoa_mbtiles[key] = path
+        tiles: str | pmtiles.PMTilesFile = path
+        if path.endswith(".pmtiles"):
+            try:
+                tiles = pmtiles.PMTilesFile(path)
+            except (OSError, pmtiles.PMTilesError) as exc:
+                log.warning("scheme handler: can't read %s: %s", path, exc)
+                return
+        with self._contour_lock:
+            self._contour_tiles[key] = tiles
 
     def requestStarted(self, job: QWebEngineUrlRequestJob):
         path = job.requestUrl().path()
@@ -141,8 +150,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             self._serve_radar_gl(job, path[len("/radar/gl/"):])
         elif path.startswith("/radar/overlay.png"):
             self._serve_radar_png(job)
-        elif path.startswith("/sfcoatiles/"):
-            self._serve_sfcoa_tile(job, path)
+        elif path.startswith("/contourtiles/"):
+            self._serve_contour_tile(job, path)
         elif path.startswith("/plots/"):
             self._serve_station_plot(job, path[len("/plots/"):])
         else:
@@ -295,8 +304,8 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
         self._reply(job, b"image/jpeg", bytes(row[0]))
 
 
-    def _serve_sfcoa_tile(self, job: QWebEngineUrlRequestJob, path: str):
-        # path: /sfcoatiles/key/z/x/y.pbf
+    def _serve_contour_tile(self, job: QWebEngineUrlRequestJob, path: str):
+        # path: /contourtiles/key/z/x/y.pbf
         parts = path.strip("/").split("/")
         try:
             key = unquote(parts[1])
@@ -307,40 +316,35 @@ class StormSchemeHandler(QWebEngineUrlSchemeHandler):
             job.fail(QWebEngineUrlRequestJob.Error.UrlInvalid)
             return
 
-        with self._sfcoa_mbtiles_lock:
-            mbtiles_path = self._sfcoa_mbtiles.get(key)
-        if not mbtiles_path:
-            self._reply(job, b"application/x-protobuf", b"")
-            return
-
-        y_tms = (1 << z) - 1 - y
+        with self._contour_lock:
+            tiles = self._contour_tiles.get(key)
         try:
-            conn = mbtiles.connect(mbtiles_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT tile_data FROM tiles "
-                    "WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-                    (z, x, y_tms),
-                )
-                row = cursor.fetchone()
-            finally:
-                conn.close()
+            tile_data = self._contour_tile(tiles, z, x, y) if tiles else None
         except Exception as exc:
-            log.warning("scheme handler: SFCOA tile DB error key=%s z=%d x=%d y=%d: %s", key, z, x, y, exc)
-            self._reply(job, b"application/x-protobuf", b"")
-            return
+            log.warning("scheme handler: contour tile error key=%s z=%d x=%d y=%d: %s", key, z, x, y, exc)
+            tile_data = None
+        # no tile: an empty protobuf, which MapLibre skips silently
+        self._reply(job, b"application/x-protobuf", tile_data or b"")
 
+    @staticmethod
+    def _contour_tile(tiles, z: int, x: int, y: int) -> bytes | None:
+        if isinstance(tiles, pmtiles.PMTilesFile):
+            return tiles.tile(z, x, y)
+        conn = mbtiles.connect(tiles)
+        try:
+            row = conn.execute(
+                "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+                (z, x, (1 << z) - 1 - y),   # MBTiles rows count from the south (TMS)
+            ).fetchone()
+        finally:
+            conn.close()
         if row is None:
-            self._reply(job, b"application/x-protobuf", b"")
-            return
-
+            return None
         tile_data = bytes(row[0])
         try:
-            tile_data = zlib.decompress(tile_data, 32 + zlib.MAX_WBITS)
-        except Exception:
-            pass
-        self._reply(job, b"application/x-protobuf", tile_data)
+            return zlib.decompress(tile_data, 32 + zlib.MAX_WBITS)
+        except zlib.error:
+            return tile_data   # not gzipped
 
 
     def _serve_radar_png(self, job: QWebEngineUrlRequestJob):

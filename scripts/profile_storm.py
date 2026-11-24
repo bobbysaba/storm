@@ -53,10 +53,10 @@ def _synthetic_scan(minute: int = 0, n_az: int = 720, n_gates: int = 1840):
 
 
 def _radar_rows(grids: list[int]) -> list[tuple[str, str]]:
-    from ui.map import radar_overlay as ro
+    from ui.map import radar_colormaps, radar_overlay as ro
 
     _synthetic_scan()  # warm numpy and the colour tables before timing
-    ro._mpl_colors()   # first-frame matplotlib import is reported separately
+    radar_colormaps.mpl_colors()   # first-frame matplotlib import is reported separately
     rows = []
     for i, grid in enumerate(grids):
         # the pixel index is cached per grid size, so the first frame at each grid is cold

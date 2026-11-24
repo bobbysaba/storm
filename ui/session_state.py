@@ -17,6 +17,14 @@ MODES = (VEHICLE, MONITOR, VIEWER, ARCHIVE)
 
 _PREFIX = "session/"
 
+# layer and drawer keys as STORM 2.x saved them (here, in the layer order
+# and in the drawer pins)
+RENAMED_KEYS = {"sfcoa": "contours"}
+
+
+def renamed(keys) -> list:
+    return [RENAMED_KEYS.get(k, k) for k in keys]
+
 
 def mode_key(monitor: bool = False, viewer: bool = False, archive: bool = False) -> str:
     if archive:
@@ -29,7 +37,7 @@ def mode_key(monitor: bool = False, viewer: bool = False, archive: bool = False)
 
 
 def _settings(settings: QSettings | None) -> QSettings:
-    return settings if settings is not None else QSettings("NSSL", "STORM")
+    return settings if settings is not None else QSettings()
 
 
 def load(mode: str, settings: QSettings | None = None) -> dict:
@@ -41,7 +49,14 @@ def load(mode: str, settings: QSettings | None = None) -> dict:
     except ValueError:
         log.warning("ignoring unreadable saved session for %s", mode)
         return {}
-    return state if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        return {}
+    for old, new in RENAMED_KEYS.items():
+        if old in state:
+            state.setdefault(new, state.pop(old))
+    if isinstance(state.get("drawers"), list):
+        state["drawers"] = renamed(state["drawers"])
+    return state
 
 
 def save(mode: str, state: dict, settings: QSettings | None = None) -> None:

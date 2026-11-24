@@ -1,11 +1,11 @@
 import json
 import logging
-import os
 import ssl
 import threading
 
 import paho.mqtt.client as mqtt
 
+from .connect_errors import describe_connect_error
 from .observation import Observation
 from .settings import Settings
 from .vehicle_payload import PUBLISH_EXPIRY_S, PUBLISH_QOS, build_payload, vehicle_topic
@@ -17,26 +17,13 @@ _RECONNECT_MIN = 2   # seconds
 _RECONNECT_MAX = 30  # seconds
 
 
-def build_tls_context(settings: Settings) -> ssl.SSLContext:
+def build_tls_context(settings: Settings) -> ssl.SSLContext | None:
     """
-    Build the mutual-TLS context AWS IoT Core requires.  Raises
+    The TLS context for the [mqtt] login (None for tls = "none").  Raises
     FileNotFoundError / ValueError / ssl.SSLError when a cert file is missing,
     empty, or the cert and key don't match.
     """
-    for label, path in (
-        ("ca_cert", settings.ca_cert),
-        ("cert_file", settings.cert_file),
-        ("key_file", settings.key_file),
-    ):
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"MQTT TLS {label} missing: {str(path)!r}")
-        if os.path.getsize(path) == 0:
-            raise ValueError(f"MQTT TLS {label} is empty: {str(path)!r}")
-
-    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-    ctx.load_verify_locations(cafile=str(settings.ca_cert))
-    ctx.load_cert_chain(certfile=str(settings.cert_file), keyfile=str(settings.key_file))
-    return ctx
+    return settings.mqtt.tls_context()
 
 
 class VehiclePublisher:
@@ -54,6 +41,10 @@ class VehiclePublisher:
         self._lock = threading.Lock()
         self._pending: Observation | None = None
         self._published_count = 0
+        # the broker answered this connection (a drop before is a failed connect)
+        self._acked = False
+        self._refused = False
+        self._last_failure = ""
 
     @property
     def connected(self) -> bool:
@@ -68,6 +59,9 @@ class VehiclePublisher:
     def start(self):
         """Validate certs, then connect asynchronously; paho reconnects on its own."""
         s = self._settings
+        broker = s.mqtt
+        if not broker.configured:
+            raise ValueError("no broker: set host in the [mqtt] table")
         ctx = build_tls_context(s)
 
         c = mqtt.Client(
@@ -77,16 +71,20 @@ class VehiclePublisher:
         )
         c.on_connect    = self._on_connect
         c.on_disconnect = self._on_disconnect
+        c.on_connect_fail = self._on_connect_fail
 
-        c.tls_set_context(ctx)
-        c.tls_insecure_set(False)
+        if ctx is not None:
+            c.tls_set_context(ctx)
+            c.tls_insecure_set(False)
+        if broker.username:
+            c.username_pw_set(broker.username, broker.password or None)
 
         c.reconnect_delay_set(_RECONNECT_MIN, _RECONNECT_MAX)
-        c.connect_async(s.mqtt_host, s.mqtt_port, keepalive=60)
+        c.connect_async(broker.host, broker.port, keepalive=60)
         c.loop_start()
         self._client = c
         log.info("MQTT: connecting to %s:%d (client_id=%r)",
-                 s.mqtt_host, s.mqtt_port, s.effective_client_id)
+                 broker.host, broker.port, s.effective_client_id)
 
     def stop(self):
         client = self._client
@@ -120,7 +118,8 @@ class VehiclePublisher:
         payload = json.dumps(build_payload(obs, default_icon=self._settings.icon_type))
         props = mqtt.Properties(mqtt.PacketTypes.PUBLISH)
         props.MessageExpiryInterval = PUBLISH_EXPIRY_S
-        info = client.publish(vehicle_topic(obs.vehicle_id), payload.encode(),
+        topic = vehicle_topic(obs.vehicle_id, self._settings.mqtt.topic_root)
+        info = client.publish(topic, payload.encode(),
                               qos=PUBLISH_QOS, properties=props)
 
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
@@ -132,18 +131,36 @@ class VehiclePublisher:
             return
 
         self._published_count += 1
-        log.debug("MQTT: published %s %s", vehicle_topic(obs.vehicle_id), payload)
+        log.debug("MQTT: published %s %s", topic, payload)
 
     def _on_connect(self, client, userdata, connect_flags, reason_code, properties):
+        self._acked = True
         if reason_code.is_failure:
-            log.warning("MQTT: broker refused connection: %s", reason_code)
+            self._refused = True
+            log.warning("MQTT: broker refused the login: %s (check username and password)", reason_code)
             return
+        self._refused = False
+        self._last_failure = ""
         log.info("MQTT: connected (%s)", reason_code)
         self._flush()
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         code = int(reason_code.value) if reason_code is not None else 0
+        acked, self._acked = self._acked, False
+        if self._refused:
+            self._refused = False   # the refusal was logged with its reason
+            return
+        if not acked and code:
+            self._on_connect_fail(client, userdata)
+            return
         log.warning("MQTT: disconnected (code=%d); paho will reconnect", code)
+
+    def _on_connect_fail(self, client, userdata):
+        broker = self._settings.mqtt
+        reason = describe_connect_error(broker.host, broker.port, build_tls_context(self._settings))
+        if reason != self._last_failure:   # paho retries; say each new reason once
+            log.warning("MQTT: can't connect to %s:%d: %s; retrying", broker.host, broker.port, reason)
+            self._last_failure = reason
 
 
 class DryRunPublisher:
@@ -168,4 +185,5 @@ class DryRunPublisher:
     def publish_latest(self, obs: Observation):
         payload = build_payload(obs, default_icon=self._settings.icon_type)
         self._published_count += 1
-        log.info("dry run: %s %s", vehicle_topic(obs.vehicle_id), json.dumps(payload))
+        topic = vehicle_topic(obs.vehicle_id, self._settings.mqtt.topic_root)
+        log.info("dry run: %s %s", topic, json.dumps(payload))

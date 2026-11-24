@@ -176,9 +176,13 @@ def test_mqtt_reader_adds_the_next_mornings_records_to_the_cap(monkeypatch):
         ("scan_sectors", "20240428"): "\n".join([record("2024-04-28T01:30:00Z"),
                                                  record("2024-04-28T07:00:00Z")]),
     }
-    monkeypatch.setattr(mr, "_fetch_topic_text",
-                        lambda topic, date_str: (files.get((topic, date_str)), "test"))
-    reader = mr.ArchiveMQTTReader(session_date=_utc(2024, 4, 27, 20))
+    class Files:
+        name = "test"
+
+        def fetch(self, topic, date_str):
+            return files.get((topic, date_str))
+
+    reader = mr.ArchiveMQTTReader(session_date=_utc(2024, 4, 27, 20), sources=[Files()])
     reader._fetch_all()
 
     assert [ts for ts, _ in reader._data["scan_sectors"]] == [_utc(2024, 4, 27, 23), _utc(2024, 4, 28, 1, 30)]
@@ -187,13 +191,15 @@ def test_mqtt_reader_adds_the_next_mornings_records_to_the_cap(monkeypatch):
 def test_a_failed_next_morning_file_does_not_fail_the_session(monkeypatch):
     from archive.fetchers import mqtt_reader as mr
 
-    def fetch(topic, date_str):
-        if date_str == "20240428":
-            raise TimeoutError("timed out")
-        return None, "test"
+    class Flaky:
+        name = "test"
 
-    monkeypatch.setattr(mr, "_fetch_topic_text", fetch)
-    reader = mr.ArchiveMQTTReader(session_date=_utc(2024, 4, 27, 20))
+        def fetch(self, topic, date_str):
+            if date_str == "20240428":
+                raise TimeoutError("timed out")
+            return None
+
+    reader = mr.ArchiveMQTTReader(session_date=_utc(2024, 4, 27, 20), sources=[Flaky()])
     errors = []
     reader.error.connect(errors.append)
     reader._fetch_all()
@@ -218,6 +224,8 @@ def test_mqtt_activity_is_the_last_crew_change_and_last_drive():
 
 
 def test_satellite_lists_the_next_mornings_hours(monkeypatch):
+    import requests
+
     import archive.fetchers.satellite_archive_fetcher as saf
 
     prefixes = []
@@ -226,7 +234,7 @@ def test_satellite_lists_the_next_mornings_hours(monkeypatch):
         prefixes.append(url.split("prefix=")[1])
         return SimpleNamespace(content=_s3_listing().encode(), raise_for_status=lambda: None)
 
-    monkeypatch.setattr(saf.requests, "get", fake_get)
+    monkeypatch.setattr(requests, "get", fake_get)
     fetcher = saf.ArchiveSatelliteFetcher(_utc(2024, 12, 31, 20))
     fetcher._list_day_refs("conus", "ABI-L1b-RadC")
 
@@ -263,3 +271,29 @@ def test_window_keeps_the_full_utc_day_without_activity():
     host = _Host([])
     host._update_archive_session_end()
     assert host._time_ctrl.window[1] == _utc(2024, 4, 28)
+
+
+def _window(monkeypatch, tmp_path, text):
+    import settings
+    path = tmp_path / "storm.toml"
+    path.write_text(text)
+    s = settings.load(path)
+    monkeypatch.setattr(settings, "SETTINGS", s)
+    return s
+
+
+def test_session_window_from_settings(monkeypatch, tmp_path):
+    s = _window(monkeypatch, tmp_path, "[archive]\nsession_start_utc = 6\nsession_hours = 20\n"
+                                       "session_activity_after_hours = 2\n")
+    assert not s.error
+    assert session_bounds(_utc(2024, 4, 27, 3)) == (_utc(2024, 4, 27, 6), _utc(2024, 4, 28, 2))
+    # activity before 08Z doesn't count; the end is capped at 02Z the next day
+    assert activity_end(_utc(2024, 4, 27, 9), [_utc(2024, 4, 27, 7)]) is None
+    assert activity_end(_utc(2024, 4, 27, 9), [_utc(2024, 4, 28, 1, 50)]) == _utc(2024, 4, 28, 2)
+
+
+def test_session_window_must_end_by_the_next_day(monkeypatch, tmp_path):
+    s = _window(monkeypatch, tmp_path, "[archive]\nsession_start_utc = 20\nsession_hours = 30\n")
+    assert "at most 48" in s.error
+    s = _window(monkeypatch, tmp_path, "[archive]\nsession_hours = 10\n")
+    assert "less than session_hours" in s.error

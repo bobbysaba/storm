@@ -91,9 +91,10 @@ for _name in ("_init_shortcuts", "_click_if_shown", "_call_archive_controls", "_
     setattr(Host, _name, MainWindow.__dict__[_name])
 
 
-def _host(archive=True, track_file=None):
+def _host(archive=True, track_file=None, monitor=False):
     w = Host()
     w._archive = archive
+    w._monitor = monitor
     w._archive_time = T0
     w._map_container = QWidget(w)
     w._pill_route_expanded = False
@@ -103,6 +104,7 @@ def _host(archive=True, track_file=None):
     for name in ("_toggle_debug_panel", "_toggle_error_log_panel", "_add_track_point_at_marker",
                  "_delete_selected_track_point", "_undo_track_edit", "_redo_track_edit"):
         setattr(w, name, lambda n=name: w.calls.append(n))
+    w._set_recording = lambda on: w.calls.append(("record", on))
     for attr in list(MainWindow._SHORTCUT_BUTTONS.values()) + ["btn_screenshot"]:
         btn = QToolButton(w)
         btn.setToolTip(attr)
@@ -151,6 +153,13 @@ def test_live_modes_hide_archive_entries(app):
     edit = next(a for a in w.menuBar().actions() if a.text() == "Edit")
     assert not edit.isVisible()
     assert "case_open" not in w._shortcuts.bound and "track_undo" not in w._shortcuts.bound
+
+
+def test_monitor_can_record_broker_traffic(app):
+    w = _host(archive=False, monitor=True)
+    assert _texts(_menu(w, "File")) == ["Record Broker Traffic", "Save Map Screenshot…"]
+    w._record_action.trigger()
+    assert w.calls[-1] == ("record", True)
 
 
 def test_menu_entries_carry_the_table_keys_once(app):

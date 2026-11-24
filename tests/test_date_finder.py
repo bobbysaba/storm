@@ -9,7 +9,8 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QSettings, Qt
 from PyQt6.QtWidgets import QApplication
 
-from archive.catalog import ALL_PLATFORMS, AvailabilitySnapshot, PlatformAvailability
+from archive.catalog import AvailabilitySnapshot, PlatformAvailability
+from providers.nssl.archive.catalog import FOFS_PLATFORMS as ALL_PLATFORMS
 from ui.launch.availability import AvailabilityWorker
 from ui.launch.date_finder import FindDatesDialog, dates_by_site, match_dates, sites_on
 from ui.launch.dialog import LaunchDialog
@@ -120,10 +121,32 @@ def test_status_says_while_the_catalogs_are_still_being_checked():
     assert dlg._status.text().startswith("1 matching dates")
 
 
-def test_campaign_sets_the_year_range():
+def test_campaign_sets_the_year_range(monkeypatch):
+    import dataclasses
+    import settings
+    archive = dataclasses.replace(settings.SETTINGS.archive, campaigns=(("TORUS", (2019, 2022, 2023)),))
+    monkeypatch.setattr(settings, "SETTINGS", dataclasses.replace(settings.SETTINGS, archive=archive))
     dlg = FindDatesDialog()
+    assert dlg._campaign.isEnabled()
     dlg._campaign.setCurrentIndex(dlg._campaign.findData("TORUS"))
     assert dlg._year_range() == (2019, 2023)
+
+
+def test_without_campaigns_the_menu_is_off():
+    dlg = FindDatesDialog()
+    assert dlg._campaign.count() == 1 and not dlg._campaign.isEnabled()
+
+
+def test_sites_are_listed_under_their_platforms_headings():
+    from archive.catalog import KnownPlatform, RECORDED, VEHICLES
+    sites = {
+        "Recorded broker traffic": [KnownPlatform("h", "h", "Recorded broker traffic", None, group=RECORDED)],
+        "wx1": [KnownPlatform("o", "wx1", "Vehicle obs", "wx1", group=VEHICLES)],
+        "Probe 1": [next(p for p in ALL_PLATFORMS if p.platform_id == "FOFS-probe1")],
+    }
+    dlg = FindDatesDialog(sites=sites)
+    texts = [dlg._instruments.item(i).text() for i in range(dlg._instruments.count())]
+    assert [t for t in texts if t.isupper()] == ["RECORDED TRAFFIC", "VEHICLES", "MOBILE MESONET"]
 
 
 def test_choosing_a_date_sets_the_launch_date_and_keeps_the_time():

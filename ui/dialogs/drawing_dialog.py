@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from core.drawing import DrawingAnnotation, DRAWING_TYPE_MAP, FRONT_TYPE_KEYS
-from ui.theme import ACCENT, BG_BASE, BG_ELEVATED, TEXT_MUTED
+from ui.dialogs.annotation_dialog import _dialog_style
+from ui.theme import ACCENT, BG_ELEVATED, TEXT_MUTED
 from ui import palette as P
 
 _COLOR_PRESETS = [
@@ -32,28 +33,6 @@ def _make_color_combo(current_hex: str = _DEFAULT_COLOR) -> QComboBox:
             selected = i
     combo.setCurrentIndex(selected)
     return combo
-
-
-def _dialog_style() -> str:
-    return f"""
-        QDialog {{
-            background-color: {BG_BASE};
-        }}
-        QLabel {{
-            background-color: transparent;
-        }}
-        QLineEdit {{
-            background-color: {BG_ELEVATED};
-            border: 1px solid {P.BORDER};
-            border-radius: 6px;
-            padding: 6px 10px;
-            font-size: 11px;
-            color: {P.TEXT};
-        }}
-        QLineEdit:focus {{
-            border-color: {ACCENT};
-        }}
-    """
 
 
 def _centroid_latlon(coords: list[list[float]]) -> tuple[float, float]:

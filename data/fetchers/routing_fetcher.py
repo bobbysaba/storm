@@ -211,14 +211,15 @@ def _fetch_route(
 
 
 def fmt_distance(meters: float) -> str:
-    """Return a human-readable distance string (miles)."""
+    """A human-readable distance in the [units] distance unit (core/units.py)."""
+    from core import units  # noqa: PLC0415
+    if not units.miles():
+        return f"{meters:.0f} m" if meters < 1000 else units.fmt_dist(meters / 1000)
     miles = meters / 1609.34
     if miles < 0.1:
         feet = meters * 3.28084
         return f"{feet:.0f} ft"
-    if miles < 10:
-        return f"{miles:.1f} mi"
-    return f"{miles:.0f} mi"
+    return units.fmt_dist(meters / 1000)
 
 
 def fmt_duration(seconds: float) -> str:

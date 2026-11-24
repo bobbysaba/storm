@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import requests
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -18,6 +19,7 @@ pytest.importorskip("PyQt6")
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
 
+import archive.fetchers.goes_scan as gs
 import archive.fetchers.satellite_archive_fetcher as saf
 from core.goes_ir import IR_MAX_K, ir_rgb
 
@@ -91,10 +93,16 @@ def test_ir_table_takes_its_ends_outside_and_nan_as_warm():
 
 # --- rendering ----------------------------------------------------------------
 
+def _render(nc_bytes: bytes, mode: str, band: str = "vis") -> tuple[bytes, list[float]]:
+    """A GOES file read and rendered the way the fetcher does: (PNG, bbox)."""
+    scan = gs._read_goes(nc_bytes, mode)
+    return gs.render_scan(scan, band), scan.bbox
+
+
 def test_infrared_kelvins_go_through_the_ir_table_not_reflectance():
     """The fork drew band 13's kelvins as 0..1 reflectance: all white."""
     counts = np.full((300, 500), _counts_for(213.0), np.int16)
-    png, bbox = saf._render_goes_png(_goes_file(counts), "meso1", band="ir")
+    png, bbox = _render(_goes_file(counts), "meso1", band="ir")
     rgba = _png(png)
     assert rgba.shape[2] == 4
     opaque = rgba[rgba[..., 3] == 255]
@@ -106,7 +114,7 @@ def test_infrared_kelvins_go_through_the_ir_table_not_reflectance():
 def test_visible_stays_grey_with_gamma():
     scale = 0.00031746
     counts = np.full((300, 500), int(round(0.25 / scale)), np.int16)
-    png, _ = saf._render_goes_png(_goes_file(counts, units="1", scale=scale, offset=0.0), "meso1")
+    png, _ = _render(_goes_file(counts, units="1", scale=scale, offset=0.0), "meso1")
     la = _png(png)
     assert la.ndim == 3 and la.shape[2] == 2                   # grey + alpha
     grey = la[..., 0][la[..., 1] == 255]
@@ -115,14 +123,14 @@ def test_visible_stays_grey_with_gamma():
 
 def test_fill_is_transparent():
     counts = np.full((300, 500), -1, np.int16)
-    png, _ = saf._render_goes_png(_goes_file(counts), "meso1", band="ir")
+    png, _ = _render(_goes_file(counts), "meso1", band="ir")
     assert (_png(png)[..., 3] == 0).all()
 
 
 def test_unsigned_counts_and_their_fill():
     counts = np.full((300, 500), _counts_for(213.0), np.int16)
     counts[:, :250] = -1                                       # 65535 once read unsigned
-    png, _ = saf._render_goes_png(_goes_file(counts, unsigned=True), "meso1", band="ir")
+    png, _ = _render(_goes_file(counts, unsigned=True), "meso1", band="ir")
     alpha = _png(png)[..., 3]
     assert (alpha == 0).any() and (alpha == 255).any()
 
@@ -132,7 +140,7 @@ def test_box_average_of_counts_skips_fill():
     counts = rng.integers(0, 4000, (37, 50)).astype(np.int16)
     counts[:4, :4] = -1                                        # one whole block of fill
     counts[10, 10] = -1
-    out = saf._box_average_counts(counts, -1, 4)
+    out = gs._box_average_counts(counts, -1, 4)
     assert out.shape == (9, 12) and out.dtype == np.float32
     assert np.isnan(out[0, 0])
     block = counts[8:12, 8:12].astype(float)
@@ -143,7 +151,7 @@ def test_box_average_of_counts_skips_fill():
 def test_box_average_works_in_strips(monkeypatch):
     rng = np.random.default_rng(2)
     counts = rng.integers(0, 4000, (2100 * 2 + 3, 40)).astype(np.int16)
-    out = saf._box_average_counts(counts, -1, 2)               # strips of 1024 block rows
+    out = gs._box_average_counts(counts, -1, 2)               # strips of 1024 block rows
     expect = counts[:4202].reshape(2101, 2, 20, 2).mean(axis=(1, 3))
     assert np.allclose(out, expect)
 
@@ -151,25 +159,25 @@ def test_box_average_works_in_strips(monkeypatch):
 def test_window_render_matches_a_full_read(monkeypatch):
     """CONUS reads only the map's window of the file, averaged on the same
     blocks as a full read, so the picture doesn't change."""
-    monkeypatch.setitem(saf._OUTPUT_WIDTH, "conus", 120)
+    monkeypatch.setitem(gs._OUTPUT_WIDTH, "conus", 120)
     rng = np.random.default_rng(3)
     counts = rng.integers(900, 3500, (720, 1200)).astype(np.int16)
     nc = _goes_file(counts, step=1.12e-4 * 2)
-    windowed = saf._read_goes(nc, "conus", CONUS_BBOX)
+    windowed = gs._read_goes(nc, "conus", CONUS_BBOX)
     assert windowed.k > 1
     assert windowed.counts.shape[0] < 720 and windowed.counts.shape[1] < 1200
 
-    monkeypatch.setattr(saf, "_scan_window", lambda g, bbox, k: (0, g.ny, 0, g.nx))
-    saf._INDEX_CACHE.clear()
-    full = saf._read_goes(nc, "conus", CONUS_BBOX)
+    monkeypatch.setattr(gs, "_scan_window", lambda g, bbox, k: (0, g.ny, 0, g.nx))
+    gs._INDEX_CACHE.clear()
+    full = gs._read_goes(nc, "conus", CONUS_BBOX)
     assert full.counts.shape == (720, 1200)
-    assert saf._render_scan(windowed, "ir") == saf._render_scan(full, "ir")
+    assert gs.render_scan(windowed, "ir") == gs.render_scan(full, "ir")
 
 
 def test_window_starts_on_a_block_boundary():
-    g = saf._GoesGrid(lon0=np.radians(-75.0), a=6378137.0, b=6356752.31414, H=35786023.0 + 6378137.0,
+    g = gs._GoesGrid(lon0=np.radians(-75.0), a=6378137.0, b=6356752.31414, H=35786023.0 + 6378137.0,
                       x0=-0.101332, dx=5.6e-5, nx=10000, y0=0.128212, dy=-5.6e-5, ny=6000)
-    r0, r1, c0, c1 = saf._scan_window(g, CONUS_BBOX, 6)
+    r0, r1, c0, c1 = gs._scan_window(g, CONUS_BBOX, 6)
     assert r0 % 6 == 0 and c0 % 6 == 0
     assert 0 < c0 < c1 < 10000 and 0 <= r0 < r1 < 6000
 
@@ -204,7 +212,7 @@ class _RangeServer:
 
 @pytest.fixture
 def chunked_vis(monkeypatch):
-    monkeypatch.setitem(saf._OUTPUT_WIDTH, "conus", 200)
+    monkeypatch.setitem(gs._OUTPUT_WIDTH, "conus", 200)
     rng = np.random.default_rng(4)
     counts = rng.integers(0, 3150, (1440, 2400)).astype(np.int16)
     return _goes_file(counts, units="1", scale=0.00031746, offset=0.0, step=1.12e-4, chunks=(60, 60))
@@ -213,21 +221,21 @@ def chunked_vis(monkeypatch):
 @pytest.fixture
 def recorded(monkeypatch):
     calls = []
-    monkeypatch.setattr(saf.package_sources, "get", lambda url: None)
-    monkeypatch.setattr(saf.provenance, "record", lambda kind, url, data=None, **kw: calls.append(
+    monkeypatch.setattr(gs.package_sources, "get", lambda url: None)
+    monkeypatch.setattr(gs.provenance, "record", lambda kind, url, data=None, **kw: calls.append(
         {"kind": kind, "url": url, "data": data, **kw}))
     return calls
 
 
 def test_range_read_fetches_only_the_window(monkeypatch, chunked_vis, recorded):
     server = _RangeServer(chunked_vis)
-    monkeypatch.setattr(saf.requests, "Session", server)
-    monkeypatch.setattr(saf, "_RANGE_MERGE_GAP", 0)
-    scan = saf._load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
+    monkeypatch.setattr(requests, "Session", server)
+    monkeypatch.setattr(gs, "_RANGE_MERGE_GAP", 0)
+    scan = gs.load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
 
     fetched = sum(n for _, n in server.requests)
     assert fetched < 0.75 * len(chunked_vis)
-    assert np.array_equal(scan.counts, saf._read_goes(chunked_vis, "conus", CONUS_BBOX).counts)
+    assert np.array_equal(scan.counts, gs._read_goes(chunked_vis, "conus", CONUS_BBOX).counts)
     # recorded by size only, so an export downloads the whole file
     assert recorded == [{"kind": "satellite", "url": "https://bucket/f.nc", "data": None,
                          "size": len(chunked_vis), "source": "network (ranges)"}]
@@ -235,18 +243,18 @@ def test_range_read_fetches_only_the_window(monkeypatch, chunked_vis, recorded):
 
 def test_range_read_merges_nearby_chunks_into_few_requests(monkeypatch, chunked_vis, recorded):
     server = _RangeServer(chunked_vis)
-    monkeypatch.setattr(saf.requests, "Session", server)
+    monkeypatch.setattr(requests, "Session", server)
     calls = []
-    real = saf._RangeFile.prefetch
-    monkeypatch.setattr(saf._RangeFile, "prefetch", lambda self, spans: (calls.append(len(server.requests)),
+    real = gs._RangeFile.prefetch
+    monkeypatch.setattr(gs._RangeFile, "prefetch", lambda self, spans: (calls.append(len(server.requests)),
                                                                           real(self, spans))[1])
-    saf._load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
+    gs.load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
     assert len(server.requests) - calls[0] <= 5                # the window's chunks
 
 
 def test_server_ignoring_range_gives_the_whole_file(monkeypatch, chunked_vis, recorded):
-    monkeypatch.setattr(saf.requests, "Session", _RangeServer(chunked_vis, honor_range=False))
-    scan = saf._load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
+    monkeypatch.setattr(requests, "Session", _RangeServer(chunked_vis, honor_range=False))
+    scan = gs.load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
     assert scan.counts.size > 0
     assert recorded[0]["data"] == chunked_vis
 
@@ -254,25 +262,25 @@ def test_server_ignoring_range_gives_the_whole_file(monkeypatch, chunked_vis, re
 def test_failed_range_read_falls_back_to_a_download(monkeypatch, chunked_vis, recorded):
     def broken():
         raise OSError("no ranges here")
-    monkeypatch.setattr(saf.requests, "Session", broken)
+    monkeypatch.setattr(requests, "Session", broken)
     got = []
 
     def download(kind, url, **kw):
         got.append(url)
         return SimpleNamespace(content=chunked_vis, raise_for_status=lambda: None)
 
-    monkeypatch.setattr(saf.package_sources, "requests_get", download)
-    scan = saf._load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
+    monkeypatch.setattr(gs.package_sources, "requests_get", download)
+    scan = gs.load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True)
     assert got == ["https://bucket/f.nc"] and scan.counts.size > 0
 
 
 def test_a_case_package_copy_is_read_whole(monkeypatch, chunked_vis):
-    monkeypatch.setattr(saf.package_sources, "get", lambda url: chunked_vis)
+    monkeypatch.setattr(gs.package_sources, "get", lambda url: chunked_vis)
 
     def no_network():
         raise AssertionError("no range requests with a packaged copy")
-    monkeypatch.setattr(saf.requests, "Session", no_network)
-    assert saf._load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True).counts.size > 0
+    monkeypatch.setattr(requests, "Session", no_network)
+    assert gs.load_scan("https://bucket/f.nc", "conus", CONUS_BBOX, ranged=True).counts.size > 0
 
 
 # --- the fetcher --------------------------------------------------------------
@@ -324,10 +332,10 @@ def fetcher_env(monkeypatch, app):
         loaded.append((url.rsplit("/", 1)[-1], ranged))
         return SimpleNamespace(bbox=list(bbox or [-100.0, 30.0, -95.0, 35.0]))
 
-    monkeypatch.setattr(saf.requests, "get", fake_get)
+    monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(saf.threading, "Thread", _SyncThread)
-    monkeypatch.setattr(saf, "_load_scan", fake_load)
-    monkeypatch.setattr(saf, "_render_scan", lambda scan, band: f"png-{band}".encode())
+    monkeypatch.setattr(gs, "load_scan", fake_load)
+    monkeypatch.setattr(gs, "render_scan", lambda scan, band: f"png-{band}".encode())
     return SimpleNamespace(listed=listed, loaded=loaded, keys=keys)
 
 

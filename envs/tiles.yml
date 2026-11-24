@@ -1,0 +1,9 @@
+name: tiles
+# Java for scripts/make_base_mbtiles.py (Planetiler). Kept out of the storm
+# environment: only needed to build your own offline map tiles.
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.14
+  - openjdk=21

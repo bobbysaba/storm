@@ -22,17 +22,16 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-import config
 from archive.session import session_bounds
 from core import package_sources
 from core.observation import Observation
+from core.obs_cleanup import float_or_none
 from core.qt_signals import emit_alive
-from data import endpoints
+from data import auth, endpoints
 from data.fetchers.surface_fetcher import MAX_ASOS_STATIONS, load_asos_station_roster
 
 log = logging.getLogger(__name__)
@@ -44,23 +43,11 @@ _REQUEST_FIELDS = ("tmpf", "dwpf", "sknt", "drct", "alti", "mslp")
 _BATCH_SIZE = 50
 _BATCH_PACE_S = 1.0  # IEM's one request per second
 _REQUEST_TIMEOUT = 30
-_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 _RETRY_BACKOFF_S = (2.0, 5.0)
 
 
 def _urlopen_with_retry(request: Request):
-    attempts = len(_RETRY_BACKOFF_S) + 1
-    for attempt in range(attempts):
-        try:
-            return urlopen(request, timeout=_REQUEST_TIMEOUT, context=config.NSSL_SSL_CONTEXT)
-        except HTTPError as exc:
-            if exc.code not in _RETRYABLE_HTTP_CODES or attempt == attempts - 1:
-                raise
-        except URLError:
-            if attempt == attempts - 1:
-                raise
-        time.sleep(_RETRY_BACKOFF_S[attempt])
-    raise AssertionError("unreachable")  # pragma: no cover
+    return auth.urlopen_with_retry(request, timeout=_REQUEST_TIMEOUT, backoff_s=_RETRY_BACKOFF_S)
 
 
 def stations_in_bbox(roster: dict[str, dict], west: float, south: float, east: float, north: float) -> list[str]:
@@ -80,15 +67,6 @@ def _batch_url(station_ids: list[str], sts: datetime, ets: datetime) -> str:
         "format=onlycomma",
     ]
     return f"{_ASOS_HISTORY_URL}?{'&'.join(parts)}"
-
-
-def _float_or_none(value: str | None) -> float | None:
-    if value is None or value in ("", "M"):
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def _parse_valid(value: str | None) -> datetime | None:
@@ -115,13 +93,13 @@ def parse_asos_history_csv(raw_text: str, roster: dict[str, dict]) -> dict[str, 
         if ts is None:
             continue
 
-        tmpf = _float_or_none(row.get("tmpf"))
-        dwpf = _float_or_none(row.get("dwpf"))
-        sknt = _float_or_none(row.get("sknt"))
-        mslp = _float_or_none(row.get("mslp"))
+        tmpf = float_or_none(row.get("tmpf"), ("M",))
+        dwpf = float_or_none(row.get("dwpf"), ("M",))
+        sknt = float_or_none(row.get("sknt"), ("M",))
+        mslp = float_or_none(row.get("mslp"), ("M",))
         pres = mslp if (mslp is not None and 870.0 <= mslp <= 1090.0) else None
         if pres is None:
-            alti = _float_or_none(row.get("alti"))
+            alti = float_or_none(row.get("alti"), ("M",))
             if alti is not None and 27.0 <= alti <= 32.0:
                 pres = alti * 33.8639
 
@@ -134,7 +112,7 @@ def parse_asos_history_csv(raw_text: str, roster: dict[str, dict]) -> dict[str, 
             temperature_c=(tmpf - 32.0) * 5.0 / 9.0 if tmpf is not None else None,
             dewpoint_c=(dwpf - 32.0) * 5.0 / 9.0 if dwpf is not None else None,
             wind_speed_ms=sknt * 0.514444 if sknt is not None else None,
-            wind_dir_deg=_float_or_none(row.get("drct")),
+            wind_dir_deg=float_or_none(row.get("drct"), ("M",)),
             pressure_mb=pres,
         ))
 

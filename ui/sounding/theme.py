@@ -1,4 +1,6 @@
 
+import math
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QLabel
@@ -26,14 +28,49 @@ _LM_CLR     = "#4fc3f7"
 _OBS_MOTION_CLR = "#FFD400"   # observed storm motion (archive storm track)
 
 # per-source identity for comparison overlay
-_SOURCE_COLORS = {"obs": "#ff6b6b", "hrrr": "#4fc3f7", "nssl": "#81c784",
-                  "clamps_tropoe": "#ffb74d", "coptersonde": "#ba68c8"}
-_SOURCE_LABELS = {"obs": "OBS",     "hrrr": "HRRR",    "nssl": "NSSL",
-                  "clamps_tropoe": "TROPoe", "coptersonde": "COPTER"}
-_SOURCE_LS     = {"obs": "-",       "hrrr": "--",       "nssl": ":",
-                  "clamps_tropoe": "-.", "coptersonde": (0, (5, 1, 1, 1))}
-_SOURCE_GLYPHS = {"obs": "━━",      "hrrr": "╌╌",       "nssl": "┈┈",
-                  "clamps_tropoe": "━┈", "coptersonde": "━╌"}
+_SOURCE_COLORS = {"obs": "#ff6b6b", "hrrr": "#4fc3f7", "provider": "#81c784",
+                  "retrieval": "#ffb74d", "uas": "#ba68c8"}
+_SOURCE_LABELS = {"obs": "OBS",     "hrrr": "HRRR",    "provider": "PROVIDER",
+                  "retrieval": "RETRIEVAL", "uas": "UAS"}
+_SOURCE_LS     = {"obs": "-",       "hrrr": "--",       "provider": ":",
+                  "retrieval": "-.", "uas": (0, (5, 1, 1, 1))}
+_SOURCE_GLYPHS = {"obs": "━━",      "hrrr": "╌╌",       "provider": "┈┈",
+                  "retrieval": "━┈", "uas": "━╌"}
+
+# the sources STORM compares against, in pill order; sounding [[sources]]
+# and code-provider soundings are added by register_source
+COMPARISON_SOURCES = ["obs", "hrrr", "provider"]
+_EXTRA_STYLES = (("#f06292", "-", "━━"), ("#4db6ac", "--", "╌╌"), ("#fff176", ":", "┈┈"),
+                 ("#9575cd", "-.", "━┈"), ("#a1887f", (0, (5, 1, 1, 1)), "━╌"))
+
+
+def set_provider_label(label: str) -> None:
+    """The provider soundings' pill and legend label (its LABEL: "NSSL")."""
+    _SOURCE_LABELS["provider"] = label
+
+
+def provider_label() -> str:
+    return _SOURCE_LABELS["provider"]
+
+
+def set_source_labels(labels: dict) -> None:
+    """A provider's pill and legend labels for its retrieval and uas
+    soundings (its archive sounding fetcher's pill_labels: NSSL's
+    {"retrieval": "TROPoe", "uas": "COPTER"})."""
+    for key in ("retrieval", "uas"):
+        if labels.get(key):
+            _SOURCE_LABELS[key] = str(labels[key])
+
+
+def register_source(key: str, label: str) -> None:
+    """Give a sounding source (data/sources.py sounding_key) a pill, a color
+    and a line style, the next of _EXTRA_STYLES."""
+    if key in _SOURCE_COLORS:
+        return
+    color, ls, glyph = _EXTRA_STYLES[(len(COMPARISON_SOURCES) - 3) % len(_EXTRA_STYLES)]
+    _SOURCE_COLORS[key], _SOURCE_LS[key], _SOURCE_GLYPHS[key] = color, ls, glyph
+    _SOURCE_LABELS[key] = label
+    COMPARISON_SOURCES.append(key)
 
 _HODO_LAYERS = [
     ("#ff8585", 0,  3),
@@ -107,3 +144,16 @@ def _lbl(text, color=_TEXT, size=10, bold=False,
     )
     w.setAlignment(align)
     return w
+
+
+def _threshold_color(thresholds: dict[str, list], key: str, value) -> str | None:
+    """The colour of the highest of *thresholds[key]* that *value* reaches,
+    or None (no table for *key*, or no finite value)."""
+    steps = thresholds.get(key)
+    if not steps or value is None or not math.isfinite(value):
+        return None
+    color = steps[0][1]
+    for threshold, c in steps:
+        if value >= threshold:
+            color = c
+    return color

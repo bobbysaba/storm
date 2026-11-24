@@ -1,8 +1,9 @@
 """Point soundings, the ASOS box, comparison sources and VAD."""
 
 import logging
-from data.stations.sounding_utils import nearest_obs_station, nssl_within_radius_km
+from data.stations.sounding_utils import nearest_obs_station, launch_within_radius_km
 from ui.app.main_window_util import _SOUNDING_PROMPTS
+from ui.sounding.theme import provider_label
 
 log = logging.getLogger("ui.app.main_window")
 
@@ -25,29 +26,31 @@ class MainWindowSoundingMixin:
         self._on_sounding_mode_changed(mode)
 
     def _on_sounding_mode_changed(self, mode: str):
-        """Called when the user switches between HRRR, OBS, and NSSL in the sub-bar."""
+        """Called when the user switches between HRRR, OBS and the provider's soundings in the sub-bar."""
         if not self.btn_sounding.isChecked():
             return
         self._click_modes.set_prompt(_SOUNDING_PROMPTS.get(mode, ""))
         if self._archive:
-            # archive mode: OBS → radiosonde, NSSL → lidar truck sondes (then
-            # CLAMPS TROPoe), COPTERSONDE → PERiLS ascents; no HRRR source.
+            # archive mode: OBS → radiosonde, the provider's (NSSL: lidar truck
+            # sondes, then CLAMPS TROPoe), UAS → its UAS ascents; no HRRR.
             if mode == "obs":
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
                 self.map_widget.set_obs_sounding_mode(True)
-            elif mode == "coptersonde":
+            elif mode == "uas":
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_obs_sounding_mode(False)
                 self.map_widget.clear_sounding_stations()
-                self.status_msg_label.setText("Fetching CopterSonde profiles…")
-                self._archive_sounding.fetch_coptersondes()
-            else:  # nssl
+                name = str(getattr(self._archive_sounding, "uas_name", "") or "UAS")
+                self._click_modes.set_prompt(f"{name} profiles")
+                self.status_msg_label.setText(f"Fetching {name} profiles…")
+                self._archive_sounding.fetch_uas()
+            else:  # provider
                 self.map_widget.set_sounding_mode(False)
                 self.map_widget.set_obs_sounding_mode(False)
                 self.map_widget.clear_sounding_stations()
-                self.status_msg_label.setText("Fetching NSSL soundings…")
-                self._archive_sounding.fetch_nssl_sounding()
+                self.status_msg_label.setText(f"Fetching {provider_label()} soundings…")
+                self._archive_sounding.fetch_provider_sounding()
             return
         if not hasattr(self, "_sounding_fetcher"):
             return
@@ -59,12 +62,18 @@ class MainWindowSoundingMixin:
             self.map_widget.set_sounding_mode(False)
             self.map_widget.set_sounding_stations(self._sounding_stations_geojson)
             self.map_widget.set_obs_sounding_mode(True)
-        else:  # nssl
+        elif mode.startswith("source:"):
+            # a sounding [[sources]] entry or a code provider's
             self.map_widget.set_sounding_mode(False)
             self.map_widget.set_obs_sounding_mode(False)
             self.map_widget.clear_sounding_stations()
-            self.status_msg_label.setText("Fetching NSSL soundings…")
-            self._clamps_sounding_fetcher.fetch()
+            self._fetch_source_sounding(mode)
+        else:  # provider
+            self.map_widget.set_sounding_mode(False)
+            self.map_widget.set_obs_sounding_mode(False)
+            self.map_widget.clear_sounding_stations()
+            self.status_msg_label.setText(f"Fetching {provider_label()} soundings…")
+            self._provider_sounding_fetcher.fetch()
 
     def _on_sounding_map_click(self, lat: float, lon: float):
         self.status_msg_label.setText("Fetching HRRR sounding…")
@@ -142,8 +151,9 @@ class MainWindowSoundingMixin:
 
     def _on_sounding_ready(self, sset):
         self.status_msg_label.setText("")
-        if sset.is_nssl:
-            self._last_nssl_sset = sset
+        if sset.is_provider:
+            self._last_provider_sset = sset
+        self._remember_source_sounding(sset, shown=True)
         if hasattr(self, "_track"):
             # the archive storm track's motion: OBS on the hodograph, SRH obs
             self._sounding_dialog.set_observed_storm_motion(self.track_storm_motion())
@@ -152,29 +162,33 @@ class MainWindowSoundingMixin:
         available = self._compute_available_sources(sset)
         self._sounding_dialog.set_available_sources(available)
 
-        if sset.is_nssl and not self._archive:
-            self._nssl_sounding_refresh_timer.start()
-        elif hasattr(self, "_nssl_sounding_refresh_timer"):
-            self._nssl_sounding_refresh_timer.stop()
+        if sset.is_provider and not self._archive:
+            self._provider_sounding_refresh_timer.start()
+        elif hasattr(self, "_provider_sounding_refresh_timer"):
+            self._provider_sounding_refresh_timer.stop()
 
     def _compute_available_sources(self, sset) -> dict:
         """Determine which comparison source pills to show for a given primary SoundingSet."""
         available = {}
-        nssl = getattr(self, "_last_nssl_sset", None)
+        provider = getattr(self, "_last_provider_sset", None)
+        # sounding sources fetched this session, near enough to compare
+        for key, other in getattr(self, "_last_source_ssets", {}).items():
+            if key != sset.source and launch_within_radius_km(other.lat, other.lon, sset.lat, sset.lon):
+                available[key] = {}
 
         if sset.source == "hrrr":
             obs = nearest_obs_station(sset.lat, sset.lon)
             if obs:
                 available["obs"] = obs
-            if nssl and nssl_within_radius_km(nssl.lat, nssl.lon, sset.lat, sset.lon):
-                available["nssl"] = {}
+            if provider and launch_within_radius_km(provider.lat, provider.lon, sset.lat, sset.lon):
+                available["provider"] = {}
 
         elif sset.source == "obs":
             available["hrrr"] = {"lat": sset.lat, "lon": sset.lon}
-            if nssl and nssl_within_radius_km(nssl.lat, nssl.lon, sset.lat, sset.lon):
-                available["nssl"] = {}
+            if provider and launch_within_radius_km(provider.lat, provider.lon, sset.lat, sset.lon):
+                available["provider"] = {}
 
-        elif sset.source in ("nssl", "clamps_tropoe", "coptersonde"):
+        elif sset.source in ("provider", "retrieval", "uas") or sset.source.startswith("source:"):
             if sset.lat != 0.0 or sset.lon != 0.0:
                 available["hrrr"] = {"lat": sset.lat, "lon": sset.lon}
                 obs = nearest_obs_station(sset.lat, sset.lon)
@@ -189,8 +203,9 @@ class MainWindowSoundingMixin:
     def _on_comp_sounding_ready(self, sset):
         """Called when a comparison (secondary) sounding finishes fetching."""
         self.status_msg_label.setText("")
-        if sset.is_nssl:
-            self._last_nssl_sset = sset
+        if sset.is_provider:
+            self._last_provider_sset = sset
+        self._remember_source_sounding(sset, shown=False)
         self._sounding_dialog.add_source(sset)
 
     def _on_comparison_source_requested(self, source: str, meta: dict):
@@ -212,9 +227,11 @@ class MainWindowSoundingMixin:
                 return
             self.status_msg_label.setText(f"Fetching OBS comparison sounding {sid}…")
             self._comp_obs_fetcher.fetch(sid, name, lat, lon, elev)
-        elif source == "nssl":
-            self.status_msg_label.setText("Fetching NSSL comparison sounding…")
-            self._comp_nssl_fetcher.fetch()
+        elif source == "provider":
+            self.status_msg_label.setText(f"Fetching {provider_label()} comparison sounding…")
+            self._comp_provider_fetcher.fetch()
+        elif source.startswith("source:"):
+            self._fetch_source_sounding(source, comparison=True)
 
     def _on_sounding_error(self, msg: str):
         self.status_msg_label.setText(f"Sounding error: {msg}")
@@ -231,9 +248,9 @@ class MainWindowSoundingMixin:
                 )
         return self._sounding_dialog_obj
 
-    def _refresh_nssl_sounding_if_visible(self):
+    def _refresh_provider_sounding_if_visible(self):
         if self._archive:
-            self._nssl_sounding_refresh_timer.stop()
+            self._provider_sounding_refresh_timer.stop()
             return
         dlg = self._sounding_dialog_obj
         sset = getattr(dlg, "_sset", None)
@@ -241,18 +258,18 @@ class MainWindowSoundingMixin:
             dlg is None
             or not dlg.isVisible()
             or sset is None
-            or not sset.is_nssl
+            or not sset.is_provider
         ):
-            self._nssl_sounding_refresh_timer.stop()
+            self._provider_sounding_refresh_timer.stop()
             return
-        self._clamps_sounding_fetcher.fetch()
+        self._provider_sounding_fetcher.fetch()
 
     def _on_vad_requested(self):
         """Open the VAD wind-profile window: live NEXRAD VAD for the current
-        radar site, or in ARCHIVE the session's lidar wind profiles (the
-        lidar truck and the CLAMPS trailers)."""
+        radar site, or in ARCHIVE the session's lidar wind profiles (a
+        provider's archive_wind_profiles)."""
         if self._archive:
-            self._request_archive_clamps_wind()
+            self._request_archive_wind_profiles()
             return
         site = self.radar_controls.current_site()
         from ui.dialogs.vad_dialog import VADDialog

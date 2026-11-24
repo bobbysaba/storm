@@ -5,12 +5,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-import config
+from archive import history
 from core.annotation import Annotation
 from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
@@ -18,52 +16,11 @@ from core.scan_sector import ScanSector
 from network.vehicle_sync import _observation_from_payload
 from archive.session import last_moving_time, session_bounds
 from archive.vehicle_speed import VehicleSpeed, calculate_vehicle_speed
-from core import package_sources
 from core.qt_signals import emit_alive
-from data import thredds_paths as paths
 
 log = logging.getLogger(__name__)
 
-_ANNOTATIONS_PATH = "annotations"
 _TOPICS = ("vehicles", "annotations", "cones", "drawings", "scan_sectors")
-# THREDDS mirrors the API's storm.<topic>.<date> files (same records, same
-# format) but keeps only a rolling ~5 months, so the API stays as the fallback.
-# Tried first because the API answered 404 on every path (2026-11-11).
-_THREDDS_ANNOTATIONS_ROOT = paths.file_url(paths.FOFS_ANNOTATIONS)
-
-
-def _fetch_text(url: str, *, api_key: bool = False) -> Optional[str]:
-    """Fetch an archive JSONL file as text; return None on 404, raise on other
-    errors. api_key=True adds the NSSL API's key; THREDDS never gets it."""
-    headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
-    if api_key and config.NSSL_API_KEY:
-        headers["X-API-Key"] = config.NSSL_API_KEY
-    try:
-        data = package_sources.read_url("mqtt history", Request(url, headers=headers), urlopen,
-                                        timeout=20, context=config.NSSL_SSL_CONTEXT)
-        return data.decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise
-
-
-def _fetch_topic_text(topic: str, date_str: str) -> tuple[Optional[str], str]:
-    """THREDDS first, then the API. Returns (text or None, source) for logging.
-    Any THREDDS failure falls through to the API, which may still answer."""
-    thredds_error = None
-    try:
-        text = _fetch_text(f"{_THREDDS_ANNOTATIONS_ROOT}/storm.{topic}.{date_str}")
-        if text is not None:
-            return text, "THREDDS"
-    except Exception as exc:
-        thredds_error = exc
-        log.debug("ArchiveMQTTReader: THREDDS fetch failed for %s %s, trying API: %s", topic, date_str, exc)
-
-    text = _fetch_text(f"{config.NSSL_API_ROOT}/{_ANNOTATIONS_PATH}/storm.{topic}.{date_str}", api_key=True)
-    if text is None and thredds_error is not None:
-        raise RuntimeError(f"THREDDS failed ({thredds_error}) and the API has no {topic} file") from thredds_error
-    return text, "API"
 
 
 def _parse_timestamp(obj: dict) -> Optional[datetime]:
@@ -134,7 +91,8 @@ def _expired(obj: dict, t: datetime) -> bool:
 
 class ArchiveMQTTReader(QObject):
     """
-    Fetches STORM archive JSONL files (THREDDS, else the NSSL API) and replays
+    Fetches recorded broker traffic (archive/history.py: the sources in
+    [archive] history) and replays
     vehicle positions, annotations, cones, drawings, and scan sectors in sync with
     the archive TimeController.
 
@@ -170,8 +128,14 @@ class ArchiveMQTTReader(QObject):
     loaded              = pyqtSignal()   # main thread, once every topic has been fetched
     _load_complete      = pyqtSignal()   # internal — fires on bg thread, triggers main-thread replay
 
-    def __init__(self, session_date: datetime, parent=None):
+    def __init__(self, session_date: datetime, sources: list | None = None, parent=None,
+                 renames: dict[str, str] | None = None):
         super().__init__(parent)
+        # the [archive] history sources, tried in order for each file
+        self._sources = history.build_sources() if sources is None else sources
+        # vehicle IDs as recorded -> as shown (a provider's VEHICLE_RENAMES:
+        # NSSL's pre-3.0 lid1 -> dltruck)
+        self._renames = dict(renames or {})
         self._date_str = session_date.strftime("%Y%m%d")
         # the session runs into the next UTC morning (archive/session.py),
         # whose records are in the next day's files
@@ -209,6 +173,12 @@ class ArchiveMQTTReader(QObject):
         self._sync_items("cones", archive_time)
         self._sync_items("drawings", archive_time)
         self._emit_scan_sectors(archive_time)
+
+    def resend(self, archive_time: datetime) -> None:
+        """Send the vehicles and scan sectors at *archive_time* again (a
+        drawer turning a provider's vehicles back on)."""
+        self._last_emit_time = None
+        self.on_time_changed(archive_time)
 
     def vehicle_positions_near(self, target_time: datetime) -> list[tuple[str, float, float]]:
         """Return (vehicle_id, lat, lon) tuples from the vehicle timestamp
@@ -289,12 +259,12 @@ class ArchiveMQTTReader(QObject):
 
     def _fetch_all(self) -> None:
         errors = []
-        # topics are independent, and a THREDDS miss plus API fallback can take
-        # 10 s or more each, so fetch them all at once, with the next
-        # morning's files alongside the session day's
+        # topics are independent, and a miss on one source plus the next can
+        # take 10 s or more each (NSSL's THREDDS then API), so fetch them all
+        # at once, with the next morning's files alongside the session day's
         with ThreadPoolExecutor(max_workers=2 * len(_TOPICS)) as pool:
             futures = {
-                pool.submit(_fetch_topic_text, topic, date_str): (topic, date_str)
+                pool.submit(history.fetch_text, self._sources, topic, date_str): (topic, date_str)
                 for topic in _TOPICS
                 for date_str in (self._date_str, self._next_date_str)
             }
@@ -304,6 +274,11 @@ class ArchiveMQTTReader(QObject):
                     text, source = future.result()
                     if text:
                         parsed = _parse_jsonl(text)
+                        if self._renames:
+                            for _, obj in parsed:
+                                vid = obj.get("vehicle_id")
+                                if isinstance(vid, str) and vid.strip().lower() in self._renames:
+                                    obj["vehicle_id"] = self._renames[vid.strip().lower()]
                         if date_str == self._next_date_str:
                             parsed = [(ts, obj) for ts, obj in parsed if ts <= self._cap]
                         records[topic] += parsed

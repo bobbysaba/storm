@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QVBoxLayout,
 )
 
-from core.case_package import DATA_TYPES, in_time_frame
+from core.case_package import DATA_TYPES, in_time_frame, kind_label
 from ui import palette as P
 
 
@@ -90,8 +90,9 @@ class CaseExportDialog(QDialog):
         self._boxes: dict[str, QCheckBox] = {}
         self._details: dict[str, QLabel] = {}
         self._sizes: dict[str, int] = {}
-        kinds = [k for k in DATA_TYPES if any(s["kind"] == k for s in [*sources, *self._listed])]
-        rows = [("tracks", "Storm tracks")] + [(k, DATA_TYPES[k]) for k in kinds]
+        present = {s["kind"] for s in [*sources, *self._listed]}
+        kinds = [k for k in DATA_TYPES if k in present] + sorted(present - set(DATA_TYPES))
+        rows = [("tracks", "Storm tracks")] + [(k, kind_label(k)) for k in kinds]
         for r, (kind, label) in enumerate(rows):
             box = QCheckBox(label)
             count = tracks if kind == "tracks" else 1

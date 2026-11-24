@@ -98,9 +98,9 @@ def render_lidar_to_png(rays, when, field='velocity', grid_size=768, *, ray_indi
             data = np.ma.masked_where(~(intensity >= min_intensity), data)   # NaN intensity hidden too
     from matplotlib import colormaps
     from matplotlib.colors import Normalize
-    from ui.map.radar_overlay import _colormaps
+    from ui.map.radar_colormaps import radar_colormaps
     if 'vel' in field.lower():
-        lo, hi, cmap = -30.0, 30.0, _colormaps()['nws_vel']
+        lo, hi, cmap = -30.0, 30.0, radar_colormaps()['nws_vel']
     else:
         finite = data.compressed()
         lo, hi = np.percentile(finite, [2, 98]) if len(finite) else (0, 1)

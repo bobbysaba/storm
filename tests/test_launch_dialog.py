@@ -12,12 +12,14 @@ from PyQt6.QtGui import QImage, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMessageBox, QSpinBox, QToolButton
 
-from archive.catalog import ALL_PLATFORMS, AvailabilitySnapshot, PlatformAvailability
+from archive.catalog import AvailabilitySnapshot, PlatformAvailability
+from providers.nssl.archive.catalog import FOFS_PLATFORMS as ALL_PLATFORMS
 from core import case_package
 from ui import palette as P
 from ui.launch import dialog as dialog_module
 from ui.launch.availability import AvailabilityWorker
-from ui.launch.dialog import LaunchDialog, _AvailabilityCalendar, _YearGridPopup
+from ui.launch.date_widgets import _AvailabilityCalendar, _YearGridPopup
+from ui.launch.dialog import LaunchDialog
 
 
 @pytest.fixture(autouse=True)
@@ -319,6 +321,12 @@ def test_a_file_that_isnt_a_package_is_refused(tmp_path, monkeypatch):
     assert dlg.case_package() is None and dlg._archive_dt_edit.dateTime() == before
 
 
+def _broker(monkeypatch, problems):
+    """Pretend storm.toml gives *problems* for the publishing modes."""
+    monkeypatch.setattr(dialog_module._settings.Settings, "broker_problems",
+                        lambda self, mode: problems if mode in ("vehicle", "monitor") else [])
+
+
 # ── Change Day presets ─────────────────────────────────────
 def test_change_day_reopens_in_archive_on_the_last_date():
     when = datetime(2024, 4, 27, 21, 5, tzinfo=timezone.utc)
@@ -329,7 +337,7 @@ def test_change_day_reopens_in_archive_on_the_last_date():
 def test_the_admin_passphrase_given_earlier_in_the_run_isnt_asked_again(monkeypatch):
     accepted = []
     monkeypatch.setattr(LaunchDialog, "_do_accept", lambda self: accepted.append(True))
-    monkeypatch.setattr(dialog_module._config, "missing_mqtt_cert_files", lambda: [])
+    _broker(monkeypatch, [])
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail("asked for a passphrase"))
     dlg = LaunchDialog(mode="archive", verified_modes={"admin"})
     dlg.show()
@@ -339,10 +347,10 @@ def test_the_admin_passphrase_given_earlier_in_the_run_isnt_asked_again(monkeypa
 
 
 @pytest.mark.parametrize("mode", ["vehicle", "monitor", "archive"])
-def test_modes_launch_without_a_passphrase_when_the_certificates_exist(monkeypatch, mode):
+def test_modes_launch_without_a_passphrase_when_the_broker_login_is_there(monkeypatch, mode):
     accepted = []
     monkeypatch.setattr(LaunchDialog, "_do_accept", lambda self: accepted.append(True))
-    monkeypatch.setattr(dialog_module._config, "missing_mqtt_cert_files", lambda: [])
+    _broker(monkeypatch, [])
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail(a[1]))
     dlg = LaunchDialog()
     dlg._select_mode(mode)
@@ -351,33 +359,35 @@ def test_modes_launch_without_a_passphrase_when_the_certificates_exist(monkeypat
     assert accepted == [True]
 
 
-@pytest.mark.parametrize("mode", ["vehicle", "monitor", "archive"])
-def test_modes_wont_launch_without_the_certificates(monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["vehicle", "monitor"])
+def test_publishing_modes_wont_launch_without_a_broker_login(monkeypatch, mode):
     warned = []
     monkeypatch.setattr(LaunchDialog, "_do_accept", lambda self: pytest.fail("launched"))
-    monkeypatch.setattr(dialog_module._config, "missing_mqtt_cert_files", lambda: ["/x/storm.pem"])
+    _broker(monkeypatch, ["missing file: /x/storm.pem"])
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
     dlg = LaunchDialog()
     dlg._select_mode(mode)
     dlg._vid_input.setText("TEST1")
     dlg._on_launch()
-    assert warned == ["Missing Certificate Files"]
+    assert warned == ["No Broker Login"]
 
 
-def test_viewer_launches_without_the_certificates(monkeypatch):
+@pytest.mark.parametrize("mode", ["viewer", "archive"])
+def test_viewer_and_archive_launch_without_a_broker(monkeypatch, mode):
     accepted = []
     monkeypatch.setattr(LaunchDialog, "_do_accept", lambda self: accepted.append(True))
-    monkeypatch.setattr(dialog_module._config, "missing_mqtt_cert_files", lambda: ["/x/storm.pem"])
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail(a[1]))
+    monkeypatch.setattr(dialog_module._settings, "SETTINGS",
+                        dialog_module._settings.load(Path("/nonexistent/storm.toml")))
     dlg = LaunchDialog()
-    dlg._select_mode("viewer")
+    dlg._select_mode(mode)
     dlg._on_launch()
     assert accepted == [True]
 
 
 def test_admin_mode_still_asks_for_its_passphrase(monkeypatch):
     warned = []
-    monkeypatch.setattr(dialog_module._config, "missing_mqtt_cert_files", lambda: [])
+    _broker(monkeypatch, [])
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[1]))
     dlg = LaunchDialog()
     dlg._select_mode("monitor")
@@ -397,3 +407,24 @@ def test_the_archive_section_fits_the_form_at_its_minimum_width():
         assert w.isVisibleTo(dlg)
         right = w.mapTo(dlg._form, w.rect().topRight()).x()
         assert right <= dlg._form.width()
+
+
+# ── logger file layouts ─────────────────────────────────────
+def test_logger_file_list_shows_with_several_layouts(monkeypatch):
+    import dataclasses
+    import settings
+    from headless.storm_headless.obs_columns import FieldMap
+    layouts = (("truck", FieldMap(label="Truck logger")), ("gps", FieldMap(file="*_gps.csv")))
+    monkeypatch.setattr(settings, "SETTINGS", dataclasses.replace(settings.SETTINGS, obs_layouts=layouts))
+    dlg = LaunchDialog()
+    assert not dlg._layout_combo.isHidden()
+    assert [dlg._layout_combo.itemText(i) for i in range(2)] == ["Truck logger", "gps"]
+    assert dlg.obs_layout() == "truck"
+    dlg._layout_combo.setCurrentIndex(1)
+    dlg._do_accept()
+    assert LaunchDialog().obs_layout() == "gps"      # saved choice comes back
+
+
+def test_logger_file_list_hidden_with_one_layout():
+    dlg = LaunchDialog()
+    assert dlg._layout_combo.isHidden() and dlg.obs_layout() == "default"

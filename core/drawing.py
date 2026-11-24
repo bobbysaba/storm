@@ -1,6 +1,7 @@
 
-import uuid
 from datetime import datetime, timezone
+
+from core.annotation import short_uuid
 
 # define the front types, their labels, symbols, and colors
 FRONT_TYPES = [
@@ -26,12 +27,6 @@ DRAWING_TYPE_MAP = {t["key"]: t for t in ALL_DRAWING_TYPES}
 FRONT_TYPE_KEYS = {t["key"] for t in FRONT_TYPES}
 # set of custom type keys
 CUSTOM_TYPE_KEYS = {t["key"] for t in CUSTOM_TYPES}
-
-
-# function to generate a short uuid
-def _short_uuid():
-    # return first 8 hex chars
-    return uuid.uuid4().hex[:8]
 
 
 # drawing annotation record
@@ -77,7 +72,7 @@ class DrawingAnnotation:
         meta = DRAWING_TYPE_MAP.get(drawing_type, {})
         # return a new annotation
         return cls(
-            id=_short_uuid(),
+            id=short_uuid(),
             drawing_type=drawing_type,
             coordinates=coordinates,
             title=title or meta.get("label", drawing_type),

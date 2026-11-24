@@ -1,9 +1,8 @@
 """Tests for the CLAMPS .skewT parser."""
 
-import math
 from datetime import datetime, timezone
 
-from data.fetchers.clamps_sounding_fetcher import (
+from providers.nssl.live.clamps_sounding_fetcher import (
     _FILENAME_RE,
     _api_sonde_entry,
     _format_label,

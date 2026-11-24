@@ -1,5 +1,5 @@
 """The archive date index: a missing file is absent, a failed check stays unknown."""
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from threading import Event
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -7,6 +7,7 @@ from urllib.parse import quote
 import pytest
 
 from archive import catalog as cat
+from providers.nssl.archive import catalog as ncat
 
 
 def _page(spec, *names):
@@ -21,9 +22,10 @@ def _fofs(listed_platform):
 
 
 def test_registry_unique_and_every_registered_source_has_catalogs():
-    assert len({p.platform_id for p in cat.ALL_PLATFORMS}) == len(cat.ALL_PLATFORMS)
-    assert sum(p.family == cat.MESONET for p in cat.ALL_PLATFORMS) == 17  # 16 vehicles + "other"
-    for platform in cat.ALL_PLATFORMS:
+    platforms = cat.all_platforms()
+    assert len({p.platform_id for p in platforms}) == len(platforms)
+    assert sum(p.family == ncat.MESONET for p in platforms) == 17  # 16 vehicles + "other"
+    for platform in platforms:
         assert cat.catalogs_for_platform(platform)
 
 
@@ -43,7 +45,7 @@ def test_processed_and_raw_dates_are_unioned_with_encoded_and_direct_links(_fofs
 
 def test_links_restrict_directory_host_and_file_type(_fofs):
     spec = cat.catalogs_for_platform(_fofs())[0]
-    parser = cat._CatalogLinks(spec)
+    parser = ncat._CatalogLinks(spec)
     parser.feed(_page(spec, '20240427.nc', '20240101.txt', '../other/20240102.nc') +
                 f'<a href="https://other.test/catalog.html?dataset={spec.path}/20240103.nc">other</a>')
     assert parser.filenames == {'20240427.nc'}
@@ -96,13 +98,13 @@ def test_cancellation_retains_completed_listing_and_stops_remaining_requests(_fo
 def test_http_404_is_absent_but_410_remains_unknown(monkeypatch):
     def missing(*args, **kwargs):
         raise HTTPError('url', 404, 'missing', {}, None)
-    monkeypatch.setattr(cat, 'urlopen', missing)
-    assert cat._fetch_catalog_html('https://example.test', Event()) == ''
+    monkeypatch.setattr(ncat, 'urlopen', missing)
+    assert ncat._fetch_catalog_html('https://example.test', Event()) == ''
     def unavailable(*args, **kwargs):
         raise HTTPError('url', 410, 'unavailable', {}, None)
-    monkeypatch.setattr(cat, 'urlopen', unavailable)
+    monkeypatch.setattr(ncat, 'urlopen', unavailable)
     with pytest.raises(HTTPError):
-        cat._fetch_catalog_html('https://example.test', Event())
+        ncat._fetch_catalog_html('https://example.test', Event())
 
 
 def test_cancellation_stops_retry_backoff(monkeypatch):
@@ -112,17 +114,17 @@ def test_cancellation_stops_retry_backoff(monkeypatch):
         calls.append(True)
         cancel.set()
         raise URLError('timeout')
-    monkeypatch.setattr(cat, 'urlopen', fetch)
+    monkeypatch.setattr(ncat, 'urlopen', fetch)
     with pytest.raises(cat.ScanCanceled):
-        cat._fetch_catalog_html('https://example.test', cancel)
+        ncat._fetch_catalog_html('https://example.test', cancel)
     assert calls == [True]
 
 
 def test_non_catalog_response_is_an_error(monkeypatch):
     import io
-    monkeypatch.setattr(cat, 'urlopen', lambda *a, **kw: io.BytesIO(b'<html>Login required</html>'))
+    monkeypatch.setattr(ncat, 'urlopen', lambda *a, **kw: io.BytesIO(b'<html>Login required</html>'))
     with pytest.raises(ValueError, match='THREDDS catalog'):
-        cat._fetch_catalog_html('https://example.test', Event())
+        ncat._fetch_catalog_html('https://example.test', Event())
 
 
 def test_scan_prioritizes_recent_sources_without_losing_older_dates(_fofs):
@@ -225,63 +227,63 @@ def test_corrupt_date_cache_cannot_block_discovery(tmp_path, content, _fofs):
 
 
 def test_calendar_parser_keeps_one_presence_token_per_day_not_all_files():
-    spec = cat.CatalogSpec('FRDD/CLAMPS/example', '.cdf')
-    parser = cat._CatalogLinks(spec, dates_only=True)
+    spec = ncat.CatalogSpec('FRDD/CLAMPS/example', '.cdf')
+    parser = ncat._CatalogLinks(spec, dates_only=True)
     parser.feed(_page(spec, 'r.20260517.000000.cdf', 'r.20260517.120000.cdf', 'r.20260518.000000.cdf'))
     assert parser.filenames == set()
     assert parser.date_stamps == {'20260517', '20260518'}
 
 
-def _install_fofs_index(monkeypatch, paths):
-    from archive import fofs_index
-    files = [fofs_index.FofsFile(fofs_index.vehicle_for_path(p), fofs_index._date_from_name(p.rsplit("/", 1)[-1]), p, "")
-             for p in paths]
-    monkeypatch.setattr(fofs_index, "get_index", lambda *a, **k: fofs_index.FofsIndex(files, 0.0))
+def _install_fofs_index(monkeypatch, files):
+    from providers.nssl import indexes
+    from tests.test_fofs_index import index_of
+    index = index_of(files)
+    monkeypatch.setattr(indexes.FOFS, "get", lambda *a, **k: index)
 
 
-def test_mesonet_dates_come_from_the_crawled_index_wherever_files_live(monkeypatch):
-    _install_fofs_index(monkeypatch, [
-        "FOFS/Mobile-Mesonet/data/probe1/raw/20240427.txt",
-        "FOFS/Mobile-Mesonet/data/probe1/moved_here/20250605.txt",
-        "FOFS/Mobile-Mesonet/data/dltruck/raw/20250605.txt",
-    ])
-    probe1 = next(p for p in cat.ALL_PLATFORMS if p.platform_id == "FOFS-probe1")
+def test_mesonet_dates_come_from_the_published_index_wherever_files_live(monkeypatch):
+    _install_fofs_index(monkeypatch, {
+        "probe1": {"20240427": ["probe1/raw/20240427.txt"],
+                   "20250605": ["probe1/moved_here/20250605.txt"]},
+        "dltruck": {"20250605": ["dltruck/raw/20250605.txt"]},
+    })
+    probe1 = next(p for p in ncat.FOFS_PLATFORMS if p.platform_id == "FOFS-probe1")
     result = list(cat.AvailabilityIndex([probe1], lambda *a: "", pace=0).scan(Event()))[-1]
     assert result.dates == {date(2024, 4, 27), date(2025, 6, 5)}
     assert result.platforms["FOFS-probe1"].complete
 
 
 def test_unregistered_vehicle_folders_still_put_their_dates_on_the_calendar(monkeypatch):
-    _install_fofs_index(monkeypatch, [
-        "FOFS/Mobile-Mesonet/data/probe1/raw/20240427.txt",
-        "FOFS/Mobile-Mesonet/data/newtruck/raw/20250701.txt",
-    ])
-    other = next(p for p in cat.ALL_PLATFORMS if p.platform_id == "FOFS-other")
+    _install_fofs_index(monkeypatch, {
+        "probe1": {"20240427": ["probe1/raw/20240427.txt"]},
+        "newtruck": {"20250701": ["newtruck/raw/20250701.txt"]},
+    })
+    other = next(p for p in ncat.FOFS_PLATFORMS if p.platform_id == "FOFS-other")
     result = list(cat.AvailabilityIndex([other], lambda *a: "", pace=0).scan(Event()))[-1]
     assert result.dates == {date(2025, 7, 1)}
 
 
 def test_unavailable_mesonet_index_is_unknown_not_empty():
     # conftest leaves no index available
-    probe1 = next(p for p in cat.ALL_PLATFORMS if p.platform_id == "FOFS-probe1")
+    probe1 = next(p for p in ncat.FOFS_PLATFORMS if p.platform_id == "FOFS-probe1")
     result = list(cat.AvailabilityIndex([probe1], lambda *a: "", pace=0).scan(Event()))[-1]
     assert not result.platforms["FOFS-probe1"].complete
     assert "index unavailable" in result.platforms["FOFS-probe1"].errors[0]
 
 
 def test_each_mesonet_vehicle_is_its_own_site_by_its_field_name():
-    by_site = cat.platforms_by_site()
+    by_site = cat.platforms_by_site(ncat.FOFS_PLATFORMS)
     assert [p.platform_id for p in by_site["LiDAR Truck"]] == ["FOFS-dltruck"]
     assert [p.platform_id for p in by_site["Probe 1"]] == ["FOFS-probe1"]
     assert "" not in by_site
 
 
 def test_catalog_urls_come_from_thredds_paths(_fofs):
-    from data import thredds_paths as paths
+    from providers.nssl import paths
     spec = cat.catalogs_for_platform(_fofs())[0]
     assert spec.url == paths.catalog_url(spec.path)
-    probe1 = next(p for p in cat.ALL_PLATFORMS if p.platform_id == "FOFS-probe1")
-    assert cat.catalogs_for_platform(probe1)[0].url.startswith(paths.catalog_url(paths.FOFS_MESONET))
+    probe1 = next(p for p in ncat.FOFS_PLATFORMS if p.platform_id == "FOFS-probe1")
+    assert cat.catalogs_for_platform(probe1)[0].url.startswith(paths.file_url(f"{paths.FOFS_MESONET_DATA}/manifest.json"))
 
 
 def test_a_failed_check_is_cached_with_its_old_dates_but_retried_next_launch(tmp_path, _fofs):

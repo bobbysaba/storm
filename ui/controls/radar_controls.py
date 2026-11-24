@@ -1,6 +1,4 @@
 
-import math
-import re
 import threading
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen
@@ -14,72 +12,176 @@ from ui import palette as P
 from ui.widgets.drawer import Drawer
 from ui.layer_status import StatusTimeLabel
 from data import thredds_paths as paths
+from data.fetchers.radar_fetcher import normalize_site, thredds_site_token
 from core.qt_signals import emit_alive
 
 
+# listed, but never picked as the nearest site: the Radar Operations
+# Center's test radar in Norman, whose feed isn't a normal site's
+NOT_NEAREST_SITES = frozenset({"KCRI"})
+
+# every WSR-88D site in the US and its territories (NCEI's NEXRAD station
+# list): (ICAO id, name, lat, lon). Live Level 3 comes from Unidata and
+# ARCHIVE's Level 2 from the AWS bucket, which carry all of them.
 NEXRAD_SITES = [
-    ("KTLX", "Oklahoma City, OK", 35.333, -97.278),
-    ("KOUN", "Norman, OK (Research)", 35.236, -97.463),
-    ("KVNX", "Enid/Vance, OK", 36.741, -98.127),
-    ("KFDR", "Frederick, OK", 34.362, -98.976),
-    ("KINX", "Tulsa, OK", 36.175, -95.565),
-    ("KSRX", "Ft. Smith, AR", 35.291, -94.362),
-    ("KDDC", "Dodge City, KS", 37.760, -99.969),
-    ("KICT", "Wichita, KS", 37.655, -97.443),
-    ("KTWX", "Topeka, KS", 38.996, -96.232),
-    ("KEAX", "Kansas City, MO", 38.810, -94.264),
-    ("KSGF", "Springfield, MO", 37.235, -93.401),
-    ("KLSX", "St. Louis, MO", 38.699, -90.683),
-    ("KLZK", "Little Rock, AR", 34.836, -92.262),
+    ("KABR", "Aberdeen, SD", 45.456, -98.413),
+    ("KABX", "Albuquerque, NM", 35.150, -106.824),
+    ("KAKQ", "Norfolk Rich, VA", 36.984, -77.007),
     ("KAMA", "Amarillo, TX", 35.233, -101.709),
-    ("KFWS", "Dallas/Ft. Worth, TX", 32.573, -97.303),
-    ("KDYX", "Dyess AFB, TX", 32.539, -99.254),
-    ("KSHV", "Shreveport, LA", 32.451, -93.841),
-    ("KLBB", "Lubbock, TX", 33.654, -101.814),
-    ("KMAF", "Midland, TX", 31.943, -102.189),
-    ("KABR", "Aberdeen, SD", 45.455, -98.413),
-    ("KUDX", "Rapid City, SD", 44.125, -102.830),
-    ("KLNX", "North Platte, NE", 41.958, -100.576),
-    ("KOAX", "Omaha, NE", 41.320, -96.366),
-    ("KUEX", "Grand Island, NE", 40.321, -98.442),
-    ("KGLD", "Goodland, KS", 39.366, -101.700),
-    ("KPUX", "Pueblo, CO", 38.460, -104.181),
-    ("KFTG", "Denver, CO", 39.786, -104.545),
-    ("KCYS", "Cheyenne, WY", 41.152, -104.806),
-    ("KRIW", "Riverton, WY", 43.066, -108.477),
+    ("KAMX", "Miami, FL", 25.611, -80.413),
+    ("KAPX", "Gaylord, MI", 44.906, -84.720),
+    ("KARX", "La Crosse, WI", 43.823, -91.191),
+    ("KATX", "Seattle, WA", 48.195, -122.496),
+    ("KBBX", "Beale AFB, CA", 39.496, -121.632),
+    ("KBGM", "Binghamton, NY", 42.200, -75.985),
+    ("KBHX", "Eureka, CA", 40.499, -124.292),
     ("KBIS", "Bismarck, ND", 46.771, -100.761),
-    ("KMBX", "Minot, ND", 48.393, -100.864),
-    ("KFSD", "Sioux Falls, SD", 43.588, -96.728),
-    ("KDVN", "Davenport, IA", 41.611, -90.581),
-    ("KDMX", "Des Moines, IA", 41.731, -93.723),
-    # illinois
-    ("KILX", "Lincoln/Central IL", 40.150, -89.336),
-    ("KLOT", "Chicago/NE IL", 41.604, -88.085),
-    # indiana
-    ("KIND", "Indianapolis, IN", 39.707, -86.280),
-    ("KIWX", "Northern Indiana", 41.359, -85.700),
-    # tennessee
-    ("KOHX", "Nashville, TN", 36.247, -86.563),
-    ("KNQA", "Memphis, TN", 35.345, -89.874),
-    ("KMRX", "Knoxville/E TN", 36.168, -83.402),
-    # alabama
-    ("KBMX", "Birmingham, AL", 33.172, -86.770),
-    ("KHTX", "Huntsville/N AL", 34.930, -86.083),
-    ("KMOB", "Mobile, AL", 30.679, -88.240),
-    # mississippi
-    ("KDGX", "Jackson/Central MS", 32.280, -89.984),
-    ("KGWX", "Columbus/NE MS", 33.897, -88.329),
-    # new Mexico
-    ("KABX", "Albuquerque, NM", 35.150, -106.823),
-    ("KFDX", "Clovis/E NM", 34.634, -103.629),
-    ("KHDX", "Holloman AFB, NM", 33.076, -106.122),
-    # minnesota
-    ("KMPX", "Minneapolis-St. Paul, MN", 44.849, -93.565),
-    ("KDLH", "Duluth, MN", 46.837, -92.210),
-    # montana
     ("KBLX", "Billings, MT", 45.854, -108.607),
-    ("KTFX", "Great Falls, MT", 47.460, -111.385),
+    ("KBMX", "Birmingham, AL", 33.172, -86.770),
+    ("KBOX", "Boston, MA", 41.956, -71.137),
+    ("KBRO", "Brownsville, TX", 25.916, -97.419),
+    ("KBUF", "Buffalo, NY", 42.949, -78.737),
+    ("KBYX", "Key West, FL", 24.598, -81.703),
+    ("KCAE", "Columbia, SC", 33.949, -81.118),
+    ("KCBW", "Houlton, ME", 46.039, -67.806),
+    ("KCBX", "Boise, ID", 43.490, -116.236),
+    ("KCCX", "State College, PA", 40.923, -78.004),
+    ("KCLE", "Cleveland, OH", 41.413, -81.860),
+    ("KCLX", "Charleston, SC", 32.656, -81.042),
+    ("KCRI", "Roc Faa Redundant Rda 1, OK", 35.238, -97.460),
+    ("KCRP", "Corpus Christi, TX", 27.784, -97.511),
+    ("KCXX", "Burlington, VT", 44.511, -73.166),
+    ("KCYS", "Cheyenne, WY", 41.152, -104.806),
+    ("KDAX", "Sacramento, CA", 38.501, -121.678),
+    ("KDDC", "Dodge City, KS", 37.761, -99.969),
+    ("KDFX", "Laughlin AFB, TX", 29.273, -100.280),
+    ("KDGX", "Jackson/Central MS", 32.280, -89.984),
+    ("KDIX", "Philadelphia, NJ", 39.947, -74.411),
+    ("KDLH", "Duluth, MN", 46.837, -92.210),
+    ("KDMX", "Des Moines, IA", 41.731, -93.723),
+    ("KDOX", "Dover AFB, DE", 38.826, -75.440),
+    ("KDTX", "Detroit, MI", 42.700, -83.472),
+    ("KDVN", "Davenport, IA", 41.612, -90.581),
+    ("KDYX", "Dyess AFB, TX", 32.538, -99.254),
+    ("KEAX", "Kansas City, MO", 38.810, -94.264),
+    ("KEMX", "Tucson, AZ", 31.894, -110.630),
+    ("KENX", "Albany, NY", 42.587, -74.064),
+    ("KEOX", "Fort Rucker, AL", 31.461, -85.459),
+    ("KEPZ", "El Paso, NM", 31.873, -106.698),
+    ("KESX", "Las Vegas, NV", 35.701, -114.892),
+    ("KEVX", "Eglin AFB, FL", 30.565, -85.922),
+    ("KEWX", "Austin San Antonio, TX", 29.704, -98.029),
+    ("KEYX", "Edwards, CA", 35.098, -117.561),
+    ("KFCX", "Roanoke, VA", 37.024, -80.274),
+    ("KFDR", "Frederick, OK", 34.362, -98.977),
+    ("KFDX", "Clovis/E NM", 34.634, -103.619),
+    ("KFFC", "Atlanta, GA", 33.364, -84.566),
+    ("KFSD", "Sioux Falls, SD", 43.588, -96.729),
+    ("KFSX", "Flagstaff, AZ", 34.574, -111.198),
+    ("KFTG", "Denver, CO", 39.787, -104.546),
+    ("KFWS", "Dallas/Ft. Worth, TX", 32.573, -97.303),
+    ("KGGW", "Glasgow, MT", 48.206, -106.625),
+    ("KGJX", "Grand Junction, CO", 39.062, -108.214),
+    ("KGLD", "Goodland, KS", 39.367, -101.700),
+    ("KGRB", "Green Bay, WI", 44.499, -88.111),
+    ("KGRK", "Fort Hood, TX", 30.722, -97.383),
+    ("KGRR", "Grand Rapids, MI", 42.894, -85.545),
+    ("KGSP", "Greer, SC", 34.883, -82.220),
+    ("KGWX", "Columbus/NE MS", 33.897, -88.329),
+    ("KGYX", "Portland, ME", 43.891, -70.256),
+    ("KHDC", "Hammond Municipal Airport, LA", 30.519, -90.407),
+    ("KHDX", "Holloman AFB, NM", 33.077, -106.120),
+    ("KHGX", "Houston, TX", 29.472, -95.079),
+    ("KHNX", "San Joaquin Valley, CA", 36.314, -119.632),
+    ("KHPX", "Fort Campbell, KY", 36.737, -87.286),
+    ("KHTX", "Huntsville/N AL", 34.931, -86.084),
+    ("KICT", "Wichita, KS", 37.654, -97.443),
+    ("KICX", "Cedar City, UT", 37.591, -112.862),
+    ("KILN", "Cincinnati, OH", 39.420, -83.821),
+    ("KILX", "Lincoln/Central IL", 40.151, -89.337),
+    ("KIND", "Indianapolis, IN", 39.708, -86.280),
+    ("KINX", "Tulsa, OK", 36.175, -95.564),
+    ("KIWA", "Phoenix, AZ", 33.289, -111.670),
+    ("KIWX", "Northern Indiana", 41.359, -85.700),
+    ("KJAX", "Jacksonville, FL", 30.485, -81.702),
+    ("KJGX", "Robins AFB, GA", 32.676, -83.351),
+    ("KJKL", "Jackson, KY", 37.591, -83.313),
+    ("KLBB", "Lubbock, TX", 33.654, -101.814),
+    ("KLCH", "Lake Charles, LA", 30.125, -93.216),
+    ("KLGX", "Langley Hill Nw Washington, WA", 47.117, -124.107),
+    ("KLIX", "New Orleans, LA", 30.337, -89.825),
+    ("KLNX", "North Platte, NE", 41.958, -100.576),
+    ("KLOT", "Chicago/NE IL", 41.604, -88.084),
+    ("KLRX", "Elko, NV", 40.740, -116.803),
+    ("KLSX", "St. Louis, MO", 38.699, -90.683),
+    ("KLTX", "Wilmington, NC", 33.989, -78.429),
+    ("KLVX", "Louisville, KY", 37.975, -85.944),
+    ("KLWX", "Sterling, VA", 38.976, -77.487),
+    ("KLZK", "Little Rock, AR", 34.837, -92.262),
+    ("KMAF", "Midland, TX", 31.943, -102.189),
+    ("KMAX", "Medford, OR", 42.081, -122.717),
+    ("KMBX", "Minot, ND", 48.393, -100.864),
+    ("KMHX", "Morehead City, NC", 34.776, -76.876),
+    ("KMKX", "Milwaukee, WI", 42.968, -88.551),
+    ("KMLB", "Melbourne, FL", 28.113, -80.654),
+    ("KMOB", "Mobile, AL", 30.679, -88.240),
+    ("KMPX", "Minneapolis-St. Paul, MN", 44.849, -93.566),
+    ("KMQT", "Marquette, MI", 46.531, -87.548),
+    ("KMRX", "Knoxville/E TN", 36.169, -83.402),
     ("KMSX", "Missoula, MT", 47.041, -113.986),
+    ("KMTX", "Salt Lake City, UT", 41.263, -112.448),
+    ("KMUX", "San Francisco, CA", 37.155, -121.898),
+    ("KMVX", "Grand Forks, ND", 47.528, -97.326),
+    ("KMXX", "Maxwell AFB, AL", 32.537, -85.790),
+    ("KNKX", "San Diego, CA", 32.919, -117.042),
+    ("KNQA", "Memphis, TN", 35.345, -89.873),
+    ("KOAX", "Omaha, NE", 41.320, -96.367),
+    ("KOHX", "Nashville, TN", 36.247, -86.562),
+    ("KOKX", "New York City, NY", 40.866, -72.864),
+    ("KOTX", "Spokane, WA", 47.680, -117.627),
+    ("KPAH", "Paducah, KY", 37.068, -88.772),
+    ("KPBZ", "Pittsburgh, PA", 40.532, -80.218),
+    ("KPDT", "Pendleton, OR", 45.691, -118.853),
+    ("KPOE", "Fort Polk, LA", 31.155, -92.976),
+    ("KPUX", "Pueblo, CO", 38.460, -104.181),
+    ("KRAX", "Raleigh Durham, NC", 35.666, -78.490),
+    ("KRGX", "Reno, NV", 39.754, -119.462),
+    ("KRIW", "Riverton, WY", 43.066, -108.477),
+    ("KRLX", "Charleston, WV", 38.311, -81.723),
+    ("KRTX", "Portland, OR", 45.715, -122.965),
+    ("KSFX", "Pocatello, ID", 43.106, -112.686),
+    ("KSGF", "Springfield, MO", 37.235, -93.400),
+    ("KSHV", "Shreveport, LA", 32.451, -93.841),
+    ("KSJT", "San Angelo, TX", 31.371, -100.493),
+    ("KSOX", "Santa Ana Mountains, CA", 33.818, -117.636),
+    ("KSRX", "Ft. Smith, AR", 35.290, -94.362),
+    ("KTBW", "Tampa, FL", 27.706, -82.402),
+    ("KTFX", "Great Falls, MT", 47.460, -111.385),
+    ("KTLH", "Tallahassee, FL", 30.398, -84.329),
+    ("KTLX", "Oklahoma City, OK", 35.333, -97.278),
+    ("KTWX", "Topeka, KS", 38.997, -96.233),
+    ("KTYX", "Fort Drum, NY", 43.756, -75.680),
+    ("KUDX", "Rapid City, SD", 44.125, -102.830),
+    ("KUEX", "Grand Island, NE", 40.321, -98.442),
+    ("KVAX", "Moody AFB, GA", 30.890, -83.002),
+    ("KVBX", "Vandenberg AFB, CA", 34.839, -120.398),
+    ("KVNX", "Enid/Vance, OK", 36.741, -98.128),
+    ("KVTX", "Los Angeles, CA", 34.412, -119.179),
+    ("KVWX", "Evansville, IN", 38.260, -87.725),
+    ("KYUX", "Yuma, AZ", 32.495, -114.657),
+    ("PABC", "Bethel Faa, AK", 60.792, -161.876),
+    ("PACG", "Sitka, AK", 56.853, -135.529),
+    ("PAEC", "Nome, AK", 64.511, -165.295),
+    ("PAHG", "Anchorage, AK", 60.726, -151.351),
+    ("PAIH", "Middleton Island, AK", 59.461, -146.303),
+    ("PAKC", "King Salmon, AK", 58.679, -156.629),
+    ("PAPD", "Fairbanks, AK", 65.035, -147.501),
+    ("PGUA", "Andersen AFB Agana, GU", 13.456, 144.811),
+    ("PHKI", "South Kauai, HI", 21.894, -159.553),
+    ("PHKM", "Kamuela, HI", 20.125, -155.778),
+    ("PHMO", "Molokai, HI", 21.133, -157.180),
+    ("PHWA", "South Shore, HI", 19.095, -155.569),
+    ("TJUA", "San Juan, PR", 18.116, -66.078),
 ]
 
 PRODUCTS = [("N0B", "REFLECTIVITY (SR)"), ("N0U", "VELOCITY")]
@@ -130,6 +232,7 @@ class RadarControls(Drawer):
         self._radar_on           = False
         self._product            = "N0B"
         self._archive_mode       = False
+        self._vad_archive_tip    = "Lidar wind profiles"
         self._product_availability: dict[tuple[str, str], bool] = {}
         self._site               = "KTLX"
         self._all_sites          = list(NEXRAD_SITES)
@@ -342,7 +445,7 @@ class RadarControls(Drawer):
         return self._product
 
     def set_selected_site(self, site_id: str, emit: bool = False):
-        normalized = _normalize_site(site_id) or "KTLX"
+        normalized = normalize_site(site_id) or "KTLX"
         self._site = normalized
         self._stations_button.setText(f"Stations: {normalized}")
         # fetcher always fetches all 4; availability only drives combo disabled state
@@ -379,9 +482,6 @@ class RadarControls(Drawer):
     def is_data_enabled(self) -> bool:
         """Return whether radar data fetch/display is enabled."""
         return self._chk_show_data.isChecked()
-
-    def set_archive_data_enabled(self, enabled: bool) -> None:
-        self._chk_show_data.setChecked(enabled)
 
     def opacity(self) -> float:
         return self._opacity_slider.value() / 100.0
@@ -559,10 +659,16 @@ class RadarControls(Drawer):
             playback_row.setVisible(not enabled)
         self._tilt_combo.setVisible(enabled and self._tilt_combo.count() > 0)
         self._btn_dealias.setVisible(enabled and self._product == "velocity")
-        self._btn_vad.setToolTip(
-            "Lidar wind profiles: the lidar truck and the CLAMPS trailers" if enabled
-            else "View VAD wind profile hodograph"
-        )
+        self._btn_vad.setToolTip(self._vad_archive_tip if enabled else "View VAD wind profile hodograph")
+        self.content_changed()
+
+    def set_vad_available(self, available: bool, tooltip: str = "") -> None:
+        """Archive VAD is a provider's wind profiles (archive_wind_profiles: NSSL's
+        lidar winds): hidden without one; *tooltip* names its instruments."""
+        self._btn_vad.setVisible(available)
+        self._vad_archive_tip = tooltip or "Lidar wind profiles"
+        if self._archive_mode:
+            self._btn_vad.setToolTip(self._vad_archive_tip)
         self.content_changed()
 
     def current_tilt_index(self) -> int:
@@ -614,7 +720,7 @@ class RadarControls(Drawer):
 
 
     def _refresh_product_availability(self, site_id: str):
-        site = _normalize_site(site_id)
+        site = normalize_site(site_id)
         if not site:
             return
 
@@ -656,7 +762,7 @@ class RadarControls(Drawer):
         if key in self._product_availability:
             return self._product_availability[key]
 
-        site_token = _thredds_site_token(site)
+        site_token = thredds_site_token(site)
         url = f"{THREDDS_CATALOG_ROOT}/{product}/{site_token}/catalog.xml"
         try:
             with urlopen(url, timeout=6) as resp:
@@ -734,30 +840,3 @@ class RadarControls(Drawer):
         ms = self._speed_combo.itemData(index)
         if ms is not None:
             self.speed_changed.emit(ms)
-
-
-def _normalize_site(site_id: str) -> str:
-    text = (site_id or "").strip().upper()
-    if not text:
-        return ""
-    match = re.search(r"\b[A-Z][A-Z0-9]{3}\b", text)
-    return match.group(0) if match else ""
-
-
-def _thredds_site_token(site: str) -> str:
-    site = site.upper()
-    if site.startswith("K") and len(site) == 4:
-        return site[1:]
-    return site
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """great-circle distance in km — used to sort radar sites by proximity."""
-    r = 6371.0
-    lat1r = math.radians(lat1)
-    lat2r = math.radians(lat2)
-    dlat = lat2r - lat1r
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return r * c

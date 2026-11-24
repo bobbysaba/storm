@@ -46,7 +46,7 @@
 
 ## 1. Overview
 
-STORM is a standalone desktop application purpose-built for severe weather storm chasing situational awareness. It integrates offline vector maps, real-time NEXRAD radar, GOES satellite imagery, SPC/NWS hazard products, collaborative field annotations, meteorological drawings, and live multi-vehicle tracking — all in a single interface designed to function reliably in the field.
+STORM is a standalone desktop application for situational awareness in severe-weather field work, for any team with an MQTT broker. It integrates offline vector maps, real-time NEXRAD radar, GOES satellite imagery, SPC/NWS hazard products, collaborative field annotations, meteorological drawings, and live multi-vehicle tracking — all in a single interface designed to function reliably in the field. The built-in weather layers (NEXRAD, GOES, SPC/NWS, IEM, HRRR) cover the US; your team's own data sources can be added in `storm.toml`. NSSL's setup is a profile on top: see [`docs/nssl.md`](docs/nssl.md).
 
 **Core Technology Stack:**
 
@@ -58,9 +58,9 @@ STORM is a standalone desktop application purpose-built for severe weather storm
 | Optional Base Layers | Offline NLCD and USGS satellite MBTiles |
 | Radar Decoding | MetPy + matplotlib (Level 3, Unidata THREDDS) |
 | Satellite Imagery | IEM WMS (GOES-East, GOES-West) |
-| SFCOA Mesoanalysis | NSSL SFCOA vector tiles |
+| SFCOA Mesoanalysis | NSSL SFCOA vector tiles (a `contours` source in the NSSL profile) |
 | Hazard Data | SPC GeoJSON MapServer + NWS API |
-| Vehicle/Annotation Sync | MQTT over AWS IoT (TLS) |
+| Vehicle/Annotation Sync | MQTT v5 over your team's broker (`storm.toml`) |
 | Python-to-JS Bridge | QWebChannel (`bridge` object) |
 
 **Run Command:**
@@ -81,7 +81,7 @@ python main.py
 ### Prerequisites
 - Python 3.14 via conda (Miniforge, Miniconda, or Anaconda)
 - conda environment: `storm` (created via `python setup.py` or `conda env create -f envs/storm.yml`)
-- The offline MBTiles vector tile database (`storm.mbtiles`, ~500 MB–1 GB, distributed separately)
+- The offline MBTiles vector tile database (`storm.mbtiles`, about 3.7 GB, distributed separately). The shipped tiles cover the central US only (116°W–82°W, 28°N–49°N); `scripts/make_base_mbtiles.py` builds one for your own area (see the README)
 - Optional offline base-layer MBTiles files: `storm_nlcd.mbtiles` for NLCD land cover and `satellite.mbtiles` for USGS imagery
 
 **Quick Setup:**
@@ -93,14 +93,32 @@ python setup.py
 
 The setup script creates the conda environment and desktop launcher automatically. See the README for detailed installation instructions.
 
-### MQTT Certificates
-Certain network features (vehicle sync, annotation/drawing sync) require AWS IoT TLS certificates. Place them at:
-- `aws/storm.pem` — CA certificate
-- `aws/storm.pem.crt` — device certificate
-- `aws/storm-private.pem.key` — private key
-- `aws/storm-public.pem.key` — public key
+### Broker Settings (`storm.toml`)
+Vehicles, annotations, drawings, cones and scan sectors are shared through an MQTT broker your team runs. Tell STORM which one in `storm.toml` in the STORM folder:
 
-If certificates are missing, STORM starts in a degraded state — map, radar, satellite, and SPC/NWS hazard features remain fully functional, but MQTT-dependent sync features are disabled.
+```bash
+cp storm.example.toml storm.toml      # then set [mqtt] host and the login
+cp profiles/nssl.toml storm.toml      # or: NSSL's setup
+```
+
+The README's quickstart walks through checking the connection. NSSL's setup (profile, certificates, API key) is in [`docs/nssl.md`](docs/nssl.md).
+
+Passwords go in `.env` (copy `.env.example`), not in `storm.toml`. [Section 15](#15-configuration--certificates) summarizes the settings; [`docs/configuration.md`](docs/configuration.md) describes every key.
+
+Without a broker, STORM starts in a degraded state: map, radar, satellite, and SPC/NWS hazard features work, VIEWER and ARCHIVE launch, but nothing is shared live, and VEHICLE and MONITOR won't launch.
+
+### Data Providers
+Everything STORM reads from public sources (radar, satellite, SPC/NWS hazards, IEM ASOS and radiosondes, HRRR soundings, damage surveys) works for everyone. NSSL's own data is a *provider* that ships with STORM and is on for everyone unless `storm.toml` says `[providers.nssl] enabled = false` (the NSSL profile adds `team = true`):
+
+- **NSSL THREDDS** (public, no key): ARCHIVE's **NSSL** button, for every team: NSSL's recorded vehicles and scan sectors, the FOFS mobile mesonet's one-second obs, the CLAMPS trailers, the lidar truck (radiosondes, winds, Doppler lidar scans and stares) and CLAMPS TROPoe ([NSSL's archive data](#nssls-archive-data-the-nssl-button)). NSSL's past deployment locations are a profile setting.
+- **NSSL API** (also needs `NSSL_API_KEY` in `.env`, which the profile's `[[auth]]` table sends to the API only): live CLAMPS soundings, SFCOA, the regional mesonets, and the day's shared items at launch (`current.json`, the profile's `[mqtt] shared_items_url`). SFCOA and the mesonets are `[[sources]]` in the profile, not part of the provider.
+
+Without the key, live SOUNDINGS has no NSSL source. Without the profile's SFCOA source there's no SFCOA button. PREV LOCS is a setting any team can use (`[map] deployment_locations`). NSSL's provider plugs in the way any team's code provider does (below): its ARCHIVE data is its own drawer, so a team with its own soundings can still fill the shared SOUNDING button. A team's own lidars and wind profiles sit beside NSSL's: LIDAR (next to RADAR) and NSSL > LIDAR open the same lidar drawer with every lidar on the map, and VAD and WINDS list every wind source. [Section 20](#20-feature-availability-matrix) lists what needs what; [`docs/nssl.md`](docs/nssl.md) is the NSSL setup checklist.
+
+### Your Own Data Sources
+Station networks, map overlays and soundings your team has can be added in `storm.toml` without changing STORM: one `[[sources]]` table per feed says where it is, how it's laid out and what units it's in. Station networks appear as buttons in SURFACE ([6.5](#65-surface-obs)), GeoJSON overlays as buttons in MAP ([6.7](#67-map-tools--base-layers)) (either can go on the toolbar instead), and soundings as buttons in SOUNDINGS ([6.4](#64-soundings)). [`docs/data-sources.md`](docs/data-sources.md) has every key and examples. The NSSL profile's regional mesonets (OK, WTM, KS, CO, NE, SD) are sources like these; they need `NSSL_API_KEY`.
+
+A feed a table can't describe (a login handshake, paging, a binary format) can come from a **code provider**: a Python package of your team's own in `providers/<name>/` (git-ignored) or a folder you name, turned on with `[providers.<name>] enabled = true`. It hands STORM the same three kinds, can add ARCHIVE sources for recorded traffic and vehicle obs, and can feed STORM's own windows (a sounding button of its own, archive VAD, LIDAR, SFCOA); see [`docs/providers.md`](docs/providers.md). An AI coding agent can set up either with you from [`docs/agent-setup.md`](docs/agent-setup.md).
 
 ### Single-Instance Guard
 Only one instance of STORM can run per machine (an internal port is used as a lock). If a second launch is attempted, a warning dialog appears and the second instance exits immediately.
@@ -115,14 +133,14 @@ Every time STORM starts, a configuration dialog appears before the main window o
 
 #### Launch Mode
 
-Choose one of three mutually exclusive roles for this session:
+Choose one of four mutually exclusive roles for this session:
 
 | Mode | Description |
 |------|-------------|
-| **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires the MQTT certificate files. |
-| **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires the MQTT certificate files. |
-| **VIEWER** | Open to anyone — sees the team's vehicles, annotations, drawings, cones and scan sectors live, but can't publish. Map, radar, satellite, and SPC/NWS hazards work as in the other modes. |
-| **ARCHIVE** | Replay a past session — enter a UTC date/time and STORM fetches and plays back historical radar, satellite, hazards, soundings, and MQTT vehicle positions synchronized to a central time controller. Requires the MQTT certificate files. See [Section 8](#8-archive-mode). |
+| **VEHICLE** | Full participant — publishes local obs (file watcher / GPS) and syncs annotations, drawings, and cones over MQTT. Requires a broker login that can publish. |
+| **MONITOR** | View-only participant — all map overlays and MQTT inbound work, but no local obs are published. Requires a broker login that can publish (annotations, drawings and cones are still shared). |
+| **VIEWER** | Sees the team's vehicles, annotations, drawings, cones and scan sectors live, but can't publish. Uses the read-only `[mqtt.viewer]` login when one is set. Map, radar, satellite, and SPC/NWS hazards work as in the other modes. Needs no broker to launch. |
+| **ARCHIVE** | Replay a past session — enter a UTC date/time and STORM fetches and plays back historical radar, satellite, hazards, soundings, and MQTT vehicle positions synchronized to a central time controller. Never connects to the broker. See [Section 8](#8-archive-mode). |
 
 #### Archive Config (ARCHIVE mode only)
 
@@ -131,15 +149,15 @@ When ARCHIVE is selected, the vehicle-specific fields (ID, icon, data directory)
 **Archive Start Time (UTC)**
 A date/time field for the UTC start time of the replay session. Type the date and time, or open a calendar from the field's arrow or the calendar button beside it. All data products (radar, satellite, hazards, soundings, vehicle positions) replay from this time. Picking a day in a calendar keeps the time of day.
 
-While ARCHIVE is selected, STORM looks for dates with data in the background (the ring beside the calendar button shows how many catalogs it has checked) and **shades those days** in both calendars. Click the calendar's year to jump to a year from a grid; years with data are outlined. The dates found are kept for a day (an hour for this year's), so the next launch shades the calendar at once. A day without shading isn't proof there's no data: a catalog that couldn't be reached stays unknown. Today, the dates come from the FOFS mobile mesonet vehicles.
+While ARCHIVE is selected, STORM looks for dates with data in the background (the ring beside the calendar button shows how many catalogs it has checked) and **shades those days** in both calendars. Click the calendar's year to jump to a year from a grid; years with data are outlined. The dates found are kept for a day (an hour for this year's), so the next launch shades the calendar at once. A day without shading isn't proof there's no data: a catalog that couldn't be reached stays unknown. The dates come from the archive sources in `storm.toml` ([Your Own Archive Data](#your-own-archive-data)): recorded broker traffic and vehicle-obs files in your folders (listed fresh each time), a web source's `dates.json`, and, with the NSSL provider, the FOFS mobile mesonet vehicles on NSSL's THREDDS server.
 
 Under the field:
 
-- **Browse available cases…** opens a window to find dates by campaign (VORTEX2, TORUS, PERiLS, LIFT…), years, months and vehicles. Check vehicles to see the dates when *all of* them (or *any of* them) have data. A year-by-month grid counts the matching dates (click a month to list only its dates), and the list shows each date, newest first, with the vehicles that have data that day. Double-click a date, or select it and press *Use this date*, to set the archive date; the time is kept. The window fills in while the background search runs.
+- **Browse available cases…** opens a window to find dates by campaign, years, months and vehicles. Campaigns are the `[[archive.campaigns]]` tables in `storm.toml` (the NSSL profile lists VORTEX2, RiVorS, TORUS, PERiLS and LIFT); without any, the campaign menu is off. The vehicle list is grouped by where the dates come from: RECORDED TRAFFIC, VEHICLES (your own vehicle-obs files) and, with the NSSL provider, MOBILE MESONET. Check vehicles to see the dates when *all of* them (or *any of* them) have data. A year-by-month grid counts the matching dates (click a month to list only its dates), and the list shows each date, newest first, with the vehicles that have data that day. Double-click a date, or select it and press *Use this date*, to set the archive date; the time is kept. The window fills in while the background search runs.
 - **Open case…** chooses a case package (see [Menu Bar and Case Packages](#menu-bar-and-case-packages)). The date and time move to the case, a line under the links names it (station, time frame, tracks, packed files), and *Launch* opens it. Choosing another date, or *Clear*, drops it.
 
-**Passphrase**
-VEHICLE, MONITOR and ARCHIVE launch only when the MQTT certificate files (`storm.pem`, `storm.pem.crt`, `storm-private.pem.key`) are in the `aws/` folder; LAUNCH shows which ones are missing. VIEWER needs none: it connects with the read-only viewer certificate shipped in `certs/viewer/`, whose AWS IoT policy (`certs/viewer/viewer-policy.json`) only lets it subscribe. Only admin mode asks for a passphrase, and only when its box is checked.
+**Broker Login**
+VEHICLE and MONITOR launch only when `storm.toml` names a broker with a login that may publish, and every certificate file that login needs is on disk; LAUNCH lists what's missing. VIEWER and ARCHIVE launch without one. In the NSSL profile, the team certificates go in `providers/nssl/certs/team/` and VIEWER uses a read-only certificate shipped with STORM ([`docs/nssl.md`](docs/nssl.md)). Only admin mode asks for a passphrase, and only when its box is checked.
 
 The archive start time is not saved between sessions — each archive launch requires an explicit selection, except after *File > Change Day…*, which reopens the launch window on the last session's date.
 
@@ -154,7 +172,10 @@ Your vehicle's identifier on the network (e.g., "Chase1", "Mesonet-TX"). Pre-fil
 Choose the icon that represents your vehicle on the map. Options: car, drone, mesonet, lidar, radar, hailcam.
 
 **Data Directory (Track A)**
-Optional folder path for a local FOFS instrument logger. If left blank, file-watcher input is disabled for the session. Use **Browse** to pick a folder. The app scans for `YYYYMMDD.txt` and polls it every 10 seconds.
+Optional folder path for a local instrument logger. If left blank, file-watcher input is disabled for the session. Use **Browse** to pick a folder. The app finds today's file there and polls it every second. Which file and which columns come from `[obs_columns]` in `storm.toml` (a `*YYYYMMDD.csv` with an ISO 8601 `time` column by default; see [Section 15](#15-configuration--certificates)).
+
+**Logger File**
+Shown when `storm.toml` names more than one logger layout (`[obs_columns.<name>]`): pick the one this vehicle's logger writes. The NSSL profile has *FOFS mesonet logger* and *GPS Ka (position only)*.
 
 #### Data on Launch (collapsible)
 
@@ -162,7 +183,7 @@ A collapsible section lets you pre-select which data layers to enable automatica
 
 - **SPC / NWS / RADAR** — multi-select toggle buttons to auto-enable those overlays
 - **Satellite** — exclusive selector: OFF | CONUS | AUTO-MESO
-- **Surface obs** — multi-select: OK MESONET | WTM | KS | CO | NE
+- **Surface obs** — multi-select: the station networks in `storm.toml` ([Your Own Data Sources](#your-own-data-sources)); with the NSSL profile, OK | WTM | KS | CO | NE | SD. The row is hidden when there are none
 
 #### Update Status
 
@@ -201,7 +222,7 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 | **Floating Toolbar** | Top-left collapsible drawer strip — all overlay and tool controls |
 | **Map** | Full-window interactive map; all overlays render here |
 | **Vehicle Panel** | Right-side dock — vehicle list and selected-vehicle details |
-| **Outlook Panel** | Left-side slide-out — SPC/NWS text discussion viewer |
+| **Outlook Panel** | Right-side slide-out — SPC/NWS text discussion viewer |
 | **Status Bar** | Bottom strip — mouse coordinates, zoom, status messages, clock, network indicator |
 
 ---
@@ -224,7 +245,7 @@ Click **LAUNCH** to proceed. Vehicle ID, icon, data directory, and mode are save
 
 Right-clicking the map opens a menu at the cursor. On bare map it offers:
 
-- **Sounding here ▸** — HRRR, nearest RAOB, or CLAMPS when a CLAMPS sounding has been fetched within 150 km
+- **Sounding here ▸** — HRRR, nearest RAOB, or (NSSL provider) CLAMPS when a CLAMPS sounding has been fetched within 150 km
 - **Route to here / Route from here** — opens ROUTE with the point filled in (in VEHICLE, *Route to here* routes from your GPS fix)
 - **Measure from here** — turns on MEASURE with the first point placed
 - **Place annotation ▸** and **Draw ▸** — place one annotation, or start a front, polyline or polygon at the point
@@ -258,7 +279,7 @@ The last ten commands run are listed first. Only commands available in the curre
 9. GOES satellite imagery (optional, opacity-controlled)
 10. NEXRAD radar overlay (semi-transparent PNG raster)
 11. SFCOA mesoanalysis contours
-12. Surface obs station models (OK Mesonet, WTM, KS Mesonet, CO Mesonet, NE Mesonet, ASOS)
+12. Surface obs station models (your station networks, ASOS); `[[sources]]` overlays sit with the hazard layers, under the road labels
 13. Station plot icons (MetPy-style, at vehicle positions)
 14. Vehicle markers (colored dots + info popups)
 15. Annotations (road closure / construction / flooding / downed-lines / debris markers)
@@ -285,7 +306,7 @@ Clicking the button expands the radar drawer. Checking the checkbox inside enabl
 #### Drawer Controls
 
 **Site Selector (dropdown)**
-Choose from pre-configured NEXRAD sites (e.g., KTLX, KOUN, KVNX, KDYX, KFWS, etc.) or type a custom 4-letter site code. Changing the site immediately clears cached frames and begins fetching for the new site.
+Choose from every WSR-88D site in the US and its territories (e.g., KTLX, KVNX, KDYX, KFWS) or type a custom 4-letter site code. On first launch the site is the one nearest your `[map]` home (in VEHICLE mode, the one nearest your GPS once it has a fix). Changing the site immediately clears cached frames and begins fetching for the new site.
 
 **Product Selector (dropdown)**
 
@@ -298,7 +319,7 @@ Choose from pre-configured NEXRAD sites (e.g., KTLX, KOUN, KVNX, KDYX, KFWS, etc
 Enables or disables radar fetching. When unchecked, radar is hidden from the map but site/product selections are preserved.
 
 **VAD Button**
-Opens the VAD wind-profile window (hodograph and time-height) for the current radar site's recent NEXRAD VAD profiles. In ARCHIVE it shows the session's Doppler-lidar wind profiles instead (see *CLAMPS and CopterSonde* in Archive Mode).
+Opens the VAD wind-profile window (hodograph and time-height) for the current radar site's recent NEXRAD VAD profiles. In ARCHIVE it shows the session's Doppler-lidar wind profiles instead (see *NSSL's archive data* in Archive Mode).
 
 #### Playback Controls
 
@@ -377,7 +398,7 @@ When any hazard product is active, a compact color legend row appears below the 
 
 **SPC Categorical / Tornado / Wind / Hail polygons:**
 - Click a polygon → popup with risk level and probability label
-- Click "Read Discussion" in the popup → fetches full text from IEM/SPC and displays it in the [Outlook Panel](#8-outlook-text-panel)
+- Click "Read Discussion" in the popup → fetches full text from IEM/SPC and displays it in the [Outlook Panel](#9-outlook-text-panel)
 
 **Watches:**
 - Click a county-polygon → popup with watch number, type (Tornado or Severe Thunderstorm), and issuance details
@@ -498,7 +519,7 @@ While radar data is on and SYNC is on in the radar drawer, these controls are of
 
 #### How Satellite Data Works
 
-- **Source:** IEM GOES-East WMS (`mesonet.agron.iastate.edu`) serving current operational GOES satellite (GOES-19 as of 2025)
+- **Source:** CONUS: nowCOAST WMS (`nowcoast.noaa.gov`, `goes_visible_imagery`, GOES-East and GOES-West) as map tiles. MESO: IEM GOES-East WMS (`mesonet.agron.iastate.edu`, GOES-19 as of 2025)
 - **Request format:** WMS GetMap PNG
 - **Frame cache:** Up to 10 frames per mode. MESO also keeps older frames at one per 5 minutes, up to 40 minutes back, so a synced radar loop finds a frame (lite mode keeps only the 10). IEM serves only the current MESO frame, so these build up while the sector is selected.
 - **CONUS polling:** Every 5 minutes; 10 frames backfilled on mode selection
@@ -517,10 +538,10 @@ Select which data source to use for Skew-T log-P soundings. Only one source is a
 |--------|--------|----------------|
 | **HRRR** | NCEP HRRR model via open-meteo (no API key) | Click anywhere on the map |
 | **OBS** | Observed radiosondes via IEM RAOB API | Radiosonde station markers appear; click one |
-| **NSSL** | NSSL CLAMPS DL truck soundings via NSSL API | CLAMPS markers appear when data is available; click one |
-| **COPTERSONDE** | ARCHIVE only: PERiLS CopterSonde (UAS) ascents | The day's launch sites appear in a list next to the button; pick one |
+| **NSSL** | Live only: the lidar truck's soundings via the NSSL API (needs `NSSL_API_KEY`). Another team's code provider can fill this button with its own soundings and name ([`docs/providers.md`](docs/providers.md)) | CLAMPS markers appear when data is available; click one |
+| *(your soundings)* | Live only: one button per sounding source in `storm.toml` or a code provider ([Your Own Data Sources](#your-own-data-sources)) | Pick it: the launches in its lookback open in the sounding dialog, newest first on the slider, and refresh every `refresh_min` while shown. Greyed out when its API key isn't set |
 
-ARCHIVE has no HRRR source; its NSSL button reads the lidar truck's sondes and falls back to CLAMPS TROPoe retrievals (see *CLAMPS and CopterSonde* in Archive Mode). In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog.
+ARCHIVE has no HRRR source, and NSSL's radiosondes and TROPoe are under the NSSL button (see *NSSL's archive data* in Archive Mode). In HRRR mode, a click on the map immediately starts fetching. In OBS and NSSL modes, station/truck markers are rendered on the map first; clicking a marker fetches and opens the sounding dialog. Once one of your sounding sources has been fetched, the dialog offers it as a comparison pill on any sounding within 150 km, the way it offers NSSL.
 
 See [Section 10](#10-point-soundings) for full dialog documentation.
 
@@ -530,20 +551,24 @@ See [Section 10](#10-point-soundings) for full dialog documentation.
 
 **Button:** `SURFACE` (checkable toggle, expands drawer)
 
-Displays live surface observation station models from OK Mesonet, West Texas Mesonet, Kansas Mesonet, Colorado Mesonet, Nebraska Mesonet, and ASOS/AWOS stations.
+Displays live surface observation station models from ASOS/AWOS stations and from the station networks in `storm.toml` ([Your Own Data Sources](#your-own-data-sources)). With none set up, the drawer shows ASOS only.
 
 #### Network Toggles (multi-select)
 
+One button per station network in `storm.toml` (hover for its full name), then **ASOS**: IEM ASOS/AWOS current observations inside a box you draw. A network whose API key isn't in `.env` is greyed out and its tooltip names the key. A network set up with `where = "toolbar"` has its own toolbar button instead.
+
+With the NSSL profile and `NSSL_API_KEY`:
+
 | Button | Network | Coverage |
 |--------|---------|----------|
-| **OK MESONET** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
+| **OK** | Oklahoma Mesonet (OU) | ~120 stations across Oklahoma |
 | **WTM** | West Texas Mesonet (TTU) | ~50 stations across West Texas |
 | **KS** | Kansas Mesonet (K-State) | ~80 stations across Kansas |
 | **CO** | Colorado Mesonet (CoAgMET) | ~90 stations across Colorado |
 | **NE** | Nebraska Mesonet | Stations across Nebraska |
-| **ASOS** | IEM ASOS/AWOS current observations | User-drawn bounding box |
+| **SD** | South Dakota Mesonet | Stations across South Dakota |
 
-Any combination can be active at once. OK Mesonet, WTM, KS Mesonet, CO Mesonet, and NE Mesonet poll independently every 5 minutes. ASOS fetches stations inside the selected bounding box and refreshes that saved domain on the same surface-observation timer.
+Any combination can be active at once. Each network refreshes on its own `refresh_min` (5 minutes unless set); ASOS fetches stations inside the selected bounding box and refreshes that saved domain every 5 minutes.
 
 #### ASOS Bounding Box
 
@@ -573,16 +598,18 @@ Toggle station models on or off with the **Show plots** checkbox.
 
 #### Freshness Coloring
 
-The station-plot center dot is colored by observation age, not fetch time. OK Mesonet, WTM, KS Mesonet, CO Mesonet, and NE Mesonet use short freshness thresholds because they report frequently. ASOS uses wider thresholds because routine reports are typically hourly:
+The station-plot center dot is colored by observation age, not fetch time. Each network has its own thresholds (`fresh_min`, 5 and 10 minutes unless set), and the drawer's legend lists them. ASOS uses wider thresholds because routine reports are typically hourly:
 
 | Source | Green | Yellow | Red |
 |--------|-------|--------|-----|
-| OK Mesonet / WTM / KS Mesonet / CO Mesonet / NE Mesonet | ≤5 min | ≤10 min | >10 min |
+| Station networks (default; the NSSL profile's mesonets) | ≤5 min | ≤10 min | >10 min |
 | ASOS | ≤70 min | ≤90 min | >90 min |
 
 The ASOS timestamp comes from IEM's `valid` observation time.
 
 #### Data Sources
+
+Each network's address and layout are its `[[sources]]` table. For the NSSL profile's:
 
 | Source | Endpoint |
 |--------|----------|
@@ -591,19 +618,20 @@ The ASOS timestamp comes from IEM's `valid` observation time.
 | Kansas Mesonet | NSSL API KS Mesonet JSON with embedded station metadata |
 | Colorado Mesonet | NSSL API CO Mesonet JSON + CO station metadata |
 | Nebraska Mesonet | NSSL API NE Mesonet JSON with embedded station metadata |
+| South Dakota Mesonet | NSSL API SD Mesonet JSON with embedded station metadata |
 | ASOS/AWOS | IEM `currents.json` for selected station IDs; station metadata from IEM METAR GeoJSON |
 
 ---
 
 ### 6.6 SFCOA Mesoanalysis
 
-**Button:** `SFCOA` (checkable toggle, expands drawer)
+**Button:** `SFCOA` (checkable toggle, expands drawer; under the ⋯ overflow menu when the toolbar is narrow)
 
-Displays NSSL SFCOA mesoanalysis contour products as labeled vector-tile overlays. SFCOA is available in normal user sessions and does not require admin mode.
+Displays NSSL SFCOA mesoanalysis contour products as labeled vector-tile overlays. SFCOA is a `contours` source in the NSSL profile (`[[sources]]`, [data-sources.md](docs/data-sources.md#contours-contour-lines-from-vector-tiles)); any team can add its own the same way, and its button and drawer then carry that source's name. SFCOA comes from the NSSL API, so its button is greyed out without `NSSL_API_KEY`.
 
 #### Product Groups
 
-SFCOA variables are grouped into compact columns so related fields are easy to scan:
+SFCOA variables are grouped into compact columns so related fields are easy to scan (each run's `metadata.json` names a variable's group and lists the variables in the order the buttons go; variables in other groups share a last column):
 
 | Group | Examples |
 |-------|----------|
@@ -631,8 +659,8 @@ Click one or more product buttons to add those contours to the map. Clicking a s
 
 #### How SFCOA Data Works
 
-- **Source:** NSSL API SFCOA run index and per-run metadata via `SFCOA_BASE_URL`
-- **Render format:** MapLibre vector tiles with contour lines and labels
+- **Source:** NSSL API SFCOA run index and per-run metadata (`https://api.nssl.noaa.gov/data/sfcoa`, the source's `url` in the profile); button labels, tooltips and groups come from each run's `metadata.json`
+- **Render format:** MapLibre vector tiles with contour lines and labels; each variable's tile file (`.pmtiles`, or `.mbtiles` while the profile says `tiles = "mbtiles"`) is downloaded whole and kept for a day
 - **Layer behavior:** SFCOA is mutually exclusive with other large overlay drawers so the toolbar stays readable
 - **Caching:** Selected product/time combinations are cached during the session for faster stepping back to recently viewed fields
 
@@ -650,6 +678,7 @@ The MAP drawer groups map-context tools and optional offline base layers:
 | **MEASURE** | Starts the distance measurement tool. |
 | **LANDCOVER** | Toggles the offline NLCD land-cover raster when `tiles/storm_nlcd.mbtiles` is installed. |
 | **SAT** | Toggles the offline USGS satellite basemap when `tiles/satellite.mbtiles` is installed. |
+| *(your overlays)* | One button per GeoJSON overlay in `storm.toml` ([Your Own Data Sources](#your-own-data-sources)): target areas, road closures, field boundaries. Each refreshes every `refresh_min` while on. Live modes only, except an overlay with `archive = true` (fixed layers such as field boundaries), which ARCHIVE shows too. |
 
 LANDCOVER and SAT are available to normal users. They appear only when the matching MBTiles file exists in the `tiles/` folder.
 
@@ -690,7 +719,7 @@ When the vehicle is within 30 m of the destination, STORM shows an arrival notif
 
 | Function | Service |
 |----------|---------|
-| Turn-by-turn routing | OSRM public demo server (`router.project-osrm.org`) |
+| Turn-by-turn routing | openrouteservice (`api.openrouteservice.org`), with `ORS_API_KEY` in `.env` (free at openrouteservice.org) |
 | Address geocoding | Nominatim (`nominatim.openstreetmap.org`) |
 
 ---
@@ -807,7 +836,7 @@ Places a storm motion cone on the map — a forward-propagating sector showing t
 2. Click any location on the map (typically the current storm location).
 3. A dialog opens with two fields:
    - **Speed (knots):** Expected storm forward speed. Default 35 kts. Range: 0–200.
-   - **Heading (degrees):** Direction the storm is moving *toward*. Default 240° (toward the SSW). Range: 0–359.
+   - **Heading (degrees):** Direction the storm is coming *from*, as the dialog says. Default 240° (from the WSW, moving toward the ENE). Range: 0–359.
 4. Click **Add to Map**.
 
 The rendered cone includes:
@@ -825,7 +854,7 @@ The rendered cone includes:
 3. Update the values or click **Delete**.
 4. Click **Save**.
 
-Cones are synced via MQTT (`storm/cones/{id}` topic).
+Cones are synced via MQTT (`<topic_root>/cones/{id}` topic).
 
 #### Disabled If
 
@@ -847,7 +876,7 @@ Measures great-circle distances on the map.
 4. Click an end point — the segment is fixed.
 5. Continue clicking to measure additional segments (multi-segment path).
 6. **Finish:** Press **Escape**.
-7. Distance is shown in miles (e.g., "47.3 mi") with total path length.
+7. Distance is shown in miles and kilometres (e.g., "47.3 mi / 76.1 km"), the `[units]` distance first.
 
 **Clear:** A **Clear** button removes all measurement geometry from the map.
 
@@ -891,9 +920,9 @@ Station plots are generated as PNG images (135×135 px, transparent background) 
 
 ### 6.14 Deployment Locations
 
-**Button:** `DEPLOY LOCS` (checkable toggle, expands drawer)
+**Button:** `PREV LOCS` (checkable toggle, expands drawer)
 
-Displays historical deployment locations as markers on the map, filtered by research quality metrics.
+Displays NSSL's historical deployment locations as markers on the map, filtered by research quality metrics. Live modes with the NSSL provider only.
 
 #### Quality Metric Selector
 
@@ -913,12 +942,12 @@ An additional slider controls the displayed circle radius for each location mark
 
 #### Data Source
 
-- **File:** `locs/deployment_locations.csv`
+- **File:** `[map] deployment_locations` in `storm.toml`: a CSV file or URL with `lat`, `lon` and optional `rank_abi`, `rank_aoi`, `rqi` columns. The NSSL profile uses `providers/nssl/locs/deployment_locations.csv`
 - Markers are pre-loaded at startup; toggling visibility or threshold is instant.
 
 #### Disabled If
 
-`--disable-deploy-locs` is passed at launch, or the locations file is missing.
+`--disable-deploy-locs` is passed at launch, `[map] deployment_locations` isn't set, or the locations file is missing.
 
 ---
 
@@ -1070,6 +1099,7 @@ The status bar runs along the bottom of the main window.
 | **Left** | Mouse coordinates (lat/lon) and zoom level, updated live as you move the cursor over the map. Example: `35.2413 | -97.4521   Z 6.2` |
 | **Center** | Status messages: "Ready" (default), "MQTT connected", error messages (e.g., "Radar fetch error: timeout") |
 | **Right** | Current UTC clock (updates every second). Example: `18:45:32 UTC`. While a loop shows a past frame, a **◷ LOOP HH:MMZ** chip sits before the date; click it to return to live. |
+| **Broker** | **● MQTT OK** while connected to the broker, **● MQTT OFFLINE** while not (the center then gives the reason), **● NO BROKER** when `storm.toml` names none. Not shown in ARCHIVE. |
 | **Far right** | Network status indicator pill: **Green** = Online, **Yellow** = Slow (>1 s response), **Red** = Offline. Checked every 30 seconds via Cloudflare DNS. |
 
 ---
@@ -1082,7 +1112,7 @@ Archive mode lets you replay any past session at a chosen UTC date and time. All
 
 Select **ARCHIVE** in the launch dialog and choose a UTC start date/time using the calendar picker. Click **LAUNCH**. The map opens straight away; a small indicator at the top left lists what is still loading (hazards, satellite, vehicle tracks, radar) and disappears when everything has arrived. The map is usable meanwhile.
 
-The session runs from 00Z on the chosen date to 06Z the next morning, trimmed to 30 minutes after the day's last activity (driving, or an annotation, cone, drawing or sector change from 12Z on) once vehicles and MQTT history have loaded.
+The session runs from 00Z on the chosen date to 06Z the next morning, trimmed to 30 minutes after the day's last activity (driving, or an annotation, cone, drawing or sector change from 12Z on) once vehicles and MQTT history have loaded. Those defaults suit a field day in the Americas (local afternoon and evening fall between about 18Z and 06Z). A team elsewhere moves the window with `session_start_utc`, `session_hours` and `session_activity_after_hours` under `[archive]` in `storm.toml` ([`docs/configuration.md`](docs/configuration.md#archive-recorded-history-and-vehicle-obs)); the times below are the defaults.
 
 The window title and status pill display the current archive timestamp while in this mode: `[ARCHIVE YYYY-MM-DD HH:MMZ]`.
 
@@ -1090,11 +1120,11 @@ The window title and status pill display the current archive timestamp while in 
 
 ### Archive Controls Bar
 
-A controls bar sits at the bottom of the map window in archive mode (it is not visible in live modes).
+A controls bar sits at the bottom of the map window in archive mode (it is not visible in live modes). Beside the UTC clock it shows the time in your local zones: `[map] time_zones` in `storm.toml` (up to three), or this computer's own zone; the NSSL profile shows Central and Mountain.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  21:04:30Z │ 16:04 CT / 15:04 MT        Radar: … │ Sat: … │ OBS: …         │
+│  21:04:30Z │ 16:04 CDT / 15:04 MDT      Radar: … │ Sat: … │ OBS: …         │
 │  ──────────────────────── time slider ───────────────────────────────    │
 │  00Z    02Z    04Z   …   (radar scan ticks, coverage, hour labels)        │
 │  -1m  -10  ▶  +10  +1m │ ⏮  ⏭ │ SPEED 1×▾ │ JUMP                         │
@@ -1127,7 +1157,7 @@ The SPEED box sets the playback multiplier: 1× (real time), 5×, 10×, 30×, 60
 |-----------|---------------|
 | **Radar:** | Product, tilt and scan time of the frame on screen; for velocity, `· dealiased` or `· not dealiased` |
 | **Sat:** | Satellite status: `off` until SATELLITE is turned on, then the sector, band and frame time; `none` on a day with no GOES imagery (hover for why) |
-| **OBS:** | Vehicle data source: `probing`, `1-second (n)`, `catalog (n)`, `partial n/m`, `MQTT fallback`, or `no data for this date` |
+| **OBS:** | Vehicle data source: `probing`, `1-second (n)`, `catalog (n)`, `partial n/m`, `MQTT fallback`, or `no data for this date`. `MQTT fallback` also when no vehicle-obs source is set up: vehicles move on their recorded positions |
 
 These update as each fetcher resolves data for the current archive timestamp.
 
@@ -1140,15 +1170,42 @@ These update as each fetcher resolves data for the current archive timestamp.
 | NEXRAD Radar | Unidata THREDDS archive | Fetches Level 2 or Level 3 scans nearest to the current archive time |
 | GOES Satellite | NOAA GOES-16 / GOES-19 archive on AWS | Listed and fetched only once SATELLITE is turned on; shows the newest frame at or before the archive time, VIS or IR. Visible CONUS frames download only the part of the file covering the map's CONUS view (about 30 of 66 MB). Before 28 Feb 2017 (no GOES-16) the drawer is disabled and **Sat:** reads `none`. |
 | SPC/NWS Hazards | Archived GeoJSON products | Fetched once at session start for the session date |
-| Soundings | IEM RAOB (OBS); lidar truck sondes, the NSSL API, then CLAMPS TROPoe (NSSL); PERiLS CopterSonde | Fetched on demand, up to the archive clock on its UTC day. No model (HRRR) soundings in ARCHIVE |
-| Lidar wind profiles | CLAMPS / lidar truck VAD and CSM winds on NSSL THREDDS | Loaded for the whole session the first time VAD is pressed, then kept |
+| Soundings | IEM RAOB (OBS); under NSSL, the lidar truck's radiosondes and CLAMPS TROPoe on NSSL THREDDS | Fetched on demand, up to the archive clock on its UTC day. No model (HRRR) soundings in ARCHIVE |
+| Lidar wind profiles | CLAMPS / lidar truck VAD winds on NSSL THREDDS | Loaded for the whole session the first time NSSL > LIDAR > WINDS is pressed, then kept |
 | CLAMPS trailers | Trailer met tower or MWR surface fields on NSSL THREDDS | Loaded at session start for the session span, replayed on the clock as map markers |
-| Doppler lidar scans | Lidar truck and CLAMPS trailer PPI / CSM files on NSSL THREDDS | Found at session start and loaded in the background; a picked lidar's sweeps are drawn as the clock reaches them |
-| Vehicle Positions | MQTT message log | Historical vehicle obs replayed in time order |
+| Doppler lidar scans | Lidar truck and CLAMPS trailer PPI / CSM files on NSSL THREDDS | Found at session start and loaded in the background; a picked lidar's scans open in the scan window, and on the map with its "draw on map" |
+| Doppler lidar stares | The same lidars' fixed-point (vertical) files on NSSL THREDDS | Found at session start; a lidar's load when STARES picks it, into a time-height window |
+| Vehicles, annotations, drawings, cones, scan sectors | Recorded broker traffic (see [Recorded Team Traffic](#recorded-team-traffic)); one-second vehicle obs from your own logger files or, with the NSSL provider, FOFS on NSSL THREDDS (see [Your Own Archive Data](#your-own-archive-data)) | Replayed in time order on the clock |
 | ASOS | IEM ASOS history | Stations inside a drawn box, fetched once for the session, replayed on the clock |
 | Damage Paths | NWS Damage Assessment Toolkit, else NCEI Storm Events | Tornado paths inside a drawn box, within a day of the session date |
 
 Each layer updates automatically as the archive clock advances. Data fetches are triggered when the clock crosses boundaries (e.g., every radar scan interval).
+
+### Recorded Team Traffic
+
+The team's own vehicles, annotations, drawings, cones and scan sectors replay from recordings of the broker: one file per kind per UTC day (`storm.vehicles.20260506` and so on, named after your `topic_root`), read for the chosen day and the next morning. STORM looks for them in the sources listed under `[archive] history` in `storm.toml`, in order, and uses the first that has each file: folders on this machine, web addresses, or `nssl` for NSSL's own recordings (with the NSSL provider on). Without that setting it reads NSSL's recordings when the provider is on, then the `recordings/` folder.
+
+To record your team's days, either run the recorder on a machine that stays connected through the field day:
+
+```bash
+python -m archive.recorder
+```
+
+or, in MONITOR mode, check **File > Record Broker Traffic** (remembered for the next MONITOR launch). Both write to `recordings/` (`[archive] recordings` changes it) and only need a read-only login. A day with no recording replays without the team's traffic. File layout, sources and what the recorder writes are in [`docs/archive-data.md`](docs/archive-data.md).
+
+### Your Own Archive Data
+
+Vehicles can replay on their loggers' one-second files as well as their recorded positions. List where the files are under `[archive] vehicle_obs` in `storm.toml`: folders on this machine, web addresses, or `nssl` for NSSL's FOFS mesonet files (the default with the NSSL provider on). Below each folder or web address a vehicle's file for a UTC day sits at `vehicle_obs_path`, `{vehicle}/{date}.csv` by default (`wx1/20260506.csv`):
+
+```toml
+[archive]
+vehicle_obs = ["vehicle-obs"]
+vehicle_obs_path = "{vehicle}/{date}.csv"
+```
+
+The files are CSV, read with the same `[obs_columns]` as live obs files. For each vehicle STORM reads the files dated the day before, the day and the day after (for loggers that name files by the local day) and keeps the rows in the session. The first source with rows for a vehicle wins; a vehicle no source has moves on its recorded positions, and one that only has files is added to the map anyway. Every source's rows get the same checks: missing-value codes (−999, a 999 wind) and impossible readings are dropped, as are fixes at 0,0, short jumps away and back faster than a vehicle can drive, and frozen positions beside them; one row is kept per second.
+
+The calendar and **Browse available cases…** list each vehicle in a folder by its file names. A web source can't be listed, so give it a `dates.json` (`{"dates": [...], "vehicles": {"wx1": ["20260506"]}}`) to shade its days; without one its days aren't shaded but still load. Case packages carry these files like the rest, and a package made on another machine serves a folder's files by their path inside the folder. Details are in [`docs/archive-data.md`](docs/archive-data.md#vehicle-obs-files).
 
 ---
 
@@ -1169,7 +1226,7 @@ When a track has motion, the sounding viewer plots it as an **OBS** marker on th
 
 ### Observation Trails
 
-At the bottom of the VEHICLES panel in archive mode, **show trails** draws each platform's recent path (one-second FOFS data where there is some, else the recorded MQTT positions), colored by a quantity:
+At the bottom of the VEHICLES panel in archive mode, **show trails** draws each platform's recent path (one-second vehicle obs where there are some, from your own files or FOFS, else the recorded MQTT positions), colored by a quantity:
 
 - the quantity: measured fields or derived ones (θ, θv, θe, θw, mixing ratio, u / v, radial and tangential wind);
 - the window: the last 5, 10, 15, 30 or 60 minutes before the clock;
@@ -1188,7 +1245,7 @@ When the clock has been still for half a second, the frame on screen is re-rende
 
 Both are picked by drawing a box on the map, like live ASOS: turn the button on, then drag a box. **Esc** or a right-click backs out, and with nothing loaded the button turns off again. Neither needs the NSSL servers.
 
-**SURFACE > ASOS** fetches the ASOS/AWOS history of every station inside the box (up to 400) from IEM for the whole session — its UTC day and the next morning to 06Z — and shows each station's latest report at the archive clock as a station plot. The center dot is colored by the report's age at the clock (green ≤ 70 min, yellow ≤ 90 min, red older), so a station that stopped reporting turns red as playback moves on. Stepping back before a station's first report removes it. The drawer's status line says how many stations are loading and loaded. **new ASOS bbox** draws another box; the stations shown stay until it is drawn. **show plots** hides the plots without turning ASOS off. With a storm track, trails in *time-to-space* mode include the ASOS stations as well (their pressure is sea-level, so pressure-based quantities stay blank for them). The regional mesonets aren't archived, so the SURFACE drawer shows ASOS only.
+**SURFACE > ASOS** fetches the ASOS/AWOS history of every station inside the box (up to 400) from IEM for the whole session — its UTC day and the next morning to 06Z — and shows each station's latest report at the archive clock as a station plot. The center dot is colored by the report's age at the clock (green ≤ 70 min, yellow ≤ 90 min, red older), so a station that stopped reporting turns red as playback moves on. Stepping back before a station's first report removes it. The drawer's status line says how many stations are loading and loaded. **new ASOS bbox** draws another box; the stations shown stay until it is drawn. **show plots** hides the plots without turning ASOS off. With a storm track, trails in *time-to-space* mode include the ASOS stations as well (their pressure is sea-level, so pressure-based quantities stay blank for them). The station networks from `storm.toml` (the NSSL profile's regional mesonets among them) are live only, so the SURFACE drawer shows ASOS only.
 
 **HAZARDS > DAMAGE PATHS** finds NWS damage-survey tornado paths inside the box, surveyed within a day of the session date. They come from the Damage Assessment Toolkit (DAT); where it has none (common before about 2015), from NCEI Storm Events, whose paths are straight lines from each tornado's start to its end point. Paths are colored by EF rating (EF0 teal, EF1 green, EF2 yellow, EF3 orange, EF4 red, EF5 purple, unrated light blue), with a white dot at the start and a colored dot at the end. Hovering a path shows its rating and source, start and end times (UTC), length, width and peak wind. The status line says how many were found and from which source. To search another box, turn DAMAGE PATHS off and on again. The first NCEI search of a year downloads that year's Storm Events file (tens of MB); later searches reuse it.
 
@@ -1196,29 +1253,51 @@ Both sources are recorded for case packages (*ASOS observations*, *Damage paths*
 
 ---
 
-### CLAMPS and CopterSonde
+### NSSL's archive data (the NSSL button)
 
-These come from NSSL's THREDDS server (the CLAMPS trailers, the NSSL lidar truck and the PERiLS campaign folders). Each is there only for the days the instruments were deployed; most dates have none.
+NSSL's field data on its public THREDDS server is in every ARCHIVE session, for every team, with no key: the **NSSL** button after RADAR opens a drawer with **VEHICLES · LIDAR · SOUNDING · RETRIEVALS**. Nothing in it asks the NSSL API. An item with nothing for the date is greyed out ("none for this date" on hover); NSSL's instruments were out on only some days. A team can leave NSSL out with `[providers.nssl] enabled = false` in `storm.toml`.
 
-**Lidar wind profiles (RADAR > VAD).** The first press loads every lidar wind source for the session (its UTC day and the next morning to 06Z): VAD and continuous-scan (CSM) winds from the lidar truck's two lidars, and VAD winds from the CLAMPS1 and CLAMPS2 trailers. When more than one has data, pick the instrument from a list (with its number of profiles). The VAD window opens on the latest profile at or before the archive clock; the scrubber and the time-height view cover the whole session. CSM files can be about 100 MB and a day of CSM winds holds thousands of profiles, so the first load can take a while; later presses reuse it. Cells with a failed fit, fill values or (for CSM winds) too little lidar signal are left out.
+**VEHICLES.** NSSL's recorded vehicles and their scan sectors, their FOFS one-second obs and the CLAMPS trailers' surface obs. With the NSSL profile these are the team's own vehicles: VEHICLES starts on, and turning it off hides them. For every other team it starts off; turning it on loads NSSL's recordings for the session, and NSSL's vehicles appear tagged **NSSL** ("NSSL probe1", "NSSL dltruck") beside your own. NSSL's annotations, drawings and cones stay out of other teams' maps. NSSL's vehicles publish under their FOFS folder names (`dltruck`, `probe1`…); recordings from before 3.0 say `lid1` and `p1`–`p7`, which read as those names.
 
-**NSSL soundings.** SOUNDINGS > NSSL tries, in order: the lidar truck's radiosondes on THREDDS (from April 2022), the NSSL API, then CLAMPS TROPoe retrievals, and shows the first with profiles on the clock's day up to the clock. A sonde launch is placed on the lidar truck's recorded track (one-second data, else MQTT) when it has a fix within a minute of launch; otherwise the header says the launch position is unknown. TROPoe profiles are temperature and humidity retrieved from a trailer's AERI and/or microwave radiometer every few minutes. They have no wind (the hodograph reads "no wind") and come from one trailer only. When nothing is found, the status line names the sources that had nothing and any that failed.
+**LIDAR** opens the lidar drawer (below): the lidar truck's and the CLAMPS trailers' Doppler lidar scans, **STARES** for their vertical stares, and **WINDS** for their wind profiles.
 
-**CopterSonde (SOUNDINGS > COPTERSONDE).** PERiLS CopterSonde ascents (2022 and 2023 IOP days) on the clock's day up to the clock, one list entry per launch site and aircraft. Picking a site opens its ascents in the sounding viewer. They reach a few hundred metres, so most parameters stay blank.
+**Lidar wind profiles (NSSL > LIDAR > WINDS).** The first press loads every lidar wind source for the session (its UTC day and the next morning to 06Z): VAD winds from the lidar truck's two lidars and from the CLAMPS1 and CLAMPS2 trailers, retrieved from their high-elevation VAD rings. When more than one has data, pick the instrument from a list (with its number of profiles). The VAD window opens on the latest profile at or before the archive clock; the scrubber and the time-height view cover the whole session. The first load can take a while; later presses reuse it. Cells with a failed fit or fill values are left out. Above the aerosol layer a VAD fits noise, so the window's **min intensity** hides levels whose intensity (the lidar's SNR + 1) is below it: it starts at 1.002, which clears most of the noise on the CLAMPS and truck lidars; all the way left ("off") shows every level. The time shown stays put as it moves, and a profile with no levels left drops out of the scrubber. NEXRAD VADs have no intensity, so the control isn't there.
+
+**SOUNDING: the lidar truck's radiosondes** (on THREDDS from April 2022) on the clock's day up to the clock. A launch is placed on the lidar truck's recorded track (one-second data, else MQTT) when it has a fix within a minute of launch; otherwise the header says the launch position is unknown.
+
+**RETRIEVALS: CLAMPS TROPoe**, temperature and humidity retrieved from a trailer's AERI and/or microwave radiometer every few minutes, on the clock's day up to the clock. They have no wind (the hodograph reads "no wind") and come from one trailer only. Radiosondes and retrievals are separate products; each says when it has none, or why it couldn't be read.
+
+Both open the sounding viewer, which still offers OBS (and the others) as comparison pills.
 
 **CLAMPS trailers on the map.** Each trailer's surface observations (temperature, dewpoint from humidity, pressure, wind) replay on the archive clock as a lidar marker labeled CLAMPS1 / CLAMPS2, with time series and trails like the mobile mesonet. A trailer leaves the map once its latest report is five minutes old. CLAMPS2's met tower is used when it has the day (2016–2021, without wind direction: its files say the trailer's heading isn't applied); otherwise the radiometer's surface sensors (to 2023). Days whose sensors recorded nothing show no trailer.
 
-**Doppler lidar scans (LIDAR).** The lidar truck's and the CLAMPS trailers' low-angle sweeps (PPI scans, and the sector sweeps in their continuous-scan files), drawn on the map like a radar's. LIDAR, next to RADAR, is enabled once the date is known to have lidar files. They load in the background once the first radar image and the vehicle tracks are in ("Loading lidar scans…" in the indicator). While LIDAR is open, every place a lidar scanned from this session is marked with a purple dot: a trailer's site, or each stop of the truck (labeled *Truck 1*, *Truck 2*…). Hovering a dot tells when it scanned and how its scan directions were set; clicking it pauses the clock at its first scan. Its sweeps are then drawn as the clock reaches them, each held until the next (up to 10 minutes), its scanning periods show as a purple strip under the time slider, and the drawer's button (hover for its position and distance from the radar; click to center the map on it) names it. The drawer also picks the field (velocity, intensity, backscatter, as recorded), hides the scans (**show on map**), and sets a **min intensity**: cells whose intensity (the files' SNR + 1) is below it are hidden, which clears the noise beyond the aerosol layer (about 1.005–1.02 usually does it; all the way left shows every cell). **WINDS** opens the lidar wind profiles, as RADAR > VAD does.
+**Doppler lidar scans (NSSL > LIDAR).** The lidar truck's and the CLAMPS trailers' low-angle sweeps, scanning as a radar does (PPI scans, and the sector sweeps in their continuous-scan files, at 5° elevation or less). LIDAR is enabled once the date is known to have lidar files. They load in the background once the first radar image and the vehicle tracks are in ("Loading lidar scans…" in the indicator). Without the NSSL profile, nothing downloads until LIDAR is first opened: that loads NSSL's vehicles too, and the scans follow once the truck's track is in, so the purple dots take a moment the first time. While LIDAR is open, every place a lidar scanned from this session is marked with a purple dot: a trailer's site, or each stop of the truck (labeled *Truck 1*, *Truck 2*…). Hovering a dot tells when it scanned and how its scan directions were set; clicking it pauses the clock at its first scan and opens its **scan window**; its scanning periods show as a purple strip under the time slider, and the drawer's button (hover for its position and distance from the radar; click to center the map on it) names it. **SCANS** opens the window again.
 
-Only sweeps below 45° count: the 60–70° rings many files hold are wind-profile (VAD) scans, so on many days LIDAR reads "No lidar PPI scans this session". The truck's files carry no position, so its scans are placed from its one-second track (else its MQTT track), fix by fix within a minute. Its scan directions are relative to the truck and turned to north by the heading in its files; when a file has none, the heading comes from the truck's compass in its mesonet data and an amber ⚠ says so (hover for the estimate). With neither, the scans can't be oriented: a red ⚠, and the stop is listed but its scans aren't drawn. Velocity is shown as recorded, positive away from the lidar, with no correction for the truck's motion. Files over 150 MB load only once their lidar is picked; files over 768 MB (some trailer continuous-scan days run to 1–2 GB) aren't downloaded, and the status line says so. Downloads are kept in `~/.cache/storm/raw_lidar` (up to 3 GB, least recently used removed first).
+The scan window shows one scan at a time in km east and north of the lidar, north up, with range rings:
+- **field** (velocity, intensity, backscatter, as recorded), **colours** (the scale's low and high ends, and **RESET COLOURS**);
+- **min intensity**: gates whose intensity (the files' SNR + 1) is below it are hidden, which clears the noise beyond the aerosol layer (about 1.005–1.02 usually does it; all the way left shows every gate);
+- ◀ ▶ and the scan list pick a scan; **follow the clock** shows the scan at the archive clock, each held until the next (up to 10 minutes);
+- under the cursor: range, azimuth, height, position, the field's value and the gate's intensity; drag a box (the toolbar's zoom) or scroll to zoom, pan, double-click to go back; the toolbar also saves a PNG;
+- **draw on map** (off by default) draws the scan shown, with this field and threshold, on the map.
 
-All of these are recorded for case packages (*CLAMPS winds, sondes and TROPoe*, *CLAMPS surface met*, *Raw lidar scans*, *CopterSonde profiles*).
+Only sweeps at 5° or less count: higher sweeps are other scan strategies (the 60–70° rings many files hold are the VAD scans behind WINDS), so on many days LIDAR reads "No lidar PPI scans this session". The truck's files carry no position, so its scans are placed from its one-second track (else its MQTT track), fix by fix within a minute. Its scan directions are relative to the truck and turned to north by the heading in its files; when a file has none, the heading comes from the truck's compass in its mesonet data and an amber ⚠ says so (hover for the estimate). With neither, the scans can't be oriented: a red ⚠, and the stop is listed but its scans aren't drawn. Velocity is shown as recorded, positive away from the lidar, with no correction for the truck's motion. Files over 150 MB load only once their lidar is picked; files over 768 MB (some trailer continuous-scan days run to 1–2 GB) aren't downloaded, and the status line says so. Downloads are kept in `~/.cache/storm/raw_lidar` (up to 3 GB, least recently used removed first).
+
+**Lidar stares (NSSL > LIDAR > STARES).** The same lidars' fixed-point files: rays straight up, one every second or two. STARES is on once a lidar has a stare file for the date (LIDAR opens for stares alone, too), and opens a window of vertical velocity against time and height for the session (12Z to the next morning), on the picked lidar if it has stares, else the first; the list at the top switches lidars (each loads when picked; a day's stares can be a few hundred MB, and the window shows how far the download has got):
+- **field**: vertical velocity (positive up), intensity, or backscatter (log10);
+- **min intensity** (starts at 1.010: above the boundary layer a stare is mostly noise) and **colours**, as in the scan window (velocity starts at ±3 m/s);
+- **cloud base**: the cloud-base height the files record, as green dots;
+- the archive clock as a dashed yellow line;
+- under the cursor: the time, height, value, intensity and cloud base of the nearest ray; box or scroll zoom, pan, double-click to go back.
+
+Rays are averaged into columns as wide as the view needs, so a whole day draws at once and zooming in brings back single rays; time with no rays is blank. On days the lidar ran continuous scans, it looks up for one ray between conical scans, which show as thin columns. The files say positive velocity is toward the lidar, but as with the scans that's not how they're written: the stares agree in sign with the conical scans taken between them, so velocity is shown as recorded, positive up. Every lidar product (stares, scans, and the VAD and CSM wind profiles) leaves out its first four gates, which are inside the lidar's near-range blind zone (noise, or a fixed velocity such as +35 m/s, which a VAD fits as calm air); NSSL's own processing hides them too. Some files on THREDDS were cut short when they were copied there (CLAMPS1 on 2023-06-09 is 32 KB of 52 MB); the window says "file incomplete on THREDDS" for those.
+
+All of these are recorded for case packages (*Instrument wind profiles, sondes and retrievals*, *Instrument surface obs*, *Raw lidar scans*).
 
 ---
 
 ### Limitations in Archive Mode
 
-- Vehicle positions are read from stored MQTT message logs — only vehicles that were active and publishing during the original session will appear.
+- Vehicle positions come from recorded broker traffic and vehicle-obs files ([Recorded Team Traffic](#recorded-team-traffic), [Your Own Archive Data](#your-own-archive-data)) — a vehicle that is in neither won't appear.
 - Real-time MQTT sync (annotations, drawings) is inactive in archive mode.
 - Local file watcher (Track A) and GPS reader (Track B) are inactive.
 - Network connectivity is still required — archive data is fetched from remote servers at playback time — unless the case was opened from a case package that holds the data (below).
@@ -1296,7 +1375,7 @@ Click any SPC feature (outlook area, watch polygon, or MD polygon) on the map, t
 
 ## 10. Point Soundings
 
-STORM supports three independent sounding sources, selected via the **SOUNDINGS** drawer (see [Section 6.4](#64-soundings)). All three sources display in the same Skew-T log-P dialog.
+STORM has two built-in sounding sources, HRRR and observed radiosondes, plus NSSL's with the NSSL provider and any your team adds in `storm.toml` ([Your Own Data Sources](#your-own-data-sources)). Pick one in the **SOUNDINGS** drawer (see [Section 6.4](#64-soundings)); they all display in the same Skew-T log-P dialog.
 
 ### HRRR Model Soundings
 
@@ -1304,13 +1383,11 @@ Click any map location within the HRRR CONUS domain. Data fetched from open-mete
 
 ### Observed Radiosonde Soundings
 
-Switch to OBS mode in the SOUNDINGS drawer. Radiosonde station markers appear on the map at active upper-air sites. Click a marker to fetch the most recent balloon launch profile from IEM RAOB. STORM automatically selects the 00Z or 12Z launch closest to the current UTC time.
+Switch to OBS mode in the SOUNDINGS drawer. Radiosonde station markers appear on the map at the US upper-air sites in IEM's RAOB network (80, including Alaska, Hawaii and Puerto Rico; Denver isn't in IEM's archive, and military test ranges are left out). Click a marker to fetch the most recent balloon launch profile from IEM RAOB. STORM automatically selects the 00Z or 12Z launch closest to the current UTC time.
 
 ### NSSL CLAMPS DL Truck Soundings
 
-Switch to NSSL mode in the SOUNDINGS drawer. CLAMPS truck markers appear when data is available from the NSSL API. Click a marker to fetch and display the most recent truck sounding. Up to 12 hours of soundings per truck are available.
-
-### Triggering a Sounding
+Switch to NSSL mode in the SOUNDINGS drawer (there with the NSSL provider and `NSSL_API_KEY`). CLAMPS truck markers appear when data is available from the NSSL API. Click a marker to fetch and display the most recent truck sounding. Up to 12 hours of soundings per truck are available.
 
 ### Dialog Layout
 
@@ -1342,7 +1419,7 @@ The header shows the HRRR init time and the currently-displayed valid time. The 
 | Green curve | Dewpoint |
 | Dashed warm-tint curve | Virtual temperature |
 | White dashed curve | Surface-based parcel profile |
-| Surface T/Td labels | Bold numeric labels at the base of the temperature (red) and dewpoint (green) traces showing surface values in °C |
+| Surface T/Td labels | Bold numeric labels at the base of the temperature (red) and dewpoint (green) traces showing surface values in the `[units]` temperature unit (°F by default) |
 | Red shading | CAPE area |
 | Blue shading | CIN area |
 | Cyan circle | LCL marker |
@@ -1397,7 +1474,7 @@ Storm motion is displayed as `RM  dir°/spd kt` and `LM  dir°/spd kt` in the ho
 | LR 0–3 km | 0–3 km AGL lapse rate (°C/km) |
 | SFC θe | Surface equivalent potential temperature (K) |
 | PW | Precipitable water (mm) |
-| Conv Temp | Convective temperature — surface temperature required for convection initiation (°F) |
+| Conv Temp | Convective temperature — surface temperature required for convection initiation (°F, or °C with `[units]`) |
 | STP | Significant Tornado Parameter |
 | SCP | Supercell Composite Parameter |
 | EHI | Energy-Helicity Index |
@@ -1448,23 +1525,25 @@ STORM tracks vehicles through several parallel data input channels. All inputs f
 
 ### Track A — Local File Watcher
 
-Polls a FOFS truck logger format file every 10 seconds. Enabled only if a data directory was selected at launch.
+Polls the logger's CSV file every second. Enabled only if a data directory was selected at launch.
 
-**Expected filename:** `YYYYMMDD.txt` (today's date)
+**Which file:** the layout's `file` pattern in `[obs_columns]`: by default `*YYYYMMDD.csv` for today's UTC date (the shortest matching name when there are several). A pattern without `{date}` follows the most recently changed matching file instead.
 
-**Expected columns (tab or comma delimited):**
+**Which columns:** the layout's column names. By default:
 
 | Column | Format | Description |
 |--------|--------|-------------|
-| `gps_date` | DDMMYY | GPS date |
-| `gps_time` | HHMMSS | GPS time (UTC) |
+| `time` | ISO 8601 | Time (UTC when it has no zone) |
 | `lat` | decimal degrees | Latitude |
 | `lon` | decimal degrees | Longitude |
-| `t_fast` | °F | Fast-response temperature |
-| `dewpoint` | °F | Dewpoint temperature |
-| `sfc_wspd` | knots | Surface wind speed |
-| `sfc_wdir` | degrees | Surface wind direction |
-| `pressure` | mb | Atmospheric pressure |
+| `temperature_c` | °C | Temperature |
+| `dewpoint_c` | °C | Dewpoint temperature |
+| `wind_speed_ms` | m/s | Wind speed |
+| `wind_dir_deg` | degrees | Wind direction |
+| `pressure_mb` | hPa | Pressure |
+| `heading_deg` | degrees | Which way the vehicle faces |
+
+The NSSL profile's `fofs` layout reads the FOFS truck logger's `YYYYMMDD.txt` (`gps_date`, `gps_time`, `t_fast`, `dewpoint`, `sfc_wspd`, `sfc_wdir`, `pressure`, `compass_dir`).
 
 ### Track B — GPS Reader
 
@@ -1472,27 +1551,34 @@ Automatically detects and reads NMEA sentences from a connected serial GPS devic
 
 ### MQTT — Inbound Vehicle Observations
 
-Receives observations from other vehicles via the `storm/vehicles/{id}` topic. Active whenever MQTT is connected and not disabled.
+Receives observations from other vehicles via the `<topic_root>/vehicles/{id}` topic (`storm/vehicles/{id}` by default). Active whenever MQTT is connected and not disabled. Any logger or script can appear as a vehicle by publishing the payload in [`docs/wire-format.md`](docs/wire-format.md); the headless publisher (`headless/`) does this from a logger file on a Raspberry Pi.
 
 ## 12. Network & MQTT Sync
 
-STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, and vehicle observations across all connected vehicles in the network.
+STORM uses an MQTT v5 broker, set in `storm.toml` (see [Section 15](#15-configuration--certificates)), to synchronize vehicle observations, annotations, drawings, cones and scan sectors across all connected vehicles in the network. Setting up a broker (Mosquitto or a hosted service), who can see what, and fixing connection problems are in [`docs/broker.md`](docs/broker.md).
 
 ### Topics
 
+Every topic starts with `topic_root` from `storm.toml`'s `[mqtt]` table, `storm` unless your team changed it. Everyone on the team must use the same root; a client with a different one sees none of the others.
+
 | Topic | Content |
 |-------|---------|
-| `storm/vehicles/{id}` | Vehicle observations (lat, lon, temp, dewpoint, wind, pressure) |
-| `storm/annotations/{id}` | Road condition annotations (create / edit / delete) |
-| `storm/drawings/{id}` | Meteorological drawings (fronts, polylines, polygons) |
-| `storm/cones/{id}` | Storm motion cones |
+| `<topic_root>/vehicles/{id}` | Vehicle observations (lat, lon, temp, dewpoint, wind, pressure) |
+| `<topic_root>/annotations/{id}` | Road condition annotations (create / edit / delete) |
+| `<topic_root>/drawings/{id}` | Meteorological drawings (fronts, polylines, polygons) |
+| `<topic_root>/cones/{id}` | Storm motion cones |
+| `<topic_root>/scan_sectors/{id}` | Each vehicle's current scan sector |
+
+Every payload, with its fields, units, QoS, retain flag and expiry, is in [`docs/wire-format.md`](docs/wire-format.md).
 
 ### Behavior
 
-- On connect, retained messages for all active annotations, drawings, and cones are received and displayed automatically.
+- Annotations, drawings, cones and scan sectors are retained on the broker, deletes included, so on connect (and on every reconnect) the current ones arrive at once and anything deleted while you were away disappears. This needs a broker that sends retained messages on wildcard subscriptions, as Mosquitto, EMQX and HiveMQ do. AWS IoT Core doesn't: on NSSL's broker scan sectors still arrive (each one within a few seconds, once its vehicle publishes), but annotations, drawings and cones from before you connected don't. A setup with `[mqtt] shared_items_url` loads those from that URL at launch instead (NSSL's profile: the NSSL API's `current.json`), and the **↻ Refresh** button in the annotation drawer re-fetches it (the button only shows with it set). See [`docs/wire-format.md`](docs/wire-format.md#retained-messages).
+- Annotations, drawings and scan sectors expire from the broker at the team's daily reset (`daily_reset_utc` in `storm.toml`, 08:00 UTC unless changed), cones after an hour, vehicle positions after three hours.
 - Disconnect/reconnect is handled automatically — STORM continuously attempts to reconnect with exponential backoff.
 - If `--disable-mqtt` is passed, all sync features are disabled and the vehicle panel shows only locally-observed vehicles.
-- Status bar shows "MQTT connected" or an error message.
+- In MONITOR mode, **File > Record Broker Traffic** writes everything the broker sends to `recordings/` for ARCHIVE to replay; `python -m archive.recorder` does the same without the GUI. See [Recorded Team Traffic](#recorded-team-traffic).
+- The status pill shows **● MQTT OK**, **● MQTT OFFLINE** or **● NO BROKER**; while offline the status bar gives the reason (for example "not authorized").
 
 ---
 
@@ -1510,14 +1596,14 @@ STORM uses MQTT over AWS IoT (TLS) to synchronize annotations, drawings, cones, 
 | GOES Satellite (MESO-1/2) | Every 1 minute | When active, per-sector |
 | Offline NLCD Land Cover | Local MBTiles | Optional `tiles/storm_nlcd.mbtiles`; no network polling |
 | Offline USGS Satellite Basemap | Local MBTiles | Optional `tiles/satellite.mbtiles`; no network polling |
-| SFCOA Mesoanalysis | On demand | API index refresh plus selected vector-tile products |
+| SFCOA Mesoanalysis | On demand | NSSL API index refresh plus selected vector-tile products |
 | HRRR Point Sounding (open-meteo) | On demand | 1 API call per map click |
 | Observed Radiosonde (IEM RAOB) | On demand | Nearest 00Z / 12Z launch |
 | NSSL CLAMPS DL Truck | On demand | Fetched from the NSSL API on click |
-| OK / WTM / KS / CO / NE Mesonet (surface obs) | Every 5 minutes | Per-network, independent toggles |
+| Your station networks (`[[sources]]`; the NSSL profile's OK / WTM / KS / CO / NE / SD) | Every `refresh_min` (5 minutes unless set) | Per-network, independent toggles |
 | ASOS/AWOS Surface Obs (IEM) | Every 5 minutes after bbox selection | User-drawn bbox; capped for performance |
-| Turn-by-turn Routing (OSRM) | On demand | Re-fetched automatically if off-route |
-| Local Obs File (Track A) | Every 10 seconds | Today's YYYYMMDD.txt |
+| Turn-by-turn Routing (openrouteservice) | On demand | Re-fetched automatically if off-route |
+| Local Obs File (Track A) | Every second | Today's logger file (`[obs_columns]` `file`) |
 | GPS (Track B) | Real-time / continuous | NMEA sentences |
 | MQTT Inbound | Real-time | Vehicle obs, annotations, drawings, cones |
 | Network Health Check | Every 30 seconds | Cloudflare 1.1.1.1 ping |
@@ -1533,9 +1619,11 @@ Run `python main.py --help` for the full list. Key options:
 ```
 --debug                        Enable debug logging and the debug panel (Ctrl+D)
 --log-level LEVEL              Logging verbosity: DEBUG, INFO, WARNING, ERROR (default: WARNING)
+--case PACKAGE.zip             Open a case package in ARCHIVE, skipping the launch window
+--perf-log                     Write timings, memory and responsiveness to perf_logs/ (also STORM_PERF_LOG=1)
 ```
 
-> **Note:** Mode selection (VEHICLE, MONITOR, VIEWER, ARCHIVE) is handled exclusively through the launch dialog, which checks for the certificate files (and the admin passphrase). There are no command-line flags for mode selection.
+> **Note:** Mode selection (VEHICLE, MONITOR, VIEWER, ARCHIVE) is handled exclusively through the launch dialog, which checks for a broker login (and the admin passphrase). There are no command-line flags for mode selection.
 
 ### Disable Features
 
@@ -1559,6 +1647,9 @@ Run `python main.py --help` for the full list. Key options:
 
 ```
 --render-grid-size N            Radar rendering grid: 128, 256, 512, 768, 1024, or 1536
+--lite                          Lite mode: lower radar resolution, fewer surface plots, slower loops
+--gpu-radar                     Experimental: draw live reflectivity with WebGL (off in safe/lite mode)
+--webengine-flags FLAGS         Extra Chromium flags for the map, e.g. "--disable-gpu-compositing"
 ```
 
 ### Debug Run Profiles
@@ -1575,25 +1666,86 @@ Run `python main.py --help` for the full list. Key options:
 ### Network
 
 ```
---mqtt-no-tls                  MQTT without TLS (development use only, not for field use)
+--mqtt-no-tls                  Connect as if [mqtt] tls = "none" (diagnostics only, not for field use)
+```
+
+### Recorder
+
+`python -m archive.recorder` records broker traffic for ARCHIVE without opening STORM (see [Recorded Team Traffic](#recorded-team-traffic)):
+
+```
+--folder FOLDER                Write here instead of [archive] recordings (default recordings/)
+-v, --verbose                  Debug logging
 ```
 
 ---
 
 ## 15. Configuration & Certificates
 
+### storm.toml
+
+Per-install settings live in `storm.toml` in the STORM folder (or the file `STORM_CONFIG` names). Copy `storm.example.toml`, or a profile such as `profiles/nssl.toml`. Relative paths are resolved against the STORM folder. A missing file means no broker. Problems are listed together in one window at startup, and STORM uses the rest of the file: an unknown table or key is skipped, with a suggestion for a near miss ("did you mean [units]?"); a table with an invalid value keeps its defaults (a bad `[mqtt]` means no broker, nothing more); a bad `[[sources]]`, `[[auth]]` or `[providers.<name>]` entry is left out. A file that isn't valid TOML is ignored as a whole. Details in [`docs/configuration.md`](docs/configuration.md#when-something-in-the-file-is-wrong). Every key is in [`docs/configuration.md`](docs/configuration.md).
+
+**`[mqtt]`** — the broker:
+
+| Key | Description |
+|-----|-------------|
+| `host`, `port` | Broker address (port defaults to 8883, or 1883 without TLS) |
+| `tls` | `"none"`, `"server"` (default: TLS, broker verified) or `"mutual"` (TLS plus a client certificate, as AWS IoT Core needs) |
+| `ca_cert` | CA bundle for a privately signed broker; system trust store if left out |
+| `cert_file`, `key_file` | Client certificate and key, for `tls = "mutual"` |
+| `username` | Broker login; the password goes in `.env` as `STORM_MQTT_PASSWORD` |
+| `client_id_prefix` | Put in front of the client ID (the vehicle ID) |
+| `read_only` | Never publish; VEHICLE and MONITOR won't launch with it |
+| `topic_root` | First level of every topic (default `"storm"`); the same for everyone on the team. See [Section 12](#12-network--mqtt-sync) |
+| `daily_reset_utc` | Hour (UTC) when shared annotations, drawings and scan sectors expire (default `8`) |
+
+**`[mqtt.viewer]`** — optional read-only login for VIEWER mode. Keys left out come from `[mqtt]`; its password is `STORM_MQTT_VIEWER_PASSWORD`. Without it, VIEWER uses the `[mqtt]` login and never publishes. It always uses `[mqtt]`'s `topic_root` and `daily_reset_utc`.
+
+**`[providers.nssl]`** — NSSL's provider is built in: without the table ARCHIVE's NSSL button is there for everyone. `enabled = false` leaves it out; `team = true` (the NSSL profile) makes NSSL the setup's own team ([Data Providers](#data-providers)). Its live API layers also need `NSSL_API_KEY` in `.env`.
+
+**`[[sources]]`** — your own station networks, map overlays and soundings, one table each ([Your Own Data Sources](#your-own-data-sources); every key in [`docs/data-sources.md`](docs/data-sources.md)).
+
+**`[providers.<name>]`** — a code provider of your team's own (NSSL's is one too): `enabled = true`, an optional `path`, and its own options ([`docs/providers.md`](docs/providers.md)).
+
+**`[archive]`** — where ARCHIVE reads recorded broker traffic (`recordings`, `history`, `history_prefix`) and vehicle obs (`vehicle_obs`, `vehicle_obs_path`), and the case finder's `[[archive.campaigns]]` (`name`, `years`). See [Recorded Team Traffic](#recorded-team-traffic) and [Your Own Archive Data](#your-own-archive-data).
+
+**`[obs_columns]`** — which file in a vehicle logger's folder is today's, and which of its CSV columns hold what, for live obs files and ARCHIVE's vehicle-obs files. Defaults read a plain CSV named after the UTC day; `""` means the file has no such column.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `file` | `*{date}.csv` | Today's file: a file-name pattern, `{date}` the UTC day as YYYYMMDD; without `{date}`, the newest matching file |
+| `lat`, `lon` | `lat`, `lon` | Position (decimal degrees) |
+| `timestamp` | `time` | One ISO 8601 column (UTC when it has no zone) |
+| `date`, `time` | `""` | Or UTC date and time columns, read with `date_format` / `time_format` |
+| `date_format`, `time_format` | `%Y%m%d`, `%H%M%S` | Python `strptime` formats |
+| `temperature_c`, `dewpoint_c` | `temperature_c`, `dewpoint_c` | °C |
+| `wind_speed_ms`, `wind_dir_deg` | `wind_speed_ms`, `wind_dir_deg` | m/s; degrees, from |
+| `pressure_mb` | `pressure_mb` | hPa |
+| `heading_deg` | `heading_deg` | Which way the vehicle faces |
+| `label` | the layout's name | Its name in the launch window |
+
+Columns in other units are converted with `[obs_columns.units]` (for example `temperature_c = "F"`, `wind_speed_ms = "kt"`). Teams with more than one kind of logger name a layout for each (`[obs_columns.<name>]`) and pick one in the launch window's **Logger File** list; ARCHIVE reads vehicle-obs files with the first. The NSSL profile has `fofs` and `gps_ka`. The headless publisher reads the same table and picks a layout with `layout`. Every key: [`docs/configuration.md`](docs/configuration.md#obs_columns-vehicle-logger-columns).
+
+**`[map]`** — `home_lat`, `home_lon` and `zoom`: where the map opens, and the position STORM falls back to while your vehicle has none yet (ARCHIVE's first radar site, a new scan sector). Default: the middle of the contiguous US at zoom 4; the NSSL profile sets Norman, OK at zoom 6. `time_zones`: the local clocks in ARCHIVE's bar (IANA names such as `"Europe/Berlin"`, up to three); default, this computer's zone.
+
+**`[units]`** — `temperature` (`"F"` or `"C"`) and `distance` (`"mi"` or `"km"`): how STORM shows temperatures (station plots, vehicle panel and timeseries, the sounding viewer's surface labels and convective temperature) and distances (measuring tool, routing, damage paths, pin and radar-site distances). Defaults °F and miles. Wind is always in knots. The °F and miles throughout this guide are the defaults.
+
+**`[archive]` session window** — `session_start_utc`, `session_hours`, `session_activity_after_hours`: where ARCHIVE's session starts and ends ([Archive Mode](#8-archive-mode)).
+
+### .env
+
+Secrets, one `KEY=VALUE` per line (copy `.env.example`): `STORM_MQTT_PASSWORD`, `STORM_MQTT_VIEWER_PASSWORD`, `NSSL_API_KEY`, `ORS_API_KEY`, `STORM_ADMIN_PASSPHRASE_HASH`, and the keys your `[[sources]]` and `[[auth]]` tables name with `api_key_env`. A real environment variable of the same name wins.
+
 ### config.py
 
-Edit `config.py` for persistent defaults:
+`config.py` holds constants that are the same for every install:
 
 | Constant | Description |
 |----------|-------------|
 | `ACCENT_COLOR` | UI accent color (default: `"#00CFFF"`, cyan) |
 | `VEHICLE_ID` | Default vehicle ID (overridden by launch dialog) |
-| `OBS_FILE_DIR` | Default data directory path (overridden by launch dialog) |
-| `MQTT_HOST` | AWS IoT endpoint hostname |
-| `MQTT_PORT` | MQTT port (default: 8883 for TLS) |
-| `MQTT_USE_TLS` | Whether to require TLS (default: True) |
+| `OBS_FILE_DIR` | Default data directory path (overridden by launch dialog); its file and columns are `[obs_columns]` |
 
 ### Persistent Session State (QSettings)
 
@@ -1602,19 +1754,11 @@ The following are saved automatically and restored at next launch:
 - Last-used vehicle ID
 - Last-used data directory
 
-Settings are stored under the `"NSSL" / "STORM"` namespace in your OS's native settings storage.
+Settings are stored under the `"STORM" / "STORM"` namespace in your OS's native settings storage. Settings saved under the old `"NSSL" / "STORM"` namespace are copied over once, the first time this version starts.
 
-### TLS Certificate Files
+### NSSL Certificate Files
 
-Place these three files exactly at these paths before using MQTT:
-
-| File | Role |
-|------|------|
-| `/aws/storm.pem` | CA certificate |
-| `/aws/storm.pem.crt` | Device certificate |
-| `/aws/storm-private.pem.key` | Private key |
-
-Missing certificates cause MQTT to fail silently — all other features remain operational.
+With `profiles/nssl.toml`, VEHICLE and MONITOR need the team certificates (handed out by the STORM team) in `providers/nssl/certs/team/`; VIEWER uses the read-only certificate shipped in `providers/nssl/certs/viewer/`. A missing file stops VEHICLE and MONITOR at the launch window; everything else works. The file list, and moving certificates from an older install's `aws/` folder, are in [`docs/nssl.md`](docs/nssl.md#3-certificates). Your own broker's files can go in a top-level `certs/`, which is git-ignored.
 
 ---
 
@@ -1710,11 +1854,14 @@ STORM uses an internal TCP port (19876) as a process lock. If a second instance 
 | Symptom | Likely Cause | Resolution |
 |---------|-------------|-----------|
 | Radar not updating | THREDDS server unavailable or slow | Check network indicator; try a different site |
-| "MQTT disconnected" in status bar | Certificate missing or endpoint unreachable | Verify `/aws/` certificate files exist |
+| **● NO BROKER** pill | No `storm.toml`, or no `[mqtt] host` in it | Copy `storm.example.toml` or a profile to `storm.toml` and set the broker |
+| **● MQTT OFFLINE** pill | Broker unreachable, or the login was refused (the status bar gives the reason) | Check `[mqtt]` in `storm.toml`, the certificate files it names, and `STORM_MQTT_PASSWORD` in `.env` |
 | Station plots missing | `--disable-annotations` passed | Relaunch without that flag |
 | MESO-1/2 buttons grayed out | Sectors not currently available | Wait — buttons enable automatically when sectors are active |
 | Map tiles blank/gray | `storm.mbtiles` missing or corrupted | Verify the MBTiles file is present and not zero-byte |
 | Slow/choppy radar rendering | Grid size too large for hardware | Use `--render-grid-size 256` |
+| Other broker connection problems (`not authorized`, two laptops dropping each other, late joiners missing items) | Login, access list, `topic_root` or a duplicate vehicle ID | See [`docs/broker.md`](docs/broker.md#when-it-doesnt-connect) |
+| `make_base_mbtiles.py` says Java not found | No Java 21 | `conda env create -f envs/tiles.yml`, then run the script after `conda activate tiles` |
 | Hatch patterns not visible | WebGL limitation | Known quirk; patterns are built as pixel data, not canvas — should render in all supported modes |
 
 ---
@@ -1728,7 +1875,7 @@ MapLibre GL running inside QWebEngineView cannot reliably read back canvas pixel
 The `bridge` object that connects Python and JavaScript is initialized asynchronously after the map loads. All JavaScript API functions are stubbed as no-ops (`_stormNoop`) until the bridge is ready. In practice this is transparent to the user, but very rapid actions in the first second after launch may be silently dropped.
 
 **MBTiles Files Not Included in Repository**
-The offline vector tile database (`storm.mbtiles`) is large (500 MB–1 GB) and is not included in the git repository. Optional NLCD and satellite-basemap caches are also distributed outside git. Place MBTiles files in the `tiles/` folder.
+The offline vector tile database (`storm.mbtiles`) is large (about 3.7 GB) and is not included in the git repository. The shipped files cover the central US only (116°W–82°W, 28°N–49°N); `scripts/make_base_mbtiles.py` (vector base map, anywhere) and `scripts/make_satellite_mbtiles.py --bbox` (USGS imagery, US only) build your own. Optional NLCD and satellite-basemap caches are also distributed outside git. Place MBTiles files in the `tiles/` folder.
 
 **SPC Text Product Latency**
 IEM AFOS sometimes responds slowly (up to 20 seconds per request). STORM waits patiently rather than timing out aggressively. This is normal behavior during high-traffic SPC issuance periods.
@@ -1746,41 +1893,55 @@ SPC GeoJSON products (tor, wind, hail) are typically updated once or twice daily
 
 ## 20. Feature Availability Matrix
 
-| Feature | Default | Disabled By |
-|---------|---------|-------------|
-| Offline vector base map | ✅ Always | n/a (requires storm.mbtiles) |
-| Offline NLCD land cover | ✅ Enabled when installed | Requires `tiles/storm_nlcd.mbtiles` |
-| Offline USGS satellite basemap | ✅ Enabled when installed | Requires `tiles/satellite.mbtiles` |
-| NEXRAD Radar overlay | ✅ Enabled | `--disable-radar` |
-| GOES Satellite overlay | ✅ Enabled | n/a |
-| SPC Hazards (outlook, tor, wind, hail) | ✅ Enabled | n/a |
-| SPC Watches | ✅ Enabled | n/a |
-| SPC Mesoscale Discussions | ✅ Enabled | n/a |
-| NWS Warnings | ✅ Enabled | n/a |
-| Outlook Text Panel | ✅ Enabled | n/a |
-| HRRR Point Soundings | ✅ Enabled | n/a |
-| Observed Radiosonde Soundings | ✅ Enabled | n/a |
-| NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | n/a |
-| Surface Obs (OK / WTM / KS / CO / NE / ASOS) | ✅ Enabled (when toggled on) | n/a |
-| SFCOA Mesoanalysis | ✅ Enabled | n/a |
-| Turn-by-turn Routing | ✅ Enabled | n/a |
-| Annotations (road conditions) | ✅ Enabled | `--disable-annotations` |
-| Drawings (fronts, polylines, polygons) | ✅ Enabled | `--disable-annotations` |
-| Storm Motion Cone | ✅ Enabled | `--disable-annotations` |
-| Station Plots (vehicle obs) | ✅ Enabled | `--disable-annotations` |
-| Measurement Tool | ✅ Enabled | n/a |
-| Deployment Locations | ✅ Enabled | `--disable-deploy-locs` or missing data file |
-| Radar Playback (loop mode) | ✅ Enabled | `--disable-radar` |
-| Satellite Playback (loop mode) | ✅ Enabled | n/a |
-| Archive Mode (session replay) | ✅ Enabled | Requires the MQTT certificate files; selected at launch |
-| Archive Radar Playback (Level 2/3) | ✅ Enabled in archive mode | n/a |
-| Archive Satellite Playback | ✅ Enabled in archive mode | n/a |
-| Archive Hazard Products | ✅ Enabled in archive mode | n/a |
-| Archive Vehicle Positions (MQTT log) | ✅ Enabled in archive mode | n/a |
-| Archive Soundings | ✅ On demand in archive mode | n/a |
-| Vehicle Timeseries Plots | ✅ Enabled (for vehicles with obs history) | n/a |
+"Needs" is what the feature requires beyond STORM itself: **NSSL** is the NSSL provider (built in; `[providers.nssl] enabled = false` removes it), **NSSL + key** adds `NSSL_API_KEY`, **NSSL profile + key** is the `[[sources]]` in `profiles/nssl.toml` with `NSSL_API_KEY`. See [Data Providers](#data-providers).
+
+| Feature | Default | Needs | Disabled By |
+|---------|---------|-------|-------------|
+| Offline vector base map | ✅ Always | — | n/a (requires storm.mbtiles) |
+| Offline NLCD land cover | ✅ Enabled when installed | — | Requires `tiles/storm_nlcd.mbtiles` |
+| Offline USGS satellite basemap | ✅ Enabled when installed | — | Requires `tiles/satellite.mbtiles` |
+| NEXRAD Radar overlay | ✅ Enabled | — | `--disable-radar` |
+| GOES Satellite overlay | ✅ Enabled | — | n/a |
+| SPC Hazards (outlook, tor, wind, hail) | ✅ Enabled | — | n/a |
+| SPC Watches | ✅ Enabled | — | n/a |
+| SPC Mesoscale Discussions | ✅ Enabled | — | n/a |
+| NWS Warnings | ✅ Enabled | — | n/a |
+| Outlook Text Panel | ✅ Enabled | — | n/a |
+| HRRR Point Soundings | ✅ Enabled | — | n/a |
+| Observed Radiosonde Soundings | ✅ Enabled | — | n/a |
+| NSSL CLAMPS Truck Soundings | ✅ Enabled (when data available) | NSSL + key | n/a |
+| Surface Obs: ASOS | ✅ Enabled (when toggled on) | — | n/a |
+| Surface Obs: OK / WTM / KS / CO / NE / SD mesonets | ✅ Enabled (when toggled on) | NSSL profile + key | n/a |
+| Surface Obs: your station networks | ✅ Enabled (when toggled on, live modes) | `[[sources]]`, and its key if it has one | n/a |
+| Map overlays (GeoJSON) | ✅ Enabled (when toggled on, live modes; ARCHIVE too with `archive = true`) | `[[sources]]`, and its key if it has one | n/a |
+| Your sounding sources | ✅ Enabled (when picked, live modes) | `[[sources]]`, and its key if it has one | n/a |
+| Code provider data | ✅ Enabled (as its sources say) | `[providers.<name>]` and its package | n/a |
+| SFCOA Mesoanalysis | ✅ Enabled | NSSL profile + key | n/a |
+| Your contours source | ✅ Enabled (live modes) | `[[sources]]` with `kind = "contours"`, and its key if it has one | n/a |
+| Day's shared items at launch (`[mqtt] shared_items_url`; NSSL: `current.json`) | ✅ Enabled | `shared_items_url` (NSSL: + key) | `--disable-annotations` |
+| Turn-by-turn Routing | ✅ Enabled | `ORS_API_KEY` | n/a |
+| Annotations (road conditions) | ✅ Enabled | a broker | `--disable-annotations` |
+| Drawings (fronts, polylines, polygons) | ✅ Enabled | a broker | `--disable-annotations` |
+| Storm Motion Cone | ✅ Enabled | a broker | `--disable-annotations` |
+| Station Plots (vehicle obs) | ✅ Enabled | — | `--disable-annotations` |
+| Measurement Tool | ✅ Enabled | — | n/a |
+| Recording broker traffic (MONITOR, `python -m archive.recorder`) | Off until checked | a broker | n/a |
+| Deployment Locations | ✅ Enabled (live modes) | NSSL | `--disable-deploy-locs` or missing data file |
+| Radar Playback (loop mode) | ✅ Enabled | — | `--disable-radar` |
+| Satellite Playback (loop mode) | ✅ Enabled | — | n/a |
+| Archive Mode (session replay) | ✅ Enabled | — | Selected at launch; needs no broker |
+| Archive Radar Playback (Level 2/3) | ✅ Enabled in archive mode | — | n/a |
+| Archive Satellite Playback | ✅ Enabled in archive mode | — | n/a |
+| Archive Hazard Products, ASOS, Damage Paths | ✅ Enabled in archive mode | — | n/a |
+| Archive team traffic (recorded vehicles, annotations, drawings, cones, scan sectors) | ✅ Enabled in archive mode | a recording, or NSSL | n/a |
+| Archive one-second vehicle obs: your logger files | ✅ Enabled in archive mode | `[archive] vehicle_obs` | n/a |
+| Archive one-second vehicle obs: FOFS | ✅ Enabled in archive mode (NSSL > VEHICLES) | — (built in) | n/a |
+| Archive Soundings: OBS | ✅ On demand in archive mode | — | n/a |
+| Archive NSSL radiosondes, TROPoe | ✅ On demand in archive mode (NSSL button) | — (built in) | n/a |
+| Archive NSSL vehicles, CLAMPS trailers, lidar winds, lidar scans and stares | ✅ Enabled in archive mode (NSSL button) | — (built in) | n/a |
+| Vehicle Timeseries Plots | ✅ Enabled (for vehicles with obs history) | — | n/a |
 
 ---
 
 *STORM — Severe Thunderstorm Observation and Reconnaissance Monitor*
-*Internal field operations tool — NSSL Mobile Mesonet program*
+*Built for NSSL field operations; usable by any team with an MQTT broker*

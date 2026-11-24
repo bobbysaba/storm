@@ -7,4 +7,4 @@ also imported by the GUI so both share one row parser and one payload format;
 nothing in this package may depend on Qt.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

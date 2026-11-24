@@ -1,7 +1,8 @@
 
 import math
-import uuid
 from datetime import datetime, timezone, timedelta
+
+from core.annotation import short_uuid
 
 # earth radius in nautical miles
 R_NM = 3440.065
@@ -13,12 +14,6 @@ _TIME_STEPS = [0, 0.25, 0.50, 0.75, 1.0]
 _RIB_STEPS = [0.25, 0.50, 0.75]
 # points in the end-cap arc (inclusive)
 _ARC_POINTS = 7
-
-
-# function to generate a short uuid
-def _short_uuid():
-    # return first 8 hex chars
-    return uuid.uuid4().hex[:8]
 
 
 # spherical forward projection (returns lat, lon)
@@ -119,7 +114,7 @@ class StormCone:
         created_at = datetime.now(timezone.utc)
         # return a new record
         return cls(
-            id=_short_uuid(),
+            id=short_uuid(),
             lat=lat,
             lon=lon,
             heading=heading,

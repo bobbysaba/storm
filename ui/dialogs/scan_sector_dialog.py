@@ -115,7 +115,7 @@ class ScanSectorDialog(QDialog):
         )
 
     def _load_values(self):
-        s = QSettings("NSSL", "STORM")
+        s = QSettings()
         scan = self._active_scan if self._active_scan and self._active_scan.active else None
 
         mode = scan.mode if scan else s.value(f"{_KEY_PREFIX}/mode", "sector", type=str)
@@ -135,7 +135,7 @@ class ScanSectorDialog(QDialog):
         self.stop_btn.setVisible(bool(scan))
 
     def _save_values(self):
-        s = QSettings("NSSL", "STORM")
+        s = QSettings()
         s.setValue(f"{_KEY_PREFIX}/mode", self.mode_combo.currentData())
         s.setValue(f"{_KEY_PREFIX}/range_m", self.range_spin.value())
         s.setValue(f"{_KEY_PREFIX}/inner_range_m", self.inner_spin.value())

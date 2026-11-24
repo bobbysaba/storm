@@ -5,19 +5,14 @@ overridden on the command line.  See storm-headless.example.toml.
 
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-# same broker the GUI uses (config.MQTT_HOST in the main app)
-DEFAULT_MQTT_HOST = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
-DEFAULT_MQTT_PORT = 8883
+from .mqtt_settings import MQTTSettings, MQTTSettingsError, parse_mqtt
+from .obs_columns import FieldMap, ObsColumnsError, parse_obs_layouts, pick_layout
 
-# file names the GUI expects inside its aws/ directory
-DEFAULT_CA_CERT   = "storm.pem"
-DEFAULT_CERT_FILE = "storm.pem.crt"
-DEFAULT_KEY_FILE  = "storm-private.pem.key"
-
-KNOWN_ICON_TYPES = ("car", "drone", "mesonet", "lidar", "radar")
+# the map icons STORM draws (ui/map/map_template.html, the launch window)
+KNOWN_ICON_TYPES = ("car", "drone", "mesonet", "lidar", "radar", "hailcam")
 
 
 class SettingsError(ValueError):
@@ -29,22 +24,31 @@ class Settings:
     vehicle_id: str
     data_dir: Path
     icon_type: str = "car"
-    # gps ka logger layout instead of fofs
-    gps_mode: bool = False
+    # the logger's layouts, the same [obs_columns] table as storm.toml
+    obs_layouts: tuple[tuple[str, FieldMap], ...] = (("default", FieldMap()),)
+    # which of them this logger writes ("" = the first)
+    layout: str = ""
     # seconds between file polls and between mqtt publishes
     poll_s: float = 1.0
     publish_s: float = 5.0
-    mqtt_host: str = DEFAULT_MQTT_HOST
-    mqtt_port: int = DEFAULT_MQTT_PORT
-    # empty → "<vehicle_id>-pi" so a laptop on the same vehicle id never collides
+    # the [mqtt] table, same schema as the GUI's storm.toml
+    mqtt: MQTTSettings = field(default_factory=MQTTSettings)
+    # empty → "<client_id_prefix><vehicle_id>-pi" so a laptop on the same
+    # vehicle id never collides
     client_id: str = ""
-    ca_cert: Path = Path(DEFAULT_CA_CERT)
-    cert_file: Path = Path(DEFAULT_CERT_FILE)
-    key_file: Path = Path(DEFAULT_KEY_FILE)
+
+    @property
+    def obs_columns(self) -> FieldMap:
+        """The logger's layout."""
+        return pick_layout(self.obs_layouts, self.layout)
+
+    @property
+    def layout_name(self) -> str:
+        return self.layout or self.obs_layouts[0][0]
 
     @property
     def effective_client_id(self) -> str:
-        return self.client_id or f"{self.vehicle_id}-pi"
+        return self.client_id or self.mqtt.client_id(f"{self.vehicle_id}-pi")
 
 
 def normalize_vehicle_id(raw: str) -> str:
@@ -57,7 +61,7 @@ def load_settings(config_path: str | Path | None, **overrides) -> Settings:
     """
     Read *config_path* (may be None when everything is given as overrides)
     and apply any non-None *overrides* (vehicle_id, data_dir, icon_type,
-    gps_mode, client_id).  Relative paths resolve against the config file's
+    layout, client_id).  Relative paths resolve against the config file's
     directory.
     """
     raw: dict = {}
@@ -80,6 +84,12 @@ def load_settings(config_path: str | Path | None, **overrides) -> Settings:
     mqtt = raw.get("mqtt", {})
     if not isinstance(mqtt, dict):
         raise SettingsError("[mqtt] must be a table")
+    # client_id is headless-only: the GUI's IDs come from the launch window
+    mqtt_table = {k: v for k, v in mqtt.items() if k != "client_id"}
+    try:
+        broker = parse_mqtt(mqtt_table, base_dir)
+    except MQTTSettingsError as e:
+        raise SettingsError(str(e)) from None
 
     vehicle_id = normalize_vehicle_id(str(raw.get("vehicle_id", "")))
     if not vehicle_id or vehicle_id == "storm":
@@ -95,24 +105,31 @@ def load_settings(config_path: str | Path | None, **overrides) -> Settings:
             f"icon_type {icon_type!r} is not one of {', '.join(KNOWN_ICON_TYPES)}"
         )
 
+    if "gps_mode" in raw:
+        raise SettingsError("gps_mode is gone: name the logger's layout with layout = \"<name>\" "
+                            "(an [obs_columns.<name>] table; see docs/configuration.md)")
+    try:
+        obs_layouts = parse_obs_layouts(raw.get("obs_columns", {}))
+    except ObsColumnsError as e:
+        raise SettingsError(str(e)) from None
+    layout = raw.get("layout", "")
+    names = [name for name, _ in obs_layouts]
+    if not isinstance(layout, str) or (layout.strip() and layout.strip() not in names):
+        raise SettingsError(f"layout must be one of the [obs_columns] layouts: {', '.join(names)}")
+
     poll_s    = _positive_float(raw.get("poll_s", 1.0), "poll_s")
     publish_s = _positive_float(raw.get("publish_s", 5.0), "publish_s")
-
-    cert_dir = _resolve(mqtt.get("cert_dir", "aws"), base_dir)
 
     return Settings(
         vehicle_id=vehicle_id,
         data_dir=_resolve(data_dir, base_dir),
         icon_type=icon_type,
-        gps_mode=bool(raw.get("gps_mode", False)),
+        obs_layouts=obs_layouts,
+        layout=layout.strip(),
         poll_s=poll_s,
         publish_s=publish_s,
-        mqtt_host=str(mqtt.get("host", DEFAULT_MQTT_HOST)),
-        mqtt_port=int(mqtt.get("port", DEFAULT_MQTT_PORT)),
+        mqtt=broker,
         client_id=str(raw.get("client_id") or mqtt.get("client_id") or "").strip(),
-        ca_cert=_resolve(mqtt.get("ca_cert", DEFAULT_CA_CERT), cert_dir),
-        cert_file=_resolve(mqtt.get("cert_file", DEFAULT_CERT_FILE), cert_dir),
-        key_file=_resolve(mqtt.get("key_file", DEFAULT_KEY_FILE), cert_dir),
     )
 
 

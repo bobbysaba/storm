@@ -32,7 +32,7 @@ class MainWindowHazardsMixin:
 
         # load persisted NWS filter selections from QSettings and apply.
         try:
-            s = QSettings("NSSL", "STORM")
+            s = QSettings()
             stored = s.value("nws/filters", None, type=str)
             # stored is comma-separated string or None
             if stored:
@@ -110,7 +110,7 @@ class MainWindowHazardsMixin:
         self._hazard_fetcher.set_nws_filter(codes if codes else None)
         # persist to settings as comma-separated string (or empty to clear)
         try:
-            s = QSettings("NSSL", "STORM")
+            s = QSettings()
             if codes:
                 s.setValue("nws/filters", ",".join(sorted(codes)))
             else:

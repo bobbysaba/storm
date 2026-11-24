@@ -10,7 +10,7 @@ import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QLabel, QToolButton, QWidget
 
-from archive.fetchers.raw_lidar_archive_fetcher import KNOWN_RAW_LIDAR_SOURCES, LidarAsset
+from providers.nssl.archive.raw_lidar_archive_fetcher import KNOWN_RAW_LIDAR_SOURCES, LidarAsset
 from core.lidar_scans import classify_scans
 from ui.app.main_window_lidar import MainWindowLidarMixin
 from ui.controls.raw_lidar_controls import RawLidarControls
@@ -50,39 +50,20 @@ def _rays(instrument="CLAMPS1", starts=(0, 600), lat=35.0, provenance=None):
 
 # -- drawer ------------------------------------------------------------------------------
 
-def test_drawer_fields_keep_the_choice_and_offer_intensity_only_when_recorded(app):
+def test_drawer_status_scans_and_location(app):
     controls = RawLidarControls()
-    picked = []
-    controls.field_selected.connect(picked.append)
-    controls.set_fields({"backscatter": "sr-1", "velocity": "m/s"})
-    assert controls.current_field() == "velocity" and picked == ["velocity"]   # velocity by default
-    assert controls._intensity_slider.isEnabled() is False
-    controls._field_combo.setCurrentIndex(controls._field_combo.findData("backscatter"))
-    assert picked == ["velocity", "backscatter"]
-    controls.set_fields({"backscatter": "sr-1", "intensity": "", "velocity": "m/s"})
-    assert controls.current_field() == "backscatter" and len(picked) == 2   # kept, nothing sent
-    assert controls._intensity_slider.isEnabled()
-    controls.set_fields({"velocity": "m/s"})                                # gone: back to velocity
-    assert picked[-1] == "velocity"
-
-
-def test_drawer_intensity_and_status(app):
-    controls = RawLidarControls()
-    assert controls.min_intensity() is None
-    controls._set_intensity_available(True)
-    controls._intensity_slider.setValue(12)
-    assert controls.min_intensity() == 1.012 and controls._intensity_value.text() == "1.012"
-    controls._intensity_slider.setValue(0)
-    assert controls.min_intensity() is None and controls._intensity_value.text() == "off"
     controls.set_status("No lidar data this date")
     assert controls._location_button.text() == "No lidar data this date"
+    assert not controls._scans_button.isEnabled()                 # nothing picked yet
     controls.set_location("Lidar truck · stop 1 of 2", "details")
     controls.set_status("Pick a lidar")
     assert controls._location_button.text() == "Lidar truck · stop 1 of 2"
-    requested = []
-    controls.location_requested.connect(lambda: requested.append(1))
+    asked = []
+    controls.location_requested.connect(lambda: asked.append("center"))
+    controls.scans_requested.connect(lambda: asked.append("scans"))
     controls._location_button.click()
-    assert requested == [1]
+    controls._scans_button.click()
+    assert asked == ["center", "scans"]
 
 
 def test_drawer_heading_notice(app):
@@ -196,8 +177,9 @@ class _Host(QObject, MainWindowLidarMixin):
         self._archive_radar = SimpleNamespace(station="KTLX")
         self.surveyed, self.loaded = [], []
         self._archive_raw_lidar = SimpleNamespace(survey=self.surveyed.append,
-                                                  load_files=lambda i, a: self.loaded.append((i, a)))
-        self.renders = []
+                                                  load_files=lambda i, a: self.loaded.append((i, a)),
+                                                  sources=KNOWN_RAW_LIDAR_SOURCES, track_vehicle="lid1")
+        self.renders, self.windows = [], []
 
     def _layout_overlays(self):
         pass
@@ -205,11 +187,14 @@ class _Host(QObject, MainWindowLidarMixin):
     def _later(self, ms, callback):
         callback()
 
-    def _request_archive_clamps_wind(self):
+    def _request_archive_wind_profiles(self):
         pass
 
     def _bg_render_lidar_sweep(self, scan, field, min_intensity, generation):   # synchronous stand-in
         self.renders.append((scan, field, min_intensity, generation))
+
+    def _open_lidar_scan_window(self):        # the window itself: tests/test_lidar_scan_dialog.py
+        self.windows.append(self._lidar_location.key)
 
 
 @pytest.fixture
@@ -235,6 +220,40 @@ def test_lidar_opens_only_when_the_date_has_files(host):
     host._on_lidar_assets_ready({"CLAMPS1-PPI": [asset]})
     assert host.btn_raw_lidar.isEnabled() and host.surveyed == [{"CLAMPS1": [asset]}]
     assert "lidar-survey" in host.activities
+
+
+def test_a_guest_providers_lidars_survey_once_lidar_opens_and_its_tracks_are_in(host):
+    """NSSL's lidars without its profile: nothing downloads until LIDAR is
+    opened, which loads NSSL's vehicles; the survey then waits for their
+    tracks, so the truck's scans are placed."""
+    waits, loaded = [], []
+    host._later = lambda ms, callback: waits.append(callback)
+    entry = SimpleNamespace(team=False, drawer=SimpleNamespace(lidar=host._archive_raw_lidar), guest=None)
+    host._archive_drawers = [entry]
+
+    def load_guest(e):
+        loaded.append(e)
+        e.guest = SimpleNamespace(tracks_loaded=False)
+    host._load_guest_vehicles = load_guest
+    asset = LidarAsset(_source("DLTRUCK1"), "a.cdf")
+    host._on_lidar_assets_ready({"DLTRUCK1-DL1-PPI": [asset]})
+    assert host.btn_raw_lidar.isEnabled() and host.surveyed == [] and "lidar-survey" not in host.activities
+    host.btn_raw_lidar.setChecked(True)
+    assert loaded == [entry] and host.surveyed == [] and len(waits) == 1      # the tracks aren't in yet
+    entry.guest.tracks_loaded = True
+    waits.pop()()
+    assert host.surveyed == [{"DLTRUCK1": [asset]}] and "lidar-survey" in host.activities
+    host.btn_raw_lidar.setChecked(False)
+    host.btn_raw_lidar.setChecked(True)
+    assert len(host.surveyed) == 1 and loaded == [entry]                       # once
+
+
+def test_the_teams_own_provider_drawer_surveys_at_startup(host):
+    host._archive_drawers = [SimpleNamespace(team=True, drawer=SimpleNamespace(lidar=host._archive_raw_lidar),
+                                             guest=None)]
+    asset = LidarAsset(_source("DLTRUCK1"), "a.cdf")
+    host._on_lidar_assets_ready({"DLTRUCK1-DL1-PPI": [asset]})
+    assert host.surveyed == [{"DLTRUCK1": [asset]}]
 
 
 def test_the_survey_waits_for_the_vehicle_tracks(host):
@@ -286,6 +305,8 @@ def test_picking_a_lidar_goes_to_its_first_scan_and_draws_it(host):
     assert host.raw_lidar_controls._location_button.text() == "CLAMPS1 trailer · stop 1 of 1"
     assert "km from KTLX" in host.raw_lidar_controls._location_button.toolTip()
     assert [m["selected"] for m in host.map_widget.locations] == [True]
+    assert host.windows == ["CLAMPS1-1"] and host.renders == []   # its window; the map only on request
+    host._on_lidar_data_toggled(True)                             # the window's "draw on map"
     [(scan, field, intensity, generation)] = host.renders
     assert scan is loc.scans[0] and field == "velocity" and intensity is None
     assert "lidar-location" in host.activities
@@ -301,6 +322,7 @@ def test_picking_a_lidar_goes_to_its_first_scan_and_draws_it(host):
 def test_the_sweep_follows_the_clock_but_isnt_redrawn_needlessly(host):
     host._on_lidar_file_ready("CLAMPS1", _rays())
     host._on_lidar_location_clicked("CLAMPS1-1")
+    host._on_lidar_data_toggled(True)
     first = host.renders[-1]
     host._on_lidar_render_ready({"generation": first[3], "error": "x", "quiet": True})
     host._time_ctrl.current_time = T0 + timedelta(seconds=30)    # same scan held
@@ -310,7 +332,6 @@ def test_the_sweep_follows_the_clock_but_isnt_redrawn_needlessly(host):
     host._on_lidar_time_changed(None)
     assert host.renders[-1][0] is host._lidar_scans[1]
     # a change while a render is in flight waits for it, then draws the latest
-    host.raw_lidar_controls._set_intensity_available(True)
     host._on_lidar_min_intensity_changed(1.01)
     assert len(host.renders) == 2 and host._lidar_render_pending
     stale = host.renders[-1][3]
@@ -322,13 +343,14 @@ def test_the_sweep_follows_the_clock_but_isnt_redrawn_needlessly(host):
 def test_hiding_the_scans_clears_the_map(host):
     host._on_lidar_file_ready("CLAMPS1", _rays())
     host._on_lidar_location_clicked("CLAMPS1-1")
+    host._on_lidar_data_toggled(True)
     cleared = host.map_widget.cleared
-    host.raw_lidar_controls.set_data_on(False)
+    host._on_lidar_data_toggled(False)
     assert host.map_widget.cleared == cleared + 1
     generation = host.renders[-1][3]
     host._on_lidar_render_ready({"generation": generation, "png": b"p", "bounds": []})
     assert host.map_widget.images == []
-    host.raw_lidar_controls.set_data_on(True)
+    host._on_lidar_data_toggled(True)
     assert len(host.renders) == 2
 
 
@@ -338,7 +360,7 @@ def test_a_truck_with_an_estimated_heading_says_so(host):
                                          "azimuth_reference": "estimated from the compass"})
     host._on_lidar_file_ready("DLTRUCK1", rays)
     host._on_lidar_location_clicked("DLTRUCK1-1")
-    assert "estimated from the truck compass (~92°)" in host.raw_lidar_controls._location_button.toolTip()
+    assert "estimated from the vehicle compass (~92°)" in host.raw_lidar_controls._location_button.toolTip()
     assert host.raw_lidar_controls._heading_warning.toolTip() == "estimated from the compass"
 
 
@@ -358,3 +380,67 @@ def test_the_truck_track_prefers_one_second_data(host):
     assert host._lidar_truck_track() == dense
     host._archive_vehicle_obs = SimpleNamespace(observations_by_vehicle=lambda: {})
     assert host._lidar_truck_track() == ["mqtt"]
+
+
+# -- stares ------------------------------------------------------------------------------
+
+class _Stares(QObject):
+    found = pyqtSignal(dict)
+    ready = pyqtSignal(str, object)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        from providers.nssl.archive.lidar_stare_archive_fetcher import KNOWN_STARE_SOURCES
+        self.sources, self.loads, self.fetched = KNOWN_STARE_SOURCES, [], False
+
+    def name(self, instrument):
+        return {"DLTRUCK1": "Lidar truck", "CLAMPS1": "CLAMPS1 trailer"}.get(instrument, instrument)
+
+    def fetch(self):
+        self.fetched = True
+
+    def load(self, instrument):
+        self.loads.append(instrument)
+
+
+def _with_stares(host):
+    host._archive_raw_lidar.stares = _Stares()
+    for name in ("assets_ready", "sites_ready", "file_ready", "large_file", "instrument_loaded",
+                 "survey_done", "error"):
+        setattr(host._archive_raw_lidar, name, SimpleNamespace(connect=lambda *_: None))
+    host._archive_raw_lidar.set_truck_track = lambda source: None
+    host._archive_raw_lidar.fetch = lambda: None
+    host._time_ctrl.time_changed = SimpleNamespace(connect=lambda *_: None)
+    host._init_archive_lidar()
+    return host._archive_raw_lidar.stares
+
+
+def test_stares_alone_open_the_drawer_and_say_which_lidars(host):
+    stares = _with_stares(host)
+    assert stares.fetched and not host.raw_lidar_controls._stares_button.isEnabled()
+    stares.found.emit({"CLAMPS1": ["c.cdf"], "DLTRUCK1": ["t.cdf"], "CLAMPS2": None})
+    assert host.raw_lidar_controls._stares_button.isEnabled()
+    assert host.raw_lidar_controls._stares_button.toolTip() == \
+        "Vertical stares (time-height) from Lidar truck, CLAMPS1 trailer"
+    host._on_lidar_assets_ready({})                     # no PPI or CSM files: stares still open LIDAR
+    assert host.btn_raw_lidar.isEnabled() and "stares only" in host.btn_raw_lidar.toolTip()
+    assert host.raw_lidar_controls._location_button.text() == "No lidar scans this date; see STARES"
+
+
+def test_stares_open_on_the_picked_lidar_and_follow_the_clock(host, monkeypatch):
+    stares = _with_stares(host)
+    stares.found.emit({"CLAMPS1": ["c.cdf"], "DLTRUCK1": ["t.cdf"]})
+    host._lidar_location = SimpleNamespace(instrument="CLAMPS1")
+    host._open_lidar_stare_window()
+    window = host._lidar_stare_window
+    assert [window._lidar_combo.itemText(i) for i in range(2)] == ["Lidar truck", "CLAMPS1 trailer"]
+    assert stares.loads == ["CLAMPS1"]
+    stares.failed.emit("CLAMPS1", "file incomplete on THREDDS (33 KB of 52 MB)")
+    assert "incomplete" in window._ax.texts[0].get_text()
+    shown = []
+    monkeypatch.setattr(window, "set_time", shown.append)
+    monkeypatch.setattr(window, "isVisible", lambda: True)
+    host._on_lidar_time_changed(T0)
+    assert shown == [T0]
+    window.close()

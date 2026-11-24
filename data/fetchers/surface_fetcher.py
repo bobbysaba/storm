@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import logging
-import math
 import pathlib
 import threading
 from datetime import datetime, timezone
@@ -14,48 +11,78 @@ from urllib.request import Request, urlopen
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-import config
+import settings
 from core.observation import Observation
+from core.obs_cleanup import float_or_none
 from data import endpoints
+from data.sources import Source, decode, read_station_obs, read_stations
 
 log = logging.getLogger(__name__)
-
-OK_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ok"])
-OK_META_URL     = endpoints.OK_MESONET_CURRENT
-WTM_API_URL     = endpoints.nssl_api(endpoints.NSSL_MESONETS["wtx"])
-WTM_SITES_URL   = endpoints.WTM_SITES
-KS_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ks"])
-CO_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["co"])
-CO_META_URL     = endpoints.nssl_api(endpoints.NSSL_CO_MESONET_METADATA)
-NE_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["ne"])
-SD_API_URL      = endpoints.nssl_api(endpoints.NSSL_MESONETS["sd"])
 
 # iem endpoints for ASOS
 IEM_METAR_GEOJSON = endpoints.IEM_METAR_GEOJSON
 IEM_CURRENTS_URL  = endpoints.IEM_CURRENTS
 IEM_CURRENTS_BATCH = 100   # stations per IEM request
+_MISSING = ("--", "M")      # IEM currents' missing-value markers
 MAX_ASOS_STATIONS  = 400   # cap to keep map rendering fast
+ASOS_REFRESH_MIN   = 5
 
+# the roster shipped with STORM, used until a fresher copy is saved
 _ASOS_STATIONS_FILE = pathlib.Path(__file__).parents[1] / "asos_stations.json"
+# the copy refreshed from IEM, outside the checkout so `git pull` stays clean
+_ASOS_STATIONS_CACHE = pathlib.Path.home() / ".cache" / "storm" / "asos_stations.json"
+ASOS_ROSTER_MAX_AGE_S = 30 * 86400
+
+
+def _read_roster(path: pathlib.Path) -> dict[str, dict] | None:
+    try:
+        stations = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning("ASOS: failed to read %s: %s", path, exc)
+        return None
+    return stations if isinstance(stations, dict) and stations else None
 
 
 def load_asos_station_roster() -> dict[str, dict]:
-    """The ASOS/METAR station roster (station id -> {lat, lon, name}), read
-    from data/asos_stations.json, or built from IEM's metar.geojson and saved
-    there on first use. Shared by live ASOS and the archive's ASOS replay
-    (archive/fetchers/asos_archive_fetcher.py)."""
-    if _ASOS_STATIONS_FILE.exists():
+    """The ASOS/METAR station roster (station id -> {lat, lon, name}): the
+    copy in ~/.cache/storm while it's under 30 days old, else a fresh one
+    from IEM's metar.geojson (saved there), else the stale copy or the one
+    shipped in data/asos_stations.json. Shared by live ASOS and the
+    archive's ASOS replay (archive/fetchers/asos_archive_fetcher.py)."""
+    cached = _read_roster(_ASOS_STATIONS_CACHE)
+    if cached is not None:
         try:
-            stations = json.loads(_ASOS_STATIONS_FILE.read_text("utf-8"))
-            log.info("ASOS: loaded %d stations from %s", len(stations), _ASOS_STATIONS_FILE)
-            return stations
-        except Exception as exc:
-            log.warning("ASOS: failed to read station file, re-fetching: %s", exc)
+            age = datetime.now(timezone.utc).timestamp() - _ASOS_STATIONS_CACHE.stat().st_mtime
+        except OSError:
+            age = ASOS_ROSTER_MAX_AGE_S
+        if age < ASOS_ROSTER_MAX_AGE_S:
+            log.info("ASOS: loaded %d stations from %s", len(cached), _ASOS_STATIONS_CACHE)
+            return cached
+    try:
+        stations = _fetch_asos_station_roster()
+    except (SurfaceFetchError, RuntimeError) as exc:
+        fallback = cached or _read_roster(_ASOS_STATIONS_FILE)
+        if fallback is None:
+            raise
+        log.warning("ASOS: station roster refresh failed, using the saved one: %s", exc)
+        return fallback
+    try:
+        _ASOS_STATIONS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _ASOS_STATIONS_CACHE.write_text(json.dumps(stations, separators=(",", ":")), "utf-8")
+        log.info("ASOS: saved %d stations to %s", len(stations), _ASOS_STATIONS_CACHE)
+    except Exception as exc:
+        log.warning("ASOS: could not save station file: %s", exc)
+    return stations
 
+
+def _fetch_asos_station_roster() -> dict[str, dict]:
+    """The roster built from IEM's metar.geojson."""
     log.info("ASOS: fetching station metadata from IEM metar.geojson …")
     req = Request(IEM_METAR_GEOJSON, headers={"User-Agent": "Mozilla/5.0 STORM/1.0"})
     try:
-        with urlopen(req, timeout=30, context=config.NSSL_SSL_CONTEXT) as resp:
+        with urlopen(req, timeout=30) as resp:
             raw = resp.read()
     except HTTPError as exc:
         raise SurfaceFetchError(f"HTTP {exc.code} from {IEM_METAR_GEOJSON}") from exc
@@ -82,12 +109,6 @@ def load_asos_station_roster() -> dict[str, dict]:
     if not stations:
         raise RuntimeError("IEM metar.geojson returned no station features")
 
-    try:
-        _ASOS_STATIONS_FILE.write_text(json.dumps(stations, separators=(",", ":")), "utf-8")
-        log.info("ASOS: saved %d stations to %s", len(stations), _ASOS_STATIONS_FILE)
-    except Exception as exc:
-        log.warning("ASOS: could not save station file: %s", exc)
-
     return stations
 
 
@@ -96,29 +117,34 @@ class SurfaceFetchError(RuntimeError):
 
 
 class SurfaceFetcher(QObject):
+    """Live surface obs: ASOS (IEM) inside a box drawn on the map, plus the
+    station_obs [[sources]] in storm.toml (data/sources.py), each on its own
+    refresh_min. Every source is checked once a minute and fetched when due;
+    fetch_now() fetches every source that's on."""
+
     observations_updated = pyqtSignal(object)
     status_updated = pyqtSignal(str)
     diagnostics_updated = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, sources: tuple[Source, ...] | None = None):
         super().__init__(parent)
+        if sources is None:
+            sources = settings.SETTINGS.sources_of("station_obs")
+        self.sources: dict[str, Source] = {s.id: s for s in sources}
         self._timer = QTimer(self)
-        self._timer.setInterval(300_000)
-        self._timer.timeout.connect(self.fetch_now)
+        self._timer.setInterval(60_000)
+        self._timer.timeout.connect(self._fetch_due)
         self._state_lock = threading.Lock()
         self._running = False
         self._pending_refresh = False
-        self._ok_enabled  = False
-        self._wtm_enabled = False
-        self._ks_enabled  = False
-        self._co_enabled  = False
-        self._ne_enabled  = False
-        self._sd_enabled  = False
+        self._force = False
+        self._networks_enabled = {key: False for key in self.sources}
+        # source key -> (items, status part, when fetched), for sources not due
+        self._last_result: dict[str, tuple[list[dict], str, datetime]] = {}
+        # source key -> (stations, when fetched)
+        self._station_cache: dict[str, tuple[dict[str, dict], datetime]] = {}
         self._asos_enabled = False
-        self._ok_meta:  dict[str, dict] | None = None
-        self._wtm_meta: dict[str, dict] | None = None
-        self._co_meta:  dict[str, dict] | None = None
         self._asos_stations: dict[str, dict] | None = None   # stid → {lat, lon, name}
         self._asos_bbox: tuple[float, float, float, float] | None = None
         self._last_good: dict[str, tuple[list[dict], datetime]] = {}
@@ -134,125 +160,74 @@ class SurfaceFetcher(QObject):
     def stop(self):
         self._timer.stop()
 
-    def set_ok_enabled(self, enabled: bool):
-        self._ok_enabled = enabled
+    def set_network_enabled(self, key: str, enabled: bool):
+        if key not in self.sources:
+            return
+        self._networks_enabled[key] = enabled
+        if not enabled:
+            self._last_result.pop(key, None)
         self._update_timer()
         self.fetch_now()
 
-    def set_wtm_enabled(self, enabled: bool):
-        self._wtm_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
-
-    def set_ks_enabled(self, enabled: bool):
-        self._ks_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
-
-    def set_co_enabled(self, enabled: bool):
-        self._co_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
-
-    def set_ne_enabled(self, enabled: bool):
-        self._ne_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
-
-    def set_sd_enabled(self, enabled: bool):
-        self._sd_enabled = enabled
-        self._update_timer()
-        self.fetch_now()
+    def network_enabled(self, key: str) -> bool:
+        return self._networks_enabled.get(key, False)
 
     def _update_timer(self):
-        if (
-            self._ok_enabled
-            or self._wtm_enabled
-            or self._ks_enabled
-            or self._co_enabled
-            or self._ne_enabled
-            or self._sd_enabled
-            or (self._asos_enabled and self._asos_bbox is not None)
-        ):
+        if any(self._networks_enabled.values()) or (self._asos_enabled and self._asos_bbox is not None):
             self._timer.start()
         else:
             self._timer.stop()
 
     def fetch_now(self):
+        """Fetch every source that's on, due or not."""
+        self._start(force=True)
+
+    def _fetch_due(self):
+        self._start(force=False)
+
+    def _start(self, force: bool):
         with self._state_lock:
+            self._force = self._force or force
             if self._running:
                 self._pending_refresh = True
                 return
             self._running = True
         threading.Thread(target=self._fetch_worker, daemon=True).start()
 
+    def _due(self, key: str, refresh_min: float, now: datetime) -> bool:
+        last = self._last_result.get(key)
+        # a few seconds' slack so a 5-minute source isn't left for a 6th tick
+        return last is None or (now - last[2]).total_seconds() >= refresh_min * 60 - 10
+
+    def _fetch_or_reuse(self, key: str, label: str, refresh_min: float, fetch_fn,
+                        force: bool, parts: list[str]) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        if not force and not self._due(key, refresh_min, now):
+            items, part, _ = self._last_result[key]
+            parts.append(part)
+            return items
+        mine: list[str] = []
+        items = self._fetch_part(key, label, fetch_fn, mine)
+        self._last_result[key] = (items, mine[0], now)
+        parts.extend(mine)
+        return items
+
     def _fetch_worker(self):
         try:
+            with self._state_lock:
+                force, self._force = self._force, False
             payload: list[dict] = []
             parts: list[str] = []
 
-            if self._ok_enabled:
-                ok_attempt = datetime.now(timezone.utc)
-                ok_obs, ok_stale, ok_note = self._fetch_source("OK", "ok", self._fetch_ok_mesonet)
-                payload.extend(ok_obs)
-                ok_time = max((i["obs"].timestamp for i in ok_obs), default=None)
-                stamp = ok_time.strftime("%H:%MZ") if ok_time else "?"
-                self._update_source_diag("ok", "OK", ok_attempt, ok_obs, ok_stale, ok_note)
-                parts.append(self._format_status_part("OK", len(ok_obs), stamp, ok_stale, ok_note))
-
-            if self._wtm_enabled:
-                wtm_attempt = datetime.now(timezone.utc)
-                wtm_obs, wtm_stale, wtm_note = self._fetch_source("WTM", "wtm", self._fetch_wtm)
-                payload.extend(wtm_obs)
-                wtm_time = max((i["obs"].timestamp for i in wtm_obs), default=None)
-                stamp = wtm_time.strftime("%H:%MZ") if wtm_time else "?"
-                self._update_source_diag("wtm", "WTM", wtm_attempt, wtm_obs, wtm_stale, wtm_note)
-                parts.append(self._format_status_part("WTM", len(wtm_obs), stamp, wtm_stale, wtm_note))
-
-            if self._ks_enabled:
-                ks_attempt = datetime.now(timezone.utc)
-                ks_obs, ks_stale, ks_note = self._fetch_source("KS", "ks", self._fetch_ks_mesonet)
-                payload.extend(ks_obs)
-                ks_time = max((i["obs"].timestamp for i in ks_obs), default=None)
-                stamp = ks_time.strftime("%H:%MZ") if ks_time else "?"
-                self._update_source_diag("ks", "KS", ks_attempt, ks_obs, ks_stale, ks_note)
-                parts.append(self._format_status_part("KS", len(ks_obs), stamp, ks_stale, ks_note))
-
-            if self._co_enabled:
-                co_attempt = datetime.now(timezone.utc)
-                co_obs, co_stale, co_note = self._fetch_source("CO", "co", self._fetch_co_mesonet)
-                payload.extend(co_obs)
-                co_time = max((i["obs"].timestamp for i in co_obs), default=None)
-                stamp = co_time.strftime("%H:%MZ") if co_time else "?"
-                self._update_source_diag("co", "CO", co_attempt, co_obs, co_stale, co_note)
-                parts.append(self._format_status_part("CO", len(co_obs), stamp, co_stale, co_note))
-
-            if self._ne_enabled:
-                ne_attempt = datetime.now(timezone.utc)
-                ne_obs, ne_stale, ne_note = self._fetch_source("NE", "ne", self._fetch_ne_mesonet)
-                payload.extend(ne_obs)
-                ne_time = max((i["obs"].timestamp for i in ne_obs), default=None)
-                stamp = ne_time.strftime("%H:%MZ") if ne_time else "?"
-                self._update_source_diag("ne", "NE", ne_attempt, ne_obs, ne_stale, ne_note)
-                parts.append(self._format_status_part("NE", len(ne_obs), stamp, ne_stale, ne_note))
-
-            if self._sd_enabled:
-                sd_attempt = datetime.now(timezone.utc)
-                sd_obs, sd_stale, sd_note = self._fetch_source("SD", "sd", self._fetch_sd_mesonet)
-                payload.extend(sd_obs)
-                sd_time = max((i["obs"].timestamp for i in sd_obs), default=None)
-                stamp = sd_time.strftime("%H:%MZ") if sd_time else "?"
-                self._update_source_diag("sd", "SD", sd_attempt, sd_obs, sd_stale, sd_note)
-                parts.append(self._format_status_part("SD", len(sd_obs), stamp, sd_stale, sd_note))
+            for key, source in self.sources.items():
+                if self._networks_enabled[key]:
+                    payload.extend(self._fetch_or_reuse(
+                        key, source.short, source.refresh_min,
+                        lambda s=source: self._fetch_station_obs(s), force, parts))
 
             if self._asos_enabled and self._asos_bbox is not None:
-                asos_attempt = datetime.now(timezone.utc)
-                asos_obs, asos_stale, asos_note = self._fetch_source("ASOS", "asos", self._fetch_asos)
-                payload.extend(asos_obs)
-                asos_time = max((i["obs"].timestamp for i in asos_obs), default=None)
-                stamp = asos_time.strftime("%H:%MZ") if asos_time else "?"
-                self._update_source_diag("asos", "ASOS", asos_attempt, asos_obs, asos_stale, asos_note)
-                parts.append(self._format_status_part("ASOS", len(asos_obs), stamp, asos_stale, asos_note))
+                payload.extend(self._fetch_or_reuse(
+                    "asos", "ASOS", ASOS_REFRESH_MIN, self._fetch_asos, force, parts))
 
             payload = [item for item in payload if self._source_enabled(item.get("source", ""))]
 
@@ -277,314 +252,55 @@ class SurfaceFetcher(QObject):
             if rerun:
                 threading.Thread(target=self._fetch_worker, daemon=True).start()
 
-    def _fetch_ok_mesonet(self) -> list[dict]:
-        # Refetch the CSV every cycle — it provides lat/lon/name AND current MSLP pressure
-        meta, mslp_map = self._fetch_ok_metadata()
-        self._ok_meta = meta
+    def _fetch_station_obs(self, source: Source) -> list[dict]:
+        """One station_obs source's current obs (its station list first, when
+        it has one and it's due)."""
+        stations = None
+        if source.stations is not None:
+            cached = self._station_cache.get(source.id)
+            now = datetime.now(timezone.utc)
+            if cached is None or (now - cached[1]).total_seconds() >= source.stations.refresh_min * 60 - 10:
+                raw = self._source_get(source, source.stations.url)
+                data = self._decode(raw, source.stations.format, f"{source.short} station list",
+                                    source.stations.url)
+                try:
+                    stations = read_stations(data, source.stations, source.missing)
+                except ValueError as exc:
+                    raise SurfaceFetchError(f"{source.short} station list: {exc}") from exc
+                self._station_cache[source.id] = (stations, now)
+            else:
+                stations = cached[0]
+        if source.fetch is not None:
+            # a code provider's source: rows already in STORM's fields
+            data = source.fetch()
+        else:
+            raw = self._source_get(source, source.url)
+            data = self._decode(raw, source.format, f"{source.short} data", source.url)
+        try:
+            items = read_station_obs(source, data, stations)
+        except ValueError as exc:
+            raise SurfaceFetchError(f"{source.short} data: {exc}") from exc
+        if not items:
+            raise SurfaceFetchError(f"{source.short} data returned no station rows")
+        return items
 
-        raw  = self._http_get(OK_API_URL, headers=self._nssl_api_headers())
-        data = self._json_from_bytes(raw, "OK Mesonet data", OK_API_URL)
-        obs_time = self._parse_iso_utc(data.get("time"))
-        obs_data = data.get("data", {})
+    def _source_get(self, source: Source, url: str) -> bytes:
+        found = source.auth(url)
+        if found is None:
+            return self._http_get(url, ssl_ctx=None, headers={})
+        url, headers = found.request(url)
+        try:
+            return self._http_get(url, ssl_ctx=found.ssl_context(), headers=headers)
+        except SurfaceFetchError as exc:
+            if found.api_key_param and found.api_key:
+                # the key is in the URL; keep it out of the logs and the status line
+                raise SurfaceFetchError(str(exc).replace(found.api_key, "***")) from None
+            raise
 
-        all_stids: set[str] = set()
-        for var_vals in obs_data.values():
-            all_stids.update(var_vals.keys())
-
-        observations: list[dict] = []
-        for stid in all_stids:
-            meta_row = meta.get(stid)
-            if not meta_row:
-                continue
-            obs = Observation(
-                vehicle_id=f"surface:ok:{stid}",
-                lat=meta_row["lat"],
-                lon=meta_row["lon"],
-                timestamp=obs_time,
-                icon_type="mesonet",
-                temperature_c=self._float_or_none(obs_data.get("tair", {}).get(stid)),
-                dewpoint_c=self._float_or_none(obs_data.get("tdew", {}).get(stid)),
-                wind_speed_ms=self._float_or_none(obs_data.get("wspd", {}).get(stid)),
-                wind_dir_deg=self._float_or_none(obs_data.get("wdir", {}).get(stid)),
-                pressure_mb=mslp_map.get(stid),
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "ok",
-                "name": meta_row.get("name", stid.upper()),
-                "obs": obs,
-            })
-
-        if not observations:
-            raise RuntimeError("OK Mesonet data returned no station rows")
-
-        return observations
-
-    def _fetch_ok_metadata(self) -> tuple[dict[str, dict], dict[str, float]]:
-        """Fetch OK Mesonet station metadata and current MSLP from the public CSV."""
-        raw    = self._http_get(OK_META_URL).decode("utf-8", errors="ignore")
-        reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
-        meta: dict[str, dict] = {}
-        mslp: dict[str, float] = {}
-        for row in reader:
-            stid = (row.get("STID") or "").strip().lower()
-            lat  = self._float_or_none(row.get("LAT"))
-            lon  = self._float_or_none(row.get("LON"))
-            if not stid or lat is None or lon is None:
-                continue
-            meta[stid] = {
-                "lat": lat,
-                "lon": lon,
-                "name": (row.get("NAME") or stid.upper()).strip(),
-            }
-            pres = self._valid_float(row.get("PRES"))
-            if pres is not None and 850.0 <= pres <= 1100.0:
-                mslp[stid] = pres
-        return meta, mslp
-
-    def _fetch_wtm(self) -> list[dict]:
-        if self._wtm_meta is None:
-            self._wtm_meta = self._fetch_wtm_metadata()
-
-        raw  = self._http_get(WTM_API_URL, headers=self._nssl_api_headers())
-        data = self._json_from_bytes(raw, "WTM data", WTM_API_URL)
-        observations: list[dict] = []
-
-        for row in data.get("results", []):
-            mid = (row.get("mid") or "").strip().lower()
-            if not mid:
-                continue
-            meta = (self._wtm_meta or {}).get(mid)
-            if not meta:
-                continue
-            temp_c = self._float_or_none(row.get("temp1p5m"))
-            station_pres = self._float_or_none(row.get("pres"))
-            obs = Observation(
-                vehicle_id=f"surface:wtm:{mid}",
-                lat=meta["lat"],
-                lon=meta["lon"],
-                timestamp=self._parse_iso_utc(row.get("utc")),
-                icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=self._float_or_none(row.get("dp1p5m")),
-                wind_speed_ms=self._float_or_none(row.get("wspd10m")),
-                wind_dir_deg=self._float_or_none(row.get("wdir10m")),
-                pressure_mb=self._station_to_mslp(station_pres, meta.get("elevation_m"), temp_c),
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "wtm",
-                "name": meta.get("name", row.get("name", mid.upper())),
-                "obs": obs,
-            })
-
-        return observations
-
-    def _fetch_wtm_metadata(self) -> dict[str, dict]:
-        raw  = self._http_get(WTM_SITES_URL)
-        data = self._json_from_bytes(raw, "WTM station metadata", WTM_SITES_URL)
-        result = {}
-        for row in data.get("results", []):
-            if not row.get("mesonet_id") or not row.get("latitude") or not row.get("longitude"):
-                continue
-            elev_ft = self._float_or_none(row.get("elevation"))
-            result[row["mesonet_id"].lower()] = {
-                "lat": float(row["latitude"]),
-                "lon": float(row["longitude"]),
-                "elevation_m": elev_ft / 3.28084 if elev_ft is not None else None,
-                "name": row.get("name", row["mesonet_id"]),
-            }
-        return result
-
-    def _fetch_ks_mesonet(self) -> list[dict]:
-        raw  = self._http_get(KS_API_URL, headers=self._nssl_api_headers())
-        data = self._json_from_bytes(raw, "KS Mesonet data", KS_API_URL)
-        observations: list[dict] = []
-
-        for row in data.get("results", []):
-            station = (row.get("station") or "").strip()
-            if not station:
-                continue
-            meta = row.get("meta") or {}
-            lat = self._float_or_none(meta.get("lat"))
-            lon = self._float_or_none(meta.get("lon"))
-            if lat is None or lon is None:
-                continue
-
-            temp_c = self._float_or_none(row.get("TEMP2MAVG"))
-            rh_pct = self._float_or_none(row.get("RELHUM2MAVG"))
-            slp_kpa = self._float_or_none(row.get("SLPAVG"))
-
-            obs = Observation(
-                vehicle_id=f"surface:ks:{self._station_key(station)}",
-                lat=lat,
-                lon=lon,
-                timestamp=self._parse_iso_utc(row.get("timestamp")),
-                icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=self._dewpoint_c_from_rh(temp_c, rh_pct),
-                wind_speed_ms=self._float_or_none(row.get("WSPD10MAVG")),
-                wind_dir_deg=self._float_or_none(row.get("WDIR10M")),
-                pressure_mb=slp_kpa * 10.0 if slp_kpa is not None else None,
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "ks",
-                "name": meta.get("name") or station,
-                "obs": obs,
-            })
-
-        return observations
-
-    def _fetch_co_mesonet(self) -> list[dict]:
-        if self._co_meta is None:
-            self._co_meta = self._fetch_co_metadata()
-
-        raw = self._http_get(CO_API_URL, headers=self._nssl_api_headers())
-        data = self._json_from_bytes(raw, "CO Mesonet data", CO_API_URL)
-        observations: list[dict] = []
-
-        for stid in data.get("stations", []):
-            station = str(stid).strip().lower()
-            if not station:
-                continue
-            row = data.get(station)
-            meta = (self._co_meta or {}).get(station)
-            if not isinstance(row, dict) or not meta:
-                continue
-
-            temp_f = self._valid_float(row.get("t"))
-            dew_f = self._valid_float(row.get("dewpt"))
-            wind_mph = self._valid_float(row.get("windSpeed"))
-
-            obs = Observation(
-                vehicle_id=f"surface:co:{station}",
-                lat=meta["lat"],
-                lon=meta["lon"],
-                timestamp=self._parse_co_time(row.get("time")),
-                icon_type="mesonet",
-                temperature_c=self._f_to_c(temp_f),
-                dewpoint_c=self._f_to_c(dew_f),
-                wind_speed_ms=wind_mph * 0.44704 if wind_mph is not None else None,
-                wind_dir_deg=self._valid_float(row.get("windDir")),
-                pressure_mb=None,
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "co",
-                "name": meta.get("name", station.upper()),
-                "obs": obs,
-            })
-
-        return observations
-
-    def _fetch_co_metadata(self) -> dict[str, dict]:
-        raw = self._http_get(CO_META_URL, headers=self._nssl_api_headers())
-        data = self._json_from_bytes(raw, "CO station metadata", CO_META_URL)
-        meta: dict[str, dict] = {}
-        for key, row in data.items():
-            if not isinstance(row, dict):
-                continue
-            station = (row.get("station") or key or "").strip().lower()
-            lat = self._float_or_none(row.get("lat"))
-            lon = self._float_or_none(row.get("lon"))
-            if not station or lat is None or lon is None:
-                continue
-            meta[station] = {
-                "lat": lat,
-                "lon": lon,
-                "name": (row.get("name") or station.upper()).strip(),
-            }
-        return meta
-
-    def _fetch_ne_mesonet(self) -> list[dict]:
-        raw = self._http_get(NE_API_URL, headers=self._nssl_api_headers())
-        payload = self._json_from_bytes(raw, "NE Mesonet data", NE_API_URL)
-        observations: list[dict] = []
-
-        for row in payload.get("data", []):
-            station_id = str(row.get("id") or "").strip()
-            lat = self._float_or_none(row.get("latitude"))
-            lon = self._float_or_none(row.get("longitude"))
-            if not station_id or lat is None or lon is None:
-                continue
-
-            data = row.get("data") or {}
-            temperature = data.get("temperature") or {}
-            dewpoint = data.get("dewPoint") or {}
-            pressure = data.get("pressure") or {}
-            wind = data.get("wind") or {}
-            wind_level = wind.get("tenMeter") or {}
-            wind_speed = wind_level.get("speed") or {}
-            wind_direction = wind_level.get("direction") or {}
-            if self._float_or_none(wind_speed.get("avg")) is None:
-                wind_level = wind.get("threeMeter") or {}
-                wind_speed = wind_level.get("speed") or {}
-                wind_direction = wind_level.get("direction") or {}
-
-            obs = Observation(
-                vehicle_id=f"surface:ne:{station_id}",
-                lat=lat,
-                lon=lon,
-                timestamp=self._parse_iso_utc(row.get("timestamp")),
-                icon_type="mesonet",
-                temperature_c=self._float_or_none(temperature.get("twoMeter")),
-                dewpoint_c=self._float_or_none(dewpoint.get("twoMeter")),
-                wind_speed_ms=self._float_or_none(wind_speed.get("avg")),
-                wind_dir_deg=self._float_or_none(wind_direction.get("avg")),
-                pressure_mb=self._float_or_none(pressure.get("seaLevel")),
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "ne",
-                "name": str(row.get("name") or f"NE Mesonet {station_id}").strip(),
-                "obs": obs,
-            })
-
-        if not observations:
-            raise RuntimeError("NE Mesonet data returned no station rows")
-
-        return observations
-
-    def _fetch_sd_mesonet(self) -> list[dict]:
-        raw = self._http_get(SD_API_URL, headers=self._nssl_api_headers())
-        payload = self._json_from_bytes(raw, "SD Mesonet data", SD_API_URL)
-        observations: list[dict] = []
-
-        for row in payload:
-            stid = str(row.get("nwsid") or "").strip()
-            lat  = self._float_or_none(row.get("lat"))
-            lon  = self._float_or_none(row.get("lon"))
-            if not stid or lat is None or lon is None:
-                continue
-
-            temp_c      = self._valid_float(row.get("TA [C]"))
-            station_pres = self._valid_float(row.get("PA [mbar]"))
-            elevation_m = self._float_or_none(row.get("elev [m]"))
-
-            obs = Observation(
-                vehicle_id=f"surface:sd:{stid.lower()}",
-                lat=lat,
-                lon=lon,
-                timestamp=self._parse_iso_utc(row.get("date_time [ISO8601]")),
-                icon_type="mesonet",
-                temperature_c=temp_c,
-                dewpoint_c=self._valid_float(row.get("TD [C]")),
-                wind_speed_ms=self._valid_float(row.get("US [m/s]")),
-                wind_dir_deg=self._valid_float(row.get("UD [deg]")),
-                pressure_mb=self._station_to_mslp(station_pres, elevation_m, temp_c),
-            )
-            observations.append({
-                "id": obs.vehicle_id,
-                "source": "sd",
-                "name": str(row.get("name") or stid).strip(),
-                "obs": obs,
-            })
-
-        if not observations:
-            raise RuntimeError("SD Mesonet data returned no station rows")
-
-        return observations
+    def _decode(self, raw: bytes, fmt: str, label: str, url: str):
+        if fmt == "json":
+            return self._json_from_bytes(raw, label, url)
+        return decode(raw, fmt)
 
     def set_asos_enabled(self, enabled: bool):
         self._asos_enabled = enabled
@@ -662,30 +378,30 @@ class SurfaceFetcher(QObject):
                 continue
 
             meta = stations.get(stid, {})
-            lat  = self._float_or_none(rec.get("lat"))  or meta.get("lat")
-            lon  = self._float_or_none(rec.get("lon"))  or meta.get("lon")
+            lat  = float_or_none(rec.get("lat"), _MISSING)  or meta.get("lat")
+            lon  = float_or_none(rec.get("lon"), _MISSING)  or meta.get("lon")
             if lat is None or lon is None:
                 continue
 
             ts = self._parse_iso_utc(rec.get("utc_valid") or rec.get("valid"))
 
             # iem returns temperature/dewpoint in °F
-            tmpf = self._float_or_none(rec.get("tmpf"))
-            dwpf = self._float_or_none(rec.get("dwpf"))
+            tmpf = float_or_none(rec.get("tmpf"), _MISSING)
+            dwpf = float_or_none(rec.get("dwpf"), _MISSING)
             temp_c = (tmpf - 32.0) * 5.0 / 9.0 if tmpf is not None else None
             dew_c  = (dwpf - 32.0) * 5.0 / 9.0 if dwpf is not None else None
 
             # wind speed in knots → m/s
-            sknt   = self._float_or_none(rec.get("sknt"))
+            sknt   = float_or_none(rec.get("sknt"), _MISSING)
             wspd_ms = sknt * 0.514444 if sknt is not None else None
 
-            wdir = self._float_or_none(rec.get("drct"))
+            wdir = float_or_none(rec.get("drct"), _MISSING)
 
             # prefer mslp (already mb); fall back to altimeter (in-Hg)
-            mslp = self._float_or_none(rec.get("mslp"))
+            mslp = float_or_none(rec.get("mslp"), _MISSING)
             pres = mslp if (mslp is not None and 870.0 <= mslp <= 1090.0) else None
             if pres is None:
-                alti = self._float_or_none(rec.get("alti"))
+                alti = float_or_none(rec.get("alti"), _MISSING)
                 if alti is not None and 27.0 <= alti <= 32.0:
                     pres = alti * 33.8639
 
@@ -719,7 +435,7 @@ class SurfaceFetcher(QObject):
             req_headers.update(headers)
         req = Request(url, headers=req_headers)
         try:
-            with urlopen(req, timeout=30, context=ssl_ctx or config.NSSL_SSL_CONTEXT) as resp:
+            with urlopen(req, timeout=30, context=ssl_ctx) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
                 body = resp.read()
                 if status and status >= 400:
@@ -732,6 +448,16 @@ class SurfaceFetcher(QObject):
             raise SurfaceFetchError(f"HTTP {exc.code} from {url}: {preview}") from exc
         except URLError as exc:
             raise SurfaceFetchError(f"network error from {url}: {exc.reason}") from exc
+
+    def _fetch_part(self, key: str, label: str, fetch_fn, parts: list[str]) -> list[dict]:
+        """One source's obs (or its last good ones), with its status and diagnostics."""
+        attempt = datetime.now(timezone.utc)
+        obs, stale, note = self._fetch_source(label, key, fetch_fn)
+        valid = max((i["obs"].timestamp for i in obs), default=None)
+        stamp = valid.strftime("%H:%MZ") if valid else "?"
+        self._update_source_diag(key, label, attempt, obs, stale, note)
+        parts.append(self._format_status_part(label, len(obs), stamp, stale, note))
+        return obs
 
     def _fetch_source(self, label: str, source_key: str, fetch_fn) -> tuple[list[dict], bool, str | None]:
         try:
@@ -783,21 +509,12 @@ class SurfaceFetcher(QObject):
     def _diagnostics_snapshot(self) -> dict[str, dict[str, Any]]:
         active: dict[str, dict[str, Any]] = {}
         for key, enabled in (
-            ("ok", self._ok_enabled),
-            ("wtm", self._wtm_enabled),
-            ("ks", self._ks_enabled),
-            ("co", self._co_enabled),
-            ("ne", self._ne_enabled),
-            ("sd", self._sd_enabled),
+            *self._networks_enabled.items(),
             ("asos", self._asos_enabled and self._asos_bbox is not None),
         ):
             if enabled:
                 active[key] = dict(self._source_diag.get(key, {}))
         return active
-
-    @staticmethod
-    def _nssl_api_headers() -> dict[str, str]:
-        return {"X-API-Key": config.NSSL_API_KEY} if config.NSSL_API_KEY else {}
 
     def _json_from_bytes(self, raw: bytes, label: str, url: str) -> Any:
         text = raw.decode("utf-8", errors="replace").strip()
@@ -823,27 +540,9 @@ class SurfaceFetcher(QObject):
         return compact or "<empty>"
 
     def _source_enabled(self, source: str) -> bool:
-        return (
-            (source == "ok"  and self._ok_enabled)
-            or (source == "wtm" and self._wtm_enabled)
-            or (source == "ks" and self._ks_enabled)
-            or (source == "co" and self._co_enabled)
-            or (source == "ne" and self._ne_enabled)
-            or (source == "sd" and self._sd_enabled)
-            or (source == "asos" and self._asos_enabled)
-        )
-
-    @staticmethod
-    def _float_or_none(value: str | None) -> float | None:
-        if value is None:
-            return None
-        value = str(value).strip()
-        if not value or value in {"--", "M"}:
-            return None
-        try:
-            return float(value)
-        except ValueError:
-            return None
+        if source == "asos":
+            return self._asos_enabled
+        return self._networks_enabled.get(source, False)
 
     @staticmethod
     def _parse_iso_utc(value: str | None) -> datetime:
@@ -853,44 +552,3 @@ class SurfaceFetcher(QObject):
             return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError:
             return datetime.now(timezone.utc)
-
-    @staticmethod
-    def _parse_co_time(value: str | None) -> datetime:
-        if not value:
-            return datetime.now(timezone.utc)
-        text = str(value).strip()
-        if "T" in text and not text.endswith("Z") and "+" not in text[10:] and "-" not in text[10:]:
-            text += "+00:00"
-        return SurfaceFetcher._parse_iso_utc(text)
-
-    @staticmethod
-    def _valid_float(value: str | float | int | None) -> float | None:
-        parsed = SurfaceFetcher._float_or_none(value)
-        if parsed is None or parsed <= -900.0:
-            return None
-        return parsed
-
-    @staticmethod
-    def _f_to_c(value: float | None) -> float | None:
-        return (value - 32.0) * 5.0 / 9.0 if value is not None else None
-
-    @staticmethod
-    def _dewpoint_c_from_rh(temp_c: float | None, rh_pct: float | None) -> float | None:
-        if temp_c is None or rh_pct is None or rh_pct <= 0.0 or rh_pct > 100.0:
-            return None
-        a = 17.625
-        b = 243.04
-        gamma = math.log(rh_pct / 100.0) + (a * temp_c) / (b + temp_c)
-        return (b * gamma) / (a - gamma)
-
-    @staticmethod
-    def _station_to_mslp(pressure_mb: float | None, elevation_m: float | None, temp_c: float | None) -> float | None:
-        """Reduce station pressure to MSLP using the standard hypsometric formula."""
-        if pressure_mb is None or elevation_m is None or elevation_m <= 0.0:
-            return pressure_mb
-        t_avg_k = (temp_c if temp_c is not None else 15.0) + 273.15 + 0.5 * 0.0065 * elevation_m
-        return pressure_mb * math.exp(elevation_m / (29.271 * t_avg_k))
-
-    @staticmethod
-    def _station_key(station: str) -> str:
-        return "".join(ch.lower() if ch.isalnum() else "_" for ch in station).strip("_")

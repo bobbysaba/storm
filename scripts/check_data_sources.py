@@ -1,20 +1,25 @@
 """Check that every data source STORM reads still answers.
 
 THREDDS (data/thredds_paths.py): asks each folder for its catalog, one at
-a time with a pause between (data.nssl.noaa.gov throttles bursts). For a
-folder that no longer answers, it lists what the nearest parent folder that
-does answer now holds, so a renamed or moved folder is easy to spot.
+a time with a pause between (THREDDS throttles bursts). For a folder that no
+longer answers, it lists what the nearest parent folder that does answer now
+holds, so a renamed or moved folder is easy to spot.
 
-AWS buckets and web APIs (data/endpoints.py): one cheap request each. An
-API that answers 4xx without parameters or a key still exists; 404/410 or
-no answer means it moved or is gone.
+AWS buckets and web APIs (data/endpoints.py and the [[sources]] in your
+storm.toml): one cheap request each, asked the way STORM asks it: with the
+key and CA of the [[auth]] table covering the URL, if any. An API that
+answers 4xx without parameters or a key still exists; 404/410 or no answer
+means it moved or is gone.
+
+A provider checks its own sources with its own script, built on run()
+(NSSL's: providers/nssl/check_sources.py).
 
 Then update the file named in the report. THREDDS is fragile under load:
 the checker asks one folder at a time, 1.5 s apart, and stops if THREDDS
 stops answering. Don't run it in a loop or alongside a STORM session that is
 loading archive data.
 
-    python scripts/check_data_sources.py            # everything (~35 checks, under a minute)
+    python scripts/check_data_sources.py            # everything (~30 checks, under a minute)
     python scripts/check_data_sources.py iem        # only checks whose description or address has "iem"
 
 Exit status: 0 when every folder answers, 1 otherwise. Network only; it
@@ -33,8 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import net_compat  # noqa: E402
 from data import thredds_paths as paths  # noqa: E402
-import config  # noqa: E402
+import settings  # noqa: E402
 from data import endpoints  # noqa: E402
+from data import auth as auth_tables  # noqa: E402
 
 PAUSE_S = 1.5                 # between THREDDS requests: it throttles, and can stall, under bursts
 API_PAUSE_S = 0.4
@@ -44,11 +50,21 @@ _USER_AGENT = "Mozilla/5.0 STORM/1.0 (path check)"
 _CHILD_RE = re.compile(r'href=["\']([^"\'?#]+)/catalog\.(?:html|xml)["\']')
 
 
+# the [[auth]] tables run() asks with; None: storm.toml's. A provider's script sets its profile's.
+auth = None
+
+
+def _request(url: str):
+    full, headers, context = auth_tables.request(url, {"User-Agent": _USER_AGENT}, auth)
+    return Request(full, headers=headers), context
+
+
 def fetch(url: str) -> tuple[int | None, str]:
     """(HTTP status, body), or (None, reason) when there was no answer."""
     try:
         # one attempt, no retries: a health check shouldn't add to THREDDS's load
-        with urlopen(Request(url, headers={"User-Agent": _USER_AGENT}), timeout=TIMEOUT_S, context=config.NSSL_SSL_CONTEXT) as r:  # data.nssl.noaa.gov needs it
+        request, context = _request(url)
+        with urlopen(request, timeout=TIMEOUT_S, context=context) as r:
             return r.status, r.read(2_000_000).decode("utf-8", errors="replace")
     except HTTPError as exc:
         return exc.code, ""
@@ -75,12 +91,21 @@ def nearest_parent(host: str, path: str) -> tuple[str, list[str]] | None:
 
 
 def main(argv: list[str]) -> int:
+    return run(argv, paths.all_folders(), endpoints.all_endpoints() + source_endpoints(),
+               "data/thredds_paths.py", "data/endpoints.py or a [[sources]] url")
+
+
+def run(argv: list[str], all_folders, all_checks, thredds_file: str, api_file: str) -> int:
+    """Check these THREDDS folders ((what, host, path, required)) and URLs
+    ((what, url)), those matching argv[1] if given; *thredds_file* and
+    *api_file* are where to fix what's gone. The exit status."""
     net_compat.prefer_ipv4()
     wanted = argv[1].lower() if len(argv) > 1 else ""
-    folders = [f for f in paths.all_folders() if wanted in f[0].lower() or wanted in f[2].lower()]
+    folders = [f for f in all_folders if wanted in f[0].lower() or wanted in f[2].lower()]
+    checks = [(w, u) for w, u in all_checks if wanted in w.lower() or wanted in u.lower()]
     missing, unreachable, absent_paths = [], [], set()
     if folders:
-        print(f"Checking {len(folders)} THREDDS folders (data/thredds_paths.py)…\n")
+        print(f"Checking {len(folders)} THREDDS folders…\n")
     silent_run = 0
     for i, (what, host, path, required) in enumerate(folders):
         if silent_run >= GIVE_UP_AFTER:
@@ -114,15 +139,15 @@ def main(argv: list[str]) -> int:
     if unreachable:
         print(f"\n{len(unreachable)} folder(s) didn't answer at all: the server may be down or throttling. "
               "Try again in a few minutes.")
-    api_missing, api_silent = check_endpoints(wanted)
+    api_missing, api_silent = check_endpoints(checks)
     ok = not missing and not unreachable and not api_missing and not api_silent
     if ok:
         print("\nEverything answers.")
     else:
         if missing or unreachable:
-            print(f"\nTHREDDS: {len(missing)} missing, {len(unreachable)} without a reply -> data/thredds_paths.py")
+            print(f"\nTHREDDS: {len(missing)} missing, {len(unreachable)} without a reply -> {thredds_file}")
         if api_missing or api_silent:
-            print(f"AWS/APIs: {len(api_missing)} missing, {len(api_silent)} without a reply -> data/endpoints.py")
+            print(f"AWS/APIs: {len(api_missing)} missing, {len(api_silent)} without a reply -> {api_file}")
     return 0 if ok else 1
 
 
@@ -130,16 +155,11 @@ _STILL_THERE = {400, 401, 403, 405, 422, 429}      # answers, but wants paramete
 
 
 def probe(url: str) -> tuple[int | None, str]:
-    """(HTTP status, note), or (None, reason) when there was no answer. The
-    NSSL API is asked the way STORM asks it: its key, and config's SSL
-    context with the bundled Sectigo intermediate (the server leaves it out)."""
-    nssl = url.startswith(config.NSSL_API_ROOT)
-    headers = {"User-Agent": _USER_AGENT}
-    if nssl and config.NSSL_API_KEY:
-        headers["X-API-Key"] = config.NSSL_API_KEY
+    """(HTTP status, note), or (None, reason) when there was no answer,
+    asked with the URL's [[auth]] key and CA, as STORM asks it."""
     try:
-        with urlopen(Request(url, headers=headers), timeout=TIMEOUT_S,
-                     context=config.NSSL_SSL_CONTEXT if nssl else None) as r:
+        request, context = _request(url)
+        with urlopen(request, timeout=TIMEOUT_S, context=context) as r:
             return r.status, ""
     except HTTPError as exc:
         return exc.code, ""
@@ -147,11 +167,26 @@ def probe(url: str) -> tuple[int | None, str]:
         return None, str(getattr(exc, "reason", exc))[:80]
 
 
-def check_endpoints(wanted: str) -> tuple[list[str], list[str]]:
-    checks = [(w, u) for w, u in endpoints.all_endpoints() if wanted in w.lower() or wanted in u.lower()]
+def source_endpoints(sources=None) -> list[tuple[str, str]]:
+    """The URLs of these [[sources]] (default: the settings file in use's),
+    once each."""
+    sources = settings.SETTINGS.sources if sources is None else sources
+    out, seen = [], set()
+    for src in sources:
+        # a contours source's url is a folder; its index.json is what answers
+        main = src.url.rstrip("/") + "/index.json" if src.kind == "contours" else src.url
+        urls = [("", main)] + ([(" stations", src.stations.url)] if src.stations else [])
+        for suffix, url in urls:
+            if url not in seen:
+                seen.add(url)
+                out.append((f"{src.name}{suffix}", url))
+    return out
+
+
+def check_endpoints(checks: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
     if not checks:
         return [], []
-    print(f"\nChecking {len(checks)} AWS buckets and web APIs (data/endpoints.py)…\n")
+    print(f"\nChecking {len(checks)} AWS buckets and web APIs…\n")
     missing, silent = [], []
     for what, url in checks:
         status, reason = probe(url)

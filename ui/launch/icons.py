@@ -2,8 +2,8 @@
 import os
 import tempfile
 
-from PyQt6.QtCore import Qt, QByteArray
-from PyQt6.QtGui import QIcon, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QByteArray, QPointF, QRectF
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from ui import palette as P
 
 
@@ -64,9 +64,9 @@ _TOOLBAR_SVGS = {
     "satellite": '<rect x="9" y="9" width="6" height="6" rx="1" transform="rotate(45 12 12)"/><path d="M8.5 8.5 L4.5 4.5 M15.5 15.5 L19.5 19.5 M3 7 L7 3 M17 21 L21 17"/>',
     "hazards":   '<path d="M12 3.5 L21 19.5 H3 Z"/><path d="M12 10 V14 M12 16.6 V16.8"/>',
     "surface":   '<path d="M10 14.5 V5 a2 2 0 0 1 4 0 V14.5 a4 4 0 1 1 -4 0 Z"/><path d="M12 9 V16"/>',
-    "meso":      '<path d="M3 8 C7 4 10 12 14 8 S19 6 21 8"/><path d="M3 13 C7 9 10 17 14 13 S19 11 21 13"/><path d="M3 18 C7 14 10 22 14 18 S19 16 21 18"/>',
-    "sfcoa":     '<ellipse cx="12" cy="12" rx="9" ry="7"/><ellipse cx="12" cy="12" rx="5" ry="3.5"/><path d="M12 11.5 V12.5"/>',
+    "contours":  '<ellipse cx="12" cy="12" rx="9" ry="7"/><ellipse cx="12" cy="12" rx="5" ry="3.5"/><path d="M12 11.5 V12.5"/>',
     "sounding":  '<path d="M12 3 a5 5.5 0 0 1 5 5.5 c0 3.5 -3 6 -5 6.5 c-2 -0.5 -5 -3 -5 -6.5 A5 5.5 0 0 1 12 3 Z"/><path d="M12 15 C11 17 13 19 12 21"/>',
+    "instruments": '<path d="M12 11 V21 M8 21 H16"/><circle cx="12" cy="9.5" r="1.5"/><path d="M8.5 6 a5 5 0 0 0 0 7 M15.5 6 a5 5 0 0 1 0 7 M5.8 3.5 a8.5 8.5 0 0 0 0 12 M18.2 3.5 a8.5 8.5 0 0 1 0 12"/>',
     "lidar":     '<circle cx="5" cy="18" r="2"/><path d="M6.5 16.5 L19 6"/><path d="M11 18.5 a8 8 0 0 0 1.5 -9.5" /><path d="M15.5 19.5 a12 12 0 0 0 2 -14" />',
     "track":     '<path d="M4 19 L9.5 13.5 L14 15 L20 6" stroke-dasharray="2.6 2.2"/><circle cx="4" cy="19" r="1.6"/><circle cx="9.5" cy="13.5" r="1.6"/><circle cx="14" cy="15" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
     "vehicles":  '<path d="M4 15 V12 L6.5 7 H17.5 L20 12 V15 Z"/><circle cx="8" cy="17" r="1.8"/><circle cx="16" cy="17" r="1.8"/>',
@@ -103,3 +103,39 @@ def toolbar_icon(key: str, size: int = 14) -> QIcon:
     icon.addPixmap(_toolbar_pixmap(key, P.BG_BASE, size), QIcon.Mode.Normal, QIcon.State.On)
     icon.addPixmap(_toolbar_pixmap(key, P.BG_BASE, size), QIcon.Mode.Active, QIcon.State.On)
     return icon
+
+
+def _triangle_icon(pts: list, color: str, w: int = 10, h: int = 10) -> QIcon:
+    """A small filled triangle from fractional (x, y) points in [0, 1]."""
+    px = QPixmap(w, h)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawPolygon(QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
+    p.end()
+    return QIcon(px)
+
+
+_LEFT = [(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)]
+_RIGHT = [(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)]
+
+
+def _calendar_glyph_icon(color: str = P.TEXT_LABEL, w: int = 16, h: int = 16) -> QIcon:
+    """A line-drawn calendar: body, header rule and two binder rings."""
+    px = QPixmap(w, h)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.2)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    body = QRectF(1.5, 3.5, w - 3.0, h - 5.0)
+    p.drawRoundedRect(body, 1.5, 1.5)
+    p.drawLine(QPointF(body.left(), body.top() + 3.2), QPointF(body.right(), body.top() + 3.2))
+    p.drawLine(QPointF(w * 0.32, 1.0), QPointF(w * 0.32, 4.4))
+    p.drawLine(QPointF(w * 0.68, 1.0), QPointF(w * 0.68, 4.4))
+    p.end()
+    return QIcon(px)

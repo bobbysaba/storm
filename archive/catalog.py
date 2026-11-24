@@ -1,15 +1,19 @@
 """Which archive dates have data, for the launch window's calendar and case finder.
 
-Listings show availability, not data quality. Each registered source's
-catalogs are scanned once in the background, newest sources first; their
-dates are kept in memory and on disk (24 hours, an hour for a catalog with
-dates this year) and reused when the user changes dates. A failed check
-stays unknown: an unshaded calendar day never proves there's no data.
+Listings show availability, not data quality. Each platform's catalogs are
+scanned once in the background, newest first; their dates are kept in
+memory and on disk (24 hours, an hour for a catalog with dates this year)
+and reused when the user changes dates. A failed check stays unknown: an
+unshaded calendar day never proves there's no data.
 
-Sources registered here are the ones ARCHIVE mode reads: the FOFS mobile
-mesonet vehicles (dates from the crawled file index, archive/fofs_index.py).
-Flat THREDDS listings (CatalogSpec) are scanned too, for instruments added
-by later sessions (CLAMPS, lidar).
+Platforms come from what ARCHIVE mode reads (all_platforms):
+- recorded broker traffic ([archive] history): a folder's file names, or a
+  URL root's dates.json;
+- vehicle obs ([archive] vehicle_obs): each vehicle in a folder, a URL
+  root's dates.json, or a provider's own (NSSL's FOFS mesonet,
+  providers/nssl/archive/catalog.py).
+Local folders are listed on every scan, not cached. Campaigns for the case
+finder are [[archive.campaigns]] in storm.toml.
 """
 from __future__ import annotations
 
@@ -20,52 +24,40 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from threading import Event
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urljoin, urlsplit
-from urllib.request import Request, urlopen
 
-from config import NSSL_SSL_CONTEXT
-from archive.vehicle_aliases import KNOWN_FOFS_PLATFORMS
-from data import thredds_paths as paths
+import settings
 
-_REQUEST_TIMEOUT = 8
-_MAX_CATALOG_BYTES = 16 * 1024 * 1024
 _DATE_RE = re.compile(r"(\d{8})")
-CAMPAIGN_YEARS = {
-    "VORTEX2": (2009, 2010), "RiVorS": (2017,), "TORUS": (2019, 2022, 2023),
-    "PERiLS": (2022, 2023), "LIFT": (2024, 2025, 2026),
-}
-
-# The last year each source had data (the fork's 2026-09-08 catalog audit).
-# Only orders the scan, newest first; every source is still checked.
-_LATEST_OBSERVED_YEAR = {
-    "FOFS-dltruck": 2026, "FOFS-farfield": 2022, "FOFS-hailcam": 2026,
-    "FOFS-mg1": 2015, "FOFS-mg2": 2015, "FOFS-mg3": 2015, "FOFS-noxp_scout": 2015,
-    "FOFS-probe1": 2026, "FOFS-probe2": 2026, "FOFS-probe3": 2010, "FOFS-probe4": 2010,
-    "FOFS-probe5": 2010, "FOFS-probe7": 2010, "FOFS-probe9": 2010,
-    "FOFS-windsonde1": 2022, "FOFS-windsonde2": 2022,
-}
 
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 # a catalog with dates this year may still be gaining files
 _ACTIVE_CACHE_TTL_SECONDS = 60 * 60
 _DATE_CACHE_PATH = Path.home() / ".cache" / "storm" / "archive-dates.json"
-_USER_AGENT = "Mozilla/5.0 (STORM archive date finder)"
 log = logging.getLogger(__name__)
 
-MESONET = "FOFS Mobile Mesonet"
+# case-finder headings (KnownPlatform.group), in the order listed
+RECORDED = "RECORDED TRAFFIC"
+VEHICLES = "VEHICLES"
+INSTRUMENTS = "INSTRUMENTS"
+
+
+def campaign_years() -> dict[str, tuple[int, ...]]:
+    """[[archive.campaigns]]: campaign name -> its years."""
+    return dict(settings.SETTINGS.archive.campaigns)
 
 
 @dataclass(frozen=True)
 class KnownPlatform:
     platform_id: str
     display_name: str
-    family: str          # which kind of data (one fetcher), e.g. the mobile mesonet
+    family: str          # which kind of data, e.g. the mobile mesonet
     key: object
     site: str = ""       # the vehicle or instrument it belongs to, which the finder lists
+    group: str = INSTRUMENTS   # the finder's heading for its site
+    catalogs: tuple = ()       # where its dates come from (objects with url, year, scan)
+    latest_year: int | None = None   # last year it had data, if known: scans newest first
 
 
 class ScanCanceled(Exception):
@@ -75,43 +67,6 @@ class ScanCanceled(Exception):
 def _check_cancel(cancel: Event):
     if cancel.is_set():
         raise ScanCanceled()
-
-
-def _fetch_catalog_html(url: str, cancel: Event) -> str:
-    """One request with one retry, both interruptible. A 404 is an absent
-    folder (""); a 410 stays an error, since this host has returned it for
-    catalogs that open in a browser."""
-    request = Request(url, headers={"User-Agent": _USER_AGENT, "Accept": "text/html,*/*;q=0.8"})
-    for attempt in range(2):
-        _check_cancel(cancel)
-        try:
-            with urlopen(request, timeout=_REQUEST_TIMEOUT, context=NSSL_SSL_CONTEXT) as response:
-                chunks, size = [], 0
-                deadline = time.monotonic() + 15
-                while True:
-                    _check_cancel(cancel)
-                    chunk = response.read(65536)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size > _MAX_CATALOG_BYTES or time.monotonic() > deadline:
-                        raise ValueError("Catalog exceeds listing size/time limit")
-                html = b"".join(chunks).decode("utf-8", errors="replace")
-                if "thredds" not in html.lower() or "catalog" not in html.lower():
-                    raise ValueError("Server did not return a THREDDS catalog")
-                return html
-        except HTTPError as exc:
-            if exc.code == 404:
-                return ""
-            if exc.code not in (429, 500, 502, 503, 504) or attempt:
-                raise
-        except (URLError, TimeoutError):
-            if attempt:
-                raise
-        if cancel.wait(0.75):
-            raise ScanCanceled()
-    raise AssertionError("unreachable")
 
 
 def _dates_from_filenames(filenames) -> list[date]:
@@ -126,67 +81,10 @@ def _dates_from_filenames(filenames) -> list[date]:
     return sorted(found)
 
 
-@dataclass(frozen=True)
-class CatalogSpec:
-    """One flat THREDDS folder listing; its files' names carry the dates."""
-    path: str
-    suffix: str | tuple[str, ...]
-    year: int | None = None      # only for catalogs split by year
-
-    @property
-    def url(self):
-        return paths.catalog_url(self.path)
-
-
-@dataclass(frozen=True)
-class FofsIndexSpec:
-    """A mesonet vehicle's dates from the crawled FOFS file index, since
-    that tree is reorganized often. vehicle=None collects every folder no
-    registered vehicle covers, so a new vehicle's dates still show."""
-    vehicle: str | None
-    year: int | None = None
-
-    @property
-    def url(self):
-        return paths.catalog_url(paths.FOFS_MESONET) + f"#{self.vehicle or 'other-vehicles'}"
-
-
-class _CatalogLinks(HTMLParser):
-    def __init__(self, spec, *, dates_only=False):
-        super().__init__()
-        self.spec = spec
-        self.filenames = set()
-        self.date_stamps = set()
-        self._dates_only = dates_only
-        self._host = urlsplit(spec.url).hostname
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() != "a":
-            return
-        href = dict(attrs).get("href")
-        if not href:
-            return
-        parsed = urlsplit(urljoin(self.spec.url, href))
-        if parsed.hostname != self._host:
-            return
-        dataset = parse_qs(parsed.query).get("dataset", [None])[0]
-        path = dataset if dataset is not None else unquote(parsed.path).removeprefix("/thredds/fileServer/")
-        prefix = self.spec.path + "/"
-        if path.startswith(prefix):
-            name = path[len(prefix):]
-            if "/" not in name and name.endswith(self.spec.suffix):
-                if self._dates_only:
-                    match = _DATE_RE.search(name)
-                    if match:
-                        self.date_stamps.add(match[1])
-                else:
-                    self.filenames.add(name)
-
-
-def catalogs_for_platform(platform: KnownPlatform) -> tuple[CatalogSpec | FofsIndexSpec, ...]:
-    if platform.family == MESONET:
-        return (FofsIndexSpec(platform.key),)
-    raise ValueError(f"Unregistered source family: {platform.family}")
+def catalogs_for_platform(platform: KnownPlatform) -> tuple:
+    if not platform.catalogs:
+        raise ValueError(f"Platform without catalogs: {platform.platform_id}")
+    return platform.catalogs
 
 
 @dataclass(frozen=True)
@@ -218,7 +116,7 @@ class AvailabilityIndex:
     clear() (refresh) rechecks every catalog."""
 
     def __init__(self, platforms=None, fetch=None, pace=0.2, cache_path=None, now=None):
-        self.platforms = tuple(ALL_PLATFORMS if platforms is None else platforms)
+        self.platforms = tuple(all_platforms() if platforms is None else platforms)
         self._specs = {p.platform_id: catalogs_for_platform(p) for p in self.platforms}
         self._results = {}
         self._cached_dates = {}
@@ -229,7 +127,8 @@ class AvailabilityIndex:
         default_cache = platforms is None and fetch is None
         self._cache_path = Path(cache_path) if cache_path is not None else (_DATE_CACHE_PATH if default_cache else None)
         self._latest_seen = {}
-        self._fetch = fetch or _fetch_catalog_html
+        # injected (test) fetch for listing pages; None: each catalog's own
+        self._fetch = fetch
         self._pace = pace
         self._read_cache()
 
@@ -245,7 +144,7 @@ class AvailabilityIndex:
             records = payload.get("catalogs", {})
             if not isinstance(records, dict):
                 return
-            for spec in {s for specs in self._specs.values() for s in specs}:
+            for spec in {s for specs in self._specs.values() for s in specs if _cacheable(s)}:
                 record = records.get(spec.url)
                 if not record:
                     continue
@@ -311,7 +210,7 @@ class AvailabilityIndex:
         interleaved with the others' so one platform can't hold up the rest."""
         priorities = {}
         for platform in self.platforms:
-            hint = _LATEST_OBSERVED_YEAR.get(platform.platform_id, date.max.year)
+            hint = platform.latest_year or date.max.year
             for position, spec in enumerate(self._specs[platform.platform_id]):
                 year = spec.year or self._latest_seen.get(spec, hint)
                 priority = (-year, position)
@@ -328,19 +227,7 @@ class AvailabilityIndex:
             if cancel.wait(self._pace):
                 raise ScanCanceled()
             try:
-                if isinstance(spec, FofsIndexSpec):
-                    from archive import fofs_index
-                    index = fofs_index.get_index()
-                    if index is None:
-                        raise RuntimeError("FOFS file index unavailable")
-                    vehicles = ({spec.vehicle} if spec.vehicle is not None
-                                else index.vehicles() - set(KNOWN_FOFS_PLATFORMS))
-                    dates = frozenset(d for v in vehicles for d in index.dates(v))
-                else:
-                    html = self._fetch(spec.url, cancel)
-                    parser = _CatalogLinks(spec, dates_only=True)
-                    parser.feed(html)
-                    dates = frozenset(_dates_from_filenames(parser.date_stamps))
+                dates = frozenset(spec.scan(self._fetch, cancel))
                 self._results[spec] = (dates, "")
                 if dates:
                     self._latest_seen[spec] = max(dates).year
@@ -349,43 +236,127 @@ class AvailabilityIndex:
             except Exception as exc:  # noqa: BLE001 - a failed check stays unknown
                 self._results[spec] = (frozenset(), f"{spec.url}: {exc}")
             _check_cancel(cancel)
-            self._write_cache(spec)
+            if _cacheable(spec):
+                self._write_cache(spec)
             yield self.snapshot()
 
 
-# what people in the field call each vehicle; mg1-3 and noxp_scout aren't
-# expanded, since what they stand for isn't confirmed
-_FOFS_STAGE_NAMES: dict[str, str] = {
-    "dltruck": "LiDAR Truck",
-    "farfield": "FarField",
-    "hailcam": "HailCam",
-    "noxp_scout": "NOXP Scout",
-    "probe1": "Probe 1", "probe2": "Probe 2", "probe3": "Probe 3",
-    "probe4": "Probe 4", "probe5": "Probe 5", "probe7": "Probe 7",
-    "probe9": "Probe 9",
-    "windsonde1": "WindSonde 1", "windsonde2": "WindSonde 2",
-    "mg1": "MG1", "mg2": "MG2", "mg3": "MG3",
-}
 
 
-def _build_registry() -> list[KnownPlatform]:
-    platforms = [
-        KnownPlatform(f"FOFS-{vehicle}", _FOFS_STAGE_NAMES.get(vehicle, vehicle), MESONET, vehicle,
-                      site=_FOFS_STAGE_NAMES.get(vehicle, vehicle))
-        for vehicle in KNOWN_FOFS_PLATFORMS
-    ]
-    # vehicle folders THREDDS adds that aren't registered still reach the calendar
-    platforms.append(KnownPlatform("FOFS-other", "Other mesonet vehicles", MESONET, None,
-                                   site="Other mesonet vehicles"))
+def _cacheable(spec) -> bool:
+    """Local folders are listed every time; anything over the network is cached."""
+    return getattr(spec, "cacheable", True)
+
+
+@dataclass(frozen=True)
+class HistoryFolderSpec:
+    """Recorded broker traffic in a folder: the days in its file names."""
+    folder: Path
+    prefix: str
+    year: int | None = None
+    cacheable = False
+
+    @property
+    def url(self):
+        return self.folder.as_uri() + "#history"
+
+    def scan(self, fetch, cancel: Event) -> frozenset[date]:
+        if not self.folder.is_dir():
+            return frozenset()
+        # <prefix>.<kind>.<YYYYMMDD>[.jsonl]: the date is after the prefix
+        names = (p.name[len(self.prefix) + 1:] for p in self.folder.glob(f"{self.prefix}.*"))
+        return frozenset(_dates_from_filenames(names))
+
+
+@dataclass(frozen=True)
+class VehicleFolderSpec:
+    """One vehicle's days in a vehicle-obs folder."""
+    source: object          # archive.vehicle_obs.FolderVehicleObsSource
+    vehicle: str
+    year: int | None = None
+    cacheable = False
+
+    @property
+    def url(self):
+        return self.source.folder.as_uri() + f"#{self.vehicle}"
+
+    def scan(self, fetch, cancel: Event) -> frozenset[date]:
+        return frozenset(self.source.dates().get(self.vehicle, ()))
+
+
+@dataclass(frozen=True)
+class DatesFileSpec:
+    """A URL root's dates.json (archive/vehicle_obs.py parse_dates_file):
+    every day it lists, top-level and per vehicle."""
+    root: str
+    year: int | None = None
+
+    @property
+    def url(self):
+        return f"{self.root}/dates.json"
+
+    def scan(self, fetch, cancel: Event) -> frozenset[date]:
+        from archive import vehicle_obs
+        if fetch is not None:
+            text = fetch(self.url, cancel)
+        else:
+            raw = vehicle_obs.fetch_url(self.url)
+            text = None if raw is None else raw.decode("utf-8", errors="replace")
+        if not text:
+            return frozenset()          # no dates.json: nothing shaded
+        days, vehicles = vehicle_obs.parse_dates_file(text)
+        return frozenset(days.union(*vehicles.values()))
+
+
+def _history_platforms() -> list[KnownPlatform]:
+    from archive import history
+    platforms = []
+    for source in history.build_sources():
+        if isinstance(source, history.FolderSource):
+            catalog = HistoryFolderSpec(source.folder, source.prefix)
+        elif isinstance(source, history.UrlSource):
+            catalog = DatesFileSpec(source.root)
+        else:
+            continue                    # a provider's history isn't listed
+        platforms.append(KnownPlatform(f"history:{catalog.url}", source.name, "Recorded broker traffic",
+                                       None, site="Recorded broker traffic", group=RECORDED,
+                                       catalogs=(catalog,)))
     return platforms
 
 
-ALL_PLATFORMS: list[KnownPlatform] = _build_registry()
+def _vehicle_obs_platforms() -> list[KnownPlatform]:
+    from archive import vehicle_obs
+    platforms = []
+    for source in vehicle_obs.build_sources():
+        if isinstance(source, vehicle_obs.FolderVehicleObsSource):
+            for vehicle in sorted(source.dates()):
+                platforms.append(KnownPlatform(f"obs:{source.folder.as_uri()}#{vehicle}", vehicle,
+                                               "Vehicle obs", vehicle, site=vehicle, group=VEHICLES,
+                                               catalogs=(VehicleFolderSpec(source, vehicle),)))
+        elif isinstance(source, vehicle_obs.UrlVehicleObsSource):
+            catalog = DatesFileSpec(source.root)
+            platforms.append(KnownPlatform(f"obs:{catalog.url}", source.name, "Vehicle obs", None,
+                                           site=f"Vehicle obs ({source.root})", group=VEHICLES,
+                                           catalogs=(catalog,)))
+        else:
+            # a provider's own (NSSL: the FOFS mesonet vehicles)
+            platforms += getattr(source, "calendar_platforms", lambda: [])()
+    return platforms
 
 
-def platforms_by_site() -> dict[str, list[KnownPlatform]]:
+def all_platforms() -> list[KnownPlatform]:
+    """Every platform the calendar scans, from the [archive] sources in use."""
+    platforms, seen = [], set()
+    for platform in _history_platforms() + _vehicle_obs_platforms():
+        if platform.platform_id not in seen:
+            seen.add(platform.platform_id)
+            platforms.append(platform)
+    return platforms
+
+
+def platforms_by_site(platforms=None) -> dict[str, list[KnownPlatform]]:
     """Platforms grouped by the vehicle or instrument they belong to."""
     grouped = {}
-    for platform in ALL_PLATFORMS:
+    for platform in all_platforms() if platforms is None else platforms:
         grouped.setdefault(platform.site, []).append(platform)
     return grouped

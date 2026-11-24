@@ -1,66 +1,24 @@
 import csv
 import io
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Callable, Optional
 
+from .obs_columns import FieldMap, row_time
 from .observation import Observation
+
+__all__ = ["FieldMap", "ObsFileTail"]
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class FieldMap:
-    """
-    Maps instrument-logger CSV column names to Observation fields.
-
-    Defaults match the FOFS truck logger format (YYYYMMDD.txt):
-        sfc_wspd, sfc_wdir, t_fast, dewpoint, pressure,
-        gps_date (DDMMYY), gps_time (HHMMSS), lat, lon
-
-    Override any field by passing kwargs to the constructor.
-    """
-    lat:           str = "lat"
-    lon:           str = "lon"
-    # split date + time columns (matches FOFS truck logger)
-    date_col:      str = "gps_date"    # DDMMYY  e.g. "050625"
-    time_col:      str = "gps_time"    # HHMMSS  e.g. "175228"
-    # met fields
-    temperature_c: str = "t_fast"
-    dewpoint_c:    str = "dewpoint"
-    wind_speed_ms: str = "sfc_wspd"
-    wind_dir_deg:  str = "sfc_wdir"
-    pressure_mb:   str = "pressure"
-
-
-# GPS Ka logger layout: position only, no met fields
-GPS_KA_FIELD_MAP = FieldMap(
-    lat="Latitude",
-    lon="Longitude",
-    date_col="ddmmyy",
-    time_col="hhmmss[UTC]",
-    temperature_c="",
-    dewpoint_c="",
-    wind_speed_ms="",
-    wind_dir_deg="",
-    pressure_mb="",
-)
-
-
 class ObsFileTail:
     """
-    Incrementally reads today's *YYYYMMDD.txt inside a directory.  Each call
-    to poll() parses any complete rows appended since the last call and
-    returns the latest one.  Rolls over to the next day's file automatically
-    at midnight UTC.
-
-    When gps_mode=True the GPS Ka FieldMap is expected (Longitude/Latitude
-    columns, no met fields).  When False the FOFS FieldMap is used.
-
-    If both a bare YYYYMMDD.txt and a prefixed GPS_*YYYYMMDD.txt exist,
-    the file matching the current gps_mode is preferred.
+    Incrementally reads today's file inside a directory, picked by the
+    layout's ``file`` pattern.  Each call to poll() parses any complete rows
+    appended since the last call and returns the latest one.  Rolls over to
+    the next day's file automatically at midnight UTC.
 
     No Qt and no threads: callers decide how often to poll.
     """
@@ -68,12 +26,10 @@ class ObsFileTail:
     def __init__(self, data_dir: str,
                  vehicle_id: str,
                  field_map: FieldMap | None = None,
-                 gps_mode: bool = False,
                  now_fn: Callable[[], datetime] | None = None):
         self._data_dir   = Path(data_dir)
         self._vehicle_id = vehicle_id
         self._fields     = field_map or FieldMap()
-        self._gps_mode   = gps_mode
         self._now        = now_fn or (lambda: datetime.now(timezone.utc))
 
         self._current_date: date | None = None
@@ -83,6 +39,8 @@ class ObsFileTail:
         self._last_pos:   int   = 0
         # cached header columns — read once per file, avoids a separate open()
         self._header_cache: list[str] | None = None
+        # the file whose header was found to lack the position columns (warned once)
+        self._warned_header: Path | None = None
 
     @property
     def data_dir(self) -> Path:
@@ -93,51 +51,38 @@ class ObsFileTail:
         return self._current_path
 
 
-    def _today_path(self) -> Optional[Path]:
-        """Return the file to watch.
+    def today_path(self) -> Optional[Path]:
+        """Return the file to watch, or None when there's none yet.
 
-        FOFS mode: construct YYYYMMDD.txt from today's UTC date, with
-        multi-match preference for the bare (unprefixed) file.
+        A pattern with {date}: the matching file for today's UTC date,
+        shortest name first (a bare YYYYMMDD.txt before GPS_x_YYYYMMDD.txt).
 
-        GPS mode: pick the most recently modified GPS_*_????????.txt in the
-        directory — the logger keeps appending to the file it opened at
-        session start, which may be yesterday's date after midnight rollover.
+        Without {date}: the most recently modified matching file, since the
+        logger keeps appending to the file it opened at session start, which
+        may be yesterday's after midnight.
         """
-        if self._gps_mode:
-            candidates = list(self._data_dir.glob("*_????????.txt"))
+        if not self._fields.daily:
+            candidates = list(self._data_dir.glob(self._fields.file))
             if not candidates:
                 return None
             return max(candidates, key=lambda p: p.stat().st_mtime)
 
-        date_suffix = self._now().strftime("%Y%m%d.txt")
-        matches = sorted(self._data_dir.glob(f"*{date_suffix}"))
+        matches = list(self._data_dir.glob(self._fields.file_glob(self._now())))
         if not matches:
-            return self._data_dir / date_suffix  # non-existent; watcher will wait
-        if len(matches) == 1:
-            return matches[0]
-        # multiple matches — prefer bare YYYYMMDD.txt for FOFS
-        exact = self._data_dir / date_suffix
-        return exact if exact in matches else matches[0]
+            return None   # the watcher waits for it
+        return min(matches, key=lambda p: (len(p.name), p.name))
 
     def _roll_to_today(self):
         """Switch to the active file if it has changed, resetting byte position."""
-        if self._gps_mode:
-            # re-glob for the newest GPS file; switch if a different one appears
-            new_path = self._today_path()
-            if new_path != self._current_path:
-                self._current_path  = new_path
-                self._last_mtime    = 0.0
-                self._last_size     = 0
-                self._last_pos      = 0
-                self._header_cache  = None
-                log.info("ObsFileTail: active GPS file → %s", self._current_path)
+        if self._fields.daily:
+            today = self._now().date()
+            if today == self._current_date and self._current_path is not None:
+                return
+            self._current_date = today
+        new_path = self.today_path()
+        if new_path == self._current_path:
             return
-
-        today = self._now().date()
-        if today == self._current_date:
-            return
-        self._current_date  = today
-        self._current_path  = self._today_path()
+        self._current_path  = new_path
         self._last_mtime    = 0.0
         self._last_size     = 0
         self._last_pos      = 0
@@ -209,6 +154,7 @@ class ObsFileTail:
                 return None
             rows = list(csv.DictReader(io.StringIO(text), fieldnames=self._header_cache))
 
+        self._check_header(path)
         parsed = 0
         last_obs: Observation | None = None
         for row in rows:
@@ -226,6 +172,20 @@ class ObsFileTail:
             )
             return last_obs
         return None
+
+    def _check_header(self, path: Path) -> None:
+        """Warn once per file when its header has no position columns, the
+        usual reason a logger's vehicle never shows up ([obs_columns])."""
+        header = self._header_cache
+        if header is None or self._warned_header == path:
+            return
+        missing = [c for c in (self._fields.lat, self._fields.lon) if c not in header]
+        if missing:
+            self._warned_header = path
+            log.warning("ObsFileTail: %s has no %s column (its first line: %s); "
+                        "check [obs_columns], or the file's header row",
+                        path.name, " or ".join(repr(c) for c in missing),
+                        ",".join(header)[:120])
 
     @staticmethod
     def _read_header(path: Path) -> list[str] | None:
@@ -250,41 +210,28 @@ class ObsFileTail:
             lat=lat,
             lon=lon,
             timestamp=ts,
-            temperature_c=_float_or_none(row.get(f.temperature_c)),
-            dewpoint_c=_float_or_none(row.get(f.dewpoint_c)),
-            wind_speed_ms=_float_or_none(row.get(f.wind_speed_ms)),
-            wind_dir_deg=_float_or_none(row.get(f.wind_dir_deg)),
-            pressure_mb=_float_or_none(row.get(f.pressure_mb)),
+            temperature_c=f.to_storm("temperature_c", float_or_none(row.get(f.temperature_c))),
+            dewpoint_c=f.to_storm("dewpoint_c", float_or_none(row.get(f.dewpoint_c))),
+            wind_speed_ms=f.to_storm("wind_speed_ms", float_or_none(row.get(f.wind_speed_ms))),
+            wind_dir_deg=float_or_none(row.get(f.wind_dir_deg)),
+            pressure_mb=f.to_storm("pressure_mb", float_or_none(row.get(f.pressure_mb))),
+            heading_deg=float_or_none(row.get(f.heading_deg)),
         )
 
     def _parse_timestamp(self, row: dict) -> datetime:
-        f = self._fields
-
-        # split date (DDMMYY) + time (HHMMSS) columns
-        date_str = (row.get(f.date_col) or "").strip()
-        time_str = (row.get(f.time_col) or "").strip()
-
-        if date_str and time_str:
-            combined = date_str + time_str   # e.g. "050625" + "175228" → "050625175228"
-            try:
-                return datetime.strptime(combined, "%d%m%y%H%M%S").replace(
-                    tzinfo=timezone.utc
-                )
-            except ValueError:
-                pass
-
-        return datetime.now(timezone.utc)
+        # a row without a readable time is taken as just logged
+        return row_time(row, self._fields) or datetime.now(timezone.utc)
 
 
-
-
-def _float_or_none(raw: str | None) -> float | None:
-    if raw is None:
+def float_or_none(value) -> float | None:
+    """*value* as a float, or None when it's None, blank or not a number."""
+    if value is None:
         return None
-    text = raw.strip()
-    if not text:
-        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
     try:
-        return float(text)
-    except ValueError:
+        return float(value)
+    except (TypeError, ValueError):
         return None

@@ -70,11 +70,6 @@ class RadarScan:
     def ranges_m(self):
         return self.first_gate_m + self.gate_width_m * np.arange(self.raw.shape[1], dtype=np.float64)
 
-    # azimuth of the first radial
-    @property
-    def az_offset(self):
-        return float(self.azimuths_deg[0])
-
     # lon/lat of points at the given azimuths (deg) and ranges (m) from the
     # radar, via the spherical forward-geodesic formula (matches py-art /
     # GR2Analyst).  Inputs broadcast against each other.

@@ -18,8 +18,8 @@ ANNOTATION_TYPES = [
 ANNOTATION_TYPE_MAP = {t["key"]: t for t in ANNOTATION_TYPES}
 
 
-# function to generate a short uuid
-def _short_uuid():
+# function to generate a short uuid (also used by drawings and storm cones)
+def short_uuid():
     # return first 8 hex chars
     return uuid.uuid4().hex[:8]
 
@@ -62,7 +62,7 @@ class Annotation:
         meta = ANNOTATION_TYPE_MAP.get(type_key, {})
         # return a new annotation
         return cls(
-            id=_short_uuid(),
+            id=short_uuid(),
             type_key=type_key,
             label=label or meta.get("label", type_key),
             lat=lat,

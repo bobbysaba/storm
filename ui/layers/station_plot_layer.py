@@ -6,6 +6,7 @@ import logging
 import threading
 from collections import OrderedDict
 
+from core import units
 from core.observation import Observation
 
 log = logging.getLogger(__name__)
@@ -23,12 +24,12 @@ _png_cache_lock = threading.Lock()
 def _display_key(obs: Observation) -> tuple:
     """
     A hashable key holding exactly what the plot shows: temperature and
-    dewpoint in whole °F, pressure in whole mb, and the wind barb in whole
+    dewpoint in whole display units ([units]), pressure in whole mb, and the wind barb in whole
     knots and degrees (None when calm). Position is not part of it, so a
     moving vehicle with steady readings never re-renders.
     """
-    t_f = round(obs.temperature_c * 9 / 5 + 32) if obs.temperature_c is not None else None
-    dp_f = round(obs.dewpoint_c * 9 / 5 + 32) if obs.dewpoint_c is not None else None
+    t_f = round(units.temp(obs.temperature_c)) if obs.temperature_c is not None else None
+    dp_f = round(units.temp(obs.dewpoint_c)) if obs.dewpoint_c is not None else None
     pres = round(obs.pressure_mb) if obs.pressure_mb is not None else None
     wind = None
     if obs.wind_speed_ms is not None and obs.wind_dir_deg is not None:
@@ -68,11 +69,11 @@ def _render_key(key: tuple, center_color: str) -> bytes:
 
     ax.scatter([0.0], [0.0], s=46, c=center_color, edgecolors="#0A0A0F", linewidths=0.8, zorder=5)
 
-    # temperature (°F) — upper-left, red
+    # temperature ([units]) — upper-left, red
     if t_f is not None:
         sp.plot_parameter("NW", [t_f], color="#FF6464", fontweight="bold")
 
-    # dewpoint (°F) — lower-left, green
+    # dewpoint ([units]) — lower-left, green
     if dp_f is not None:
         sp.plot_parameter("SW", [dp_f], color="#64FF96", fontweight="bold")
 

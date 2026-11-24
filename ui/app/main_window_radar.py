@@ -12,7 +12,7 @@ from ui.map.radar_overlay import (
 from data.fetchers.radar_fetcher import RadarFetcher
 from data.fetchers.sounding_fetcher import SoundingFetcher
 from data.fetchers.obs_sounding_fetcher import ObsSoundingFetcher
-from data.fetchers.clamps_sounding_fetcher import ClampsSoundingFetcher
+from settings import code_providers
 from data.stations.sounding_stations import build_stations_geojson
 from data.radar.radar_decoder import decode_nexrad_l3
 from core.observation import Observation
@@ -33,7 +33,7 @@ class MainWindowRadarMixin:
         day's first fix: crews can stage far from the storm and drive for hours.
 
         MQTT has no history for dates STORM wasn't recording, but the
-        one-second FOFS data may still have the vehicles, so while that is
+        one-second vehicle obs may still have the vehicles, so while that is
         loading this waits for it (briefly: radar starts from home after
         RADAR_WAIT_FOR_VEHICLES_MS, and moves once the vehicles arrive)."""
         if not hasattr(self, "_archive_mqtt"):
@@ -110,11 +110,12 @@ class MainWindowRadarMixin:
         archive are excluded from consideration.
         """
         from archive.fetchers.radar_archive_fetcher import ARCHIVE_UNAVAILABLE_STATIONS
+        from ui.controls.radar_controls import NOT_NEAREST_SITES
         best_site = None
         best_dist = float("inf")
         for info in (self._radar_station_sites or []):
             site_id = info.get("site_id", "")
-            if archive and site_id in ARCHIVE_UNAVAILABLE_STATIONS:
+            if site_id in NOT_NEAREST_SITES or (archive and site_id in ARCHIVE_UNAVAILABLE_STATIONS):
                 continue
             slat = info.get("lat", 0)
             slon = info.get("lon", 0)
@@ -191,7 +192,8 @@ class MainWindowRadarMixin:
         self._radar_fetcher.fetch_error.connect(self._on_radar_error)
 
         self.map_widget.set_radar_stations(self._radar_station_sites)
-        self.radar_controls.set_selected_site("KTLX")
+        # the nearest site to [map] home until a GPS fix or a saved session says otherwise
+        self.radar_controls.set_selected_site(self._nearest_radar_site(config.HOME_LAT, config.HOME_LON))
 
         initial_site = self.radar_controls.current_site()
         self._radar_fetcher.set_site(initial_site)
@@ -203,34 +205,35 @@ class MainWindowRadarMixin:
 
         self._sounding_fetcher        = SoundingFetcher(self)
         self._obs_sounding_fetcher    = ObsSoundingFetcher(self)
-        self._clamps_sounding_fetcher = ClampsSoundingFetcher(self)
         self._sounding_dialog_obj     = None   # built on first use
-        self._nssl_sounding_refresh_timer = QTimer(self)
-        self._nssl_sounding_refresh_timer.setInterval(5 * 60 * 1000)
-        self._nssl_sounding_refresh_timer.timeout.connect(
-            self._refresh_nssl_sounding_if_visible
+        self._provider_sounding_refresh_timer = QTimer(self)
+        self._provider_sounding_refresh_timer.setInterval(5 * 60 * 1000)
+        self._provider_sounding_refresh_timer.timeout.connect(
+            self._refresh_provider_sounding_if_visible
         )
 
         # dedicated comparison fetchers — their sounding_ready goes to add_source
         self._comp_hrrr_fetcher = SoundingFetcher(self)
         self._comp_obs_fetcher  = ObsSoundingFetcher(self)
-        self._comp_nssl_fetcher = ClampsSoundingFetcher(self)
+        self._comp_provider_fetcher = code_providers.provided("live_sounding_fetcher", parent=self)
 
-        self._last_nssl_sset = None   # cached for NSSL proximity checks
+        self._last_provider_sset = None   # cached for the provider's proximity checks
 
         self._sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._sounding_fetcher.fetch_error.connect(self._on_sounding_error)
         self._obs_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
         self._obs_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
-        self._clamps_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
-        self._clamps_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
+        if self._provider_sounding_fetcher is not None:
+            self._provider_sounding_fetcher.sounding_ready.connect(self._on_sounding_ready)
+            self._provider_sounding_fetcher.fetch_error.connect(self._on_sounding_error)
 
         self._comp_hrrr_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
         self._comp_hrrr_fetcher.fetch_error.connect(self._on_sounding_error)
         self._comp_obs_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
         self._comp_obs_fetcher.fetch_error.connect(self._on_sounding_error)
-        self._comp_nssl_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
-        self._comp_nssl_fetcher.fetch_error.connect(self._on_sounding_error)
+        if self._comp_provider_fetcher is not None:
+            self._comp_provider_fetcher.sounding_ready.connect(self._on_comp_sounding_ready)
+            self._comp_provider_fetcher.fetch_error.connect(self._on_sounding_error)
 
         self.map_widget.sounding_clicked.connect(self._on_sounding_map_click)
         self.map_widget.obs_sounding_station_clicked.connect(self._on_obs_station_click)
@@ -238,6 +241,7 @@ class MainWindowRadarMixin:
 
         # pre-build stations GeoJSON once (static asset, ~15 KB)
         self._sounding_stations_geojson = build_stations_geojson()
+        self._init_sounding_sources()
 
     def _auto_start_radar(self):
         self._radar_fetcher.start()

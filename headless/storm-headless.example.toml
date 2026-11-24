@@ -1,33 +1,59 @@
 # STORM headless publisher config.
-# Copy to storm-headless.toml next to your aws/ folder and edit.
+# Copy to storm-headless.toml and edit.
 # Relative paths are resolved against this file's directory.
 
 # vehicle id as it should appear in STORM (lowercased, [a-z0-9-])
 vehicle_id = "probe1"
 
-# map icon: car, drone, mesonet, lidar, radar
+# map icon: car, drone, mesonet, lidar, radar, hailcam
 icon_type = "car"
 
-# directory the logger writes YYYYMMDD.txt files into
+# directory the logger writes its daily files into
 data_dir = "/home/storm/mesonet"
 
-# true for the GPS Ka logger layout instead of FOFS
-gps_mode = false
+# which [obs_columns.<name>] layout this logger writes, when there are
+# several; default: the first
+# layout = "fofs"
 
 # seconds between file polls / between MQTT publishes
 poll_s = 1
 publish_s = 5
 
+# Same [mqtt] keys as the STORM GUI's storm.toml (docs/configuration.md),
+# plus client_id.
 [mqtt]
-host = "a2sxsx29lc4ofu-ats.iot.us-east-1.amazonaws.com"
+host = "broker.example.org"
+# defaults to 8883, or 1883 with tls = "none"
 port = 8883
 
-# defaults to "<vehicle_id>-pi"; must differ from any STORM GUI using this vehicle id
+# none, server (TLS, broker verified) or mutual (TLS plus a client certificate)
+tls = "server"
+# CA bundle for the broker; leave out to use the system trust store
+# ca_cert = "certs/ca.pem"
+# tls = "mutual" needs these two:
+# cert_file = "certs/client.pem.crt"
+# key_file = "certs/client-private.pem.key"
+
+# login, if the broker uses one; STORM_MQTT_PASSWORD in the environment
+# takes precedence over password
+# username = "probe1"
+# password = ""
+
+# put in front of the client ID, for brokers that only allow some prefixes
+# client_id_prefix = ""
+
+# first level of every topic; must match the team's STORM setting
+# topic_root = "storm"
+
+# defaults to "<client_id_prefix><vehicle_id>-pi"; must differ from any STORM
+# GUI using this vehicle id
 # client_id = "probe1-pi"
 
-# folder holding the shared AWS IoT certs (same files as STORM's aws/ folder)
-cert_dir = "aws"
-# override individual files if they are named differently:
-# ca_cert = "storm.pem"
-# cert_file = "storm.pem.crt"
-# key_file = "storm-private.pem.key"
+# The logger CSV's columns and file name: the same [obs_columns] keys as the
+# STORM GUI's storm.toml (docs/configuration.md). Defaults are a plain
+# *YYYYMMDD.csv with an ISO 8601 `time` column and STORM's field names; ""
+# means the file has no such column. install.sh --profile copies a profile's.
+# [obs_columns]
+# file = "*{date}.csv"       # {date} = the UTC day, YYYYMMDD
+# timestamp = "time_utc"
+# temperature_c = "temp_c"

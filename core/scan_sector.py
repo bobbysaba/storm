@@ -2,6 +2,8 @@
 import math
 from datetime import datetime, timezone
 
+from core.obs_cleanup import float_or_none
+
 
 R_M = 6371008.8
 SCAN_MODES = {"point", "circle", "sector"}
@@ -96,10 +98,10 @@ class ScanSector:
         self.lat = float(lat)
         self.lon = float(lon)
         self.timestamp = timestamp or datetime.now(timezone.utc)
-        self.range_m = _float_or_none(range_m)
+        self.range_m = float_or_none(range_m)
         self.inner_range_m = max(0.0, float(inner_range_m or 0.0))
-        self.azimuth_deg = _float_or_none(azimuth_deg)
-        self.beam_width_deg = _float_or_none(beam_width_deg)
+        self.azimuth_deg = float_or_none(azimuth_deg)
+        self.beam_width_deg = float_or_none(beam_width_deg)
         self.follow_vehicle = (mode == "point") if follow_vehicle is None else bool(follow_vehicle)
         self.color = color or DEFAULT_COLOR
         self.label = label or ""
@@ -221,10 +223,3 @@ def feature_collection(scan_sectors: list[ScanSector]) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
-def _float_or_none(value) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None

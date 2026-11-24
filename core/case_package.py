@@ -32,22 +32,33 @@ FORMAT_VERSION = 2          # 2: can carry data files; 1 (tracks + provenance on
 
 # The data types a package can carry, in the order they're offered; keys are
 # the provenance kinds the fetchers pass to core/package_sources.py. Some
-# arrive with later archive sources (CLAMPS, lidar, ASOS, damage paths).
+# arrive with a provider's archive sources (NSSL: CLAMPS, lidar); a kind
+# not listed here is offered last, under its own name.
 DATA_TYPES = {
     "radar": "WSR-88D radar volumes",
-    "mesonet": "Mobile mesonet (one-second FOFS)",
+    "mesonet": "Vehicle obs (one-second files)",
     "mqtt history": "Recorded vehicles, annotations and scan sectors",
-    "clamps surface": "CLAMPS surface met",
-    "clamps profiles": "CLAMPS winds, sondes and TROPoe",
+    "instrument surface": "Instrument surface obs",
+    "instrument profiles": "Instrument wind profiles, sondes and retrievals",
     "raw lidar": "Raw lidar scans",
-    "coptersonde": "CopterSonde profiles",
-    "soundings": "Soundings (observed / NSSL)",
+    "uas": "UAS profiles",
+    "soundings": "Soundings (observed and provider)",
     "satellite": "Satellite imagery",
     "asos": "ASOS observations",
     "hazards": "SPC / NWS hazards",
     "damage paths": "Damage paths",
     "listings": "Other catalog listings",
 }
+# kinds as packages made before 3.0 recorded them
+RENAMED_KINDS = {"clamps surface": "instrument surface", "clamps profiles": "instrument profiles",
+                 "coptersonde": "uas"}
+
+
+def kind_label(kind: str) -> str:
+    kind = RENAMED_KINDS.get(kind, kind)
+    return DATA_TYPES.get(kind, kind)
+
+
 _ROOT = Path(__file__).resolve().parents[1]
 PACKAGES_ROOT = _ROOT / "data" / "case_packages"     # exports go to <session date>/ under here
 
@@ -308,14 +319,14 @@ def _readme(m: dict) -> str:
         for kind in sorted({d["kind"] for d in data}):
             files = [d for d in data if d["kind"] == kind]
             mb = sum(d["bytes"] or 0 for d in files) / 1e6
-            lines.append(f"  {DATA_TYPES.get(kind, kind)}: {len(files)} files, {mb:.1f} MB")
+            lines.append(f"  {kind_label(kind)}: {len(files)} files, {mb:.1f} MB")
         if m.get("data_changed_since_viewed"):
             lines.append(f"  ({m['data_changed_since_viewed']} file(s) changed upstream since the case was viewed; "
                          "both hashes are in package.json)")
     left_out = sorted({s["kind"] for s in m["sources"] if not s.get("included")})
     if left_out:
         lines += ["", "Not included (downloaded from their sources when the package is opened): "
-                  + ", ".join(DATA_TYPES.get(k, k) for k in left_out)]
+                  + ", ".join(kind_label(k) for k in left_out)]
     lines += ["", f"Source files loaded during the session ({len(m['sources'])}), with SHA-256:"]
     for s in m["sources"]:
         lines.append(f"  [{s['kind']}]{' (included)' if s.get('included') else ''}"

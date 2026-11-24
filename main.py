@@ -5,6 +5,7 @@ import sys
 import uuid
 import socket
 import config
+import settings
 import logging
 import net_compat
 import argparse
@@ -384,34 +385,25 @@ def _warn_missing_files() -> None:
         logging.getLogger(__name__).info(
             "Map tiles: %s not found; using online tiles (OpenFreeMap) while connected", TILES_PATH)
 
+    # storm.toml's problems: each table stands alone (settings.load), so the
+    # rest of the file is in use; one that isn't TOML runs as if there were
+    # none (no broker), and the launch window says what a mode needs
+    s = settings.SETTINGS
+    if s.problems:
+        for line in s.problems:
+            logging.getLogger(__name__).warning("%s: %s", s.path.name, line)
+        listed = "\n".join(f"  • {line}" for line in s.problems)
+        if s.unread:
+            title, text = ("Settings File Not Used",
+                           f"STORM couldn't read its settings file:\n\n{listed}\n\n"
+                           "It starts with the defaults (no broker) until that's fixed.")
+        else:
+            title, text = ("Settings File Problems",
+                           f"STORM is using {s.path.name}, but skipped what it couldn't use:\n\n{listed}")
+        QMessageBox.warning(None, title, text + "\n\nSee docs/configuration.md.")
+
     if runtime_flags.FLAGS.disable_mqtt:
         return
-
-    # the shipped viewer certificate covers VIEWER; the launch window says
-    # what's missing if a publishing mode is picked without aws/
-    if config.viewer_cert_present():
-        return
-
-    aws_dir = os.path.dirname(config.MQTT_CA_CERT)
-
-    if not os.path.isdir(aws_dir):
-        QMessageBox.warning(
-            None,
-            "Missing AWS Credentials Folder",
-            f"The AWS credentials directory was not found:\n\n  {aws_dir}\n\n"
-            "Only VIEWER mode can launch without it, and it gets no live MQTT data.\n"
-            "Create the 'aws/' folder and add your certificates to enable the other modes.",
-        )
-    else:
-        missing = config.missing_mqtt_cert_files()
-        if missing:
-            names = "\n".join(f"  \u2022 {os.path.basename(f)}" for f in missing)
-            QMessageBox.warning(
-                None,
-                "Missing AWS Certificate Files",
-                f"The following MQTT certificate files were not found:\n\n{names}\n\n"
-                "Only VIEWER mode can launch without them, and it gets no live MQTT data.",
-            )
 
 
 
@@ -504,6 +496,9 @@ def main() -> None:
     # set application properties
     app.setApplicationName("STORM")
     app.setOrganizationName("STORM")
+    # saved settings from the old ("NSSL", "STORM") store, once
+    from ui import settings_store  # noqa: PLC0415
+    settings_store.copy_legacy()
     app.setFont(QFont("Segoe UI", 10))
     # scale stylesheet font sizes by the saved MAP → TEXT setting (before any window exists)
     text_scale.install(app)
@@ -566,8 +561,8 @@ def _run_sessions(app, args, window_class=None) -> int:
             config.VEHICLE_ICON = dialog.vehicle_icon()
 
             # get the directory for real-time observation files (if any)
-            config.OBS_FILE_DIR      = dialog.data_dir()
-            config.OBS_FILE_GPS_MODE = dialog.gps_file_mode()
+            config.OBS_FILE_DIR    = dialog.data_dir()
+            config.OBS_FILE_LAYOUT = dialog.obs_layout()
 
             # get mode from the dialog
             monitor      = dialog.monitor()

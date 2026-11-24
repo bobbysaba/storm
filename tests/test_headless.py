@@ -2,11 +2,14 @@
 
 import json
 import os
+import tomllib
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from headless.storm_headless.obs_tail import GPS_KA_FIELD_MAP, ObsFileTail
+from headless.storm_headless.obs_columns import parse_obs_layouts
+from headless.storm_headless.obs_tail import ObsFileTail
 from headless.storm_headless.observation import Observation
 from headless.storm_headless.runner import PublishLoop
 from headless.storm_headless.settings import SettingsError, load_settings
@@ -16,6 +19,11 @@ from headless.storm_headless.vehicle_payload import (
     vehicle_topic,
 )
 
+# NSSL's logger layouts, from its profile
+_NSSL = Path(__file__).resolve().parent.parent / "profiles" / "nssl.toml"
+LAYOUTS = dict(parse_obs_layouts(tomllib.loads(_NSSL.read_text())["obs_columns"]))
+FOFS, GPS_KA = LAYOUTS["fofs"], LAYOUTS["gps_ka"]
+
 FOFS_HEADER = "gps_date,gps_time,lat,lon,t_fast,dewpoint,sfc_wspd,sfc_wdir,pressure\n"
 NOW = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
 
@@ -24,8 +32,8 @@ def _row(sec: int, lat: float = 35.2) -> str:
     return f"060526,1800{sec:02d},{lat},-97.4,25.5,18.0,5.0,210,965.2\n"
 
 
-def _tail(tmp_path, now=lambda: NOW, **kw) -> ObsFileTail:
-    return ObsFileTail(str(tmp_path), "probe1", now_fn=now, **kw)
+def _tail(tmp_path, now=lambda: NOW, field_map=FOFS) -> ObsFileTail:
+    return ObsFileTail(str(tmp_path), "probe1", field_map=field_map, now_fn=now)
 
 
 def _touch_newer(path):
@@ -101,9 +109,27 @@ def test_tail_waits_for_file_and_rolls_over_at_midnight(tmp_path):
 def test_tail_gps_ka_layout(tmp_path):
     (tmp_path / "GPS_ka1_20260506.txt").write_text(
         "ddmmyy,hhmmss[UTC],Latitude,Longitude\n060526,180010,35.3,-97.5\n")
-    obs = _tail(tmp_path, field_map=GPS_KA_FIELD_MAP, gps_mode=True).poll()
+    obs = _tail(tmp_path, field_map=GPS_KA).poll()
     assert (obs.lat, obs.lon, obs.temperature_c) == (35.3, -97.5, None)
     assert set(build_payload(obs)) == {"vehicle_id", "lat", "lon", "gps_date", "gps_time"}
+
+
+def test_tail_daily_pattern_prefers_the_shortest_name(tmp_path):
+    (tmp_path / "GPS_ka1_20260506.txt").write_text("x\n")
+    (tmp_path / "20260506.txt").write_text(FOFS_HEADER + _row(0))
+    assert _tail(tmp_path).poll().lat == 35.2
+    # a GPS Ka logger that kept writing yesterday's file past midnight
+    tail = _tail(tmp_path, now=lambda: datetime(2026, 5, 7, 0, 5, tzinfo=timezone.utc), field_map=GPS_KA)
+    tail.poll()
+    assert tail.current_path.name == "GPS_ka1_20260506.txt"
+
+
+def test_tail_generic_layout(tmp_path):
+    from headless.storm_headless.obs_columns import FieldMap
+    (tmp_path / "wx1_20260506.csv").write_text(
+        "time,lat,lon,temperature_c,wind_speed_ms\n2026-05-06T18:00:03Z,35.1,-97.3,21.0,4.0\n")
+    obs = _tail(tmp_path, field_map=FieldMap()).poll()
+    assert (obs.timestamp.second, obs.lat, obs.temperature_c, obs.wind_speed_ms) == (3, 35.1, 21.0, 4.0)
 
 
 # --- publish loop ----------------------------------------------------------
@@ -149,7 +175,35 @@ def test_settings_resolve_relative_to_config(tmp_path):
     assert s.vehicle_id == "probe-1"
     assert s.effective_client_id == "probe-1-pi"
     assert s.data_dir == tmp_path / "mesonet"
-    assert s.cert_file == tmp_path / "aws" / "storm.pem.crt"
+    assert not s.mqtt.configured      # no built-in broker
+
+
+def test_settings_read_the_shared_mqtt_table(tmp_path):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('vehicle_id = "probe1"\ndata_dir = "/data"\n'
+                   '[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "certs/c.crt"\nkey_file = "certs/k.key"\n'
+                   'client_id_prefix = "team-"\n')
+    s = load_settings(cfg)
+    assert s.mqtt.host == "h" and s.mqtt.cert_file == tmp_path / "certs" / "c.crt"
+    assert s.effective_client_id == "team-probe1-pi"
+    cfg.write_text('vehicle_id = "probe1"\ndata_dir = "/data"\n[mqtt]\ntls = "sometimes"\n')
+    with pytest.raises(SettingsError, match="tls must be one of"):
+        load_settings(cfg)
+
+
+def test_settings_pick_a_named_layout(tmp_path):
+    cfg = tmp_path / "h.toml"
+    base = 'vehicle_id = "ka1"\ndata_dir = "."\n'
+    cfg.write_text(base + '[obs_columns.truck]\ntemperature_c = "t"\n'
+                          '[obs_columns.gps]\nfile = "*_????????.txt"\ntemperature_c = ""\n')
+    assert load_settings(cfg).obs_columns.temperature_c == "t"
+    assert load_settings(cfg).layout_name == "truck"
+    assert load_settings(cfg, layout="gps").obs_columns.file == "*_????????.txt"
+    with pytest.raises(SettingsError, match="layout must be one of the \\[obs_columns\\] layouts: truck, gps"):
+        load_settings(cfg, layout="ka")
+    cfg.write_text(base + "gps_mode = true\n")
+    with pytest.raises(SettingsError, match="gps_mode is gone"):
+        load_settings(cfg)
 
 
 def test_settings_cli_overrides_and_validation(tmp_path):
@@ -164,13 +218,25 @@ def test_settings_cli_overrides_and_validation(tmp_path):
 
 # --- cli -------------------------------------------------------------------
 
-def test_check_reports_missing_certs(tmp_path, capsys):
+def test_check_reports_a_missing_broker(tmp_path, capsys):
     from headless.storm_headless.__main__ import main
     (tmp_path / "mesonet").mkdir()
     cfg = tmp_path / "c.toml"
     cfg.write_text('vehicle_id = "probe1"\ndata_dir = "mesonet"\n')
 
     assert main(["-c", str(cfg), "--check"]) == 1
-    assert "not ready" in capsys.readouterr().out
-    # without certs the dry-run setup is still usable
+    out = capsys.readouterr().out
+    assert "no host in the [mqtt] table" in out and "not ready" in out
+    # without a broker the dry-run setup is still usable
     assert main(["-c", str(cfg), "--check", "--dry-run"]) == 0
+
+
+def test_check_reports_missing_certs(tmp_path, capsys):
+    from headless.storm_headless.__main__ import main
+    (tmp_path / "mesonet").mkdir()
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('vehicle_id = "probe1"\ndata_dir = "mesonet"\n'
+                   '[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "c.crt"\nkey_file = "k.key"\n')
+
+    assert main(["-c", str(cfg), "--check"]) == 1
+    assert "cert_file missing" in capsys.readouterr().out

@@ -6,14 +6,14 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from archive.fetchers import clamps_sonde_archive_fetcher as sonde
-from archive.fetchers import clamps_tropoe_archive_fetcher as tropoe
-from archive.fetchers import coptersonde_archive_fetcher as copter
-from archive.fetchers import sounding_archive_fetcher as archive
+from providers.nssl.archive import clamps_sonde_archive_fetcher as sonde
+from providers.nssl.archive import clamps_tropoe_archive_fetcher as tropoe
+from providers.nssl.archive import coptersonde_archive_fetcher as copter
+from providers.nssl.archive import sounding_archive_fetcher as archive
 from core.observation import Observation
 from core.sounding import Sounding, SoundingSet
-from data import thredds_paths as paths
-from data.fetchers import clamps_sounding_fetcher as live
+from providers.nssl import paths
+from providers.nssl.live import clamps_sounding_fetcher as live
 from tests.clamps_fakes import SKEWT, FakeThredds, coptersonde_file, tropoe_file
 
 UTC = timezone.utc
@@ -69,7 +69,7 @@ def test_tropoe_takes_the_preferred_variant_and_all_its_files(monkeypatch, tmp_p
     fake.add(mwr_folder, f"{mwr_stream}.20220301.001005.nc", b"a less preferred variant")
 
     sset = tropoe.fetch_clamps_tropoe_soundings(datetime(2022, 3, 1, 23, tzinfo=UTC))
-    assert sset.source == "clamps_tropoe" and sset.is_clamps_tropoe
+    assert sset.source == "retrieval" and sset.is_retrieval
     assert sset.station_id == "CLAMPS1" and sset.station_name == "CLAMPS1 TROPoe (aeri.v2)"
     assert [s.valid_time.hour for s in sset.soundings] == [1, 13]
     assert [s.slot_offset for s in sset.soundings] == [0, 1]
@@ -104,7 +104,7 @@ def _sondes(monkeypatch, *stamps):
 def test_sondes_are_listed_and_filtered_by_date(monkeypatch):
     fake = _sondes(monkeypatch, "202205240036", "202205241938", "202205250000")
     sset = sonde.fetch_clamps_sonde_soundings(datetime(2022, 5, 24, 23, tzinfo=UTC))
-    assert sset.source == "nssl" and sset.station_id == "CLAMPS"
+    assert sset.source == "provider" and sset.station_id == "CLAMPS"
     assert [s.valid_time.strftime("%H%M") for s in sset.soundings] == ["0036", "1938"]
     assert len(sset.soundings[0].pressure) == 5
     assert not any("202205250000" in u for u in fake.file_requests())
@@ -140,7 +140,7 @@ def test_an_unplaceable_launch_is_marked_unknown(monkeypatch):
 
 
 def test_nearest_fix_is_within_a_minute():
-    from archive.fetchers.vehicle_obs_archive_fetcher import nearest_fix
+    from archive.vehicle_obs import nearest_fix
     t = datetime(2022, 5, 24, 0, 36, tzinfo=UTC)
     track = [Observation("lid1", 35.0 + i, -97.0, t + timedelta(seconds=40 * i)) for i in range(-3, 4)]
     assert nearest_fix(track, t + timedelta(seconds=15)).lat == 35.0
@@ -192,7 +192,7 @@ def test_coptersonde_groups_by_site_up_to_the_clock(monkeypatch, tmp_path):
     sets = copter.fetch_coptersonde_soundings(datetime(2023, 3, 3, 4, tzinfo=UTC))
     assert sorted(sets) == ["LakeVillage5N939", "Schlater5N963"]
     lake = sets["LakeVillage5N939"]
-    assert lake.source == "coptersonde" and lake.is_coptersonde
+    assert lake.source == "uas" and lake.is_uas
     assert [s.slot_offset for s in lake.soundings] == [0, 1]
     assert [s.valid_time.strftime("%H%M") for s in lake.soundings] == ["0212", "0337"]
     assert sets["Schlater5N963"].lat == pytest.approx(33.6)
@@ -208,99 +208,71 @@ def test_coptersonde_outside_perils_years_asks_nothing(monkeypatch):
     assert copter.coptersonde_years() == {2022, 2023}
 
 
-# -- the NSSL provider chain ------------------------------------------------------------------
+# -- the NSSL provider: radiosondes and TROPoe, each on its own, no API ---------------------
 
-def _set(when, lat=35.0, source="nssl"):
+def _set(when, lat=35.0, source="provider"):
     a = np.array([900.0, 800.0, 700.0, 600.0, 500.0])
     snd = Sounding(lat, -97.0, when, 0, "test", a, a, a, a, a, a, location_source="track")
     return SoundingSet(lat, -97.0, 300.0, when, [snd], source=source)
 
 
-def _run_chain(fetcher, t):
+def _run(fetcher, worker, t):
     values, errors = [], []
     fetcher.sounding_ready.connect(values.append)
     fetcher.fetch_error.connect(errors.append)
-    fetcher._do_fetch_nssl(t)
+    worker(t)
     return values, errors
 
 
-def test_thredds_sondes_come_first_and_get_the_truck_lookup(monkeypatch):
+def _no_api(monkeypatch):
+    def asked(*args):
+        raise AssertionError("ARCHIVE never asks the NSSL API")
+    monkeypatch.setattr(live, "_api_sonde_entries", asked)
+
+
+def test_radiosondes_get_the_truck_lookup_and_never_the_api(monkeypatch):
+    _no_api(monkeypatch)
     t = datetime(2024, 4, 27, 22, tzinfo=UTC)
     expected = _set(t - timedelta(hours=1))
     seen = []
     monkeypatch.setattr(archive, "fetch_clamps_sonde_soundings",
                         lambda when, truck: seen.append(truck) or expected)
-
-    def api_down():
-        raise AssertionError("the API isn't asked when THREDDS has launches")
-
-    monkeypatch.setattr(live, "_api_sonde_entries", api_down)
-    fetcher = archive.ArchiveSoundingFetcher()
+    monkeypatch.setattr(archive, "fetch_clamps_tropoe_soundings",
+                        lambda when: pytest.fail("radiosondes don't fall back to TROPoe"))
+    fetcher = archive.NsslArchiveSoundingFetcher()
     lookup = lambda when: None
     fetcher.set_truck_position(lookup)
-    values, errors = _run_chain(fetcher, t)
+    values, errors = _run(fetcher, fetcher._do_fetch_sondes, t)
     assert values == [expected] and errors == [] and seen == [lookup]
 
 
-def test_a_failing_provider_falls_through_and_the_future_never_shows(monkeypatch):
+def test_retrievals_are_their_own_product_and_the_future_never_shows(monkeypatch):
+    _no_api(monkeypatch)
     t = datetime(2024, 4, 27, 22, tzinfo=UTC)
-
-    def down(*args):
-        raise TimeoutError("down")
-
-    monkeypatch.setattr(archive, "fetch_clamps_sonde_soundings", down)
-    monkeypatch.setattr(live, "_api_sonde_entries", down)
-    retrievals = _set(t + timedelta(hours=1), lat=36.0, source="clamps_tropoe")
+    retrievals = _set(t + timedelta(hours=1), lat=36.0, source="retrieval")
     older = _set(t - timedelta(hours=1)).soundings[0]
     yesterday = _set(t - timedelta(days=1)).soundings[0]
     retrievals.soundings[:0] = [yesterday, older]
     monkeypatch.setattr(archive, "fetch_clamps_tropoe_soundings", lambda when: retrievals)
-    values, errors = _run_chain(archive.ArchiveSoundingFetcher(), t)
+    fetcher = archive.NsslArchiveSoundingFetcher()
+    values, errors = _run(fetcher, fetcher._do_fetch_retrievals, t)
     assert errors == []
     (sset,) = values
-    assert sset.soundings == [older] and sset.source == "clamps_tropoe"
+    assert sset.soundings == [older] and sset.source == "retrieval"
     assert sset.lat == 35.0 and sset.soundings[0].slot_offset == 0
 
 
-def test_nothing_anywhere_says_why(monkeypatch):
+def test_none_or_a_failure_says_which_product(monkeypatch):
     t = datetime(2024, 4, 27, 22, tzinfo=UTC)
     monkeypatch.setattr(archive, "fetch_clamps_sonde_soundings", lambda when, truck: None)
-    monkeypatch.setattr(live, "_api_sonde_entries", lambda: [])
-    monkeypatch.setattr(archive, "fetch_clamps_tropoe_soundings", lambda when: None)
-    values, errors = _run_chain(archive.ArchiveSoundingFetcher(), t)
-    assert values == []
-    assert errors == ["NSSL / CLAMPS sounding unavailable: none from THREDDS sonde, NSSL API, "
-                      "CLAMPS TROPoe by 22:00Z on 2024-04-27"]
-
-
-def test_provider_errors_are_listed(monkeypatch):
-    t = datetime(2024, 4, 27, 22, tzinfo=UTC)
 
     def down(*args):
         raise TimeoutError("down")
+    monkeypatch.setattr(archive, "fetch_clamps_tropoe_soundings", down)
+    fetcher = archive.NsslArchiveSoundingFetcher()
+    _, sonde_errors = _run(fetcher, fetcher._do_fetch_sondes, t)
+    other = archive.NsslArchiveSoundingFetcher()
+    _, tropoe_errors = _run(other, other._do_fetch_retrievals, t)
+    assert sonde_errors == ["Radiosondes: none by 22:00Z on 2024-04-27"]
+    assert tropoe_errors == ["TROPoe unavailable: down"]
 
-    monkeypatch.setattr(archive, "fetch_clamps_sonde_soundings", down)
-    monkeypatch.setattr(live, "_api_sonde_entries", down)
-    monkeypatch.setattr(archive, "fetch_clamps_tropoe_soundings", lambda when: None)
-    _, errors = _run_chain(archive.ArchiveSoundingFetcher(), t)
-    assert errors == ["NSSL / CLAMPS sounding unavailable: none from CLAMPS TROPoe by 22:00Z "
-                      "on 2024-04-27; THREDDS sonde: down; NSSL API: down"]
-
-
-def test_coptersondes_reach_the_signal(monkeypatch):
-    t = datetime(2023, 3, 3, 4, tzinfo=UTC)
-    sets = {"Site1": _set(t, source="coptersonde")}
-    monkeypatch.setattr(archive, "fetch_coptersonde_soundings", lambda when: sets if when == t else {})
-    fetcher = archive.ArchiveSoundingFetcher()
-    got, errors = [], []
-    fetcher.coptersondes_ready.connect(got.append)
-    fetcher.fetch_error.connect(errors.append)
-    fetcher._do_fetch_coptersondes(t)
-    assert got == [sets] and errors == []
-
-    def down(when):
-        raise TimeoutError("down")
-
-    monkeypatch.setattr(archive, "fetch_coptersonde_soundings", down)
-    fetcher._do_fetch_coptersondes(t)
-    assert errors == ["CopterSonde: down"]

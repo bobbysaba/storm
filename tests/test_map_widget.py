@@ -9,13 +9,13 @@ class _FakeMapWidget:
         self.scripts.append(script)
 
 
-def test_set_sfcoa_overlay_uses_supplied_tile_url_directly():
+def test_set_contour_overlay_uses_supplied_tile_url_directly():
     widget = _FakeMapWidget()
 
-    MapWidget.set_sfcoa_overlay(
+    MapWidget.set_contour_overlay(
         widget,
         "tmpc",
-        "storm://app/sfcoatiles/20260507_15-tmpc/{z}/{x}/{y}.pbf",
+        "storm://app/contourtiles/contour-20260507_15-tmpc/{z}/{x}/{y}.pbf",
         "tmpc_20260507_15",
         -116,
         28,
@@ -27,8 +27,8 @@ def test_set_sfcoa_overlay_uses_supplied_tile_url_directly():
     )
 
     assert len(widget.scripts) == 1
-    assert "stormSetSfcoaOverlay" in widget.scripts[0]
-    assert "storm://app/sfcoatiles/20260507_15-tmpc/{z}/{x}/{y}.pbf" in widget.scripts[0]
+    assert "stormSetContourOverlay" in widget.scripts[0]
+    assert "storm://app/contourtiles/contour-20260507_15-tmpc/{z}/{x}/{y}.pbf" in widget.scripts[0]
 
 
 def test_add_vehicle_passes_multiline_hover_text():

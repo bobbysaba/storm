@@ -1,21 +1,21 @@
 """data/endpoints.py and data/thredds_paths.py hold the live viewer's data
-addresses; the fetchers' URLs are built from them."""
+addresses (providers/nssl/endpoints.py and paths.py NSSL's); the fetchers'
+URLs are built from them."""
 import ast
 import re
 from pathlib import Path
 
-import config
+import providers.nssl as nssl
 from data import endpoints
 from data import thredds_paths as paths
+from providers.nssl import endpoints as nssl_endpoints
+from providers.nssl import paths as nssl_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_live_fetcher_urls_are_unchanged():
     from data.fetchers import (hazard_fetcher, radar_fetcher, surface_fetcher, vad_fetcher)
-    api = config.NSSL_API_ROOT.rstrip("/")
-    assert surface_fetcher.OK_API_URL == f"{api}/data/mesonet/ok_mesonet.json"
-    assert surface_fetcher.CO_META_URL == f"{api}/data/mesonet/co_metadata.json"
     assert surface_fetcher.IEM_CURRENTS_URL == "https://mesonet.agron.iastate.edu/api/1/currents.json"
     assert radar_fetcher.THREDDS_CATALOG_ROOT == "https://thredds.ucar.edu/thredds/catalog/nexrad/level3"
     assert radar_fetcher.THREDDS_FILESERVER_ROOT == "https://thredds.ucar.edu/thredds/fileServer"
@@ -27,23 +27,27 @@ def test_live_fetcher_urls_are_unchanged():
 
 
 def test_nssl_api_joins_paths_with_one_slash():
-    url = endpoints.nssl_api("/data/sonde/index.json")
-    assert url == f"{config.NSSL_API_ROOT.rstrip('/')}/data/sonde/index.json"
+    url = nssl_endpoints.api_url("/data/sonde/index.json")
+    assert url == f"{nssl.API_ROOT.rstrip('/')}/data/sonde/index.json"
     assert "//data" not in url
 
 
 def test_thredds_helpers():
     assert paths.catalog_url("/nexrad/level3/", paths.UCAR) == \
         "https://thredds.ucar.edu/thredds/catalog/nexrad/level3/catalog.html"
-    assert paths.file_url("FOFS/x.txt") == "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/x.txt"
+    assert nssl_paths.file_url("FOFS/x.txt") == "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/x.txt"
+    assert nssl_paths.catalog_url("FOFS") == paths.catalog_url("FOFS", nssl_paths.NSSL)
 
 
 def test_checker_lists_are_well_formed():
-    checks = endpoints.all_endpoints()
+    checks = endpoints.all_endpoints() + nssl_endpoints.all_endpoints()
     assert len({what for what, _ in checks}) == len(checks)          # names are unique
     assert all(url.startswith("https://") for _, url in checks)
+    assert not any("nssl" in url for _, url in endpoints.all_endpoints())
     for what, host, path, required in paths.all_folders():
-        assert host in (paths.NSSL, paths.UCAR) and not path.startswith("/") and isinstance(required, bool)
+        assert host == paths.UCAR and not path.startswith("/") and isinstance(required, bool)
+    for what, host, path, required in nssl_paths.all_folders():
+        assert host == nssl_paths.NSSL and not path.startswith("/") and isinstance(required, bool)
 
 
 def _code_strings(path: Path):
@@ -65,9 +69,22 @@ def test_live_code_writes_no_data_address_of_its_own():
     namespace = re.compile(r"https?://(?:www\.w3\.org|www\.unidata\.ucar\.edu/namespaces)")
     web = re.compile(r"https?://[A-Za-z0-9]")
     offenders = []
-    for folder in ("data/fetchers", "ui", "core"):
+    for folder in ("data/fetchers", "ui", "core", "providers/nssl/live"):
         for path in sorted((ROOT / folder).rglob("*.py")):
             for line, text in _code_strings(path):
                 if web.search(text) and not namespace.search(text):
                     offenders.append(f"{path.relative_to(ROOT)}:{line}: {text[:70]}")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_generic_layers_never_import_a_provider():
+    """data/, core/ and network/ work for any team; providers/ builds on them,
+    not the other way round."""
+    offenders = []
+    for folder in ("data", "core", "network", "settings"):
+        for path in sorted((ROOT / folder).rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(errors="replace"))):
+                names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+                offenders += [f"{path.relative_to(ROOT)}: {n}" for n in names if n.split(".")[0] == "providers"]
     assert not offenders, "\n".join(offenders)

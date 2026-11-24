@@ -3,7 +3,7 @@ import threading
 import time
 from typing import Callable, Protocol
 
-from .obs_tail import GPS_KA_FIELD_MAP, FieldMap, ObsFileTail
+from .obs_tail import ObsFileTail
 from .observation import Observation
 from .settings import Settings
 
@@ -75,13 +75,12 @@ class PublishLoop:
 
 def run(settings: Settings, publisher, stop_event: threading.Event):
     """Run until *stop_event* is set."""
-    field_map = GPS_KA_FIELD_MAP if settings.gps_mode else FieldMap()
     tail = ObsFileTail(str(settings.data_dir), settings.vehicle_id,
-                       field_map=field_map, gps_mode=settings.gps_mode)
+                       field_map=settings.obs_columns)
     loop = PublishLoop(tail, publisher, settings.publish_s)
 
     log.info("tailing %s (%s) as %s every %.1fs, publishing every %.1fs",
-             settings.data_dir, "GPS Ka" if settings.gps_mode else "FOFS",
+             settings.data_dir, f"layout {settings.layout_name}",
              settings.vehicle_id, settings.poll_s, settings.publish_s)
 
     publisher.start()

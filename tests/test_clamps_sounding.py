@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from PyQt6.QtWidgets import QApplication
 from core.sounding import SoundingSet
-from data.fetchers.clamps_sounding_fetcher import _parse_skewt, _FILENAME_RE
+from providers.nssl.live.clamps_sounding_fetcher import _parse_skewt, _FILENAME_RE
 from ui.sounding.dialog import SoundingDialog
 
 DEFAULT_FILE = os.path.expanduser(
@@ -51,7 +51,7 @@ def main():
         soundings    = [snd],
         station_id   = "CLAMPS",
         station_name = "NSSL CLAMPS DL Truck",
-        source       = "nssl",
+        source       = "provider",
     )
 
     print(f"Loaded {len(snd.pressure)} levels, "

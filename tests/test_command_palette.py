@@ -85,7 +85,7 @@ def test_arrows_move_the_selection(setup):
     QTest.keyClick(palette._input, Qt.Key.Key_Down)
     QTest.keyClick(palette._input, Qt.Key.Key_Down)
     QTest.keyClick(palette._input, Qt.Key.Key_Down)      # stops at the last row
-    assert palette.current_row == 2
+    assert palette._list.currentRow() == 2
     QTest.keyClick(palette._input, Qt.Key.Key_Up)
     QTest.keyClick(palette._input, Qt.Key.Key_Return)
     QTest.qWait(20)

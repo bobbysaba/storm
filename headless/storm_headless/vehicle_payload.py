@@ -1,23 +1,34 @@
 """
-Wire format for vehicle observations on storm/vehicles/{vehicle_id}.
+Wire format for vehicle observations on <topic_root>/vehicles/{vehicle_id}.
 
 Every STORM client and the archive read this format, so any change here is a
-protocol change.
+protocol change (and needs docs/wire-format.md updated).
 """
 
 from datetime import datetime, timezone
 
+from . import topics
+from .obs_tail import float_or_none
 from .observation import Observation
-
-TOPIC_PREFIX = "storm/vehicles"
 
 # publish settings shared by the GUI and the headless publisher
 PUBLISH_QOS = 1
 PUBLISH_EXPIRY_S = 10800   # MQTT v5 message expiry: 3 hours
 
+# Observation field -> payload keys a receiver accepts, first match wins.  The
+# generic name comes first; the FOFS logger name (what STORM itself sends, and
+# what past recordings hold) is the fallback.
+MET_KEYS = {
+    "temperature_c": ("temperature_c", "t_fast"),
+    "dewpoint_c":    ("dewpoint_c", "dewpoint"),
+    "wind_speed_ms": ("wind_speed_ms", "wspd"),
+    "wind_dir_deg":  ("wind_dir_deg", "wdir"),
+    "pressure_mb":   ("pressure_mb", "pressure"),
+}
 
-def vehicle_topic(vehicle_id: str) -> str:
-    return f"{TOPIC_PREFIX}/{vehicle_id}"
+
+def vehicle_topic(vehicle_id: str, root: str = topics.DEFAULT_ROOT) -> str:
+    return topics.topic(root, topics.VEHICLES, vehicle_id)
 
 
 def build_payload(obs: Observation, default_icon: str | None = None) -> dict:
@@ -46,18 +57,38 @@ def build_payload(obs: Observation, default_icon: str | None = None) -> dict:
 
 
 def observation_from_payload(payload: dict) -> Observation:
+    """Read a vehicle payload: the generic names or the FOFS ones (MET_KEYS),
+    and an ISO 8601 ``timestamp`` or ``gps_date`` + ``gps_time``."""
+    met = {field: float_or_none(_first(payload, keys)) for field, keys in MET_KEYS.items()}
     return Observation(
         vehicle_id=payload["vehicle_id"],
         lat=float(payload["lat"]),
         lon=float(payload["lon"]),
-        timestamp=parse_gps_timestamp(payload.get("gps_date"), payload.get("gps_time")),
+        timestamp=_payload_timestamp(payload),
         icon_type=(payload.get("icon_type") or "").strip() or None,
-        wind_speed_ms=_float_or_none(payload.get("wspd")),
-        wind_dir_deg=_float_or_none(payload.get("wdir")),
-        temperature_c=_float_or_none(payload.get("t_fast")),
-        dewpoint_c=_float_or_none(payload.get("dewpoint")),
-        pressure_mb=_float_or_none(payload.get("pressure")),
+        **met,
     )
+
+
+def _first(payload: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if payload.get(key) is not None:
+            return payload[key]
+    return None
+
+
+def _payload_timestamp(payload: dict) -> datetime:
+    """``timestamp`` (ISO 8601; no offset means UTC) when it parses, else
+    gps_date + gps_time, else now."""
+    raw = payload.get("timestamp")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+    return parse_gps_timestamp(payload.get("gps_date"), payload.get("gps_time"))
 
 
 def parse_gps_timestamp(gps_date: str | None, gps_time: str | None) -> datetime:
@@ -72,12 +103,3 @@ def parse_gps_timestamp(gps_date: str | None, gps_time: str | None) -> datetime:
         except ValueError:
             pass
     return datetime.now(timezone.utc)
-
-
-def _float_or_none(val) -> float | None:
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None

@@ -1,10 +1,10 @@
 """Vehicles: obs ingest, the vehicle panel, follow mode, scan sectors and timeseries."""
 
 import logging
-import csv
 import time
 import runtime_flags
 import config
+import settings
 from datetime import datetime, timezone
 from pathlib import Path
 from PyQt6.QtWidgets import (
@@ -15,12 +15,14 @@ from PyQt6.QtCore import Qt, QTimer, QSize, QStandardPaths
 from ui.controls.routing_controls import _make_loc_icon
 from archive.vehicle_speed import calculate_vehicle_speed, format_vehicle_speed
 from ui.dialogs.scan_sector_dialog import ScanSectorDialog
+from core import units
+from core.geo import haversine_km
 from core.scan_sector import ScanSector, feature_collection
 from core.observation import Observation
 from core.vehicle_history import VehicleHistoryStore
 from core.vehicle import Vehicle
 from data.ingest.gps_reader import GPSReader
-from data.ingest.obs_file_watcher import ObsFileWatcher, FieldMap
+from data.ingest.obs_file_watcher import ObsFileWatcher
 from ui.layers.station_plot_layer import StationPlotLayer
 from ui import palette as P
 from ui.app.main_window_util import (
@@ -200,29 +202,19 @@ class MainWindowVehiclesMixin:
             )
 
     def _init_deploy_locs(self):
-        if config.DEPLOY_LOCS_FILE:
+        # [map] deployment_locations; PREV LOCS is hidden without them
+        if self._load_deployment_locations is not None:
             QTimer.singleShot(1200, self._load_deploy_locs)
 
     def _load_deploy_locs(self):
         try:
-            with open(config.DEPLOY_LOCS_FILE, newline='') as f:
-                reader = csv.DictReader(f)
-                points = [
-                    {
-                        "lat": float(r["lat"]),
-                        "lon": float(r["lon"]),
-                        "rank_abi": int(r["rank_abi"]) if r["rank_abi"] else None,
-                        "rank_aoi": int(r["rank_aoi"]) if r["rank_aoi"] else None,
-                        "rqi": float(r["rqi"]) if r["rqi"] else None,
-                    }
-                    for r in reader
-                ]
+            points = self._load_deployment_locations()
             self.map_widget.load_deploy_locs(points)
             # ranked points, for the command palette's "nearest deployment location"
-            self._deploy_points = [p for p in points if p["rank_abi"] is not None]
-            log.info("deploy locs: loaded %d points from %s", len(points), config.DEPLOY_LOCS_FILE)
+            self._deploy_points = [p for p in points if p.get("rank_abi") is not None]
+            log.info("deploy locs: loaded %d points", len(points))
         except Exception as e:
-            log.warning("deploy locs: could not load %s: %s", config.DEPLOY_LOCS_FILE, e)
+            log.warning("deploy locs: could not load them: %s", e)
 
     def update_vehicle_obs(self, obs: Observation) -> None:
         """Public entry point for all vehicle observation updates (MQTT, file watcher, GPS)."""
@@ -494,7 +486,7 @@ class MainWindowVehiclesMixin:
                 self._last_scan_publish = now
             return
 
-        dist_km = self._haversine_km(scan.lat, scan.lon, obs.lat, obs.lon)
+        dist_km = haversine_km(scan.lat, scan.lon, obs.lat, obs.lon)
         if dist_km > SCAN_MOVE_THRESHOLD_KM:
             self._scan_move_count += 1
         else:
@@ -516,7 +508,9 @@ class MainWindowVehiclesMixin:
             self._update_recenter_btn_visibility()
 
     def _should_display_vehicle_obs(self, obs: Observation) -> bool:
-        return self._obs_age_minutes(obs) <= 10.0 * 60.0
+        return (self._obs_age_minutes(obs) <= 10.0 * 60.0
+                and not (hasattr(self, "_vehicle_hidden_by_drawer")
+                         and self._vehicle_hidden_by_drawer(obs.vehicle_id)))
 
     def _sync_routing_vehicle_snapshot(self) -> None:
         if hasattr(self, "routing_controls"):
@@ -756,7 +750,7 @@ class MainWindowVehiclesMixin:
         if not hasattr(self, "_archive_mqtt") or not hasattr(self, "_time_ctrl"):
             return []
 
-        surface = getattr(self, "_archive_clamps_surface", None)
+        surface = getattr(self, "_archive_surface_playback", None)
         if surface is not None and vehicle_id in surface.rows:
             return surface.history(vehicle_id, self._time_ctrl.current_time)
         dense_obs = getattr(self, "_archive_vehicle_obs", None)
@@ -894,8 +888,8 @@ class MainWindowVehiclesMixin:
         sl.addWidget(ts_lbl)
 
         # obs values grid
-        temp_txt = f"{obs.temperature_c * 9/5 + 32:.0f}°F" if obs.temperature_c is not None else "--"
-        dew_txt  = f"{obs.dewpoint_c   * 9/5 + 32:.0f}°F" if obs.dewpoint_c   is not None else "--"
+        temp_txt = f"{units.temp(obs.temperature_c):.0f}{units.temp_label()}" if obs.temperature_c is not None else "--"
+        dew_txt  = f"{units.temp(obs.dewpoint_c):.0f}{units.temp_label()}" if obs.dewpoint_c   is not None else "--"
         wind_txt = (
             f"{obs.wind_speed_ms * 1.94384:.0f}kt @ {obs.wind_dir_deg:.0f}°"
             if obs.wind_speed_ms is not None and obs.wind_dir_deg is not None else "--"
@@ -948,41 +942,17 @@ class MainWindowVehiclesMixin:
 
         # track A — instrument file watcher (surface obs vehicles)
         if config.OBS_FILE_DIR:
-            if config.OBS_FILE_GPS_MODE:
-                field_map = FieldMap(
-                    lat="Latitude",
-                    lon="Longitude",
-                    date_col="ddmmyy",
-                    time_col="hhmmss[UTC]",
-                    temperature_c="",
-                    dewpoint_c="",
-                    wind_speed_ms="",
-                    wind_dir_deg="",
-                    pressure_mb="",
-                )
-            else:
-                field_map = FieldMap(
-                    lat=config.OBS_FILE_COL_LAT,
-                    lon=config.OBS_FILE_COL_LON,
-                    date_col=config.OBS_FILE_COL_DATE,
-                    time_col=config.OBS_FILE_COL_TIME,
-                    temperature_c=config.OBS_FILE_COL_TEMP,
-                    dewpoint_c=config.OBS_FILE_COL_DEWP,
-                    wind_speed_ms=config.OBS_FILE_COL_WSPD,
-                    wind_dir_deg=config.OBS_FILE_COL_WDIR,
-                    pressure_mb=config.OBS_FILE_COL_PRES,
-                )
+            # the [obs_columns] layout picked in the launch window
             self._obs_watcher = ObsFileWatcher(
                 data_dir=config.OBS_FILE_DIR,
                 vehicle_id=config.VEHICLE_ID,
-                field_map=field_map,
+                field_map=settings.SETTINGS.obs_layout(config.OBS_FILE_LAYOUT),
                 poll_interval_s=config.OBS_FILE_POLL_S,
-                gps_mode=config.OBS_FILE_GPS_MODE,
                 parent=self,
             )
             self._obs_watcher.obs_ready.connect(self._on_local_vehicle_obs)
             self._obs_watcher.start()
-            log.info("Obs file watcher started: dir=%s gps_mode=%s",
-                     config.OBS_FILE_DIR, config.OBS_FILE_GPS_MODE)
+            log.info("Obs file watcher started: dir=%s layout=%s",
+                     config.OBS_FILE_DIR, config.OBS_FILE_LAYOUT or settings.SETTINGS.obs_layouts[0][0])
         else:
             log.info("Obs file dir not configured (obs_file.data_dir empty) — Track A disabled")

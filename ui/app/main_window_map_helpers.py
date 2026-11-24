@@ -1,9 +1,10 @@
 
 from datetime import datetime, timezone
 
+from core.geo import haversine_km
 from ui.widgets.layer_order_pill import MAPLIBRE_LAYERS
 from ui.map.widget import TILES_PATH
-from ui.controls.radar_controls import NEXRAD_SITES
+from ui.controls.radar_controls import NEXRAD_SITES, NOT_NEAREST_SITES
 from ui.theme import set_pill_status
 
 
@@ -31,13 +32,13 @@ class MainWindowMapHelpersMixin:
         return sites
 
     def _nearest_radar_site(self, lat: float, lon: float) -> str:
-        candidates = self._radar_station_sites or [
+        candidates = [site for site in self._radar_station_sites or [
             {"site_id": site_id, "lat": site_lat, "lon": site_lon}
             for site_id, _, site_lat, site_lon in NEXRAD_SITES
-        ]
+        ] if site["site_id"] not in NOT_NEAREST_SITES]
         nearest = min(
             candidates,
-            key=lambda site: self._haversine_km(lat, lon, site["lat"], site["lon"]),
+            key=lambda site: haversine_km(lat, lon, site["lat"], site["lon"]),
         )
         return nearest["site_id"]
 
@@ -54,18 +55,6 @@ class MainWindowMapHelpersMixin:
         west, south, east, north = bounds
         return west <= lon <= east and south <= lat <= north
 
-    @staticmethod
-    def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        import math
-
-        r = 6371.0
-        lat1r = math.radians(lat1)
-        lat2r = math.radians(lat2)
-        dlat = lat2r - lat1r
-        dlon = math.radians(lon2 - lon1)
-        a = math.sin(dlat / 2) ** 2 + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        return r * c
 
 
     def _update_clock(self):

@@ -73,10 +73,16 @@ class SoundingSet:
     fetch_time: datetime
     soundings: list       # list[Sounding], chronological order
 
-    # populated only for observed / NSSL soundings:
+    # populated only for observed / provider soundings:
     station_id:   str = ""      # e.g. "OUN" or "CLAMPS"
     station_name: str = ""      # e.g. "Norman, OK"
-    source:       str = "hrrr"  # "hrrr" | "obs" | "nssl" | "clamps_tropoe" | "coptersonde"
+    # "hrrr" | "obs" | "provider" (a provider's live_sounding_fetcher /
+    # archive soundings: NSSL's lidar truck) | "retrieval" (a provider's
+    # remote-sensing profiles) | "uas" (a provider's uncrewed-aircraft ascents)
+    source:       str = "hrrr"
+    # a provider's name for the instrument, for the window's title and
+    # header ("CLAMPS TROPoe", "CopterSonde"); retrieval and uas sets
+    label:        str = ""
 
     @property
     def is_observed(self) -> bool:
@@ -84,21 +90,22 @@ class SoundingSet:
         return self.source == "obs"
 
     @property
-    def is_nssl(self) -> bool:
-        """True when this set came from the NSSL CLAMPS DL Truck."""
-        return self.source == "nssl"
+    def is_provider(self) -> bool:
+        """True when this set came from a provider's soundings (NSSL: the
+        lidar truck's sondes)."""
+        return self.source == "provider"
 
     @property
-    def is_clamps_tropoe(self) -> bool:
-        """True for a CLAMPS AERI / MWR TROPoe retrieval: remote sensing, not
-        an in-situ launch, so kept apart from NSSL sondes (a different
+    def is_retrieval(self) -> bool:
+        """True for a remote-sensing retrieval (NSSL: CLAMPS TROPoe): not an
+        in-situ launch, so kept apart from a provider's sondes (a different
         comparison key, and the difference stays visible). No wind."""
-        return self.source == "clamps_tropoe"
+        return self.source == "retrieval"
 
     @property
-    def is_coptersonde(self) -> bool:
-        """True for a PERiLS CopterSonde (UAS) ascent."""
-        return self.source == "coptersonde"
+    def is_uas(self) -> bool:
+        """True for an uncrewed-aircraft ascent (NSSL: CopterSonde)."""
+        return self.source == "uas"
 
     @property
     def is_time_series(self) -> bool:

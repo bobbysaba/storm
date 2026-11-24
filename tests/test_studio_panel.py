@@ -16,7 +16,7 @@ from PyQt6.QtGui import QAction, QWheelEvent
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from archive.time_controller import TimeController
-from core.studio import Project, View
+from core.studio import View
 from ui.app import main_window_studio
 from ui.app.main_window import MainWindow
 from ui.app.main_window_studio import STUDIO_SUSPENDS, MainWindowStudioMixin

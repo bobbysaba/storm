@@ -8,26 +8,29 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QToolButton, QFileDialog, QFrame,
     QApplication, QMessageBox, QSizePolicy, QWidget,
     QDateTimeEdit, QSpinBox, QComboBox, QCheckBox, QScrollArea, QCalendarWidget,
 )
 from PyQt6.QtCore import (
-    Qt, QSettings, QTimer, QSize, QDate, QDateTime, QPointF, QRectF, QObject, QEvent, pyqtSignal,
+    Qt, QSettings, QTimer, QSize, QDate, QDateTime,
 )
-from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QPolygonF, QPen, QTextCharFormat
+from PyQt6.QtGui import QIcon
 
 import config as _config
-from ui.launch.icons import combo_down_arrow_qss, _svg_pixmap
+import settings as _settings
+from data.update_checker import UpdateWorker
+from ui.launch.date_widgets import _AvailabilityCalendar, _CircularProgress, _ClickConsumer, _YearGridPopup
+from ui.launch.icons import _LEFT, _RIGHT, _calendar_glyph_icon, _svg_pixmap, _triangle_icon, combo_down_arrow_qss
 from ui.launch.styles import (
     _CAL_BTN_STYLE, _DIALOG_STYLE, _ICON_SELECTED_STYLE, _LINK_BTN_STYLE, _LOG_BTN_STYLE,
     _MODE_BTN_SELECTED_STYLE, _MODE_BTN_STYLE, _UPD_AVAILABLE, _UPD_CHECKING, _UPD_CURRENT,
-    _UPD_ERROR, _UPD_SUCCESS, _UPD_WARNING, _YEAR_GRID_STYLE,
+    _UPD_ERROR, _UPD_SUCCESS, _UPD_WARNING,
 )
 from ui.launch.availability import AvailabilityWorker
 from ui.launch.date_finder import FindDatesDialog
-from ui.launch.update_dialogs import _CondaUpdateDialog, _LogViewerDialog, UpdateWorker
+from ui.launch.update_dialogs import _CondaUpdateDialog, _LogViewerDialog
 from ui import palette as P
 
 log = logging.getLogger(__name__)
@@ -35,6 +38,11 @@ log = logging.getLogger(__name__)
 
 
 _PBKDF2_ITERATIONS = 600_000
+
+def _obs_sources():
+    """The station_obs [[sources]] the launch window can turn on at launch."""
+    return _settings.SETTINGS.sources_of("station_obs")
+
 
 def _verify_pbkdf2(passphrase: str, stored: str) -> bool:
     """Verify *passphrase* against a ``base64(salt):base64(dk)`` hash."""
@@ -46,238 +54,6 @@ def _verify_pbkdf2(passphrase: str, stored: str) -> bool:
         return False
     dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, _PBKDF2_ITERATIONS)
     return hmac.compare_digest(dk, expected_dk)
-
-
-def _triangle_icon(pts: list, color: str, w: int = 10, h: int = 10) -> QIcon:
-    """A small filled triangle from fractional (x, y) points in [0, 1]."""
-    px = QPixmap(w, h)
-    px.fill(Qt.GlobalColor.transparent)
-    p = QPainter(px)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawPolygon(QPolygonF([QPointF(x * w, y * h) for x, y in pts]))
-    p.end()
-    return QIcon(px)
-
-
-_LEFT = [(0.85, 0.1), (0.85, 0.9), (0.15, 0.5)]
-_RIGHT = [(0.15, 0.1), (0.15, 0.9), (0.85, 0.5)]
-
-
-def _calendar_glyph_icon(color: str = P.TEXT_LABEL, w: int = 16, h: int = 16) -> QIcon:
-    """A line-drawn calendar: body, header rule and two binder rings."""
-    px = QPixmap(w, h)
-    px.fill(Qt.GlobalColor.transparent)
-    p = QPainter(px)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color))
-    pen.setWidthF(1.2)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    body = QRectF(1.5, 3.5, w - 3.0, h - 5.0)
-    p.drawRoundedRect(body, 1.5, 1.5)
-    p.drawLine(QPointF(body.left(), body.top() + 3.2), QPointF(body.right(), body.top() + 3.2))
-    p.drawLine(QPointF(w * 0.32, 1.0), QPointF(w * 0.32, 4.4))
-    p.drawLine(QPointF(w * 0.68, 1.0), QPointF(w * 0.68, 4.4))
-    p.end()
-    return QIcon(px)
-
-
-class _CircularProgress(QWidget):
-    """A small ring beside the archive date: how many catalogs the
-    background date scan has checked."""
-
-    def __init__(self, parent=None, diameter: int = 20):
-        super().__init__(parent)
-        self.setFixedSize(diameter, diameter)
-        self._value = 0
-        self._maximum = 0
-
-    def setRange(self, minimum: int, maximum: int) -> None:
-        self._maximum = max(0, maximum)
-        self.update()
-
-    def setValue(self, value: int) -> None:
-        self._value = value
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(2, 2, -2, -2)
-        track = QPen(QColor(P.BORDER))
-        track.setWidth(3)
-        painter.setPen(track)
-        painter.drawArc(rect, 0, 360 * 16)
-        fraction = (self._value / self._maximum) if self._maximum else 0.0
-        arc = QPen(QColor(P.ACCENT))
-        arc.setWidth(3)
-        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(arc)
-        # from 12 o'clock, clockwise (Qt angles run counterclockwise from 3 o'clock)
-        painter.drawArc(rect, 90 * 16, -round(360 * 16 * fraction))
-        painter.end()
-
-
-class _AvailabilityCalendar(QCalendarWidget):
-    """A calendar that shades the days with archive data."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._known_dates = frozenset()
-        self.setMinimumSize(322, 260)
-        self.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-        self.setMaximumDate(QDate.currentDate())     # no case is in the future
-        weekday = QTextCharFormat()
-        weekday.setForeground(QColor(P.TEXT_LABEL))
-        for day in Qt.DayOfWeek:
-            self.setWeekdayTextFormat(day, weekday)
-
-    def set_known_dates(self, dates):
-        self._known_dates = frozenset(dates)
-        self.updateCells()
-
-    def paintCell(self, painter, rect, date):
-        # each cell drawn once (tinting over Qt's own cell washes out the
-        # number and the selection); inset tiles keep runs of days apart
-        current_month = date.year() == self.yearShown() and date.month() == self.monthShown()
-        enabled = self.isEnabled() and self.minimumDate() <= date <= self.maximumDate()
-        available = date.toPyDate() in self._known_dates
-        selected = date == self.selectedDate() and enabled
-        background = P.BG_SUNKEN_3
-        foreground = P.TEXT if current_month else P.TEXT_LABEL
-        border = None
-        if not enabled:
-            foreground = P.TEXT_DISABLED
-        elif selected:
-            background, foreground = P.ACCENT, P.BG_BASE
-        elif available:
-            background = P.AVAILABLE if current_month else P.AVAILABLE_DIM
-            foreground = P.TEXT_BRIGHT if current_month else P.TEXT_LABEL
-            border = P.AVAILABLE_EDGE if current_month else P.AVAILABLE_EDGE_DIM
-        if enabled and not selected and date == QDate.currentDate():
-            border = P.TEXT_LABEL
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(rect, QColor(P.BG_SUNKEN_3))
-        tile = QRectF(rect).adjusted(2, 2, -2, -2)
-        painter.setPen(QPen(QColor(border), 1) if border else Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(background))
-        painter.drawRoundedRect(tile, 4, 4)
-        font = painter.font()
-        font.setPixelSize(12)
-        font.setBold(selected or (available and enabled))
-        painter.setFont(font)
-        painter.setPen(QColor(foreground))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(date.day()))
-        painter.restore()
-
-
-class _ClickConsumer(QObject):
-    """Takes a widget's click (or Space / Enter) and calls on_click instead:
-    the calendar's year button opens the year grid rather than Qt's year
-    spin box."""
-
-    def __init__(self, on_click, parent=None):
-        super().__init__(parent)
-        self._on_click = on_click
-
-    def eventFilter(self, obj, event):
-        mouse = event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton
-        key = event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter)
-        if mouse or key:
-            self._on_click()
-            return True
-        return False
-
-
-class _YearGridPopup(QWidget):
-    """A dozen years to jump to from the calendar's year button; years with
-    data are outlined. Never pages past this year."""
-
-    yearPicked = pyqtSignal(int)
-
-    _COLUMNS = 4
-    _ROWS = 3
-    _COUNT = _COLUMNS * _ROWS
-
-    def __init__(self, current_year: int, parent=None):
-        super().__init__(parent, Qt.WindowType.Popup)
-        self.setObjectName("yearGridPopup")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(_YEAR_GRID_STYLE)
-        self._known_years = frozenset()
-        self._current_year = current_year
-        self._max_year = QDate.currentDate().year()
-        self._start_year = self._clamp_start(current_year - 5)
-        self._buttons: list[QPushButton] = []
-        self._build_ui()
-        self._refresh()
-
-    def _clamp_start(self, start: int) -> int:
-        return min(start, self._max_year - self._COUNT + 1)
-
-    def _nav_button(self, points, tip, delta) -> QToolButton:
-        btn = QToolButton()
-        btn.setObjectName("yearNavBtn")
-        btn.setIcon(_triangle_icon(points, P.TEXT_LABEL))
-        btn.setIconSize(QSize(9, 9))
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(tip)
-        btn.clicked.connect(lambda: self._shift(delta))
-        return btn
-
-    def _build_ui(self):
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
-        nav = QHBoxLayout()
-        nav.setSpacing(4)
-        nav.addWidget(self._nav_button(_LEFT, "Earlier years", -self._COUNT))
-        self._range_lbl = QLabel()
-        self._range_lbl.setObjectName("yearRangeLbl")
-        self._range_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        nav.addWidget(self._range_lbl, 1)
-        self._next_btn = self._nav_button(_RIGHT, "Later years", self._COUNT)
-        nav.addWidget(self._next_btn)
-        outer.addLayout(nav)
-
-        grid = QGridLayout()
-        grid.setSpacing(5)
-        for i in range(self._COUNT):
-            btn = QPushButton()
-            btn.setObjectName("yearCell")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked, idx=i: self._pick(idx))
-            grid.addWidget(btn, i // self._COLUMNS, i % self._COLUMNS)
-            self._buttons.append(btn)
-        outer.addLayout(grid)
-
-    def _shift(self, delta: int):
-        self._start_year = self._clamp_start(self._start_year + delta)
-        self._refresh()
-
-    def _pick(self, idx: int):
-        self.yearPicked.emit(self._start_year + idx)
-        self.hide()
-
-    def set_known_years(self, years):
-        self._known_years = frozenset(years)
-        self._refresh()
-
-    def _refresh(self):
-        self._range_lbl.setText(f"{self._start_year} – {self._start_year + self._COUNT - 1}")
-        self._next_btn.setEnabled(self._start_year + self._COUNT - 1 < self._max_year)
-        for i, btn in enumerate(self._buttons):
-            year = self._start_year + i
-            btn.setText(str(year))
-            btn.setProperty("available", year in self._known_years)
-            btn.setProperty("selected", year == self._current_year)
-            btn.setToolTip("Dates with data" if year in self._known_years else "No dates found yet")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
 
 
 class LaunchDialog(QDialog):
@@ -313,18 +89,15 @@ class LaunchDialog(QDialog):
         saved = {
             "vehicle_id":     s.value("launch/vehicle_id",     "",        type=str),
             "data_dir":       s.value("launch/data_dir",       "",        type=str),
-            "gps_file_mode":  s.value("launch/gps_file_mode",  False,     type=bool),
+            "obs_layout":     s.value("launch/obs_layout",     "",        type=str),
             "mode":           s.value("launch/mode",           "vehicle", type=str),
             "vehicle_icon":   s.value("launch/vehicle_icon",   "car",     type=str),
             "auto_spc":       s.value("launch/auto_spc",       False,     type=bool),
             "auto_nws":       s.value("launch/auto_nws",       False,     type=bool),
             "auto_radar":     s.value("launch/auto_radar",     False,     type=bool),
             "auto_satellite": s.value("launch/auto_satellite", "",        type=str),
-            "auto_obs_ok":       s.value("launch/auto_obs_ok",       False, type=bool),
-            "auto_obs_wtm":      s.value("launch/auto_obs_wtm",      False, type=bool),
-            "auto_obs_ks":       s.value("launch/auto_obs_ks",       False, type=bool),
-            "auto_obs_co":       s.value("launch/auto_obs_co",       False, type=bool),
-            "auto_obs_ne":       s.value("launch/auto_obs_ne",       False, type=bool),
+            **{f"auto_obs_{src.id}": s.value(f"launch/auto_obs_{src.id}", False, type=bool)
+               for src in _obs_sources()},
             "radar_resolution":  s.value("launch/radar_resolution",  -1,    type=int),
         }
         if mode:
@@ -412,7 +185,7 @@ class LaunchDialog(QDialog):
         vid_row = QHBoxLayout()
         vid_row.setSpacing(6)
         self._vid_input = QLineEdit(saved.get("vehicle_id", ""))
-        self._vid_input.setPlaceholderText("e.g.  lid1")
+        self._vid_input.setPlaceholderText("e.g.  car1")
         vid_row.addWidget(self._vid_input)
 
         self._lock_btn = QPushButton("🔒")
@@ -443,20 +216,26 @@ class LaunchDialog(QDialog):
         dir_row.addWidget(self._browse_btn)
 
         vs.addLayout(dir_row)
-        vs.addSpacing(8)
-
-        # gps data file checkbox
-        self._gps_mode_check = QCheckBox("GPS data file (no met obs)")
-        self._gps_mode_check.setChecked(saved.get("gps_file_mode", False))
-        self._gps_mode_check.setStyleSheet(
-            f"QCheckBox {{ color: {P.TEXT_LABEL}; font-size: 11px; }}"
-            f"QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {P.BORDER_SUBTLE};"
-            f" border-radius: 3px; background: {P.BG_ELEVATED}; }}"
-            f"QCheckBox::indicator:checked {{ background: {P.ACCENT}; border-color: {P.ACCENT}; }}"
-            f"QCheckBox:disabled {{ color: {P.TEXT_DISABLED}; }}"
-        )
-        vs.addWidget(self._gps_mode_check)
         vs.addSpacing(14)
+
+        # logger file layout: the [obs_columns.<name>] layouts, when there's
+        # more than one to choose from
+        layouts = _settings.SETTINGS.obs_layouts
+        self._layout_combo = QComboBox()
+        self._layout_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for name, fields in layouts:
+            self._layout_combo.addItem(fields.label or name, name)
+        idx = self._layout_combo.findData(saved.get("obs_layout", ""))
+        self._layout_combo.setCurrentIndex(max(idx, 0))
+        if len(layouts) > 1:
+            layout_label = QLabel("LOGGER FILE")
+            layout_label.setObjectName("fieldLabel")
+            vs.addWidget(layout_label)
+            vs.addSpacing(6)
+            vs.addWidget(self._layout_combo)
+            vs.addSpacing(14)
+        else:
+            self._layout_combo.setVisible(False)
 
         # vehicle icon picker
         icon_label = QLabel("VEHICLE ICON")
@@ -659,7 +438,7 @@ class LaunchDialog(QDialog):
             self._sat_btns[key] = btn
         ds.addLayout(sat_row)
 
-        # row 3: surface obs multi-select
+        # row 3: surface obs multi-select, the station_obs [[sources]] (none: no row)
         obs_row = QHBoxLayout()
         obs_row.setSpacing(6)
         obs_lbl = QLabel("OBS")
@@ -667,19 +446,17 @@ class LaunchDialog(QDialog):
         obs_lbl.setFixedWidth(28)
         obs_row.addWidget(obs_lbl)
         self._obs_btns: dict[str, QPushButton] = {}
-        for key, label in (
-            ("ok", "OK MESO"),
-            ("wtm", "WTM"),
-            ("ks", "KS"),
-            ("co", "CO"),
-            ("ne", "NE"),
-        ):
-            btn = QPushButton(label)
+        for src in _obs_sources():
+            btn = QPushButton(src.short)
+            btn.setToolTip(f"Turn on {src.name} at launch")
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(lambda _checked, k=key: self._toggle_obs(k))
+            btn.clicked.connect(lambda _checked, k=src.id: self._toggle_obs(k))
             obs_row.addWidget(btn)
-            self._obs_btns[key] = btn
-        ds.addLayout(obs_row)
+            self._obs_btns[src.id] = btn
+        if self._obs_btns:
+            ds.addLayout(obs_row)
+        else:
+            obs_lbl.hide()
 
         # row 4: radar render resolution
         res_row = QHBoxLayout()
@@ -724,7 +501,7 @@ class LaunchDialog(QDialog):
         self._select_satellite(saved.get("auto_satellite", ""))
 
         self._selected_obs: set[str] = set()
-        for key in ("ok", "wtm", "ks", "co", "ne"):
+        for key in self._obs_btns:
             if saved.get(f"auto_obs_{key}", False):
                 self._selected_obs.add(key)
         self._refresh_obs_styles()
@@ -1046,7 +823,7 @@ class LaunchDialog(QDialog):
         self._vid_input.setReadOnly(locked)
         self._dir_input.setReadOnly(locked)
         self._browse_btn.setEnabled(not locked)
-        self._gps_mode_check.setEnabled(not locked)
+        self._layout_combo.setEnabled(not locked)
         self._lock_btn.setText("🔒" if locked else "🔓")
         self._lock_btn.setToolTip("Unlock all fields" if locked else "Lock all fields")
         for btn in self._icon_btns.values():
@@ -1253,20 +1030,18 @@ class LaunchDialog(QDialog):
     def _on_launch(self):
         mode = getattr(self, "_selected_mode", "vehicle")
 
-        # vehicle, monitor, and archive modes need the MQTT certificate files
-        if mode != "viewer":
-            missing = _config.missing_mqtt_cert_files()
-            if missing:
-                names = "\n".join(f"  \u2022 {os.path.basename(f)}" for f in missing)
-                QMessageBox.warning(
-                    self,
-                    "Missing Certificate Files",
-                    f"{mode.upper()} mode needs the MQTT certificate files in\n\n"
-                    f"  {os.path.dirname(_config.MQTT_CA_CERT)}\n\n"
-                    f"These were not found:\n\n{names}\n\n"
-                    "Only VIEWER mode can launch without them.",
-                )
-                return
+        # vehicle and monitor publish, so they need a broker login that can
+        if problems := _settings.SETTINGS.broker_problems(mode):
+            lines = "\n".join(f"  \u2022 {p}" for p in problems)
+            QMessageBox.warning(
+                self,
+                "No Broker Login",
+                f"{mode.upper()} mode needs a broker it can publish to "
+                f"([mqtt] in {_settings.SETTINGS.path.name}):\n\n{lines}\n\n"
+                "VIEWER and ARCHIVE launch without one. "
+                "See docs/configuration.md.",
+            )
+            return
 
         if self._admin_check.isChecked() and "admin" not in self._verified_modes:
             if not _config.ADMIN_PASSPHRASE_HASH:
@@ -1308,7 +1083,7 @@ class LaunchDialog(QDialog):
         s = QSettings()
         s.setValue("launch/vehicle_id",     self._vid_input.text().strip())
         s.setValue("launch/data_dir",       self._dir_input.text().strip())
-        s.setValue("launch/gps_file_mode",  self._gps_mode_check.isChecked())
+        s.setValue("launch/obs_layout",     self._layout_combo.currentData())
         mode = getattr(self, "_selected_mode", "vehicle")
         # don't persist archive mode as the default (it needs explicit selection).
         s.setValue("launch/mode", mode if mode != "archive" else "viewer")
@@ -1319,11 +1094,8 @@ class LaunchDialog(QDialog):
         s.setValue("launch/auto_radar", "radar" in layers)
         s.setValue("launch/auto_satellite", getattr(self, "_selected_satellite", ""))
         obs = getattr(self, "_selected_obs", set())
-        s.setValue("launch/auto_obs_ok",  "ok"  in obs)
-        s.setValue("launch/auto_obs_wtm", "wtm" in obs)
-        s.setValue("launch/auto_obs_ks",  "ks"  in obs)
-        s.setValue("launch/auto_obs_co",  "co"  in obs)
-        s.setValue("launch/auto_obs_ne",  "ne"  in obs)
+        for key in getattr(self, "_obs_btns", {}):
+            s.setValue(f"launch/auto_obs_{key}", key in obs)
         s.setValue("launch/radar_resolution", self._res_combo.currentData())
         self.accept()
 
@@ -1338,10 +1110,11 @@ class LaunchDialog(QDialog):
             return ""
         return self._dir_input.text().strip()
 
-    def gps_file_mode(self) -> bool:
+    def obs_layout(self) -> str:
+        """The [obs_columns] layout of the vehicle's logger files."""
         if getattr(self, "_selected_mode", "vehicle") != "vehicle":
-            return False
-        return self._gps_mode_check.isChecked()
+            return ""
+        return self._layout_combo.currentData() or ""
 
     def monitor(self) -> bool:
         return getattr(self, "_selected_mode", "vehicle") == "monitor"

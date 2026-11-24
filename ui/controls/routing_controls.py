@@ -4,12 +4,12 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QSizePolicy,
     QApplication, QMenu,
 )
-from math import radians, sin, cos, sqrt, atan2
 
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QSize
 from PyQt6.QtGui import QIcon, QPixmap, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
+from core.geo import haversine_km
 from data.fetchers.routing_fetcher import RoutingFetcher, RouteResult, fmt_distance, fmt_duration
 from ui import palette as P
 from ui.widgets.drawer import Drawer
@@ -25,17 +25,31 @@ _ARRIVE_M       = 30.0    # metres to destination → trigger arrival
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Approximate great-circle distance in metres."""
-    R = 6_371_000.0
-    p1, p2 = radians(lat1), radians(lat2)
-    dp = radians(lat2 - lat1)
-    dl = radians(lon2 - lon1)
-    a = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
-    return 2 * R * atan2(sqrt(a), sqrt(1 - a))
+    """Great-circle distance in metres."""
+    return haversine_km(lat1, lon1, lat2, lon2) * 1000.0
+
 
 # text-colour styles applied inline on the QLineEdit fields
 _STYLE_GPS    = f"color: {P.OK};"   # green  — set via GPS loc button
 _STYLE_MANUAL = f"color: {P.TEXT_BRIGHT};"   # white  — manually entered / map-picked
+
+
+def _svg_icon(svg: str, size: int) -> QIcon:
+    """*svg* (with a {color} placeholder) as an icon: blue, and dim gray when
+    the button is disabled, so Qt swaps them on its own."""
+    def pixmap(color: str) -> QPixmap:
+        renderer = QSvgRenderer(svg.format(color=color).encode())
+        px = QPixmap(size, size)
+        px.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(px)
+        renderer.render(painter)
+        painter.end()
+        return px
+
+    icon = QIcon()
+    icon.addPixmap(pixmap(P.INFO), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(pixmap(P.TEXT_DISABLED), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
 
 
 def _make_vehicle_icon(size: int = 15) -> QIcon:
@@ -49,21 +63,7 @@ def _make_vehicle_icon(size: int = 15) -> QIcon:
         '<circle cx="16.5" cy="17" r="1.5" stroke="{color}" stroke-width="1.5" fill="none"/>'
         '</svg>'
     )
-
-    def _pixmap(color: str) -> QPixmap:
-        svg_bytes = _SVG.format(color=color).encode()
-        renderer = QSvgRenderer(svg_bytes)
-        px = QPixmap(size, size)
-        px.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(px)
-        renderer.render(painter)
-        painter.end()
-        return px
-
-    icon = QIcon()
-    icon.addPixmap(_pixmap(P.INFO), QIcon.Mode.Normal,   QIcon.State.Off)
-    icon.addPixmap(_pixmap(P.TEXT_DISABLED), QIcon.Mode.Disabled, QIcon.State.Off)
-    return icon
+    return _svg_icon(_SVG, size)
 
 
 _VEHICLE_ICON = None
@@ -90,21 +90,7 @@ def _make_loc_icon(size: int = 15) -> QIcon:
         ' stroke-linecap="round" stroke-linejoin="round"/>'
         '</svg>'
     )
-
-    def _pixmap(color: str) -> QPixmap:
-        svg_bytes = _SVG.format(color=color).encode()
-        renderer = QSvgRenderer(svg_bytes)
-        px = QPixmap(size, size)
-        px.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(px)
-        renderer.render(painter)
-        painter.end()
-        return px
-
-    icon = QIcon()
-    icon.addPixmap(_pixmap(P.INFO), QIcon.Mode.Normal,   QIcon.State.Off)
-    icon.addPixmap(_pixmap(P.TEXT_DISABLED), QIcon.Mode.Disabled, QIcon.State.Off)
-    return icon
+    return _svg_icon(_SVG, size)
 
 
 _LOC_ICON = None   # built once on first use to avoid constructing before QApp

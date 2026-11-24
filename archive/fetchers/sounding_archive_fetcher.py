@@ -6,9 +6,6 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from archive.fetchers.clamps_sonde_archive_fetcher import TruckPosition, fetch_clamps_sonde_soundings
-from archive.fetchers.clamps_tropoe_archive_fetcher import fetch_clamps_tropoe_soundings
-from archive.fetchers.coptersonde_archive_fetcher import fetch_coptersonde_soundings
 from core.sounding import Sounding, SoundingSet
 from core.qt_signals import emit_alive
 from data.fetchers.obs_sounding_fetcher import (
@@ -22,28 +19,24 @@ log = logging.getLogger(__name__)
 
 class ArchiveSoundingFetcher(QObject):
     """
-    On-demand sounding fetcher for archive mode.
-
-    Observed radiosondes (IEM RAOB), NSSL / CLAMPS profiles (lidar truck
-    sondes, then TROPoe retrievals) and PERiLS CopterSonde ascents at the
-    archive clock rather than "now". There is no archive model sounding:
-    Open-Meteo's historical HRRR came back empty or timed out (2026-11-11).
+    On-demand sounding fetcher for archive mode: observed radiosondes (IEM
+    RAOB) at the archive clock rather than "now". There is no archive model
+    sounding: Open-Meteo's historical HRRR came back empty or timed out
+    (2026-11-11). The NSSL provider adds its own sources
+    (providers/nssl/archive/sounding_archive_fetcher.py).
 
     Signals
     -------
     sounding_ready(SoundingSet)
-    coptersondes_ready(dict)    {site + tail number: SoundingSet}
     fetch_error(str)
     """
 
     sounding_ready = pyqtSignal(object)   # SoundingSet
-    coptersondes_ready = pyqtSignal(object)   # {site: SoundingSet}
     fetch_error    = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_archive_time: Optional[datetime] = None
-        self._truck_position: TruckPosition | None = None
 
 
     def on_time_changed(self, archive_time: datetime) -> None:
@@ -58,31 +51,6 @@ class ArchiveSoundingFetcher(QObject):
         threading.Thread(
             target=self._do_fetch_obs,
             args=(station_id, lat, lon, elev, t),
-            daemon=True,
-        ).start()
-
-    def set_truck_position(self, lookup: TruckPosition | None) -> None:
-        """Where the lidar truck was at a time (within a minute), to place
-        its sonde launches. Called from worker threads."""
-        self._truck_position = lookup
-
-    def fetch_coptersondes(self) -> None:
-        """PERiLS CopterSonde ascents on the clock's day, up to the clock."""
-        t = self._current_archive_time
-        if t is None:
-            self.fetch_error.emit("No archive time set")
-            return
-        threading.Thread(target=self._do_fetch_coptersondes, args=(t,), daemon=True).start()
-
-    def fetch_nssl_sounding(self) -> None:
-        """Fetch the NSSL mobile sounding nearest to the current archive time."""
-        t = self._current_archive_time
-        if t is None:
-            self.fetch_error.emit("No archive time set")
-            return
-        threading.Thread(
-            target=self._do_fetch_nssl,
-            args=(t,),
             daemon=True,
         ).start()
 
@@ -150,87 +118,6 @@ class ArchiveSoundingFetcher(QObject):
         except Exception as exc:
             log.error("ArchiveSoundingFetcher: obs sounding failed: %s", exc)
             emit_alive(self, "fetch_error", f"Observed sounding error: {exc}")
-
-
-    def _do_fetch_nssl(self, t: datetime) -> None:
-        """Try the lidar truck's sondes on THREDDS, then the NSSL API, then
-        CLAMPS TROPoe retrievals (clearly labeled as such). One provider's
-        failure doesn't stop the next. Every result is limited to the clock's
-        UTC day, up to the clock."""
-        errors, empty = [], []
-        for name, fetch in (
-            ("THREDDS sonde", lambda: fetch_clamps_sonde_soundings(t, self._truck_position)),
-            ("NSSL API", lambda: _api_sonde_set(t)),
-            ("CLAMPS TROPoe", lambda: fetch_clamps_tropoe_soundings(t)),
-        ):
-            try:
-                sset = _within_day(fetch(), t)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{name}: {exc}")
-                log.warning("Archive sounding provider failed: %s: %s", name, exc)
-                continue
-            if sset is not None:
-                emit_alive(self, "sounding_ready", sset)
-                return
-            empty.append(name)
-        parts = []
-        if empty:
-            parts.append(f"none from {', '.join(empty)} by {t:%H:%MZ} on {t:%Y-%m-%d}")
-        detail = "; ".join(parts + errors)
-        emit_alive(self, "fetch_error", f"NSSL / CLAMPS sounding unavailable: {detail}")
-
-    def _do_fetch_coptersondes(self, t: datetime) -> None:
-        try:
-            sets = fetch_coptersonde_soundings(t)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("CopterSonde fetch failed: %s", exc)
-            emit_alive(self, "fetch_error", f"CopterSonde: {exc}")
-            return
-        emit_alive(self, "coptersondes_ready", sets)
-
-
-def _api_sonde_set(t: datetime) -> SoundingSet | None:
-    """The NSSL API's launches on the clock's day (its index is rolling and
-    of unknown depth, and the API answered 404 on 2026-11-11)."""
-    from data.fetchers.clamps_sounding_fetcher import (
-        _api_sonde_entries,
-        _fetch_and_parse_url,
-        _soundings_to_set,
-    )
-    day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
-    entries = sorted((e for e in _api_sonde_entries() if day_start <= e.file_time <= t),
-                     key=lambda e: e.file_time)
-    soundings = []
-    for idx, entry in enumerate(entries):
-        try:
-            snd = _fetch_and_parse_url(entry.skewt_url, entry.file_time, idx, entry.raw_url)
-        except Exception as exc:  # noqa: BLE001 - skip this launch
-            log.warning("ArchiveSoundingFetcher: NSSL API file %s failed: %s", entry.skewt_url, exc)
-            continue
-        if snd is not None:
-            soundings.append(snd)
-    return _soundings_to_set(soundings, t) if soundings else None
-
-
-def _within_day(sset: SoundingSet | None, t: datetime) -> SoundingSet | None:
-    """The set's soundings from t's UTC midnight through t, renumbered, with
-    the set placed at the latest one; None when none are left."""
-    if sset is None:
-        return None
-    day_start = t.replace(hour=0, minute=0, second=0, microsecond=0)
-    sset.soundings = sorted((s for s in sset.soundings if day_start <= s.valid_time <= t),
-                            key=lambda s: s.valid_time)
-    if not sset.soundings:
-        return None
-    for idx, snd in enumerate(sset.soundings):
-        snd.slot_offset = idx
-    latest = sset.soundings[-1]
-    if latest.location_source is not None or (latest.lat, latest.lon) != (0, 0):
-        sset.lat, sset.lon = latest.lat, latest.lon
-    if latest.height.size:
-        sset.elevation = float(latest.height[0])
-    sset.fetch_time = t
-    return sset
 
 
 def _archive_timestamps_to_query(t: datetime) -> list[str]:

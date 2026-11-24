@@ -666,7 +666,6 @@ QWidget#statusOverlayLeft *[pillStatus="off"]    { color: $text_disabled; }
 QWidget#statusOverlayLeft *[pillStatus="mode_vehicle"] { color: $mode_vehicle; }
 QWidget#statusOverlayLeft *[pillStatus="mode_monitor"] { color: $mode_monitor; }
 QWidget#statusOverlayLeft *[pillStatus="mode_viewer"]  { color: $mode_viewer; }
-QWidget#statusOverlayLeft *[pillStatus="mode_archive"] { color: $mode_archive; }
 QWidget#statusOverlayLeft *[pillStatus="mode_admin"]   { color: $mode_admin; }
 
 /* Current map click mode (ui/click_mode.py): "▶ measure — click first point · Esc to exit". */
@@ -970,19 +969,15 @@ QSlider::sub-page:horizontal {
     border-radius: 1px;
 }
 
-/* ── Mesoanalysis / SFCOA drawers ─────────────────────── */
-#floatingToolbar QWidget#mesoanalysisDrawer,
-#floatingToolbar QWidget#sfcoaDrawer,
-#floatingToolbar QWidget#mesoanalysisControlRow,
-#floatingToolbar QWidget#sfcoaControlRow,
-#floatingToolbar QWidget#sfcoaProductGrid,
-#floatingToolbar QWidget#mesoanalysisStatusRow {
+/* ── Contours drawer ─────────────────────── */
+#floatingToolbar QWidget#contourDrawer,
+#floatingToolbar QWidget#contourControlRow,
+#floatingToolbar QWidget#contourProductGrid {
     background: transparent;
     border: none;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QToolButton,
-#floatingToolbar QWidget#sfcoaDrawer QToolButton {
+#floatingToolbar QWidget#contourDrawer QToolButton {
     background-color: transparent;
     border: 1px solid $border_soft@0.42;
     border-radius: 6px;
@@ -990,16 +985,14 @@ QSlider::sub-page:horizontal {
     padding: 3px 8px;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisGroupLabel,
-#floatingToolbar QWidget#sfcoaDrawer QLabel#sfcoaGroupLabel {
+#floatingToolbar QWidget#contourDrawer QLabel#contourGroupLabel {
     color: $text_muted;
     font-size: 11px;
     font-weight: 700;
     min-width: 72px;
 }
 
-#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton,
-#floatingToolbar QWidget#sfcoaProductGrid QToolButton {
+#floatingToolbar QWidget#contourProductGrid QToolButton {
     background-color: transparent;
     background: transparent;
     min-width: 62px;
@@ -1007,49 +1000,40 @@ QSlider::sub-page:horizontal {
     font-size: 11px;
 }
 
-#floatingToolbar QWidget#mesoanalysisProductGrid,
-#floatingToolbar QWidget#mesoanalysisProductGrid QWidget,
-#floatingToolbar QWidget#mesoanalysisPlaybackCell,
-#floatingToolbar QWidget#sfcoaProductGrid,
-#floatingToolbar QWidget#sfcoaProductGrid QWidget {
+#floatingToolbar QWidget#contourProductGrid,
+#floatingToolbar QWidget#contourProductGrid QWidget {
     background: transparent;
     background-color: transparent;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QLabel#mesoanalysisTimeLabel,
-#floatingToolbar QWidget#sfcoaDrawer QLabel#sfcoaTimeLabel {
+#floatingToolbar QWidget#contourDrawer QLabel#contourTimeLabel {
     color: $text_secondary;
     font-size: 11px;
     font-weight: 600;
 }
 
-#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:hover,
-#floatingToolbar QWidget#sfcoaProductGrid QToolButton:hover {
+#floatingToolbar QWidget#contourProductGrid QToolButton:hover {
     background-color: $info@0.08;
     border-color: $info@0.35;
 }
 
-#floatingToolbar QWidget#mesoanalysisProductGrid QToolButton:checked,
-#floatingToolbar QWidget#sfcoaProductGrid QToolButton:checked {
+#floatingToolbar QWidget#contourProductGrid QToolButton:checked {
     background-color: $info@0.18;
     border-color: $info;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QToolButton:hover,
-#floatingToolbar QWidget#sfcoaDrawer QToolButton:hover {
+#floatingToolbar QWidget#contourDrawer QToolButton:hover {
     background-color: $info@0.08;
     border-color: $info@0.55;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QToolButton:checked,
-#floatingToolbar QWidget#sfcoaDrawer QToolButton:checked {
+#floatingToolbar QWidget#contourDrawer QToolButton:checked {
     background-color: $info@0.18;
     border-color: $info;
     color: $text_bright;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QComboBox,
-#floatingToolbar QWidget#sfcoaDrawer QComboBox {
+#floatingToolbar QWidget#contourDrawer QComboBox {
     background-color: $bg_hover@0.62;
     border: 1px solid $border_soft@0.48;
     border-radius: 6px;
@@ -1058,13 +1042,11 @@ QSlider::sub-page:horizontal {
     min-width: 0;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QComboBox:hover,
-#floatingToolbar QWidget#sfcoaDrawer QComboBox:hover {
+#floatingToolbar QWidget#contourDrawer QComboBox:hover {
     border-color: $text_label@0.72;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QPushButton,
-#floatingToolbar QWidget#sfcoaDrawer QPushButton {
+#floatingToolbar QWidget#contourDrawer QPushButton {
     background: transparent;
     border: 1px solid $border_soft@0.48;
     border-radius: 6px;
@@ -1074,21 +1056,10 @@ QSlider::sub-page:horizontal {
     padding: 2px 8px;
 }
 
-#floatingToolbar QWidget#mesoanalysisDrawer QPushButton:hover,
-#floatingToolbar QWidget#sfcoaDrawer QPushButton:hover {
+#floatingToolbar QWidget#contourDrawer QPushButton:hover {
     background-color: $info@0.08;
     border-color: $info@0.55;
     color: $text_bright;
-}
-
-#floatingToolbar QWidget#mesoanalysisDrawer QSlider {
-    background: transparent;
-}
-
-#floatingToolbar QWidget#mesoanalysisDrawer QSlider::groove:horizontal {
-    background-color: $text_secondary@0.28;
-    height: 2px;
-    border-radius: 1px;
 }
 
 /* ── Radar / Satellite playback rows (small icon buttons, minimal padding) ── */

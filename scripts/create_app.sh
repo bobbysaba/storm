@@ -120,7 +120,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleDisplayName</key>
     <string>STORM</string>
     <key>CFBundleIdentifier</key>
-    <string>edu.ou.nssl.storm</string>
+    <string>io.github.bobbysaba.storm</string>
     <key>CFBundleVersion</key>
     <string>__STORM_VERSION__</string>
     <key>CFBundleShortVersionString</key>

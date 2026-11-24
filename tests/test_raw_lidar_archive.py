@@ -1,4 +1,4 @@
-"""Reading raw lidar PPI / CSM files (archive/fetchers/raw_lidar_archive_fetcher.py):
+"""Reading raw lidar PPI / CSM files (providers/nssl/archive/raw_lidar_archive_fetcher.py):
 times, range units, fill values, the truck's heading and GPS placement."""
 from datetime import date, datetime, timedelta, timezone
 
@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from archive.fetchers import clamps_common
-from archive.fetchers import raw_lidar_archive_fetcher as raw
+from providers.nssl.archive import clamps_common
+from providers.nssl.archive import raw_lidar_archive_fetcher as raw
 from archive.positions import PositionTrack
 from core.observation import Observation
 
@@ -20,9 +20,10 @@ def _file(path, source, bad_time=False, trailer_heading=None, range_units='km'):
     ds = xr.Dataset({
         'base_time': ((), 1782001159.),
         'time_offset': ('time', [120., np.nan if bad_time else 0., 360.]),
-        'range': ('range', [.015, .045]),
-        'velocity': (('time', 'range'), [[10., -999.], [20., 21.], [30., 31.]]),
-        'intensity': (('time', 'range'), np.ones((3, 2)) * 1.05),
+        # four blind gates first (a fixed 35 m/s, as the real files have), then two real ones
+        'range': ('range', [.0, .003, .006, .009, .015, .045]),
+        'velocity': (('time', 'range'), [[35.] * 4 + v for v in ([10., -999.], [20., 21.], [30., 31.])]),
+        'intensity': (('time', 'range'), np.ones((3, 6)) * 1.05),
         'azimuth': ('time', [120., 121., 122.]),
         'elevation': ('time', [180., 90., .5]),
         'lat': ('time', [-999.] * 3), 'lon': ('time', [-999.] * 3),
@@ -91,9 +92,10 @@ def test_raw_registry_is_ppi_and_csm_only():
     assert {s.product for s in raw.KNOWN_RAW_LIDAR_SOURCES} == {'ppi', 'csm'}
     assert not any(tag in s.datastream for s in raw.KNOWN_RAW_LIDAR_SOURCES for tag in ('hpl', 'dlfp', 'dlother'))
     assert all('/ingested/' in s.path for s in raw.KNOWN_RAW_LIDAR_SOURCES)
-    from data.thredds_paths import all_folders
+    from providers.nssl.paths import all_folders
+    from providers.nssl.archive.lidar_stare_archive_fetcher import KNOWN_STARE_SOURCES
     checked = {path for what, _h, path, _r in all_folders() if what.startswith('raw lidar')}
-    assert checked == {s.path for s in raw.KNOWN_RAW_LIDAR_SOURCES}
+    assert checked == {s.path for s in (*raw.KNOWN_RAW_LIDAR_SOURCES, *KNOWN_STARE_SOURCES)}
 
 
 def test_discovery_lists_the_folder_without_assuming_a_midnight_filename(monkeypatch):

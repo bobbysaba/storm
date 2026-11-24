@@ -232,13 +232,6 @@ class CommandPalette(QFrame):
     def rows(self) -> list[Command]:
         return list(self._rows)
 
-    @property
-    def current_row(self) -> int:
-        return self._list.currentRow()
-
-    def set_query(self, text: str) -> None:
-        self._input.setText(text)
-
     def _on_text_changed(self, text: str) -> None:
         self._place_timer.stop()
         query = text.strip()

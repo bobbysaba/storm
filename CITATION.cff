@@ -14,8 +14,8 @@ authors:
 repository-code: "https://github.com/bobbysaba/storm"
 url: "https://github.com/bobbysaba/storm"
 license: GPL-3.0-or-later
-version: "2.0.0"
-date-released: "2026-11-13"
+version: "3.0.0"
+date-released: "2026-11-22"
 keywords:
   - storm chasing
   - situational awareness

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.observation import Observation
+from core.obs_cleanup import float_or_none
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +32,11 @@ def load_truck_observations(path: str | Path) -> list[Observation]:
                     lat=float(row["lat"]),
                     lon=float(row["lon"]),
                     timestamp=_parse_gps_dt(row.get("gps_dt", "")),
-                    temperature_c=_float_or_none(row.get("Utube_FastTemp")),
-                    dewpoint_c=_float_or_none(row.get("TdC")),
-                    wind_speed_ms=_float_or_none(row.get("windSpd_ms")),
-                    wind_dir_deg=_float_or_none(row.get("windDir_Der")),
-                    pressure_mb=_float_or_none(row.get("Pressure")),
+                    temperature_c=float_or_none(row.get("Utube_FastTemp")),
+                    dewpoint_c=float_or_none(row.get("TdC")),
+                    wind_speed_ms=float_or_none(row.get("windSpd_ms")),
+                    wind_dir_deg=float_or_none(row.get("windDir_Der")),
+                    pressure_mb=float_or_none(row.get("Pressure")),
                 )
             except Exception as exc:
                 log.warning("truck replay row %d skipped: %s", i, exc)
@@ -64,18 +65,6 @@ def _parse_gps_dt(raw: str) -> datetime:
         except ValueError:
             pass
     return datetime.now(timezone.utc)
-
-
-def _float_or_none(raw: str | None) -> float | None:
-    if raw is None:
-        return None
-    text = raw.strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
 
 
 def _str_or(row: dict, key: str, default: str) -> str:

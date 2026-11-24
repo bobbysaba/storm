@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QToolButton,
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPalette, QColor
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -19,6 +18,7 @@ from config import ACCENT_COLOR as _STORM_CYAN
 from core.vad import VADProfile, VADSet, calculate_vad_parameters, time_height_grid
 from data.fetchers.vad_fetcher import fetch_recent_vads
 from ui.export_tools import copy_widget_png, save_widget_png
+from ui.sounding.theme import _force_bg, _lbl, _threshold_color
 
 log = logging.getLogger(__name__)
 
@@ -85,50 +85,12 @@ QToolButton:pressed {{
 """
 
 
-def _threshold_color(key: str, value) -> str | None:
-    thresholds = _THRESHOLDS.get(key)
-    if not thresholds or value is None:
-        return None
-    if not np.isfinite(value):
-        return None
-    color = thresholds[0][1]
-    for threshold, c in thresholds:
-        if value >= threshold:
-            color = c
-    return color
+# a lidar VAD's levels under this intensity (SNR + 1) are hidden to start:
+# above the aerosol layer a VAD fits noise. The window's slider moves it.
+DEFAULT_MIN_INTENSITY = 1.002
+_INTENSITY_STEP = 0.001          # the slider's step
+_INTENSITY_MAX_STEPS = 60        # 1.000 .. 1.060
 
-
-def _force_bg(widget):
-    bg  = QColor(_FIG_BG)
-    txt = QColor(_TEXT)
-    pal = widget.palette()
-    for role in (
-        QPalette.ColorRole.Window,    QPalette.ColorRole.Base,
-        QPalette.ColorRole.AlternateBase, QPalette.ColorRole.Button,
-        QPalette.ColorRole.Midlight,  QPalette.ColorRole.Light,
-        QPalette.ColorRole.Mid,       QPalette.ColorRole.Dark,
-        QPalette.ColorRole.Shadow,
-    ):
-        pal.setColor(role, bg)
-    for role in (
-        QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText,
-        QPalette.ColorRole.Text,       QPalette.ColorRole.BrightText,
-    ):
-        pal.setColor(role, txt)
-    widget.setPalette(pal)
-    widget.setAutoFillBackground(True)
-
-
-def _lbl(text, color=_TEXT, size=10, bold=False,
-         align=Qt.AlignmentFlag.AlignLeft):
-    w = QLabel(text)
-    weight = "bold" if bold else "normal"
-    w.setStyleSheet(
-        f"background-color: transparent; color: {color}; "
-        f"font-size: {size}px; font-weight: {weight};"
-    )
-    w.setAlignment(align)
-    return w
 
 
 class VADDialog(QDialog):
@@ -144,7 +106,8 @@ class VADDialog(QDialog):
         self.site = site
         self._preloaded_set = preloaded_set
         self._start_time = start_time
-        self.vad_set: Optional[VADSet] = None
+        self._source_set: Optional[VADSet] = None     # as loaded
+        self.vad_set: Optional[VADSet] = None         # shown: above the intensity floor
         self._cur_idx = 0
         self._view = "hodograph"          # or "time_height"
         self._th_ax = None
@@ -219,6 +182,34 @@ class VADDialog(QDialog):
         scrubber_col.addLayout(self._tick_row)
 
         header_row.addWidget(self._scrubber_widget)
+
+        # a lidar VAD's intensity floor (shown once the set carries intensity)
+        self._intensity_widget = QWidget()
+        intensity_row = QHBoxLayout(self._intensity_widget)
+        intensity_row.setContentsMargins(0, 0, 0, 0)
+        intensity_row.setSpacing(5)
+        _mid = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        intensity_row.addWidget(_lbl("min intensity", color=_MUTED, size=10, align=_mid))
+        self._intensity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._intensity_slider.setRange(0, _INTENSITY_MAX_STEPS)
+        self._intensity_slider.setValue(round((DEFAULT_MIN_INTENSITY - 1.0) / _INTENSITY_STEP))
+        self._intensity_slider.setFixedWidth(110)
+        self._intensity_slider.setFixedHeight(16)
+        self._intensity_slider.setToolTip(
+            "Hide levels whose intensity (the lidar's SNR + 1) is below this: above the aerosol "
+            f"layer a VAD fits noise. Starts at {DEFAULT_MIN_INTENSITY:.3f}; all the way left shows every level.")
+        _force_bg(self._intensity_slider)
+        self._intensity_slider.valueChanged.connect(self._on_intensity_moved)
+        intensity_row.addWidget(self._intensity_slider)
+        self._intensity_value = _lbl(f"{DEFAULT_MIN_INTENSITY:.3f}", color=_TEXT, size=10, align=_mid)
+        self._intensity_value.setMinimumWidth(36)
+        intensity_row.addWidget(self._intensity_value)
+        self._intensity_widget.setVisible(False)
+        header_row.addWidget(self._intensity_widget, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._intensity_timer = QTimer(self)
+        self._intensity_timer.setSingleShot(True)
+        self._intensity_timer.setInterval(150)
+        self._intensity_timer.timeout.connect(self._apply_intensity_floor)
 
         # hodograph of the chosen profile, or every profile as a time-height plot
         view_row = QHBoxLayout()
@@ -349,6 +340,7 @@ class VADDialog(QDialog):
         while self._tick_row.count():
             item = self._tick_row.takeAt(0)
             if item.widget():
+                item.widget().hide()          # gone now, not when the event loop deletes it
                 item.widget().deleteLater()
         self._tick_labels.clear()
 
@@ -374,7 +366,7 @@ class VADDialog(QDialog):
                 visible.add(i)
                 i += step
 
-        # a lidar's CSM winds run to thousands of profiles a day: then only
+        # a long day of profiles can run to hundreds: then only
         # the spaced labels exist, and the header gives the exact time
         self._tick_indices = (list(range(count)) if count <= _MAX_TICK_LABELS
                               else sorted(visible))
@@ -393,6 +385,31 @@ class VADDialog(QDialog):
         self._tick_row.addStretch(1)
 
         self._update_header()
+
+    def min_intensity(self) -> float | None:
+        """The floor, or None when the slider is all the way left."""
+        steps = self._intensity_slider.value()
+        return 1.0 + steps * _INTENSITY_STEP if steps else None
+
+    def _on_intensity_moved(self, steps: int) -> None:
+        self._intensity_value.setText(f"{1.0 + steps * _INTENSITY_STEP:.3f}" if steps else "off")
+        self._intensity_timer.start()
+
+    def _apply_intensity_floor(self) -> None:
+        """Show the loaded set above the floor, on the same time."""
+        if self._source_set is None:
+            return
+        shown = self.vad_set[self._cur_idx].timestamp if self.vad_set and len(self.vad_set) else self._start_time
+        self.vad_set = self._source_set.above(self.min_intensity())
+        self._th_grid = None
+        if len(self.vad_set) == 0:
+            self._fig.clear()
+            self._canvas.draw_idle()
+            self._header_line2.setText("No levels above this intensity")
+            return
+        self._cur_idx = self._index_at(shown)
+        self._rebuild_scrubber()
+        self._draw()
 
     def _on_scrubber_changed(self, idx: int):
         self._cur_idx = idx
@@ -433,13 +450,16 @@ class VADDialog(QDialog):
     def _fetch_data(self):
         """Fetch VAD data from THREDDS, or use the preloaded archive set."""
         try:
-            self.vad_set = (
+            self._source_set = (
                 self._preloaded_set if self._preloaded_set is not None
                 else fetch_recent_vads(self.site, count=12)
             )
+            self._intensity_widget.setVisible(self._source_set.has_intensity)
+            self.vad_set = self._source_set.above(self.min_intensity())
 
             if len(self.vad_set) == 0:
-                self._header_line2.setText("VAD data not available via THREDDS")
+                self._header_line2.setText("No levels above this intensity" if len(self._source_set)
+                                           else "VAD data not available via THREDDS")
                 self._header_line2.setStyleSheet(
                     "background-color: transparent; color: #FFD166; "
                     "font-size: 10px; font-weight: 600;"
@@ -737,7 +757,7 @@ class VADDialog(QDialog):
                 c = _MUTED
             else:
                 lbl.setText(fmt.format(val))
-                tc = _threshold_color(key, val)
+                tc = _threshold_color(_THRESHOLDS, key, val)
                 c = tc if tc else _MUTED
             lbl.setStyleSheet(
                 f"background-color: transparent; color: {c}; "

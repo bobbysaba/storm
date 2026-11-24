@@ -51,9 +51,9 @@ class FakeDialog:
     def archive(self):
         return self._answer[1] is not None
 
-    vehicle_id = data_dir = lambda self: ""
+    vehicle_id = data_dir = obs_layout = lambda self: ""
     vehicle_icon = lambda self: "car"
-    gps_file_mode = monitor = viewer = lambda self: False
+    monitor = viewer = lambda self: False
     radar_resolution = lambda self: -1
     deleteLater = lambda self: None
 

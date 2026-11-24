@@ -8,22 +8,19 @@ from PyQt6.QtWidgets import (
     QToolButton, QComboBox, QFrame, QSlider,
     QDialog, QPushButton, QDateTimeEdit,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QPainter
 
-try:
-    from zoneinfo import ZoneInfo
-    _HAS_ZONEINFO = True
-except ImportError:
-    _HAS_ZONEINFO = False
+from zoneinfo import ZoneInfo
 
+import settings
 from archive.time_controller import TimeController, SPEED_OPTIONS
 from ui import palette as P
 
 log = logging.getLogger(__name__)
 
-_CT_TZ = ZoneInfo("America/Chicago") if _HAS_ZONEINFO else None
-_MT_TZ = ZoneInfo("America/Denver")  if _HAS_ZONEINFO else None
+# the local clocks beside UTC: [map] time_zones, else the computer's own zone
+_LOCAL_ZONES = tuple(ZoneInfo(z) for z in settings.SETTINGS.map.time_zones) or (None,)
 
 # the slider's groove starts and ends half a handle (theme: 12px) from its edges
 _GROOVE_INSET = 6
@@ -146,15 +143,7 @@ class ArchiveControls(QWidget):
         ticks and an optional coverage strip
       • Speed selector
       • Jump-to-time dialog
-
-    Signals
-    -------
-    tilt_changed(int)   — user changed tilt index
-    product_changed(str) — user changed Level-2 product
     """
-
-    tilt_changed    = pyqtSignal(int)
-    product_changed = pyqtSignal(str)
 
     def __init__(self, time_controller: TimeController, parent=None):
         super().__init__(parent)
@@ -199,7 +188,7 @@ class ArchiveControls(QWidget):
 
         row1.addWidget(self._vdiv())
 
-        self._local_label = QLabel("--:-- CT / --:-- MT")
+        self._local_label = QLabel(" / ".join("--:--" for _ in _LOCAL_ZONES))
         self._local_label.setStyleSheet(
             f"color: {P.TEXT_LABEL}; font-size: 11px; font-weight: 500; letter-spacing: 0.5px;"
         )
@@ -276,7 +265,6 @@ class ArchiveControls(QWidget):
         row2.addStretch()
 
         root.addLayout(row2)
-        self._row2 = row2
         self._precision_mode = False
         self._on_time_changed(self._tc.current_time)
 
@@ -393,7 +381,7 @@ class ArchiveControls(QWidget):
         self._jump_to_scan(1)
 
     def local_time_text(self) -> str:
-        """The clock in Central / Mountain time, as the bar shows it."""
+        """The clock in the local zones ([map] time_zones), as the bar shows it."""
         return self._local_label.text()
 
     def _jump_to_scan(self, direction: int) -> None:
@@ -423,80 +411,9 @@ class ArchiveControls(QWidget):
         self._date_label.setText(t.strftime("%Y-%m-%d"))
         self._utc_label.setText(t.strftime("%H:%M:%S UTC"))
 
-        if _CT_TZ:
-            ct = t.astimezone(_CT_TZ)
-        if _MT_TZ:
-            mt = t.astimezone(_MT_TZ)
-        if _CT_TZ and _MT_TZ:
-            self._local_label.setText(
-                f"{ct.strftime('%H:%M %Z')} / {mt.strftime('%H:%M %Z')}"
-            )
-
-
-    def add_radar_selectors(
-        self,
-        products: list[str],      # list of (pyart_field, display_label)
-        tilts: list[float],
-    ) -> None:
-        """
-        Dynamically insert product and tilt combo boxes into the control row.
-        Called by MainWindow once the first Level-2 scan arrives.
-        """
-        # already added.
-        if hasattr(self, "_product_combo"):
-            return
-
-        row2 = self._row2   # inserted before JUMP and the trailing stretch
-
-        div = self._vdiv()
-        row2.insertWidget(row2.count() - 2, div)
-
-        prod_lbl = QLabel("PROD")
-        prod_lbl.setStyleSheet(
-            f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
+        self._local_label.setText(
+            " / ".join(t.astimezone(zone).strftime("%H:%M %Z") for zone in _LOCAL_ZONES)
         )
-        row2.insertWidget(row2.count() - 2, prod_lbl)
-
-        self._product_combo = QComboBox()
-        self._product_combo.setObjectName("archiveProductCombo")
-        self._product_combo.setFixedWidth(120)
-        for field, label in products:
-            self._product_combo.addItem(label, userData=field)
-        self._product_combo.currentIndexChanged.connect(
-            lambda i: self.product_changed.emit(
-                self._product_combo.itemData(i) or self._product_combo.itemText(i)
-            )
-        )
-        row2.insertWidget(row2.count() - 2, self._product_combo)
-
-        tilt_lbl = QLabel("TILT")
-        tilt_lbl.setStyleSheet(
-            f"color: {P.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.5px;"
-        )
-        row2.insertWidget(row2.count() - 2, tilt_lbl)
-
-        self._tilt_combo = QComboBox()
-        self._tilt_combo.setObjectName("archiveTiltCombo")
-        self._tilt_combo.setFixedWidth(70)
-        for deg in tilts:
-            self._tilt_combo.addItem(f"{deg:.1f}°")
-        self._tilt_combo.currentIndexChanged.connect(
-            lambda i: self.tilt_changed.emit(i)
-        )
-        row2.insertWidget(row2.count() - 2, self._tilt_combo)
-
-    def update_tilt_list(self, tilts: list[float]) -> None:
-        """Refresh the tilt combo when a new scan arrives with different tilts."""
-        if not hasattr(self, "_tilt_combo"):
-            return
-        current = self._tilt_combo.currentIndex()
-        self._tilt_combo.blockSignals(True)
-        self._tilt_combo.clear()
-        for deg in tilts:
-            self._tilt_combo.addItem(f"{deg:.1f}°")
-        self._tilt_combo.setCurrentIndex(min(current, self._tilt_combo.count() - 1))
-        self._tilt_combo.blockSignals(False)
-
 
 
 class _JumpToTimeDialog(QDialog):

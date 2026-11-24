@@ -1,5 +1,5 @@
-"""Raw lidar downloads to the disk cache (archive/fetchers/clamps_common.py)
-and the background survey (archive/fetchers/raw_lidar_quicklook_fetcher.py)."""
+"""Raw lidar downloads to the disk cache (providers/nssl/archive/clamps_common.py)
+and the background survey (providers/nssl/archive/raw_lidar_quicklook_fetcher.py)."""
 import io
 import os
 import threading
@@ -7,18 +7,19 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
-from archive.fetchers import clamps_common
-from archive.fetchers import raw_lidar_quicklook_fetcher as qf
-from archive.fetchers.raw_lidar_archive_fetcher import KNOWN_RAW_LIDAR_SOURCES, LidarAsset
+from providers.nssl.archive import clamps_common
+from providers.nssl.archive import raw_lidar_quicklook_fetcher as qf
+from providers.nssl.archive.raw_lidar_archive_fetcher import KNOWN_RAW_LIDAR_SOURCES, LidarAsset
 from core import package_sources, provenance
 
 URL = "https://data.nssl.noaa.gov/thredds/fileServer/x/clampsdlppiC1.b1.20230609.120000.cdf"
 
 
 class _Response(io.BytesIO):
+    headers = {"Content-Length": "1000"}
+
     def __enter__(self):
         return self
 
@@ -33,7 +34,7 @@ def network(monkeypatch):
     def opener(request, timeout):
         calls.append(request.full_url)
         return _Response(b"x" * 1000)
-    monkeypatch.setattr(clamps_common, "_urlopen_with_retry", opener)
+    monkeypatch.setattr(clamps_common, "urlopen_with_retry", opener)
     provenance.reset(active=True)
     yield calls
     provenance.reset(active=False)
@@ -51,6 +52,14 @@ def test_a_download_is_kept_and_reused_while_its_hash_matches(network, tmp_path)
     clamps_common.download_to_cache("raw lidar", URL, tmp_path, "f.cdf")
     assert len(network) == 2 and path.read_bytes() == b"x" * 1000
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_a_download_reports_its_progress(network, tmp_path):
+    got = []
+    clamps_common.download_to_cache("raw lidar", URL, tmp_path, "f.cdf", progress=lambda n, total: got.append((n, total)))
+    assert got == [(1000, 1000)]
+    clamps_common.download_to_cache("raw lidar", URL, tmp_path, "f.cdf", progress=got.append)
+    assert len(got) == 1                                  # from the cache: nothing to report
 
 
 def test_a_case_package_copy_comes_first(network, monkeypatch, tmp_path):

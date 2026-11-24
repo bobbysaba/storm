@@ -1,0 +1,209 @@
+# STORM settings. Copy to storm.toml in the STORM folder and edit (or point
+# STORM_CONFIG at a file elsewhere). profiles/ holds ready-made versions for
+# known setups. Every key is described in docs/configuration.md.
+#
+# Relative paths are resolved against the STORM folder. Secrets (passwords,
+# API keys) go in .env, not here: see .env.example.
+
+# The MQTT broker your team shares. VEHICLE and MONITOR need it; VIEWER and
+# ARCHIVE launch without it. Without a host STORM runs with no live vehicles,
+# annotations, drawings, cones or scan sectors.
+[mqtt]
+host = "broker.example.org"
+# defaults to 8883, or 1883 with tls = "none"
+port = 8883
+
+# none: plain TCP; server: TLS, broker verified; mutual: TLS plus a client
+# certificate
+tls = "server"
+# CA bundle for the broker; leave out to use the system trust store
+# ca_cert = "certs/ca.pem"
+# tls = "mutual" needs these two:
+# cert_file = "certs/client.pem.crt"
+# key_file = "certs/client-private.pem.key"
+
+# login, if the broker uses one; the password goes in .env as
+# STORM_MQTT_PASSWORD
+# username = ""
+
+# put in front of every client ID (the vehicle ID), for brokers that only
+# allow some prefixes
+# client_id_prefix = ""
+
+# never publish, for a login the broker only lets subscribe; VEHICLE and
+# MONITOR won't launch with it
+# read_only = false
+
+# first level of every topic (<topic_root>/vehicles/<id> and so on); every
+# STORM client and headless publisher on the team must use the same one
+# topic_root = "storm"
+
+# hour (UTC, 0-23) when shared annotations, drawings and scan sectors expire;
+# pick one between your field days
+# daily_reset_utc = 8
+# for a broker that doesn't send retained messages on wildcard subscriptions
+# (AWS IoT): a URL with the day's shared items, read at launch
+# shared_items_url = "https://data.example.org/storm/current.json"
+
+# Optional: a separate, read-only login for VIEWER mode, so people without the
+# team login can watch. Keys left out come from [mqtt]. Without this table
+# VIEWER uses the [mqtt] login and never publishes. Its password goes in .env
+# as STORM_MQTT_VIEWER_PASSWORD.
+# [mqtt.viewer]
+# username = "viewer"
+# client_id_prefix = "viewer-"
+
+# Where the map opens, also the fallback position while your vehicle has none
+# (ARCHIVE's first radar site, a new scan sector). Default: the middle of the contiguous US, zoom 4.
+# [map]
+# home_lat = 39.5
+# home_lon = -98.35
+# zoom = 4
+# ARCHIVE's local clocks beside UTC (IANA names, up to 3); default: this
+# computer's own zone
+# time_zones = ["America/Chicago", "America/Denver"]
+# PREV LOCS: past deployment locations, a CSV (lat, lon, ...) file or URL
+# deployment_locations = "locs/deployments.csv"
+
+# Display units: temperature "F" or "C", distance "mi" or "km". Wind is
+# always in knots.
+# [units]
+# temperature = "F"
+# distance = "mi"
+
+# Recorded broker traffic for ARCHIVE (docs/archive-data.md). The recorder
+# (python -m archive.recorder, or MONITOR's File > Record Broker Traffic)
+# writes to `recordings`; ARCHIVE reads `history` in order, first file wins:
+# folders, http(s) URL roots, or provider names. Default: the providers that
+# are on, then `recordings`.
+# [archive]
+# recordings = "recordings"
+# history = ["recordings", "https://data.example.org/storm/history"]
+# for files recorded under another topic root:
+# history_prefix = "storm"
+#
+# Vehicle observations for ARCHIVE from your loggers' own files: folders,
+# http(s) URL roots, or provider names, tried in order for each vehicle.
+# Default: the providers that are on. Vehicles no source has move on their
+# recorded positions. Files are read with [obs_columns].
+# vehicle_obs = ["vehicle-obs"]
+# where a vehicle's file for a UTC day sits below each folder or URL root
+# vehicle_obs_path = "{vehicle}/{date}.csv"
+# a logger whose files use another name than the broker ID
+# vehicle_aliases = { p1 = "probe1" }
+#
+# The session window: from session_start_utc (hour UTC) on the date you pick,
+# at most session_hours long (start + hours <= 48), ended by the day's last
+# activity from session_activity_after_hours after the start. The defaults,
+# 00Z to 06Z the next day, suit a field day in the Americas.
+# session_start_utc = 0
+# session_hours = 30
+# session_activity_after_hours = 12
+#
+# Field campaigns for the case finder (Browse available cases), one table each:
+# [[archive.campaigns]]
+# name = "Spring 2026"
+# years = [2026]
+
+# Your vehicle loggers' CSV files, for live obs files (VEHICLE mode's obs
+# folder, headless) and ARCHIVE's vehicle_obs files: which columns hold what,
+# and which file in the folder is today's. Defaults are a plain CSV named
+# *YYYYMMDD.csv with an ISO 8601 `time` column and STORM's field names as
+# column names; "" means the file has no such column. Values are read as °C,
+# m/s, hPa and degrees unless [obs_columns.units] says otherwise. See
+# docs/configuration.md.
+# [obs_columns]
+# file = "*{date}.csv"       # {date} = the UTC day, YYYYMMDD; without it, the newest match
+# lat = "lat"
+# lon = "lon"
+# timestamp = "time"         # one ISO 8601 column, UTC when it has no zone
+# date = ""                  # or date + time columns, read with the formats below in UTC
+# time = ""
+# date_format = "%Y%m%d"
+# time_format = "%H%M%S"
+# temperature_c = "temperature_c"
+# dewpoint_c = "dewpoint_c"
+# wind_speed_ms = "wind_speed_ms"
+# wind_dir_deg = "wind_dir_deg"
+# pressure_mb = "pressure_mb"
+# heading_deg = "heading_deg"
+# columns in other units, converted as they're read:
+# [obs_columns.units]
+# temperature_c = "F"       # C, F, K
+# wind_speed_ms = "kt"      # m/s, kt, mph, km/h
+# pressure_mb = "inHg"      # hPa, mb, kPa, Pa, inHg
+#
+# More than one kind of logger: name each layout instead, and pick one in the
+# launch window (LOGGER FILE) or with headless's layout key. ARCHIVE's
+# vehicle_obs files are read with the first. profiles/nssl.toml has two.
+# [obs_columns.truck]
+# label = "Truck logger"
+# temperature_c = "temp"
+# [obs_columns.gps]
+# label = "GPS only"
+# file = "*_gps.csv"
+# temperature_c = ""
+
+# Your own data feeds, one [[sources]] table each: station plots in SURFACE
+# (kind = "station_obs"), GeoJSON on the map (kind = "overlay"), soundings
+# in the Skew-T viewer (kind = "sounding") or contour lines of gridded fields,
+# run by run (kind = "contours", one at most). Every key and more examples:
+# docs/data-sources.md. API keys go in .env under the name api_key_env gives.
+# An AI coding agent can write these with you: docs/agent-setup.md.
+# [[sources]]
+# id = "farm"
+# kind = "station_obs"
+# name = "Farm Network"
+# short = "FARM"
+# url = "https://data.example.org/farm/current.json"
+# api_key_env = "FARM_API_KEY"
+# rows = "results"
+# fields = { station = "id", lat = "lat", lon = "lon", time = "time", temperature_c = "t", dewpoint_c = "td", wind_speed_ms = "ws", wind_dir_deg = "wd" }
+# units = { temperature_c = "F", dewpoint_c = "F", wind_speed_ms = "mph" }
+#
+# [[sources]]
+# id = "targets"
+# kind = "overlay"
+# name = "Target areas"
+# short = "TGT"
+# url = "https://data.example.org/targets.geojson"
+# style = { color = "#ff8800", label = "name" }
+# archive = false             # true: ARCHIVE shows it too (fixed layers)
+#
+# [[sources]]
+# id = "uni"
+# kind = "sounding"
+# name = "University Sondes"
+# short = "UNI"
+# url = "https://data.example.org/sondes/index.json"   # [{time, url, lat, lon}, ...]
+# format = "sharppy"          # each profile: sharppy, csv or json
+# lookback_hours = 12
+#
+# [[sources]]
+# id = "meso"
+# kind = "contours"
+# name = "Regional mesoanalysis"
+# short = "MESO"
+# url = "https://data.example.org/meso"   # index.json, <run>/metadata.json, <run>/<field>.pmtiles
+
+# A server's key and CA, for every URL below url (sources, history, shared
+# items, ...); the key goes to no other server. docs/configuration.md.
+# [[auth]]
+# url = "https://data.example.org"
+# api_key_env = "FARM_API_KEY"
+# ca_cert = "certs/example-intermediate.pem"
+
+# Data providers: extra layers for a known setup (providers/<name>/). NSSL's
+# is built in and on without this table: ARCHIVE's NSSL button (its public
+# THREDDS data) for every team. enabled = false leaves it out; its live API
+# layers need profiles/nssl.toml and NSSL_API_KEY (docs/nssl.md).
+# [providers.nssl]
+# enabled = false
+#
+# Your own code provider, for feeds a [[sources]] table can't describe: a
+# package in providers/<name>/ (git-ignored) or at path. Other keys are its
+# options. docs/providers.md.
+# [providers.farm]
+# enabled = true
+# path = "~/farm-storm"
+# api_key_env = "FARM_API_KEY"

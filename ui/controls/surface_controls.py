@@ -5,25 +5,26 @@ from PyQt6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QFrame, QToolButt
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from config import ACCENT_COLOR
+from ui.layers.surface_plot_layer import ASOS_FRESH_MIN
 from ui import palette as P
 from ui.widgets.drawer import Drawer
 
 
 class SurfaceControls(Drawer):
-    """Collapsible drawer for surface observation overlays."""
+    """Collapsible drawer for surface observation overlays: a button for each
+    station_obs source in storm.toml that sits in the drawer, then ASOS."""
 
-    ok_toggled   = pyqtSignal(bool)
-    wtm_toggled  = pyqtSignal(bool)
-    ks_toggled   = pyqtSignal(bool)
-    co_toggled   = pyqtSignal(bool)
-    ne_toggled   = pyqtSignal(bool)
-    sd_toggled   = pyqtSignal(bool)
+    source_toggled = pyqtSignal(str, bool)   # source id, on
     asos_toggled = pyqtSignal(bool)
     asos_bbox_requested = pyqtSignal()
     plots_toggled = pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, sources=()):
         super().__init__(parent)
+        # station_obs sources (data/sources.py) shown in the drawer
+        self._sources = [s for s in sources if s.where == "drawer"]
+        # every station_obs source, for the legend (toolbar ones too)
+        self._all_sources = list(sources)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -44,27 +45,22 @@ class SurfaceControls(Drawer):
         r1.setContentsMargins(0, 0, 0, 0)
         r1.setSpacing(4)
 
-        self._btn_ok = self._btn("OK")
-        self._btn_wtm = self._btn("WTM")
-        self._btn_ks = self._btn("KS")
-        self._btn_co = self._btn("CO")
-        self._btn_ne = self._btn("NE")
-        self._btn_sd = self._btn("SD")
+        self._source_btns: dict[str, QToolButton] = {}
+        for source in self._sources:
+            btn = self._btn(source.short)
+            missing = source.missing_key()
+            if missing:
+                btn.setEnabled(False)
+                btn.setToolTip(f"{source.name}: needs {missing} in .env")
+            else:
+                btn.setToolTip(source.name)
+            btn.toggled.connect(lambda on, key=source.id: self.source_toggled.emit(key, on))
+            r1.addWidget(btn)
+            self._source_btns[source.id] = btn
         self._btn_asos = self._btn("ASOS")
-        self._btn_ok.toggled.connect(self.ok_toggled.emit)
-        self._btn_wtm.toggled.connect(self.wtm_toggled.emit)
-        self._btn_ks.toggled.connect(self.ks_toggled.emit)
-        self._btn_co.toggled.connect(self.co_toggled.emit)
-        self._btn_ne.toggled.connect(self.ne_toggled.emit)
-        self._btn_sd.toggled.connect(self.sd_toggled.emit)
+        self._btn_asos.setToolTip("ASOS stations inside a box you draw on the map")
         self._btn_asos.toggled.connect(self.asos_toggled.emit)
         self._btn_asos.toggled.connect(self._on_asos_button_toggled)
-        r1.addWidget(self._btn_ok)
-        r1.addWidget(self._btn_wtm)
-        r1.addWidget(self._btn_ks)
-        r1.addWidget(self._btn_co)
-        r1.addWidget(self._btn_ne)
-        r1.addWidget(self._btn_sd)
         r1.addWidget(self._btn_asos)
 
         r1.addWidget(self._vdiv())
@@ -170,8 +166,7 @@ class SurfaceControls(Drawer):
 
     def _diagnostics_html(self, diagnostics: dict) -> str:
         parts = []
-        for key in ("ok", "wtm", "ks", "co", "ne", "asos"):
-            info = diagnostics.get(key)
+        for key, info in diagnostics.items():
             if not info:
                 continue
             label = info.get("label", key.upper())
@@ -184,13 +179,20 @@ class SurfaceControls(Drawer):
         return "<br/>".join(parts)
 
     def _legend_html(self) -> str:
+        """One age line per set of thresholds: the sources that share it, then
+        ASOS."""
         green = f'<span style="color:{P.OK};">●</span>'
         yellow = f'<span style="color:{P.WARN};">●</span>'
         red = f'<span style="color:{P.ERROR};">●</span>'
-        return (
-            f"Mesonet age: {green} ≤ 5 min  {yellow} ≤ 10 min  {red} > 10 min<br/>"
-            f"ASOS age: {green} ≤ 70 min  {yellow} ≤ 90 min  {red} > 90 min"
-        )
+        groups: dict[tuple[float, float], list[str]] = {}
+        for source in self._all_sources:
+            groups.setdefault(source.fresh_min, []).append(escape(source.short))
+        groups.setdefault(ASOS_FRESH_MIN, []).append("ASOS")
+        lines = []
+        for (g, a), names in groups.items():
+            lines.append(f"{' '.join(names)} age: {green} ≤ {g:g} min  {yellow} ≤ {a:g} min  "
+                         f"{red} > {a:g} min")
+        return "<br/>".join(lines)
 
     @staticmethod
     def _status_html(text: str) -> str:
@@ -214,8 +216,16 @@ class SurfaceControls(Drawer):
 
     def _source_buttons(self) -> dict:
         # ASOS is left out: it needs a box drawn on the map each session
-        return {"ok": self._btn_ok, "wtm": self._btn_wtm, "ks": self._btn_ks,
-                "co": self._btn_co, "ne": self._btn_ne, "sd": self._btn_sd}
+        return dict(self._source_btns)
+
+    def source_button(self, key: str) -> QToolButton | None:
+        return self._source_btns.get(key)
+
+    def set_source_checked(self, key: str, on: bool = True) -> None:
+        """Turn a source on (the launch window's auto-start), if it can be."""
+        btn = self._source_btns.get(key)
+        if btn is not None and btn.isEnabled() and not btn.isHidden():
+            btn.setChecked(on)
 
     def save_state(self) -> dict:
         return {
@@ -225,15 +235,13 @@ class SurfaceControls(Drawer):
 
     def restore_state(self, state: dict) -> None:
         for key in state.get("sources") or ():
-            btn = self._source_buttons().get(key)
-            if btn is not None:
-                btn.setChecked(True)
+            self.set_source_checked(key)
         if "plots" in state:
             self._chk_show_plots.setChecked(bool(state["plots"]))
 
     def configure_for_archive(self) -> None:
         """ARCHIVE: ASOS only, replayed on the archive clock from a box drawn
-        on the map (the regional mesonets aren't archived)."""
+        on the map (the station_obs sources are live only)."""
         for btn in self._source_buttons().values():
             btn.hide()
         self._btn_asos.setToolTip("Replay the ASOS stations inside a box you draw on the map")

@@ -1,9 +1,10 @@
 """Find the PPI scans in a raw-lidar file's rays (archive/fetchers/
-raw_lidar_archive_fetcher.py RawLidarRays): azimuth sweeps at a low
-elevation (under 45 deg), the only scans STORM shows -- on the map, like
-radar volumes. They come from the lidars' PPI files and the sector sweeps in
-their CSM files; anything else in those files (high-elevation VAD rings,
-fixed pointing) is left out.
+raw_lidar_archive_fetcher.py RawLidarRays): azimuth sweeps at 5 deg
+elevation or less, scanning as a radar does: the only scans STORM shows -- on
+the map, like radar volumes. They come from the lidars' PPI files and the
+sector sweeps in their CSM files; anything else in those files is another
+scan strategy and is left out here (higher sweeps such as the VAD rings,
+which reach STORM as the processed VAD winds; fixed pointing).
 
 Rays belong to one scan while the scan number stays the same and no more
 than MAX_GAP_S passes between rays. Whether rays sweep comes from how the
@@ -24,7 +25,7 @@ import numpy as np
 MAX_GAP_S = 10.0          # a longer pause between rays ends a scan
 SWEEP_DEG = 20.0          # an azimuth span beyond this is a sweep
 FLAT_DEG = 2.0            # a PPI's elevation varies less than this
-MAX_ELEVATION_DEG = 45.0  # above this a sweep is a VAD ring, not a PPI
+MAX_ELEVATION_DEG = 5.0   # above this a sweep is another scan strategy (VAD rings), not a PPI
 
 
 @dataclass(frozen=True, eq=False)       # scans compare by identity (they hold arrays)
@@ -60,7 +61,7 @@ def _azimuth_span(azimuth: np.ndarray) -> float:
 def _is_ppi(elevation: np.ndarray, pointing: np.ndarray) -> bool:
     if elevation.size < 3 or _azimuth_span(pointing) <= SWEEP_DEG:
         return False
-    return float(np.ptp(elevation)) < FLAT_DEG and float(np.median(elevation)) < MAX_ELEVATION_DEG
+    return float(np.ptp(elevation)) < FLAT_DEG and float(np.median(elevation)) <= MAX_ELEVATION_DEG
 
 
 def _make(idx, times, elevation, known) -> LidarScan:

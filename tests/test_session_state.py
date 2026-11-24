@@ -14,10 +14,9 @@ from PyQt6.QtWidgets import QApplication
 from ui import session_state
 from ui.app.drawer_manager import DEFAULT_PINNED, DrawerManager
 from ui.controls.hazard_controls import HazardControls
-from ui.controls.mesoanalysis_controls import MESO_PRODUCT_GROUPS, MesoanalysisControls
 from ui.controls.radar_controls import RadarControls
 from ui.controls.satellite_controls import SatelliteControls
-from ui.controls.sfcoa_controls import SfcoaControls
+from ui.controls.contour_controls import ContourControls
 from ui.controls.surface_controls import SurfaceControls
 
 
@@ -167,51 +166,51 @@ def test_hazards_keep_launch_spc_product(app):
     assert dst._active_spc_mode() == "outlook" and dst._btn_mds.isChecked()
 
 
+def _station_sources(*ids):
+    import settings
+    text = "".join(f'[[sources]]\nid = "{i}"\nkind = "station_obs"\nurl = "https://x.test/{i}"\n'
+                   f'fields = {{ station = "id", lat = "lat", lon = "lon", temperature_c = "t" }}\n'
+                   for i in ids)
+    import tomllib
+    return settings.parse_sources(tomllib.loads(text)["sources"], settings.PROJECT_DIR)
+
+
 def test_surface_round_trip_skips_asos(app):
-    src = SurfaceControls()
-    src._btn_ok.setChecked(True)
-    src._btn_ks.setChecked(True)
+    sources = _station_sources("ok", "wtm", "ks")
+    src = SurfaceControls(sources=sources)
+    src.source_button("ok").setChecked(True)
+    src.source_button("ks").setChecked(True)
     src._btn_asos.setChecked(True)
     src._chk_show_plots.setChecked(False)
     state = src.save_state()
     assert state == {"sources": ["ok", "ks"], "plots": False}
 
-    dst = SurfaceControls()
+    dst = SurfaceControls(sources=sources)
     dst.restore_state(state)
-    assert dst._btn_ok.isChecked() and dst._btn_ks.isChecked()
+    assert dst.source_button("ok").isChecked() and dst.source_button("ks").isChecked()
     assert not dst._btn_asos.isChecked() and not dst.plots_visible()
 
 
-def _sfcoa_products(*ids):
+def _contour_products(*ids):
     return [SimpleNamespace(variable_id=v, group="thermo", label=v.upper(), long_name="",
                             units="") for v in ids]
 
 
-def test_sfcoa_products_wait_for_listing(app):
-    dst = SfcoaControls()
+def test_contour_products_wait_for_listing(app):
+    dst = ContourControls()
     toggled = []
     dst.product_toggled.connect(lambda pid, on: toggled.append((pid, on)))
     dst.restore_state({"products": ["mlcape", "sbcape"]})
     assert dst.save_state() == {"products": ["mlcape", "sbcape"]}
 
-    dst.set_products(_sfcoa_products("sbcape", "t2m"))
+    dst.set_products(_contour_products("sbcape", "t2m"))
     assert dst.active_products() == {"sbcape"} and toggled == [("sbcape", True)]
     assert dst._product_buttons["sbcape"].isChecked()
     # not offered yet: still pending, and still saved
     assert dst.save_state() == {"products": ["mlcape", "sbcape"]}
 
-    dst.set_products(_sfcoa_products("sbcape", "mlcape"))
+    dst.set_products(_contour_products("sbcape", "mlcape"))
     assert dst.active_products() == {"sbcape", "mlcape"}
-
-
-def test_meso_products_wait_for_listing(app):
-    product_id = MESO_PRODUCT_GROUPS[0][1][0][0]
-    dst = MesoanalysisControls()
-    dst.restore_state({"products": [product_id]})
-    assert dst.active_products() == set()
-    dst.set_products([SimpleNamespace(product_id=product_id)])
-    assert dst.active_products() == {product_id}
-    assert dst._product_buttons[product_id].isChecked()
 
 
 # ── drawer manager ─────────────────────────────────────────────────────
@@ -308,6 +307,8 @@ class _Host:
 
 for _name in ("_session_mode", "_session_skipped", "_collect_session_state", "_restore_session"):
     setattr(_Host, _name, MainWindow.__dict__[_name])
+for _name in ("_source_buttons_state", "_restore_source_buttons"):
+    setattr(_Host, _name, getattr(MainWindow, _name))
 
 
 def _host(settings, monkeypatch, monitor=False, archive=False, launch_sat="", launch_spc=False):
@@ -317,12 +318,11 @@ def _host(settings, monkeypatch, monitor=False, archive=False, launch_sat="", la
     h._launch_auto_satellite, h._launch_auto_spc = launch_sat, launch_spc
     h._radar_fetcher = object()
     h.radar_controls = _FakeRadar()
-    for key in ("satellite", "hazards", "surface", "mesoanalysis", "sfcoa"):
+    for key in ("satellite", "hazards", "surface", "contours"):
         setattr(h, MainWindow._SESSION_CONTROLS[key], _FakeControl({"k": key}))
     h.inits = []
-    h._init_mesoanalysis = lambda: h.inits.append("mesoanalysis")
-    h._init_sfcoa = lambda: h.inits.append("sfcoa")
-    h._drawers, h.buttons = _manager(settings, "radar", "hazards", "sounding", "surface", "sfcoa")
+    h._init_contour = lambda: h.inits.append("contours")
+    h._drawers, h.buttons = _manager(settings, "radar", "hazards", "sounding", "surface", "contours")
     for key in h.buttons:
         h._drawers.set_pinned(key, True)          # pinned: several stay open, as saved
     return h
@@ -335,8 +335,7 @@ _SAVED = {
     "satellite": {"mode": "meso1"},
     "hazards": {"spc_mode": "tor"},
     "surface": {"sources": ["ok"]},
-    "mesoanalysis": {"products": []},
-    "sfcoa": {"products": ["sbcape"]},
+    "contours": {"products": ["sbcape"]},
 }
 
 
@@ -351,7 +350,7 @@ def test_restore_live(app, settings, monkeypatch):
     assert h.hazard_controls.restored == [(_SAVED["hazards"], {"spc_mode": True})]
     assert h.surface_controls.restored == [(_SAVED["surface"], {})]
     # only layers with saved products start their fetcher
-    assert h.inits == ["sfcoa"] and h.mesoanalysis_controls.restored == []
+    assert h.inits == ["contours"]
     # SOUNDING would enter its click mode, so it stays closed
     assert h._drawers.open_keys() == ["hazards", "radar"]
 
@@ -392,4 +391,4 @@ def test_collect_round_trips(app, settings, monkeypatch):
     state = h._collect_session_state()
     assert state["drawers"] == ["radar"]
     assert state["radar"] == {"data": True} and state["radar_site"] == "KTLX"
-    assert state["sfcoa"] == {"k": "sfcoa"}
+    assert state["contours"] == {"k": "contours"}

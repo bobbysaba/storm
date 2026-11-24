@@ -195,26 +195,6 @@ class ArchiveRadarFetcher(QObject):
 
         threading.Thread(target=finish, daemon=True, name="archive-radar-cleanup").start()
 
-    def set_station(self, station: str) -> None:
-        self._station = station.upper()
-        for path in self._raw_cache.values():
-            if path and os.path.exists(path):
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        self._raw_cache.clear()
-        self._parsed_cache.clear()
-        self._decoded_cache.clear()
-        with self._index_lock:
-            self._index = []
-            self._index_pos = {}
-            self._index_keys = {}
-        self._target_scan = None
-        self._pending_fetches.clear()
-        self._pending_decodes.clear()
-        self.load_index()
-
     def set_product(self, pyart_field: str) -> None:
         """Switch the rendered product and reuse cached raw/decoded volumes."""
         if pyart_field == self._product:

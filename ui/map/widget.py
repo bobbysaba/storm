@@ -314,7 +314,7 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
     def clear_satellite_frame(self) -> None:
         self.run_js("if(window.stormClearSatelliteFrame) stormClearSatelliteFrame();")
 
-    def set_mesoanalysis_overlay(
+    def set_contour_overlay(
         self,
         product_id: str,
         tile_url: str,
@@ -328,75 +328,36 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         label_units: str = "",
     ) -> None:
         self.run_js(
-            "if(window.stormSetMesoanalysisOverlay) "
-            f"stormSetMesoanalysisOverlay({json.dumps(product_id)},"
+            "if(window.stormSetContourOverlay) "
+            f"stormSetContourOverlay({json.dumps(product_id)},"
             f"{json.dumps(tile_url)},"
             f"{json.dumps(source_layer)},{west},{south},{east},{north},"
             f"{int(minzoom)},{int(maxzoom)},"
             f"{json.dumps(str(label_units or ''))});"
         )
 
-    def set_sfcoa_overlay(
-        self,
-        product_id: str,
-        tile_url: str,
-        source_layer: str,
-        west: float,
-        south: float,
-        east: float,
-        north: float,
-        minzoom: int = 0,
-        maxzoom: int = 8,
-        label_units: str = "",
-    ) -> None:
-        self.run_js(
-            "if(window.stormSetSfcoaOverlay) "
-            f"stormSetSfcoaOverlay({json.dumps(product_id)},"
-            f"{json.dumps(tile_url)},"
-            f"{json.dumps(source_layer)},{west},{south},{east},{north},"
-            f"{int(minzoom)},{int(maxzoom)},"
-            f"{json.dumps(str(label_units or ''))});"
-        )
-
-    def register_sfcoa_mbtiles(self, tile_key: str, mbtiles_path: str) -> None:
+    def register_contour_tiles(self, tile_key: str, path: str) -> None:
+        """A contours field's tile file, served at storm://app/contourtiles/<tile_key>/."""
         handler = getattr(self, "_scheme_handler", None)
-        if handler is not None and hasattr(handler, "set_sfcoa_mbtiles"):
-            handler.set_sfcoa_mbtiles(tile_key, mbtiles_path)
+        if handler is not None and hasattr(handler, "set_contour_tiles"):
+            handler.set_contour_tiles(tile_key, path)
 
-    def set_sfcoa_visible(self, visible: bool) -> None:
+    def set_contour_visible(self, visible: bool) -> None:
         self.run_js(
-            f"if(window.stormSetSfcoaVisible) "
-            f"stormSetSfcoaVisible({'true' if visible else 'false'});"
+            f"if(window.stormSetContourVisible) "
+            f"stormSetContourVisible({'true' if visible else 'false'});"
         )
 
-    def set_sfcoa_opacity(self, opacity: float) -> None:
+    def set_contour_opacity(self, opacity: float) -> None:
         self.run_js(
-            f"if(window.stormSetSfcoaOpacity) "
-            f"stormSetSfcoaOpacity({opacity:.3f});"
+            f"if(window.stormSetContourOpacity) "
+            f"stormSetContourOpacity({opacity:.3f});"
         )
 
-    def clear_sfcoa_overlay(self, product_id: str = "") -> None:
+    def clear_contour_overlay(self, product_id: str = "") -> None:
         self.run_js(
-            f"if(window.stormClearSfcoaOverlay) "
-            f"stormClearSfcoaOverlay({json.dumps(str(product_id or ''))});"
-        )
-
-    def set_mesoanalysis_visible(self, visible: bool) -> None:
-        self.run_js(
-            f"if(window.stormSetMesoanalysisVisible) "
-            f"stormSetMesoanalysisVisible({'true' if visible else 'false'});"
-        )
-
-    def set_mesoanalysis_opacity(self, opacity: float) -> None:
-        self.run_js(
-            f"if(window.stormSetMesoanalysisOpacity) "
-            f"stormSetMesoanalysisOpacity({opacity:.3f});"
-        )
-
-    def clear_mesoanalysis_overlay(self, product_id: str = "") -> None:
-        self.run_js(
-            f"if(window.stormClearMesoanalysisOverlay) "
-            f"stormClearMesoanalysisOverlay({json.dumps(str(product_id or ''))});"
+            f"if(window.stormClearContourOverlay) "
+            f"stormClearContourOverlay({json.dumps(str(product_id or ''))});"
         )
 
     def set_nlcd_visible(self, visible: bool) -> None:
@@ -415,12 +376,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         self.run_js(
             f"if(window.stormSetSatelliteBasemapVisible) "
             f"stormSetSatelliteBasemapVisible({'true' if visible else 'false'});"
-        )
-
-    def set_satellite_basemap_opacity(self, opacity: float) -> None:
-        self.run_js(
-            f"if(window.stormSetSatelliteBasemapOpacity) "
-            f"stormSetSatelliteBasemapOpacity({opacity:.3f});"
         )
 
     def set_meso_sectors(self, sectors: dict):
@@ -640,12 +595,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         flag = 'true' if active else 'false'
         self.run_js(f"if(window.stormSetAsosBoxMode) stormSetAsosBoxMode({flag});")
 
-    def fit_bounds(self, west: float, south: float, east: float, north: float, padding: int = 40) -> None:
-        """Fly the map to fit the given bounding box with optional padding (px)."""
-        self.run_js(
-            f"map.fitBounds([[{west},{south}],[{east},{north}]], {{padding:{padding}}});"
-        )
-
     def add_station_plot(self, vehicle_id: str, lat: float, lon: float, png_bytes: bytes) -> None:
         import base64
         b64 = base64.b64encode(png_bytes).decode("ascii")
@@ -728,9 +677,6 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
             f"if(window.stormSetScanSectors) stormSetScanSectors({json.dumps(json.dumps(geojson))});"
         )
 
-    def set_scan_sectors_visible(self, visible: bool) -> None:
-        self.run_js(f"if(window.stormSetScanSectorsVisible) stormSetScanSectorsVisible({'true' if visible else 'false'});")
-
     # ── storm track (archive TRACK) ──
     def set_track_geojson(self, geojson: dict) -> None:
         self.run_js(f"if(window.stormSetTrackGeoJSON) stormSetTrackGeoJSON({json.dumps(json.dumps(geojson))});")
@@ -790,6 +736,17 @@ class MapWidget(QWidget if SAFE_MAP_MODE else QWebEngineView):
         colored by EF rating; None clears them."""
         data = json.dumps(geojson or {"type": "FeatureCollection", "features": []})
         self.run_js(f"if(window.stormSetDamagePaths) stormSetDamagePaths({json.dumps(data)});")
+
+    def set_source_overlay(self, source_id: str, geojson: dict, style: dict) -> None:
+        """A [[sources]] overlay's GeoJSON (data/fetchers/overlay_fetcher.py),
+        drawn with its style table; shown."""
+        data, style_json = json.dumps(geojson), json.dumps(style)
+        self.run_js(f"if(window.stormSetSourceOverlay) stormSetSourceOverlay("
+                    f"{json.dumps(source_id)}, {json.dumps(data)}, {json.dumps(style_json)});")
+
+    def set_source_overlay_visible(self, source_id: str, visible: bool) -> None:
+        self.run_js(f"if(window.stormSetSourceOverlayVisible) stormSetSourceOverlayVisible("
+                    f"{json.dumps(source_id)}, {'true' if visible else 'false'});")
 
     def set_spc_geojson(
         self,

@@ -65,13 +65,13 @@ class MainWindowTrailsMixin:
 
     def _trail_observations(self) -> dict:
         """Each vehicle's whole day of observations (time-ordered), the
-        one-second FOFS data where there is some, then the CLAMPS trailers'
+        one-second vehicle obs where there are some, then the CLAMPS trailers'
         surface met, else the recorded MQTT history."""
         found = {}
         dense = getattr(self, "_archive_vehicle_obs", None)
         if dense is not None:
             found.update(dense.observations_by_vehicle())
-        surface = getattr(self, "_archive_clamps_surface", None)
+        surface = getattr(self, "_archive_surface_playback", None)
         if surface is not None:
             for trailer, rows in surface.rows.items():
                 found.setdefault(trailer, rows)

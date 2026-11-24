@@ -4,13 +4,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
 from ui import palette as P
+from ui.session_state import renamed
 
 
 DEFAULT_LAYERS: list[str] = [
     "nlcd",
     "satellite",
-    "mesoanalysis",
-    "sfcoa",
+    "contours",
     "radar",
     "cwa",
     "spc_outlook",
@@ -27,19 +27,13 @@ DEFAULT_LAYERS: list[str] = [
     "annotations",
     "storm_cones",
     "route",
-    "ok_mesonet",
-    "wtm",
-    "ks_mesonet",
-    "co_mesonet",
-    "ne_mesonet",
     "asos",
 ]
 
 LAYER_LABELS: dict[str, str] = {
     "satellite":    "Satellite",
     "nlcd":         "NLCD",
-    "mesoanalysis": "Mesoanalysis",
-    "sfcoa":       "SFCOA",
+    "contours":       "Contours",   # the contours source's short name when there is one
     "radar":        "Radar",
     "cwa":          "CWA",
     "spc_outlook":  "SPC Outlook",
@@ -56,19 +50,13 @@ LAYER_LABELS: dict[str, str] = {
     "annotations":  "Annotations",
     "storm_cones":  "Storm Cones",
     "route":        "Route",
-    "ok_mesonet":   "OK Mesonet",
-    "wtm":          "WTM",
-    "ks_mesonet":   "KS Mesonet",
-    "co_mesonet":   "CO Mesonet",
-    "ne_mesonet":   "NE Mesonet",
     "asos":         "ASOS",
 }
 
 MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "satellite":    ["sat-layer", "sat-wms-layer"],
     "nlcd":         ["nlcd-landcover"],
-    "mesoanalysis": ["mesoanalysis-line", "mesoanalysis-label"],
-    "sfcoa":       ["sfcoa-fill", "sfcoa-line", "sfcoa-label"],
+    "contours":       ["contour-fill", "contour-line", "contour-label"],
     "radar":        ["radar-overlay"],
     "cwa":          ["cwa-fill", "cwa-line", "cwa-label"],
     "spc_outlook":  ["spc-cat-fill", "spc-cat-line"],
@@ -96,22 +84,27 @@ MAPLIBRE_LAYERS: dict[str, list[str]] = {
     "annotations":  [],
     "storm_cones":  [],
     "route":        ["route-casing", "route-line"],
-    "ok_mesonet":   [],
-    "wtm":          [],
-    "ks_mesonet":   [],
-    "co_mesonet":   [],
-    "ne_mesonet":   [],
     "asos":         ["asos-plots"],
 }
+
+
+def register_layer(key: str, label: str, maplibre_layers: list[str], before: str = "asos") -> None:
+    """Add a layer that comes from storm.toml ([[sources]]); call before the
+    pill is built. New ones go just under *before* in the default order."""
+    if key in LAYER_LABELS:
+        return
+    LAYER_LABELS[key] = label
+    MAPLIBRE_LAYERS[key] = list(maplibre_layers)
+    DEFAULT_LAYERS.insert(DEFAULT_LAYERS.index(before) if before in DEFAULT_LAYERS else len(DEFAULT_LAYERS), key)
 
 _SETTINGS_KEY = "layers/order"
 
 
 def load_layer_order() -> list[str]:
-    s = QSettings("NSSL", "STORM")
+    s = QSettings()
     saved = s.value(_SETTINGS_KEY, None)
     if isinstance(saved, list):
-        merged = [k for k in saved if k in LAYER_LABELS]
+        merged = [k for k in renamed(saved) if k in LAYER_LABELS]
         for k in DEFAULT_LAYERS:
             if k not in merged:
                 merged.append(k)
@@ -120,7 +113,7 @@ def load_layer_order() -> list[str]:
 
 
 def save_layer_order(order: list[str]) -> None:
-    QSettings("NSSL", "STORM").setValue(_SETTINGS_KEY, order)
+    QSettings().setValue(_SETTINGS_KEY, order)
 
 
 class LayerOrderPill(QWidget):

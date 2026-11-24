@@ -1,4 +1,4 @@
-"""C18: lidar wind profiles (VAD / CSM winds) from the lidar truck and the
+"""C18: lidar VAD wind profiles from the lidar truck and the
 CLAMPS trailers: the shared THREDDS listing, parsing real files' quirks,
 the session span and the fetcher that keeps its sets."""
 import time
@@ -8,10 +8,10 @@ from urllib.error import URLError
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from archive.fetchers import clamps_common
-from archive.fetchers import clamps_wind_archive_fetcher as wind
+from providers.nssl.archive import clamps_common
+from providers.nssl.archive import clamps_wind_archive_fetcher as wind
 from core.vad import MS_TO_KNOT
-from data import thredds_paths as paths
+from providers.nssl import paths
 from tests.clamps_fakes import FakeThredds, catalog_html, not_found, wind_file
 
 
@@ -71,12 +71,12 @@ def test_read_goes_through_package_sources_with_the_nssl_user_agent(monkeypatch)
         return b"data"
 
     monkeypatch.setattr(package_sources, "read_url", read_url)
-    assert clamps_common.read("clamps profiles", "https://x/f.cdf") == b"data"
+    assert clamps_common.read("instrument profiles", "https://x/f.cdf") == b"data"
     kind, url, agent, opener = seen[0]
-    assert (kind, url) == ("clamps profiles", "https://x/f.cdf")
+    assert (kind, url) == ("instrument profiles", "https://x/f.cdf")
     assert agent.startswith("Mozilla/5.0")
-    from archive.fetchers.vehicle_obs_archive_fetcher import _urlopen_with_retry
-    assert opener is _urlopen_with_retry
+    from data.auth import urlopen_with_retry
+    assert opener is urlopen_with_retry
 
 
 # -- parsing -------------------------------------------------------------------------
@@ -118,37 +118,27 @@ def test_parse_drops_failed_fits_under_the_speed_bound(tmp_path):
 def test_parse_drops_the_default_fill_without_r_sq(tmp_path):
     data = wind_file(tmp_path, _epoch(2022, 5, 25), [0.0], [0.1, 0.2],
                      wspd=[[8.0, 5e9]], wdir=[[180.0, 180.0]], rms=[[9.96921e36, 9.96921e36]])
-    (p,) = wind.parse_clamps_wind_netcdf(data, "DLTRUCK1-DL1-CSMWINDS")
+    (p,) = wind.parse_clamps_wind_netcdf(data, "DLTRUCK1-DL1-VAD")
     assert list(p.heights_m) == approx([100.0])
     assert p.rms_error == 0.0
 
 
-def test_csm_winds_need_signal_and_a_small_uncertainty(tmp_path):
-    """CSM fits to noise above the aerosol layer have r_sq near 1: intensity
-    (SNR + 1) and wspd_sigma sort them out."""
-    data = wind_file(
-        tmp_path, _epoch(2022, 5, 19), [0.0], [0.1, 0.5, 6.0, 9.0],
-        wspd=[[8.0, 12.0, 110.0, 15.0]], wdir=[[180.0] * 4], r_sq=[[0.99] * 4],
-        intensity=[[1.05, 1.02, 1.003, 1.03]], wspd_sigma=[[0.5, 1.0, 0.8, 3.5]],
-    )
-    (p,) = wind.parse_clamps_wind_netcdf(data, "DLTRUCK1-DL2-CSMWINDS")
-    assert list(p.heights_m) == approx([100.0, 500.0])
-
-
-def test_vad_files_are_not_filtered_on_intensity(tmp_path):
-    """A VAD averages a whole scan: CLAMPS2's good winds sit at 1.002."""
+def test_vad_files_keep_their_intensity_for_the_window_to_filter(tmp_path):
+    """The VAD window's floor is the user's to move: the reader keeps every
+    level with its intensity."""
     data = wind_file(tmp_path, _epoch(2026, 5, 15), [0.0], [0.5, 1.0],
                      wspd=[[10.0, 12.0]], wdir=[[200.0, 210.0]], r_sq=[[0.999, 0.999]],
                      intensity=[[1.002, 1.001]])
     (p,) = wind.parse_clamps_wind_netcdf(data, "CLAMPS2-VAD")
-    assert len(p.heights_m) == 2
+    assert len(p.heights_m) == 2 and list(p.intensity) == approx([1.002, 1.001])
+    assert list(p.above(1.002).heights_m) == approx([500.0])
 
 
 def test_sources_and_names():
     dirs = {s.platform_dir for s in wind.KNOWN_CLAMPS_WIND_SOURCES}
     assert dirs == {"dltruck/dltruck1", "clamps/clamps1", "clamps/clamps2"}
     assert wind.wind_source_name("DLTRUCK1-DL1-VAD") == "Lidar truck VAD (DL1)"
-    assert wind.wind_source_name("DLTRUCK1-DL2-CSMWINDS") == "Lidar truck CSM winds (DL2)"
+    assert not any("csmwinds" in s.datastream for s in wind.KNOWN_CLAMPS_WIND_SOURCES)
     assert wind.wind_source_name("CLAMPS1-VAD") == "CLAMPS1 trailer VAD"
 
 

@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from PyQt6.QtCore import QTimer
+
 from ui.map.radar_overlay import RadarOverlay
 from data.stations.sounding_stations import build_stations_geojson
 
@@ -61,9 +62,12 @@ class MainWindowArchiveMixin:
         self._drawings: dict = {}
         self._storm_cones: dict = {}
 
+        import settings
+        from settings import code_providers
         self._archive_mqtt = ArchiveMQTTReader(
             session_date=self._archive_time,
             parent=self,
+            renames=code_providers.team_vehicle_renames(settings.SETTINGS),
         )
         self._archive_mqtt.vehicle_position.connect(self._on_archive_vehicle_position)
         self._archive_mqtt.vehicles_cleared.connect(self._on_archive_vehicles_cleared)
@@ -103,7 +107,8 @@ class MainWindowArchiveMixin:
 
         # sounding dialog (built on first use) and archive fetcher (on-demand).
         self._sounding_dialog_obj = None
-        self._archive_sounding = ArchiveSoundingFetcher(parent=self)
+        # a provider's (archive_sounding_fetcher: NSSL's) adds its own soundings to OBS
+        self._archive_sounding = self._provider_archive_sounding or ArchiveSoundingFetcher(parent=self)
         self._archive_sounding.sounding_ready.connect(self._on_sounding_ready)
         self._archive_sounding.fetch_error.connect(self._on_archive_sounding_error)
         # also initialise the sounding-station layer so the map shows clickable sites.
@@ -225,8 +230,10 @@ class MainWindowArchiveMixin:
         # mode_changed is normally connected in _init_soundings (not called in archive).
         self.sounding_controls.mode_changed.connect(self._on_sounding_mode_changed)
         self.sounding_controls.set_hrrr_available(False)
-        # CLAMPS: lidar winds (VAD), trailer surface obs, sonde / TROPoe / CopterSonde
-        self._init_archive_clamps()
+        # a provider's instruments (NSSL's CLAMPS): lidar winds (VAD), trailer
+        # surface obs, its soundings on the truck's track, CopterSonde
+        self._init_archive_instruments()
+        self._init_archive_drawers()
         # Doppler lidar scans (LIDAR)
         self._init_archive_lidar()
 
@@ -249,26 +256,28 @@ class MainWindowArchiveMixin:
         self._later(0, self._layout_overlays)
 
     def _start_archive_vehicle_obs(self) -> None:
-        """Start the one-second observation source (FOFS mesonet files)."""
-        if (
-            self._archive_vehicle_obs_started
-            or not hasattr(self, "_archive_mqtt")
-        ):
+        """Start the one-second observation sources ([archive] vehicle_obs:
+        the user's logger files, or NSSL's FOFS mesonet files); vehicles no
+        source has move on their recorded MQTT positions."""
+        if self._archive_vehicle_obs_started or not hasattr(self, "_archive_mqtt"):
+            return
+        from archive.fetchers.vehicle_obs_archive_fetcher import ArchiveVehicleObsFetcher
+
+        fetcher = ArchiveVehicleObsFetcher(session_date=self._archive_time, parent=self)
+        if not fetcher.has_sources:
+            fetcher.deleteLater()
+            # "started" stays off: nothing to wait for (lidar, radar, session end)
+            self._archive_status.set_obs_status("OBS: MQTT fallback")
             return
         self._archive_vehicle_obs_started = True
 
         # Recorded MQTT vehicles carry icon types; the fetcher adds every
-        # vehicle THREDDS has files for this day (archive/fofs_index.py), so
-        # dates with no MQTT history still get one-second data.
+        # vehicle a source has files for this day, so dates with no MQTT
+        # history still get one-second data.
         vehicles = self._archive_mqtt.vehicle_metadata()
         self._archive_vehicle_obs_from_catalog = not vehicles
 
-        from archive.fetchers.vehicle_obs_archive_fetcher import ArchiveVehicleObsFetcher
-
-        self._archive_vehicle_obs = ArchiveVehicleObsFetcher(
-            session_date=self._archive_time,
-            parent=self,
-        )
+        self._archive_vehicle_obs = fetcher
         self._archive_vehicle_obs.observation_ready.connect(
             self._on_archive_dense_vehicle_position
         )
@@ -299,8 +308,8 @@ class MainWindowArchiveMixin:
             times += self._archive_vehicle_obs.activity_times()
         end = activity_end(self._archive_time, times)
         if end is None:
-            start, _ = session_bounds(self._archive_time)
-            end = start + timedelta(days=1)
+            start, cap = session_bounds(self._archive_time)
+            end = min(cap, start + timedelta(days=1))
         log.info("Archive session runs to %s (%d activity markers)", end.isoformat(), len(times))
         self._time_ctrl.set_window_end(end)
 
@@ -724,7 +733,10 @@ class MainWindowArchiveMixin:
 
     def _on_archive_radar_loading_changed(self, loading: bool) -> None:
         station = self._archive_radar.station if self._archive_radar is not None else ""
-        self.status_msg_label.setText(f"Radar: loading {station}…" if loading else "")
+        if loading:
+            self.status_msg_label.setText(f"Radar: loading {station}…")
+        elif self.status_msg_label.text().startswith("Radar: loading"):
+            self.status_msg_label.setText("")      # only its own: not a lidar's or a sounding's since
         if loading and hasattr(self, "_archive_status"):
             self._archive_status.set_radar_status(f"Radar: loading {station}…")
 

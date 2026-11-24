@@ -3,16 +3,16 @@ import logging
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 # file tailing and row parsing are shared with the headless publisher
-from headless.storm_headless.obs_tail import FieldMap, GPS_KA_FIELD_MAP, ObsFileTail
+from headless.storm_headless.obs_tail import FieldMap, ObsFileTail
 
-__all__ = ["FieldMap", "GPS_KA_FIELD_MAP", "ObsFileWatcher"]
+__all__ = ["FieldMap", "ObsFileWatcher"]
 
 log = logging.getLogger(__name__)
 
 
 class ObsFileWatcher(QObject):
     """
-    Watches today's *YYYYMMDD.txt inside a directory for new rows and
+    Watches today's logger file inside a directory for new rows and
     emits obs_ready with the latest one on each poll.  Rolls over to the next
     day's file automatically at midnight.
 
@@ -25,10 +25,9 @@ class ObsFileWatcher(QObject):
                  vehicle_id: str,
                  field_map: FieldMap | None = None,
                  poll_interval_s: int = 10,
-                 gps_mode: bool = False,
                  parent=None):
         super().__init__(parent)
-        self._tail    = ObsFileTail(data_dir, vehicle_id, field_map=field_map, gps_mode=gps_mode)
+        self._tail    = ObsFileTail(data_dir, vehicle_id, field_map=field_map)
         self._poll_ms = poll_interval_s * 1000
 
         self._timer = QTimer(self)

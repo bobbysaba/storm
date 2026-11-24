@@ -46,8 +46,14 @@ def test_fixed_pointing_isnt_a_sweep_while_the_truck_turns():
 
 
 def test_a_scan_number_spanning_elevations_is_split():
-    rays = _rays([(0, [(a, 2.0) for a in range(0, 360, 30)] + [(a, 8.0) for a in range(0, 360, 30)], 1, 1)])
-    assert [s.elevation_deg for s in classify_scans(rays)] == [2.0, 8.0]
+    rays = _rays([(0, [(a, 0.5) for a in range(0, 360, 30)] + [(a, 4.0) for a in range(0, 360, 30)], 1, 1)])
+    assert [s.elevation_deg for s in classify_scans(rays)] == [0.5, 4.0]
+
+
+def test_only_sweeps_at_5_degrees_or_less_are_ppis():
+    # higher sweeps are another scan strategy (the VAD rings), plotted differently
+    rays = _rays([_ppi(0, 1, el=5.0), _ppi(60, 2, el=8.0), _ppi(120, 3, el=20.0)])
+    assert [s.elevation_deg for s in classify_scans(rays)] == [5.0]
 
 
 def test_the_map_shows_the_latest_scan_held_until_the_next():

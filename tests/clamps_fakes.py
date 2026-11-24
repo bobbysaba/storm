@@ -5,7 +5,7 @@ from urllib.error import HTTPError, URLError
 import numpy as np
 import xarray as xr
 
-from data import thredds_paths as paths
+from providers.nssl import paths
 
 
 def catalog_html(folder: str, names) -> bytes:
@@ -26,7 +26,7 @@ class FakeThredds:
     every URL asked for."""
 
     def __init__(self, monkeypatch):
-        from archive.fetchers import clamps_common
+        from providers.nssl.archive import clamps_common
         self.folders: dict[str, list[str]] = {}
         self.files: dict[str, object] = {}
         self.broken_folders: set[str] = set()
@@ -68,17 +68,25 @@ def netcdf_bytes(tmp_path, data_vars: dict, name="f.nc") -> bytes:
 
 def wind_file(tmp_path, base_time, time_offset, height_km, wspd, wdir, rms=None, r_sq=None,
               intensity=None, wspd_sigma=None) -> bytes:
-    """A dlvad / dlcsmwinds file: no fill attributes, as on THREDDS."""
+    """A dlvad file: no fill attributes, as on THREDDS. The
+    gates given come after the blind ones, which hold values that would pass
+    every check (so a reader that kept them would show them)."""
+    from providers.nssl.archive.clamps_common import BLIND_GATES
+    rows = len(time_offset)
+
+    def blind(value, fill):
+        return np.hstack([np.full((rows, BLIND_GATES), fill), np.array(value, dtype="float64").reshape(rows, -1)])
     v = {
         "base_time": ((), np.int64(base_time)),
         "time_offset": ("time", np.array(time_offset, dtype="float64")),
-        "height": ("height", np.array(height_km, dtype="float64")),
-        "wspd": (("time", "height"), np.array(wspd, dtype="float32")),
-        "wdir": (("time", "height"), np.array(wdir, dtype="float32")),
+        "height": ("height", np.concatenate([np.full(BLIND_GATES, 0.03), np.array(height_km, dtype="float64")])),
+        "wspd": (("time", "height"), blind(wspd, 20.0).astype("float32")),
+        "wdir": (("time", "height"), blind(wdir, 90.0).astype("float32")),
     }
+    fills = {"rms": 0.5, "r_sq": 0.99, "intensity": 1.05, "wspd_sigma": 0.1}
     for key, value in (("rms", rms), ("r_sq", r_sq), ("intensity", intensity), ("wspd_sigma", wspd_sigma)):
         if value is not None:
-            v[key] = (("time", "height"), np.array(value, dtype="float32"))
+            v[key] = (("time", "height"), blind(value, fills[key]).astype("float32"))
     return netcdf_bytes(tmp_path, v, "wind.cdf")
 
 

@@ -3,10 +3,12 @@
 import logging
 import threading
 import time
+from dataclasses import replace
 import runtime_flags
 import config
+import settings
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from ui.theme import set_pill_status
 from data.update_checker import UpdateWorker
 from network.mqtt_client import MQTTClient
@@ -48,9 +50,10 @@ class MainWindowStatusMixin:
         show_gps = not (self._monitor or self._viewer or self._archive)
         self.gps_indicator.setVisible(show_gps)
 
-        self.conn_indicator = QLabel("● AWS OFFLINE")
+        self.conn_indicator = QLabel("● MQTT OFFLINE")
         self.conn_indicator.setProperty("pillRole", "badge")
         set_pill_status(self.conn_indicator, "error")
+        self._mqtt_connected = False
 
         self.date_label = QLabel("-- --- ----")
         self.clock_label = QLabel("--:--:-- UTC")
@@ -73,7 +76,7 @@ class MainWindowStatusMixin:
 
     def _init_archive_status(self):
         """ARCHIVE: a coordinates chip and a status popover in place of the
-        pill (ui/widgets/archive_status.py). GPS, AWS and the wall clock mean
+        pill (ui/widgets/archive_status.py). GPS, MQTT and the wall clock mean
         nothing on a replay, so those members stay unparented and unshown."""
         from ui.widgets.archive_status import ArchiveStatus
         self._archive_status = ArchiveStatus(config.VERSION, self._map_container)
@@ -280,22 +283,26 @@ class MainWindowStatusMixin:
             self._layout_overlays()
 
     def set_connection_status(self, connected: bool):
+        self._mqtt_connected = connected
         if connected:
-            self.conn_indicator.setText("● AWS OK")
+            self.conn_indicator.setText("● MQTT OK")
             set_pill_status(self.conn_indicator, "ok")
         else:
-            self.conn_indicator.setText("● AWS OFFLINE")
+            self.conn_indicator.setText("● MQTT OFFLINE")
             set_pill_status(self.conn_indicator, "error")
 
     def _init_mqtt(self):
-        # the read-only viewer certificate may only connect as viewer-*
-        self._mqtt_certs = config.mqtt_cert_files(viewer=self._viewer)
-        client_id = config.VEHICLE_ID
-        if self._mqtt_certs[1] == config.VIEWER_MQTT_CERT_FILE:
-            client_id = config.VIEWER_MQTT_CLIENT_PREFIX + client_id
-        self._mqtt_client = MQTTClient(client_id=client_id, read_only=self._viewer, parent=self)
+        # VIEWER uses [mqtt.viewer] (or the [mqtt] login) and never publishes
+        self._mqtt_settings = settings.SETTINGS.mqtt_for(viewer=self._viewer)
+        broker = self._mqtt_settings
+        self._mqtt_client = MQTTClient(client_id=broker.client_id(config.VEHICLE_ID),
+                                       read_only=self._viewer or broker.read_only,
+                                       topic_root=broker.topic_root,
+                                       daily_reset_utc=broker.daily_reset_utc, parent=self)
         self._mqtt_client.connected.connect(self._on_mqtt_connected)
         self._mqtt_client.disconnected.connect(self._on_mqtt_disconnected)
+        self._mqtt_client.connect_failed.connect(self._on_mqtt_connect_failed)
+        self._mqtt_client.subscribe_refused.connect(self._on_mqtt_subscribe_refused)
 
         self._vehicle_sync = VehicleSync(self._mqtt_client, parent=self)
         self._vehicle_sync.vehicle_received.connect(self._on_remote_vehicle_obs)
@@ -304,23 +311,50 @@ class MainWindowStatusMixin:
         self._scan_sector_sync.scan_received.connect(self._recv_remote_scan_sector)
 
         # connect after a short delay so the window is fully painted first
-        if config.MQTT_HOST:
+        if broker.configured:
             QTimer.singleShot(500, self._mqtt_connect)
         else:
-            log.info("MQTT host not configured — running offline")
+            log.info("MQTT host not configured (storm.toml) — running offline")
+            self.conn_indicator.setText("● NO BROKER")
+            set_pill_status(self.conn_indicator, "off")
+            self.conn_indicator.setToolTip("No [mqtt] host in storm.toml: no live vehicles, "
+                                           "annotations or drawings. See docs/configuration.md.")
+        if self._monitor and broker.configured:
+            self._apply_recording(self._record_action.isChecked())
+
+    # -- recording broker traffic (MONITOR) ---------------------------------
+    def _set_recording(self, on: bool):
+        """File > Record Broker Traffic: write what the broker sends to
+        [archive] recordings for ARCHIVE to replay (archive/recorder.py).
+        Remembered for the next MONITOR launch."""
+        QSettings().setValue("monitor/record", on)
+        self._apply_recording(on)
+
+    def _apply_recording(self, on: bool):
+        client = getattr(self, "_mqtt_client", None)
+        recorder = getattr(self, "_recorder", None)
+        if client is None:
+            return      # MQTT starts later; _init_mqtt applies the menu's state
+        if on and recorder is None:
+            from archive.recorder import Recorder
+            folder = settings.SETTINGS.archive.recordings
+            self._recorder = Recorder(folder, client.topic_root)
+            client.add_tap(self._recorder.handle)
+            self.status_msg_label.setText(f"Recording broker traffic to {folder}")
+            log.info("recording broker traffic to %s", folder)
+        elif not on and recorder is not None:
+            client.remove_tap(recorder.handle)
+            recorder.close()
+            self._recorder = None
+            self.status_msg_label.setText("Stopped recording broker traffic")
+            log.info("stopped recording after %d messages", recorder.count)
 
     def _mqtt_connect(self):
-        use_tls = config.MQTT_USE_TLS and not runtime_flags.FLAGS.mqtt_no_tls
-        if not use_tls:
+        broker = self._mqtt_settings
+        if runtime_flags.FLAGS.mqtt_no_tls:
             log.warning("MQTT TLS disabled via --mqtt-no-tls (diagnostic mode)")
-        self._mqtt_client.connect_to_broker(
-            host=config.MQTT_HOST,
-            port=config.MQTT_PORT,
-            use_tls=use_tls,
-            ca_cert=self._mqtt_certs[0],
-            cert_file=self._mqtt_certs[1],
-            key_file=self._mqtt_certs[2],
-        )
+            broker = replace(broker, tls="none")
+        self._mqtt_client.connect_to_broker(broker)
 
     def _on_mqtt_connected(self):
         self.set_connection_status(True)
@@ -330,6 +364,25 @@ class MainWindowStatusMixin:
             self.status_msg_label.setText("")
             self._layout_overlays()
 
+    def _on_mqtt_connect_failed(self, reason: str):
+        """The broker couldn't be reached or TLS failed (STORM keeps retrying)."""
+        self.set_connection_status(False)
+        if self._startup_mqtt_pending:
+            self._complete_mqtt_startup_phase()
+        self.status_msg_label.setText(f"MQTT: offline: {reason}")
+        self.conn_indicator.setToolTip(f"Can't connect to the broker: {reason}. "
+                                       "STORM keeps trying; docs/broker.md has fixes.")
+        self._layout_overlays()
+
+    def _on_mqtt_subscribe_refused(self, topic: str, reason: str):
+        """Connected, but the login may not read these topics: without this the
+        map just stays empty."""
+        root = self._mqtt_settings.topic_root
+        self.status_msg_label.setText(
+            f"MQTT: the broker won't send {topic} ({reason.lower()}): this login may not use "
+            f"topic_root \"{root}\"; check topic_root and the broker's access list")
+        self._layout_overlays()
+
     def _on_mqtt_disconnected(self, code: int):
         self.set_connection_status(False)
         if self._startup_mqtt_pending:
@@ -337,14 +390,14 @@ class MainWindowStatusMixin:
         code_map = {
             -1: "setup error (cert/key/path)",
             7: "connection lost",
-            128: "unspecified error",
+            128: "connection dropped (the broker restarted or the network went away; retrying)",
             129: "malformed packet",
             130: "protocol error",
             131: "implementation-specific error",
             132: "unsupported protocol version",
             133: "client ID invalid",
             134: "bad username/password",
-            135: "not authorized",
+            135: "not authorized (wrong login, or it may not use these topics)",
             136: "server unavailable",
             137: "server busy",
             138: "banned",

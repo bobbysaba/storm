@@ -9,6 +9,16 @@ from ui import palette as P
 
 log = logging.getLogger(__name__)
 
+# age thresholds (green up to, amber up to; minutes) by source key: ASOS
+# reports hourly; station_obs sources set theirs with fresh_min
+ASOS_FRESH_MIN = (70.0, 90.0)
+DEFAULT_FRESH_MIN = (5.0, 10.0)
+_FRESH_MIN: dict[str, tuple[float, float]] = {"asos": ASOS_FRESH_MIN}
+
+
+def set_fresh_minutes(source: str, thresholds: tuple[float, float]) -> None:
+    _FRESH_MIN[source] = thresholds
+
 
 def _surface_obs_fingerprint(obs: Observation, station_id: str = "",
                              reference_time: datetime | None = None) -> tuple:
@@ -90,16 +100,11 @@ class SurfacePlotLayer:
             ts = ts.astimezone(timezone.utc)
         now = reference_time or datetime.now(timezone.utc)
         age_min = max(0.0, (now - ts).total_seconds() / 60.0)
-        if station_id.startswith("surface:asos:"):
-            # asos reports hourly — use wider freshness thresholds
-            if age_min <= 70.0:
-                return P.OK
-            if age_min <= 90.0:
-                return P.WARN
-            return P.ERROR
-        # ok Mesonet / WTM report every 5 min
-        if age_min <= 5.0:
+        # station ids are surface:<source>:<station>
+        green, amber = _FRESH_MIN.get(station_id.split(":")[1] if station_id.count(":") >= 2 else "",
+                                      DEFAULT_FRESH_MIN)
+        if age_min <= green:
             return P.OK
-        if age_min <= 10.0:
+        if age_min <= amber:
             return P.WARN
         return P.ERROR

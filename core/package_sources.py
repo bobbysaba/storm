@@ -9,7 +9,8 @@
 
 `requests_get` stands in for requests.get and `read_url` for
 urlopen(...).read(); network errors (404 and so on) behave as before. Files
-are matched by their full URL, query string included. With no package open
+are matched by their full URL, query string included; a local folder's
+files (file:// URLs) also by their path inside the folder (get_local). With no package open
 and provenance off (live modes), both are plain downloads.
 """
 from __future__ import annotations
@@ -88,10 +89,31 @@ def get(url: str) -> bytes | None:
     if entry.get("sha256") and hashlib.sha256(data).hexdigest() != entry["sha256"]:
         log.warning("Case package: %s does not match its recorded hash; downloading instead", entry["member"])
         return None
+    from core.case_package import RENAMED_KINDS  # noqa: PLC0415
+    kind = entry.get("kind", "")
+    kind = RENAMED_KINDS.get(kind, kind)
     with _lock:
-        _served[entry.get("kind", "")] += 1
-    provenance.record(entry.get("kind", ""), url, data, source="case package")
+        _served[kind] += 1
+    provenance.record(kind, url, data, source="case package")
     return data
+
+
+def get_local(path: Path, relative: str) -> bytes | None:
+    """The package's copy of a file in a local source folder: by its full
+    path, else (a package made on another machine) the one file:// entry
+    whose path ends with `relative`, its path inside the source folder."""
+    data = get(Path(path).resolve().as_uri())
+    if data is not None:
+        return data
+    suffix = "/" + Path(relative).as_posix().lstrip("/")
+    with _lock:
+        matches = [url for url in _entries if url.startswith("file://") and url.endswith(suffix)]
+    if len(matches) != 1:
+        if len(matches) > 1:
+            log.info("Case package: %d copies of %s from other machines; reading the local folder",
+                     len(matches), relative)
+        return None
+    return get(matches[0])
 
 
 def canonical_url(url: str, params=None) -> str:

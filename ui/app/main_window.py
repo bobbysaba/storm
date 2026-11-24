@@ -1,9 +1,8 @@
 
-import json
+import functools
 import logging
 import os
 import threading
-import feature_flags
 import runtime_flags
 from datetime import datetime
 
@@ -27,8 +26,7 @@ from ui.controls.deploy_locs_controls import DeployLocsControls
 from ui.controls.satellite_controls import SatelliteControls
 from ui.controls.map_controls import MapControls
 from ui.controls.landcover_controls import LandcoverControls
-from ui.controls.mesoanalysis_controls import MesoanalysisControls
-from ui.controls.sfcoa_controls import SfcoaControls
+from ui.controls.contour_controls import ContourControls
 from ui.controls.surface_controls import SurfaceControls
 from ui.widgets.outlook_panel import OutlookPanel
 from ui.widgets.pin_dot import PinDot
@@ -41,10 +39,14 @@ from ui.widgets.settings_pill import SettingsPill
 from ui.launch.icons import toolbar_icon
 from ui.widgets.responsive_toolbar import ResponsiveToolbar
 import config
+import settings
+from settings import code_providers
+from data import deployment_locations
+from network import shared_items
 from core.annotation import Annotation
 from core.storm_cone import StormCone
 from core.drawing import DrawingAnnotation
-from ui.widgets.layer_order_pill import LayerOrderPill
+from ui.widgets.layer_order_pill import LAYER_LABELS, LayerOrderPill
 from ui.widgets.drawer import Drawer
 from ui.app.drawer_manager import DrawerManager
 from ui.app.main_window_debug import MainWindowDebugMixin
@@ -52,11 +54,13 @@ from ui.app.main_window_map_helpers import MainWindowMapHelpersMixin
 from ui import palette as P
 from ui.app.main_window_archive import MainWindowArchiveMixin
 from ui.app.main_window_archive_surface import MainWindowArchiveSurfaceMixin
-from ui.app.main_window_clamps import MainWindowClampsMixin
+from ui.app.main_window_instruments import MainWindowInstrumentsMixin
 from ui.app.main_window_lidar import MainWindowLidarMixin
+from ui.app.main_window_provider_drawers import MainWindowProviderDrawersMixin
 from ui.app.main_window_radar import MainWindowRadarMixin
 from ui.app.main_window_hazards import MainWindowHazardsMixin
 from ui.app.main_window_overlays import MainWindowOverlaysMixin
+from ui.app.main_window_sources import MainWindowSourcesMixin, source_layer_key
 from ui.app.main_window_sounding import MainWindowSoundingMixin
 from ui.app.main_window_map_objects import MainWindowMapObjectsMixin
 from ui.app.main_window_vehicles import MainWindowVehiclesMixin
@@ -81,11 +85,13 @@ TIMELINE_RIGHT_CLEAR = 330
 class MainWindow(
     MainWindowArchiveMixin,
     MainWindowArchiveSurfaceMixin,
-    MainWindowClampsMixin,
+    MainWindowInstrumentsMixin,
     MainWindowLidarMixin,
+    MainWindowProviderDrawersMixin,
     MainWindowRadarMixin,
     MainWindowHazardsMixin,
     MainWindowOverlaysMixin,
+    MainWindowSourcesMixin,
     MainWindowSoundingMixin,
     MainWindowTrackMixin,
     MainWindowTrailsMixin,
@@ -135,22 +141,39 @@ class MainWindow(
         import log_context
         log_context.set_case(f"archive {archive_time:%Y-%m-%d}" if archive_time else "live")
         self._current_radar_scan = None
+        # PREV LOCS: [map] deployment_locations
+        where = settings.SETTINGS.map.deployment_locations
+        self._load_deployment_locations = functools.partial(deployment_locations.read, where) if where else None
+        # what the providers offer that isn't a [[sources]] kind (settings/code_providers.py)
+        self._init_provider_soundings()
+        # providers' own ARCHIVE drawers (NSSL's, for every team)
+        self._create_archive_drawers(archive_time)
+        # the providers' lidar scans, all in one lidar drawer (archive/combined.py):
+        # the teams' own (archive_lidar) open from a LIDAR button next to RADAR,
+        # and the provider drawers' (NSSL's) from their LIDAR rows too; with no
+        # team lidar, the first drawer's LIDAR row opens it
+        self._archive_raw_lidar = None
+        self._lidar_from_drawer = None
+        if self._archive:
+            from archive import combined
+            shared = [found for _provider, found in code_providers.every_hook(
+                settings.SETTINGS, "archive_lidar", archive_time=archive_time, parent=self)]
+            in_drawers = [e for e in self._archive_drawers if getattr(e.drawer, "lidar", None) is not None]
+            self._archive_raw_lidar = combined.lidar(shared + [e.drawer.lidar for e in in_drawers], parent=self)
+            if not shared and in_drawers:
+                self._lidar_from_drawer = in_drawers[0].drawer
         self._nws_active_phenoms: set[str] = set()  # phenom codes present in last NWS fetch
-        self._mesoanalysis_fetcher = None
-        self._mesoanalysis_current_metadata: dict | None = None
-        self._mesoanalysis_visible = False
-        self._mesoanalysis_active_products: set[str] = set()
-        self._mesoanalysis_times_by_product: dict[str, list] = {}
-        self._mesoanalysis_times = []
-        self._mesoanalysis_overlay_cache: dict[tuple[str, str], dict] = {}
-        self._sfcoa_fetcher = None
-        self._sfcoa_current_metadata: dict | None = None
-        self._sfcoa_visible = False
-        self._sfcoa_active_products: set[str] = set()
-        self._sfcoa_times = []
-        self._sfcoa_variables_by_time: dict[str, list] = {}
-        self._sfcoa_overlay_cache: dict[tuple[str, str], dict] = {}
-        self._sfcoa_status_text = ""
+        # the contours source in storm.toml (NSSL: SFCOA), if any; live only
+        contours = settings.SETTINGS.sources_of("contours")
+        self._contour_source = contours[0] if contours else None
+        self._contour_fetcher = None
+        self._contour_current_metadata: dict | None = None
+        self._contour_visible = False
+        self._contour_active_products: set[str] = set()
+        self._contour_times = []
+        self._contour_variables_by_time: dict[str, list] = {}
+        self._contour_overlay_cache: dict[tuple[str, str], dict] = {}
+        self._contour_status_text = ""
 
         self.setWindowTitle(
             f"STORM  v{config.VERSION}"
@@ -256,7 +279,7 @@ class MainWindow(
         self._start_update_check()
 
         # restore window geometry and dock layout from last session.
-        _s = QSettings("NSSL", "STORM")
+        _s = QSettings()
         if _s.contains("geometry"):
             self.restoreGeometry(_s.value("geometry"))
         if _s.contains("windowState"):
@@ -336,27 +359,45 @@ class MainWindow(
         if not self._disable_annotations:
             self._init_annotations()
             self._init_storm_cone()
-            threading.Thread(target=self._fetch_current_json, daemon=True).start()
-        if not config.MQTT_HOST:
+            # [mqtt] shared_items_url: the day's shared items, for brokers that
+            # don't send retained messages on wildcard subscriptions (AWS IoT)
+            url = self._mqtt_settings.shared_items_url
+            self._fetch_startup_items = functools.partial(shared_items.fetch, url) if url else None
+            if self._fetch_startup_items is not None:
+                threading.Thread(target=self._fetch_current_json, daemon=True).start()
+        if not self._mqtt_settings.configured:
             self._complete_mqtt_startup_phase()
         else:
             self._mqtt_startup_timer.start(4000)
 
-    def _fetch_current_json(self):
-        """One-shot background fetch of current.json to pre-populate annotations on launch."""
-        from urllib.request import urlopen, Request
+    def _init_provider_soundings(self):
+        """The first provider's sounding fetcher for this mode (live_sounding_fetcher,
+        or archive_sounding_fetcher in ARCHIVE), and its label for the button,
+        pills and legend; both None without one."""
+        from ui.sounding import theme  # noqa: PLC0415
+        self._provider_sounding_fetcher = None
+        self._provider_archive_sounding = None
+        self._provider_sounding_label = None
+        found = code_providers.first_hook(
+            settings.SETTINGS, "archive_sounding_fetcher" if self._archive else "live_sounding_fetcher",
+            parent=self)
+        if found is None:
+            return
+        provider, fetcher = found
+        if self._archive:
+            self._provider_archive_sounding = fetcher
+        else:
+            self._provider_sounding_fetcher = fetcher
+        self._provider_sounding_label = code_providers.label(provider)
+        theme.set_provider_label(self._provider_sounding_label)
 
-        from data import endpoints
-        url = endpoints.nssl_api(endpoints.NSSL_CURRENT_OBS)
+    def _fetch_current_json(self):
+        """One-shot background fetch of the day's shared items
+        ([mqtt] shared_items_url) to pre-populate annotations."""
         try:
-            headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
-            if config.NSSL_API_KEY:
-                headers["X-API-Key"] = config.NSSL_API_KEY
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=10, context=config.NSSL_SSL_CONTEXT) as resp:
-                data = json.loads(resp.read().decode())
+            data = self._fetch_startup_items()
         except Exception as e:
-            log.warning("current.json fetch failed: %s", e)
+            log.warning("startup items fetch failed: %s", e)
             return
 
         n_ann = n_cone = n_drawing = 0
@@ -369,23 +410,23 @@ class MainWindow(
                     self._annotation_sync.annotation_received.emit(ann)
                     n_ann += 1
                 except Exception as e:
-                    log.warning("current.json annotation parse error: %s", e)
+                    log.warning("startup items annotation parse error: %s", e)
             elif "drawing_type" in item:
                 try:
                     drawing = DrawingAnnotation.from_dict(item)
                     self._drawing_sync.drawing_received.emit(drawing)
                     n_drawing += 1
                 except Exception as e:
-                    log.warning("current.json drawing parse error: %s", e)
+                    log.warning("startup items drawing parse error: %s", e)
             elif "speed_kts" in item or "heading" in item:
                 try:
                     cone = StormCone.from_dict(item)
                     self._storm_cone_sync.cone_received.emit(cone)
                     n_cone += 1
                 except Exception as e:
-                    log.warning("current.json cone parse error: %s", e)
+                    log.warning("startup items cone parse error: %s", e)
 
-        log.info("current.json loaded: %d annotations, %d cones, %d drawings", n_ann, n_cone, n_drawing)
+        log.info("startup items loaded: %d annotations, %d cones, %d drawings", n_ann, n_cone, n_drawing)
 
     def _on_refresh_current_json(self):
         """Triggered by the Refresh button in the annotation toolbar."""
@@ -407,11 +448,11 @@ class MainWindow(
         self._launch_auto_nws        = s.value("launch/auto_nws",        False, type=bool)
         self._launch_auto_radar      = s.value("launch/auto_radar",      False, type=bool)
         self._launch_auto_satellite  = s.value("launch/auto_satellite",  "",    type=str)
-        self._launch_auto_obs_ok     = s.value("launch/auto_obs_ok",     False, type=bool)
-        self._launch_auto_obs_wtm    = s.value("launch/auto_obs_wtm",    False, type=bool)
-        self._launch_auto_obs_ks     = s.value("launch/auto_obs_ks",     False, type=bool)
-        self._launch_auto_obs_co     = s.value("launch/auto_obs_co",     False, type=bool)
-        self._launch_auto_obs_ne     = s.value("launch/auto_obs_ne",     False, type=bool)
+        # station_obs [[sources]] the launch window turns on
+        self._launch_auto_obs = [
+            src.id for src in self._mode_sources("station_obs")
+            if s.value(f"launch/auto_obs_{src.id}", False, type=bool)
+        ]
 
         if not self._disable_radar:
             self._init_radar()
@@ -421,6 +462,7 @@ class MainWindow(
         if not self._disable_radar and not self._archive:
             self._init_loop_sync()
         self._init_surface_obs()
+        self._init_overlay_sources()
         self._apply_launch_prefs()
         QTimer.singleShot(0, self._restore_session)
 
@@ -436,16 +478,10 @@ class MainWindow(
             self.radar_controls._chk_show_data.blockSignals(False)
             self._auto_start_radar()
             self.btn_radar.setChecked(True)
-        if self._launch_auto_obs_ok:
-            self.surface_controls._btn_ok.setChecked(True)
-        if self._launch_auto_obs_wtm:
-            self.surface_controls._btn_wtm.setChecked(True)
-        if self._launch_auto_obs_ks:
-            self.surface_controls._btn_ks.setChecked(True)
-        if self._launch_auto_obs_co:
-            self.surface_controls._btn_co.setChecked(True)
-        if self._launch_auto_obs_ne:
-            self.surface_controls._btn_ne.setChecked(True)
+        for key in self._launch_auto_obs:
+            btn = self.surface_controls.source_button(key) or self._source_btns.get(key)
+            if btn is not None and btn.isEnabled():
+                btn.setChecked(True)
         sat = self._launch_auto_satellite
         if sat == "conus":
             self.satellite_controls._btn_conus.setChecked(True)
@@ -457,7 +493,7 @@ class MainWindow(
     _SESSION_CONTROLS = {
         "radar": "radar_controls", "satellite": "satellite_controls",
         "hazards": "hazard_controls", "surface": "surface_controls",
-        "mesoanalysis": "mesoanalysis_controls", "sfcoa": "sfcoa_controls",
+        "contours": "contour_controls",
     }
     # opening SOUNDING or TRACK enters a map-click mode; don't do that on launch
     # (LIDAR is enabled only once the date's lidar files are found)
@@ -470,7 +506,7 @@ class MainWindow(
         """Controls and drawers this launch mode has no data source for."""
         if self._archive:
             # archive radar follows the archive case, not the live product list
-            return {"radar", "surface", "mesoanalysis", "sfcoa", "prev_locs", "annotate"}
+            return {"radar", "surface", "contours", "prev_locs", "annotate"}
         skip = set()
         if not hasattr(self, "_radar_fetcher"):
             skip.add("radar")
@@ -484,6 +520,7 @@ class MainWindow(
             if control is not None:
                 state[key] = control.save_state()
         state["radar_site"] = self.radar_controls.current_site()
+        state["sources"] = self._source_buttons_state()
         return state
 
     def _restore_session(self) -> None:
@@ -507,13 +544,12 @@ class MainWindow(
                                            spc_mode=not self._launch_auto_spc)
         if "surface" not in skip:
             self.surface_controls.restore_state(state.get("surface") or {})
-        for key, init in (("mesoanalysis", self._init_mesoanalysis), ("sfcoa", self._init_sfcoa)):
-            control = getattr(self, self._SESSION_CONTROLS[key], None)
-            saved = state.get(key) or {}
-            if control is None or key in skip or not saved.get("products"):
-                continue
-            control.restore_state(saved)
-            init()   # the fetcher lists products, which turns the saved ones on
+        if not self._archive:
+            self._restore_source_buttons(state.get("sources"))
+        saved = state.get("contours") or {}
+        if hasattr(self, "contour_controls") and "contours" not in skip and saved.get("products"):
+            self.contour_controls.restore_state(saved)
+            self._init_contour()   # the fetcher lists products, which turns the saved ones on
         for key in state.get("drawers") or ():
             if key in skip or key in self._SESSION_SKIP_DRAWERS:
                 continue
@@ -608,9 +644,11 @@ class MainWindow(
         self.btn_radar.toggled.connect(
             lambda on: self._set_radar_station_picker_visible(False) if not on else None
         )
-        if self._archive:
-            # next to RADAR: the lidar truck's and CLAMPS trailers' scans
+        if self._archive_raw_lidar is not None and self._lidar_from_drawer is None:
+            # next to RADAR: a team provider's lidar scans
             self._init_lidar_toolbar(tb)
+        # next: providers' own drawers (NSSL's; its LIDAR row opens the lidar drawer)
+        self._init_provider_drawer_toolbar(tb)
 
         self.btn_satellite = tb.add_button(
             "SATELLITE", "Show/hide GOES satellite imagery overlay", "satellite"
@@ -638,30 +676,27 @@ class MainWindow(
         self.btn_surface = tb.add_button(
             "SURFACE", "Show/hide surface observation controls", "surface"
         )
-        self.surface_controls = SurfaceControls(self._map_container)
+        self.surface_controls = SurfaceControls(self._map_container,
+                                                sources=self._mode_sources("station_obs"))
         self.surface_controls.setObjectName("floatingToolbar")
         self.btn_surface.toggled.connect(self.surface_controls.toggle_drawer)
         if self._archive:
             self.btn_surface.setToolTip("Show/hide ASOS replay (stations inside a box you draw)")
             self.surface_controls.configure_for_archive()
 
-        if feature_flags.is_enabled("mesoanalysis"):
-            self.btn_mesoanalysis = tb.add_button(
-                "MESO", "Show/hide Satsquatch mesoanalysis contours", "meso", overflow=True
-            )
-            self.mesoanalysis_controls = MesoanalysisControls(self._map_container)
-            self.mesoanalysis_controls.setObjectName("floatingToolbar")
-            self.btn_mesoanalysis.toggled.connect(self.mesoanalysis_controls.toggle_drawer)
-            self.btn_mesoanalysis.toggled.connect(self._on_mesoanalysis_drawer_toggled)
+        if self._contour_source is not None:
+            source = self._contour_source
+            LAYER_LABELS["contours"] = source.short
+            self.btn_contour = self._mark_key_needed(tb.add_button(
+                source.short, f"Show/hide {source.name}", source.icon, overflow=True
+            ), source)
+            self.contour_controls = ContourControls(self._map_container)
+            self.contour_controls.setObjectName("floatingToolbar")
+            self.btn_contour.toggled.connect(self.contour_controls.toggle_drawer)
+            self.btn_contour.toggled.connect(self._on_contour_drawer_toggled)
 
-        if feature_flags.is_enabled("sfcoa"):
-            self.btn_sfcoa = tb.add_button(
-                "SFCOA", "Show/hide SFCOA mesoanalysis contours", "sfcoa", overflow=True
-            )
-            self.sfcoa_controls = SfcoaControls(self._map_container)
-            self.sfcoa_controls.setObjectName("floatingToolbar")
-            self.btn_sfcoa.toggled.connect(self.sfcoa_controls.toggle_drawer)
-            self.btn_sfcoa.toggled.connect(self._on_sfcoa_drawer_toggled)
+        # [[sources]] with where = "toolbar"
+        self._init_source_toolbar_buttons(tb)
 
         # ── analysis ──
         tb.add_group()
@@ -673,6 +708,8 @@ class MainWindow(
         self.sounding_controls.setObjectName("floatingToolbar")
         self.btn_sounding.toggled.connect(self.sounding_controls.toggle_drawer)
         self.btn_sounding.toggled.connect(self._on_sounding_mode_toggled)
+        # a provider's soundings (NSSL: its API live, THREDDS then the API in ARCHIVE)
+        self.sounding_controls.set_provider_available(self._provider_sounding_label)
         if self._archive:
             self._init_track_toolbar(tb)
 
@@ -681,7 +718,7 @@ class MainWindow(
         self.btn_vehicles = tb.add_button("VEHICLES", "Toggle vehicle panel", "vehicles")
 
         self.btn_prev_locs = tb.add_button(
-            "PREV LOCS", "Show previous truck deployment locations", "prev_locs", overflow=True
+            "PREV LOCS", "Show past deployment locations", "prev_locs", overflow=True
         )
         self.deploy_locs_controls = DeployLocsControls(self._map_container)
         self.deploy_locs_controls.setObjectName("floatingToolbar")
@@ -698,11 +735,8 @@ class MainWindow(
         # ── map ──
         tb.add_group()
         self.btn_map = tb.add_button("MAP", "Map tools and base layers", "map")
-        nlcd_available = feature_flags.is_enabled("nlcd") and os.path.isfile(NLCD_TILES_PATH)
-        satellite_available = (
-            feature_flags.is_enabled("satellite_basemap")
-            and os.path.isfile(SATELLITE_TILES_PATH)
-        )
+        nlcd_available = os.path.isfile(NLCD_TILES_PATH)
+        satellite_available = os.path.isfile(SATELLITE_TILES_PATH)
         self.map_controls = MapControls(
             route_available=not self._viewer,
             landcover_available=nlcd_available,
@@ -717,6 +751,7 @@ class MainWindow(
         self.btn_nlcd = self.map_controls.btn_landcover
         self.btn_satellite_basemap = self.map_controls.btn_satellite_basemap
         self.map_controls.btn_annotations.toggled.connect(self.map_widget.set_annotations_visible)
+        self._init_overlay_drawer_buttons()
 
         self.routing_controls = RoutingControls(self._map_container)
         self.routing_controls.setObjectName("floatingToolbar")
@@ -739,14 +774,13 @@ class MainWindow(
             self.landcover_controls.opacity_changed.connect(self._on_nlcd_opacity_changed)
         if satellite_available:
             self.btn_satellite_basemap.toggled.connect(self._on_satellite_basemap_toggled)
+        if self._archive or self._load_deployment_locations is None:
+            tb.set_available(self.btn_prev_locs, False)      # [map] deployment_locations, live only
         if self._archive:
-            tb.set_available(self.btn_prev_locs, False)
             # no archive data sources for these — hide to prevent crashes.
             tb.set_available(self.btn_annotate, False)   # _mqtt_client / _annotation_sync / _drawing_sync absent
-            if hasattr(self, "btn_mesoanalysis"):
-                tb.set_available(self.btn_mesoanalysis, False)   # Satsquatch mesoanalysis is not archived
-            if hasattr(self, "btn_sfcoa"):
-                tb.set_available(self.btn_sfcoa, False)          # SFCOA mesoanalysis is not archived
+            if hasattr(self, "btn_contour"):
+                tb.set_available(self.btn_contour, False)          # a contours source is live only
         tb.finish()
 
         self.nav_pill = NavPill(self._map_container)
@@ -767,9 +801,9 @@ class MainWindow(
     def _init_layer_status(self):
         """One health record per data layer (see ui/layer_status.py)."""
         self._layer_status = LayerStatusBoard(parent=self)
-        surface_sources = (
-            "ok_mesonet", "wtm", "ks_mesonet", "co_mesonet", "ne_mesonet", "sd_mesonet", "asos",
-        )
+        surface_sources = tuple(
+            source_layer_key(src.id) for src in self._mode_sources("station_obs")
+        ) + ("asos",)
         hazard_sources = (
             "spc_outlook", "spc_tor", "spc_wind", "spc_hail", "spc_prob", "spc_sig",
             "spc_watches", "spc_mds", "nws_warnings",
@@ -779,8 +813,7 @@ class MainWindow(
             # active while a mode is selected, not while the drawer is open
             ("satellite", "Satellite", ()),
             ("hazards", "Hazards", hazard_sources),
-            ("mesoanalysis", "Mesoanalysis", ("mesoanalysis",)),
-            ("sfcoa", "SFCOA", ("sfcoa",)),
+            ("contours", self._contour_label(), ("contours",)),
             ("surface", "Surface obs", surface_sources),
         ]
         for name, label, sources in layers:
@@ -794,8 +827,7 @@ class MainWindow(
             "radar": "btn_radar",
             "satellite": "btn_satellite",
             "hazards": "btn_hazards",
-            "mesoanalysis": "btn_mesoanalysis",
-            "sfcoa": "btn_sfcoa",
+            "contours": "btn_contour",
             "surface": "btn_surface",
         }
         self._layer_status_dots = []
@@ -831,12 +863,10 @@ class MainWindow(
             ("prev_locs", "deploy_locs_controls", "btn_prev_locs"),
             ("hazards", "hazard_controls", "btn_hazards"),
             ("satellite", "satellite_controls", "btn_satellite"),
-            ("mesoanalysis", "mesoanalysis_controls", "btn_mesoanalysis"),
-            ("sfcoa", "sfcoa_controls", "btn_sfcoa"),
+            ("contours", "contour_controls", "btn_contour"),
             ("surface", "surface_controls", "btn_surface"),
             ("sounding", "sounding_controls", "btn_sounding"),
             ("track", "track_controls", "btn_track"),
-            ("lidar", "raw_lidar_controls", "btn_raw_lidar"),
             ("annotate", "annotation_tools", "btn_annotate"),
             ("map", "map_controls", "btn_map"),
         ]
@@ -849,6 +879,20 @@ class MainWindow(
             btn.customContextMenuRequested.connect(
                 lambda pos, k=key, b=btn: self._show_drawer_pin_menu(k, b, pos)
             )
+        for entry in self._archive_drawers:
+            key = f"provider:{entry.provider.name}"
+            self._drawers.add(key, entry.controls, entry.button)
+            entry.button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            entry.button.customContextMenuRequested.connect(
+                lambda pos, k=key, b=entry.button: self._show_drawer_pin_menu(k, b, pos))
+        if hasattr(self, "raw_lidar_controls"):
+            # from a provider drawer's LIDAR row it's a child, like ROUTE
+            self._drawers.add("lidar", self.raw_lidar_controls, self.btn_raw_lidar,
+                              child=self._lidar_from_drawer is not None)
+            if self._lidar_from_drawer is None:
+                self.btn_raw_lidar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                self.btn_raw_lidar.customContextMenuRequested.connect(
+                    lambda pos: self._show_drawer_pin_menu("lidar", self.btn_raw_lidar, pos))
         # opened from inside the MAP drawer; never auto-closed
         self._drawers.add("route", self.routing_controls, self.btn_route, child=True)
         if hasattr(self, "landcover_controls"):
@@ -871,7 +915,7 @@ class MainWindow(
         menu.exec(button.mapToGlobal(pos))
 
     def _refresh_drawer_pins(self):
-        for key in ("radar", "prev_locs", "hazards", "satellite", "mesoanalysis", "sfcoa",
+        for key in ("radar", "prev_locs", "hazards", "satellite", "contours",
                     "surface", "sounding", "annotate", "map"):
             try:
                 btn = self._drawers.entry(key).button
@@ -1061,7 +1105,7 @@ class MainWindow(
                 self._archive_raw_lidar.cancel()      # its downloads can run to hundreds of MB
             self._silence_archive_workers()
             self._close_case_sources()
-        _s = QSettings("NSSL", "STORM")
+        _s = QSettings()
         _s.setValue("geometry", self.saveGeometry())
         _s.setValue("windowState", self.saveState())
         from ui.widgets.layer_order_pill import save_layer_order
@@ -1095,6 +1139,8 @@ class MainWindow(
             self._obs_watcher.stop()
         if hasattr(self, "_mqtt_client"):
             self._mqtt_client.disconnect()
+        if getattr(self, "_recorder", None) is not None:
+            self._recorder.close()
         if getattr(self, "_archive_radar", None) is not None:
             self._archive_radar.shutdown()
         if hasattr(self, "map_widget"):
@@ -1193,16 +1239,17 @@ class MainWindow(
                 _stack(self.hazard_controls)
             if hasattr(self, "satellite_controls") and self.satellite_controls.occupies_space():
                 _stack(self.satellite_controls)
-            if hasattr(self, "mesoanalysis_controls") and self.mesoanalysis_controls.occupies_space():
-                _stack(self.mesoanalysis_controls)
-            if hasattr(self, "sfcoa_controls") and self.sfcoa_controls.occupies_space():
-                _stack(self.sfcoa_controls)
+            if hasattr(self, "contour_controls") and self.contour_controls.occupies_space():
+                _stack(self.contour_controls)
             if hasattr(self, "surface_controls") and self.surface_controls.occupies_space():
                 _stack(self.surface_controls)
             if hasattr(self, "sounding_controls") and self.sounding_controls.occupies_space():
                 _stack(self.sounding_controls)
             if hasattr(self, "track_controls") and self.track_controls.occupies_space():
                 _stack(self.track_controls)
+            for entry in getattr(self, "_archive_drawers", ()):
+                if entry.controls is not None and entry.controls.occupies_space():
+                    _stack(entry.controls)
             if hasattr(self, "raw_lidar_controls") and self.raw_lidar_controls.occupies_space():
                 _stack(self.raw_lidar_controls)
             if hasattr(self, "annotation_tools") and self.annotation_tools.occupies_space():

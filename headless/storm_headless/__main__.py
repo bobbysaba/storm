@@ -8,6 +8,8 @@ import threading
 from datetime import datetime, timezone
 
 from . import __version__
+from .connect_errors import try_broker
+from .obs_tail import ObsFileTail
 from .publisher import DryRunPublisher, VehiclePublisher, build_tls_context
 from .runner import run
 from .settings import Settings, SettingsError, load_settings
@@ -90,28 +92,50 @@ def _check(settings: Settings, need_certs: bool = True) -> int:
 
     line("ok", f"vehicle_id={settings.vehicle_id} icon_type={settings.icon_type} "
                f"client_id={settings.effective_client_id}")
-    line("ok", f"broker {settings.mqtt_host}:{settings.mqtt_port}")
+    broker = settings.mqtt
+    if broker.configured:
+        login = f" as {broker.username}" if broker.username else ""
+        line("ok", f"broker {broker.host}:{broker.port} tls={broker.tls}{login}")
+    else:
+        line("FAIL" if need_certs else "warn", "broker: no host in the [mqtt] table")
+        ok = ok and not need_certs
 
-    layout = "GPS Ka" if settings.gps_mode else "FOFS"
+    layout = f"layout {settings.layout_name}"
     if not settings.data_dir.is_dir():
         line("FAIL", f"data_dir {settings.data_dir} does not exist")
         ok = False
     else:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        pattern = "*_????????.txt" if settings.gps_mode else f"*{today}.txt"
-        files = sorted(settings.data_dir.glob(pattern))
-        if files:
-            line("ok", f"data_dir {settings.data_dir} ({layout}): {files[-1].name}")
+        pattern = settings.obs_columns.file_glob(datetime.now(timezone.utc))
+        # the file the publisher would tail
+        today = ObsFileTail(str(settings.data_dir), settings.vehicle_id,
+                            field_map=settings.obs_columns).today_path()
+        if today is not None:
+            line("ok", f"data_dir {settings.data_dir} ({layout}): {today.name}")
         else:
             # not fatal: the logger may simply not have started yet today
             line("warn", f"data_dir {settings.data_dir} ({layout}): no {pattern} file yet")
 
     try:
         build_tls_context(settings)
-        line("ok", f"certificates load from {settings.cert_file.parent}")
+        files = broker.tls_files()
+        if files:
+            line("ok", "certificates load: " + ", ".join(p.name for _, p in files))
     except (OSError, ValueError) as e:
         line("FAIL" if need_certs else "warn", f"certificates: {e}")
         ok = ok and not need_certs
+
+    if ok and broker.configured and need_certs:
+        # one real connection with the login (its own client ID, so a running
+        # service isn't knocked off)
+        status, why = try_broker(broker, f"{settings.effective_client_id}-check")
+        if status == "ok":
+            line("ok", f"broker answers: {why}")
+        elif status == "offline":
+            # not fatal: a Pi is often set up away from the network it'll use
+            line("warn", f"broker not reachable now: {why}")
+        else:
+            line("FAIL", f"broker: {why}")
+            ok = False
 
     print("ready" if ok else "not ready")
     return 0 if ok else 1

@@ -58,7 +58,7 @@ class RadarFetcher(QObject):
 
     def set_site(self, site: str):
         """change the radar site; takes effect on next poll cycle."""
-        self._site = _normalize_site(site)
+        self._site = normalize_site(site)
         self._last_key.clear()
         log.info("site set to %s", self._site)
 
@@ -161,7 +161,7 @@ class RadarFetcher(QObject):
         Checks the two most-recent day catalogs so calls near midnight still
         find enough entries.
         """
-        site_token = _thredds_site_token(site)
+        site_token = thredds_site_token(site)
         for product_code in _product_aliases(product.upper()):
             site_catalog_url = (
                 f"{THREDDS_CATALOG_ROOT}/{product_code}/{site_token}/catalog.xml"
@@ -231,7 +231,7 @@ class RadarFetcher(QObject):
         Return (dataset_id, dataset_url) for the latest scan.
         THREDDS layout: /{product}/{site_without_K}/{yyyymmdd}/catalog.xml
         """
-        site_token = _thredds_site_token(site)
+        site_token = thredds_site_token(site)
         for product_code in _product_aliases(product.upper()):
             site_catalog_url = (
                 f"{THREDDS_CATALOG_ROOT}/{product_code}/{site_token}/catalog.xml"
@@ -283,7 +283,7 @@ class RadarFetcher(QObject):
 
 
 
-def _normalize_site(site: str) -> str:
+def normalize_site(site: str) -> str:
     text = (site or "").strip().upper()
     match = re.search(r"\b[A-Z][A-Z0-9]{3}\b", text)
     return match.group(0) if match else ""
@@ -297,7 +297,7 @@ def _product_aliases(product: str) -> tuple[str, ...]:
     return (product,)
 
 
-def _thredds_site_token(site: str) -> str:
+def thredds_site_token(site: str) -> str:
     # thredds uses 3-letter IDs for most sites (e.g., INX instead of KINX)
     site = site.upper()
     if site.startswith("K") and len(site) == 4:

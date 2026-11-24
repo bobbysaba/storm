@@ -2,10 +2,8 @@
 
 import json
 from datetime import datetime, timezone
-from urllib.error import URLError
 
-from archive.fetchers import mqtt_reader as mr
-from archive.fetchers.mqtt_reader import ArchiveMQTTReader, _fetch_topic_text, _parse_jsonl
+from archive.fetchers.mqtt_reader import ArchiveMQTTReader, _parse_jsonl
 
 
 def _utc(hour: int, minute: int = 0) -> datetime:
@@ -83,89 +81,6 @@ def test_archive_reader_clears_scan_sectors_on_backward_seek():
     reader.on_time_changed(_utc(12, 0))
 
     assert cleared == [True]
-
-
-# ---------------------------------------------------------------------------
-# THREDDS-first / API-fallback (2026-09-08: api.nssl.noaa.gov was found
-# down, the same storm.<topic>.<date> files are also mirrored on THREDDS)
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_topic_text_prefers_thredds_when_available(monkeypatch):
-    calls = []
-
-    def fake_fetch_text(url, *, api_key=False):
-        calls.append(url)
-        assert "thredds" in url.lower()
-        return "thredds-data"
-
-    monkeypatch.setattr(mr, "_fetch_text", fake_fetch_text)
-
-    text, source = _fetch_topic_text("scan_sectors", "20260621")
-
-    assert (text, source) == ("thredds-data", "THREDDS")
-    assert len(calls) == 1  # the API is never called once THREDDS answers
-
-
-def test_fetch_topic_text_falls_back_to_api_on_a_clean_thredds_404(monkeypatch):
-    def fake_fetch_text(url, *, api_key=False):
-        if "thredds" in url.lower():
-            return None  # THREDDS's own 404-means-no-file convention
-        assert api_key is True  # the API fallback must send its auth header
-        return "api-data"
-
-    monkeypatch.setattr(mr, "_fetch_text", fake_fetch_text)
-
-    text, source = _fetch_topic_text("scan_sectors", "20260621")
-
-    assert (text, source) == ("api-data", "API")
-
-
-def test_fetch_topic_text_falls_back_to_api_on_a_thredds_network_error(monkeypatch):
-    # A THREDDS hiccup shouldn't sink the whole lookup when the API might
-    # still answer -- fall through on any failure, not just a clean 404.
-    def fake_fetch_text(url, *, api_key=False):
-        if "thredds" in url.lower():
-            raise URLError("timed out")
-        return "api-data"
-
-    monkeypatch.setattr(mr, "_fetch_text", fake_fetch_text)
-
-    text, source = _fetch_topic_text("scan_sectors", "20260621")
-
-    assert (text, source) == ("api-data", "API")
-
-
-def test_fetch_topic_text_returns_none_when_neither_source_has_the_date(monkeypatch):
-    monkeypatch.setattr(mr, "_fetch_text", lambda url, **kw: None)
-
-    text, source = _fetch_topic_text("scan_sectors", "20990101")
-
-    assert text is None
-    assert source == "API"
-
-
-def test_thredds_failure_and_api_absence_is_unknown(monkeypatch):
-    from archive.fetchers import mqtt_reader as reader
-    import pytest
-    def fetch(url, **kwargs):
-        if 'thredds' in url:
-            raise TimeoutError('timed out')
-        return None
-    monkeypatch.setattr(reader, '_fetch_text', fetch)
-    with pytest.raises(RuntimeError, match='THREDDS failed'):
-        reader._fetch_topic_text('scan_sectors', '20240427')
-
-
-def test_only_an_http_404_is_a_clean_miss(monkeypatch):
-    from archive.fetchers import mqtt_reader as reader
-    from urllib.error import URLError
-    import pytest
-    def fail(*args, **kwargs):
-        raise URLError('request failed for 20240427')
-    monkeypatch.setattr(reader, 'urlopen', fail)
-    with pytest.raises(URLError):
-        reader._fetch_text('https://example.test/20240427')
 
 
 # ---------------------------------------------------------------------------
@@ -249,18 +164,6 @@ def test_an_edited_drawing_shows_its_latest_version():
     reader._data["drawings"] = _parse_jsonl(_DRAWINGS_20260517)
     reader.on_time_changed(_may17(20))
     assert shown["cb97a3d0"].flipped is True            # the cold front was flipped after drawing
-
-
-def test_thredds_never_gets_the_api_key(monkeypatch):
-    seen = []
-    monkeypatch.setattr(mr, "_fetch_text", lambda url, *, api_key=False: seen.append((url, api_key)))
-    _fetch_topic_text("cones", "20260517")
-    assert [k for u, k in seen if "thredds" in u] == [False]
-    assert [k for u, k in seen if "thredds" not in u] == [True]
-
-
-def test_thredds_url_uses_the_uppercase_storm_folder():
-    assert mr._THREDDS_ANNOTATIONS_ROOT.endswith("/fileServer/FOFS/STORM/annotations")
 
 
 def test_a_rewind_does_not_resend_unchanged_items():

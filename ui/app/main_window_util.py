@@ -74,14 +74,20 @@ def _clear_layout(layout):
             w.deleteLater()
 
 
+def described(what: str, provided) -> str:
+    """'Lidar wind profiles: the lidar truck and the CLAMPS trailers', from a
+    provider object's description, else *what* alone."""
+    description = str(getattr(provided, "description", "") or "")
+    return f"{what}: {description}" if description else what
+
+
 # ANNOTATE drawer tools; switching between them keeps the drawer's tool highlighted
 _ANNOTATE_KINDS = ("annotation", "drawing", "storm_motion_fix")
 
 _SOUNDING_PROMPTS = {
     "hrrr": "HRRR sounding — click map",
     "obs": "observed sounding — click a station",
-    "nssl": "NSSL soundings",
-    "coptersonde": "CopterSonde profiles",
+    "provider": "provider soundings",
 }
 
 

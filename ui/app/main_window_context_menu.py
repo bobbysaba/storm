@@ -11,9 +11,11 @@ import logging
 import config
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from core.geo import haversine_km
 from data.stations.sounding_utils import (
-    _haversine_km, nearest_obs_station, nssl_within_radius_km,
+    launch_within_radius_km, nearest_obs_station,
 )
+from ui.sounding.theme import provider_label
 from ui.widgets import map_context_menu
 from ui.widgets.map_context_menu import MenuContext
 
@@ -53,12 +55,11 @@ class MainWindowContextMenuMixin:
             raob_at = (feature.get("lat", lat), feature.get("lon", lon))
         ctx.raob = nearest_obs_station(*raob_at)
 
-        nssl = getattr(self, "_last_nssl_sset", None)
-        ctx.clamps = (
-            hasattr(self, "_clamps_sounding_fetcher")
-            and nssl is not None
-            and nssl_within_radius_km(nssl.lat, nssl.lon, lat, lon)
-        )
+        provider = getattr(self, "_last_provider_sset", None)
+        if (getattr(self, "_provider_sounding_fetcher", None) is not None
+                and provider is not None
+                and launch_within_radius_km(provider.lat, provider.lon, lat, lon)):
+            ctx.provider_sounding = provider_label()
 
         if feature:
             kind, fid = feature.get("kind"), feature.get("id", "")
@@ -98,7 +99,7 @@ class MainWindowContextMenuMixin:
             site_id = info.get("site_id", "")
             if not site_id or site_id in excluded:
                 continue
-            sites.append((site_id, _haversine_km(lat, lon, info.get("lat", 0), info.get("lon", 0))))
+            sites.append((site_id, haversine_km(lat, lon, info.get("lat", 0), info.get("lon", 0))))
         sites.sort(key=lambda s: s[1])
         return tuple(sites[:count])
 
@@ -124,9 +125,9 @@ class MainWindowContextMenuMixin:
         else:
             self._on_obs_station_click(*args)
 
-    def _ctx_sounding_clamps(self):
-        self.status_msg_label.setText("Fetching NSSL soundings…")
-        self._clamps_sounding_fetcher.fetch()
+    def _ctx_sounding_provider(self):
+        self.status_msg_label.setText(f"Fetching {provider_label()} soundings…")
+        self._provider_sounding_fetcher.fetch()
 
     # ── routing and measuring ─────────────────────────────
     def _ctx_route_to(self, lat: float, lon: float):

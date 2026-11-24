@@ -185,7 +185,8 @@ class AnnotationTools(Drawer):
     Signals:
         tool_selected(str)  — type_key when a button is activated;
                               empty string when deactivated.
-        refresh_requested() — user pressed the Refresh button to re-fetch current.json.
+        refresh_requested() — user pressed the Refresh button to re-fetch the shared items
+                              (with [mqtt] shared_items_url only; see set_refresh_visible).
     """
 
     tool_selected    = pyqtSignal(str)
@@ -320,14 +321,14 @@ class AnnotationTools(Drawer):
         self._buttons.append(btn_pressure)
         row2_layout.addWidget(btn_pressure)
 
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.Shape.VLine)
-        sep3.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
-        row2_layout.addWidget(sep3)
+        self._refresh_sep = QFrame()
+        self._refresh_sep.setFrameShape(QFrame.Shape.VLine)
+        self._refresh_sep.setStyleSheet(f"color: {P.BORDER}; margin: 4px 2px;")
+        row2_layout.addWidget(self._refresh_sep)
 
         self._btn_refresh = QToolButton()
         self._btn_refresh.setText("↻\nRefresh")
-        self._btn_refresh.setToolTip("Re-fetch current.json from the API")
+        self._btn_refresh.setToolTip("Re-fetch the day's shared items from the provider")
         self._btn_refresh.setMinimumHeight(40)
         self._btn_refresh.setMinimumWidth(64)
         self._btn_refresh.setStyleSheet(P.qss("""
@@ -355,6 +356,11 @@ class AnnotationTools(Drawer):
         drawer_layout.addWidget(row2)
 
         layout.addWidget(self._drawer)
+
+    def set_refresh_visible(self, visible: bool):
+        """Show the Refresh button only where there's a snapshot to re-fetch."""
+        self._refresh_sep.setVisible(visible)
+        self._btn_refresh.setVisible(visible)
 
     def deactivate_tool(self):
         """Clear the active tool without emitting tool_selected."""

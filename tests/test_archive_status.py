@@ -76,3 +76,19 @@ def test_chip_click_toggles_the_popover_and_asks_for_layout(status):
     status.chip.clicked.emit()
     assert not status.popover.isVisible()
     assert len(asked) == 2
+
+
+def test_radar_done_loading_clears_only_its_own_message(status):
+    from types import SimpleNamespace
+    from ui.app.main_window_archive import MainWindowArchiveMixin
+    label = status.popover.status_msg_label
+    host = SimpleNamespace(_archive_radar=SimpleNamespace(station="KTLX"), status_msg_label=label)
+    changed = MainWindowArchiveMixin._on_archive_radar_loading_changed
+    changed(host, True)
+    assert label.text() == "Radar: loading KTLX…"
+    changed(host, False)
+    assert label.text() == ""
+    changed(host, True)
+    label.setText("Lidar: Lidar truck · stop 1 of 1, first scan 19:48:23 UTC")
+    changed(host, False)
+    assert label.text().startswith("Lidar:")

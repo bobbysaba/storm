@@ -5,15 +5,14 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from archive.fetchers import vehicle_obs_archive_fetcher as vof
-from archive.fetchers.vehicle_obs_archive_fetcher import (
-    ArchiveVehicleObsFetcher,
+from data import auth
+from providers.nssl.archive import vehicle_obs_archive_fetcher as vof
+from archive.fetchers.vehicle_obs_archive_fetcher import ArchiveVehicleObsFetcher
+from archive.vehicle_obs import drop_excursions as _drop_excursions, drop_stale_fixes as _drop_stale_fixes
+from providers.nssl.archive.vehicle_obs_archive_fetcher import (
     _daily_url,
-    _urlopen_with_retry,
     _apply_known_corrections,
     _candidate_file_dates,
-    _drop_excursions,
-    _drop_stale_fixes,
     _thredds_garbled_gps_date,
     parse_vehicle_csv,
 )
@@ -44,7 +43,7 @@ def test_urlopen_with_retry_retries_transient_errors_then_succeeds(monkeypatch):
     # requests with connection timeouts that clear up within seconds -- a
     # timeout on the first attempt should not be treated as "no data."
     sleeps: list[float] = []
-    monkeypatch.setattr(vof.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(auth.time, "sleep", lambda s: sleeps.append(s))
 
     calls = {"n": 0}
 
@@ -54,9 +53,9 @@ def test_urlopen_with_retry_retries_transient_errors_then_succeeds(monkeypatch):
             raise URLError("timed out")
         return "response"
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
 
-    result = _urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
+    result = auth.urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
 
     assert result == "response"
     assert calls["n"] == 3
@@ -67,29 +66,29 @@ def test_urlopen_with_retry_does_not_retry_404():
     def fake_urlopen(request, timeout, context):
         raise HTTPError("https://example.invalid", 404, "Not Found", {}, None)
 
-    original = vof.urlopen
-    vof.urlopen = fake_urlopen
+    original = auth.urlopen
+    auth.urlopen = fake_urlopen
     try:
         with pytest.raises(HTTPError) as exc_info:
-            _urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
+            auth.urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
         assert exc_info.value.code == 404
     finally:
-        vof.urlopen = original
+        auth.urlopen = original
 
 
 def test_urlopen_with_retry_gives_up_after_exhausting_retries(monkeypatch):
-    monkeypatch.setattr(vof.time, "sleep", lambda s: None)
+    monkeypatch.setattr(auth.time, "sleep", lambda s: None)
     calls = {"n": 0}
 
     def fake_urlopen(request, timeout, context):
         calls["n"] += 1
         raise URLError("timed out")
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
 
     with pytest.raises(URLError):
-        _urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
-    assert calls["n"] == len(vof._RETRY_BACKOFF_S) + 1
+        auth.urlopen_with_retry(vof.Request("https://example.invalid"), timeout=30)
+    assert calls["n"] == len(auth.RETRY_BACKOFF_S) + 1
 
 
 _HEADER = "sfc_wspd,sfc_wdir,t_fast,dewpoint,pressure,gps_date,gps_time,lat,lon\n"
@@ -497,7 +496,7 @@ def _serve(monkeypatch, files: dict[str, str]):
             raise HTTPError(request.full_url, 404, "Not Found", {}, None)
         return _Response(files[name])
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
     return requested
 
 
@@ -584,19 +583,18 @@ def test_fetch_vehicle_keeps_mmddyy_file_without_a_swapped_twin(monkeypatch):
     assert _times(observations) == [_at(2019, 6, 1, 16, 8, 41), _at(2019, 6, 1, 16, 8, 42)]
 
 
-def _index(monkeypatch, paths: list[str]):
-    from archive import fofs_index
-    files = [fofs_index.FofsFile(fofs_index.vehicle_for_path(p), fofs_index._date_from_name(p.rsplit("/", 1)[-1]), p, "")
-             for p in paths]
-    index = fofs_index.FofsIndex(files, 0.0)
-    monkeypatch.setattr(fofs_index, "get_index", lambda *a, **k: index)
+def _index(monkeypatch, files: dict):
+    from providers.nssl import indexes
+    from tests.test_fofs_index import index_of
+    index = index_of(files)
+    monkeypatch.setattr(indexes.FOFS, "get", lambda *a, **k: index)
     return index
 
 
-def test_files_are_found_wherever_the_catalog_lists_them(monkeypatch):
-    # The tree gets reorganized; the loader follows the catalog, not a
-    # hard-coded path.
-    _index(monkeypatch, ["FOFS/Mobile-Mesonet/data/probe1/qc_v2/20240427.txt"])
+def test_files_are_found_wherever_the_index_lists_them(monkeypatch):
+    # The tree gets reorganized; the loader follows the published index,
+    # not a hard-coded path.
+    _index(monkeypatch, {"probe1": {"20240427": ["probe1/qc_v2/20240427.txt"]}})
     requested = []
 
     class _Response:
@@ -611,7 +609,7 @@ def test_files_are_found_wherever_the_catalog_lists_them(monkeypatch):
         requested.append(request.full_url)
         return _Response()
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
     fetcher = ArchiveVehicleObsFetcher(datetime(2024, 4, 27, tzinfo=timezone.utc))
 
     observations = fetcher._fetch_vehicle("probe1", None)
@@ -621,8 +619,8 @@ def test_files_are_found_wherever_the_catalog_lists_them(monkeypatch):
 
 
 def test_legacy_originals_are_skipped_when_a_published_copy_exists(monkeypatch):
-    _index(monkeypatch, ["FOFS/Mobile-Mesonet/data/_legacy_data/probe1/20230601.txt",
-                         "FOFS/Mobile-Mesonet/data/probe1/raw/20230601.txt"])
+    _index(monkeypatch, {"probe1": {"20230601": ["_legacy_data/probe1/20230601.txt",
+                                                 "probe1/raw/20230601.txt"]}})
     assert vof._file_urls("probe1", date(2023, 6, 1)) == [
         "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/Mobile-Mesonet/data/probe1/raw/20230601.txt"]
 
@@ -633,10 +631,10 @@ def test_files_not_in_the_published_format_are_ignored():
     assert vof._is_published_format(_csv(("010623", "000000")))
 
 
-def test_available_vehicles_come_from_the_catalog(monkeypatch):
-    _index(monkeypatch, ["FOFS/Mobile-Mesonet/data/dltruck/raw/20250605.txt",
-                         "FOFS/Mobile-Mesonet/data/newprobe/raw/20250606.txt",
-                         "FOFS/Mobile-Mesonet/data/probe1/raw/20250610.txt"])
+def test_available_vehicles_come_from_the_index(monkeypatch):
+    _index(monkeypatch, {"dltruck": {"20250605": ["dltruck/raw/20250605.txt"]},
+                         "newprobe": {"20250606": ["newprobe/raw/20250606.txt"]},
+                         "probe1": {"20250610": ["probe1/raw/20250610.txt"]}})
     assert vof.available_vehicles(datetime(2025, 6, 5, tzinfo=timezone.utc)) == {"dltruck", "newprobe"}
 
 
@@ -647,7 +645,7 @@ def test_fetch_vehicle_file_warns_when_a_real_file_has_no_datable_rows(monkeypat
     fetcher = ArchiveVehicleObsFetcher(datetime(2017, 5, 11, tzinfo=timezone.utc))
 
     with caplog.at_level("WARNING"):
-        observations, _ = fetcher._fetch_vehicle_file("probe1", None, date(2017, 5, 11))
+        observations, _ = fetcher._sources[0]._fetch_vehicle_file("probe1", None, date(2017, 5, 11))
 
     assert observations == []
     assert "no rows could be dated" in caplog.text
@@ -659,7 +657,7 @@ def test_fetch_vehicle_file_does_not_warn_for_a_genuinely_empty_file(monkeypatch
     fetcher = ArchiveVehicleObsFetcher(datetime(2024, 4, 27, tzinfo=timezone.utc))
 
     with caplog.at_level("WARNING"):
-        observations, _ = fetcher._fetch_vehicle_file("probe1", None, date(2024, 4, 27))
+        observations, _ = fetcher._sources[0]._fetch_vehicle_file("probe1", None, date(2024, 4, 27))
 
     assert observations == []
     assert "no rows could be dated" not in caplog.text
@@ -723,8 +721,8 @@ def test_dropped_sensor_rows_keep_their_position():
 
 
 def test_roster_adds_vehicles_published_for_the_day(monkeypatch):
-    _index(monkeypatch, ["FOFS/Mobile-Mesonet/data/probe1/raw/20250605.txt",
-                         "FOFS/Mobile-Mesonet/data/newprobe/raw/20250605.txt"])
+    _index(monkeypatch, {"probe1": {"20250605": ["probe1/raw/20250605.txt"]},
+                         "newprobe": {"20250605": ["newprobe/raw/20250605.txt"]}})
     fetcher = ArchiveVehicleObsFetcher(datetime(2025, 6, 5, tzinfo=timezone.utc))
 
     roster = fetcher._with_published_vehicles({"p1": "probe"})
@@ -738,13 +736,15 @@ def test_roster_without_an_index_probes_the_known_platforms():
 
     roster = fetcher._with_published_vehicles({"p1": "probe"})
 
+    # a pre-3.0 recording's p1 is probe1 already: not added twice
     assert roster["p1"] == "probe" and "probe1" not in roster
-    assert {"lid1", "hailcam", "p2"} <= set(roster)
+    # the rest come in under their folder names, which are their broker IDs now
+    assert {"dltruck", "hailcam", "probe2"} <= set(roster)
 
 
 def test_date_with_no_mqtt_history_still_loads_from_thredds(monkeypatch):
     # TORUS 2019: STORM wasn't recording MQTT, so the roster is empty.
-    _index(monkeypatch, ["FOFS/Mobile-Mesonet/data/probe1/raw/20190601.txt"])
+    _index(monkeypatch, {"probe1": {"20190601": ["probe1/raw/20190601.txt"]}})
     _serve(monkeypatch, {"20190601.txt": _qc_met_csv([("060119", "160841"), ("060119", "160842")])})
     fetcher = ArchiveVehicleObsFetcher(datetime(2019, 6, 1, tzinfo=timezone.utc))
     finished = []
@@ -752,12 +752,12 @@ def test_date_with_no_mqtt_history_still_loads_from_thredds(monkeypatch):
 
     fetcher._load_all({})
 
-    assert finished == [{"p1"}] and fetcher.roster_size == 1
-    assert fetcher.available_vehicle_ids == {"p1"}
+    assert finished == [{"probe1"}] and fetcher.roster_size == 1
+    assert fetcher.available_vehicle_ids == {"probe1"}
 
 
 def test_fetch_retries_a_timeout_but_not_a_404(monkeypatch):
-    monkeypatch.setattr(vof.time, "sleep", lambda s: None)
+    monkeypatch.setattr(auth.time, "sleep", lambda s: None)
     calls = []
 
     class _Response:
@@ -777,7 +777,7 @@ def test_fetch_retries_a_timeout_but_not_a_404(monkeypatch):
             raise URLError("timed out")
         return _Response()
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
     fetcher = ArchiveVehicleObsFetcher(datetime(2024, 4, 27, tzinfo=timezone.utc))
 
     observations = fetcher._fetch_vehicle("probe1", None)
@@ -794,7 +794,7 @@ def test_requests_send_a_browser_like_user_agent(monkeypatch):
         seen.append(request.get_header("User-agent"))
         raise HTTPError(request.full_url, 404, "Not Found", {}, None)
 
-    monkeypatch.setattr(vof, "urlopen", fake_urlopen)
+    monkeypatch.setattr(auth, "urlopen", fake_urlopen)
     ArchiveVehicleObsFetcher(datetime(2024, 4, 27, tzinfo=timezone.utc))._fetch_vehicle("probe1", None)
 
     assert seen and all(ua.startswith("Mozilla/5.0") for ua in seen)

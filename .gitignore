@@ -1,7 +1,16 @@
 # list of files/directories to NOT commit to the git repo
 
-# AWS keys
-aws/
+# broker certificates and keys: your own (certs/), NSSL team ones
+# (providers/nssl/certs/team/), and the old NSSL location (aws/)
+/certs/
+/providers/nssl/certs/team/
+/aws/
+
+# a group's own code providers (providers/<name>/) stay out of the repo;
+# only NSSL's ships
+/providers/*
+!/providers/__init__.py
+!/providers/nssl/
 
 # mbtiles files (too large for git — download separately or build locally)
 tiles/*.mbtiles
@@ -62,5 +71,11 @@ data/studio/
 storm_launcher.sh
 scripts/launch_storm_linux.sh
 
-# local secrets (API keys, admin passphrase hash): copy .env.example to .env
+# local secrets (API keys, broker password, admin passphrase hash): copy .env.example to .env
 .env
+
+# per-install settings: copy storm.example.toml (or a profiles/ file) to storm.toml
+storm.toml
+
+# broker traffic the recorder writes (archive/recorder.py)
+/recordings/

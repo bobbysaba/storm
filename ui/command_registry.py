@@ -138,9 +138,6 @@ class CommandRegistry:
     def add_provider(self, name: str, provider: Callable[[], Iterable[Command]]) -> None:
         self._providers.append((name, provider))
 
-    def provider_names(self) -> list[str]:
-        return [name for name, _ in self._providers]
-
     def refresh(self) -> list[Command]:
         """Ask every provider for its commands now; a failing provider is skipped."""
         seen: set[str] = set()

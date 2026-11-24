@@ -1,8 +1,6 @@
 
-import sys
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
 from ui import palette as P
 
 _LOADING_STYLE = P.qss("""

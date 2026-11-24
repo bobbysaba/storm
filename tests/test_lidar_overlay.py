@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from archive.fetchers.raw_lidar_archive_fetcher import RawLidarRays, RawLidarSource
+from providers.nssl.archive.raw_lidar_archive_fetcher import RawLidarRays, RawLidarSource
 from ui.map.lidar_overlay import render_lidar_to_png
 
 _WHEN = datetime(2026, 6, 8, 12, 0, 0, tzinfo=timezone.utc)

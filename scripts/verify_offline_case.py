@@ -59,7 +59,7 @@ def _app(scratch: Path):
     from PyQt6.QtWidgets import QApplication
     import main as storm_main
     storm_main._register_storm_scheme()
-    # every QSettings("NSSL", "STORM") reads and writes a scratch file
+    # every QSettings() reads and writes a scratch file
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(scratch / "settings"))
     app = QApplication(sys.argv)

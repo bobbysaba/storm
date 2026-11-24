@@ -2,18 +2,31 @@
 import os
 from pathlib import Path
 
+import settings
 from config import ACCENT_COLOR
 from data import endpoints
 
 
-DEFAULT_LAT  = 35.22
-DEFAULT_LON  = -97.44
-DEFAULT_ZOOM = 6
+# where the map opens: [map] in storm.toml
+DEFAULT_LAT  = settings.SETTINGS.map.home_lat
+DEFAULT_LON  = settings.SETTINGS.map.home_lon
+DEFAULT_ZOOM = settings.SETTINGS.map.zoom
 _STORM_BASE  = "storm://app"   # base for all asset/tile URLs
 
 TILES_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "tiles", "storm.mbtiles")
 )
+_TILES_DIR = os.path.dirname(TILES_PATH)
+
+# the area the shipped optional tile files cover, for files without bounds
+_DEFAULT_BOUNDS = (-116.0, 28.0, -82.0, 49.0)
+
+
+def _tile_bounds(name: str) -> str:
+    """[west, south, east, north] from tiles/<name>'s metadata, as JS."""
+    from core import mbtiles
+    b = mbtiles.bounds(os.path.join(_TILES_DIR, name)) or _DEFAULT_BOUNDS
+    return "[" + ", ".join(f"{v:g}" for v in b) + "]"
 
 STATIC_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "static")
@@ -49,4 +62,7 @@ def build_map_html() -> str:
         .replace("__DEFAULT_LON__", str(DEFAULT_LON))
         .replace("__DEFAULT_LAT__", str(DEFAULT_LAT))
         .replace("__DEFAULT_ZOOM__", str(DEFAULT_ZOOM))
+        .replace("__UNITS_MI__", "true" if settings.SETTINGS.units.distance == "mi" else "false")
+        .replace("__NLCD_BOUNDS__", _tile_bounds("storm_nlcd.mbtiles"))
+        .replace("__SAT_BOUNDS__", _tile_bounds("satellite.mbtiles"))
     )

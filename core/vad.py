@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ class VADProfile:
         wind_dir: Array of wind directions in degrees (0-360)
         wind_spd: Array of wind speeds in knots
         rms_error: RMS error of the VAD fit (quality indicator)
+        intensity: Per-level signal (a lidar's SNR + 1), or None (NEXRAD)
     """
     timestamp: datetime
     site: str
@@ -39,11 +41,26 @@ class VADProfile:
     wind_dir: np.ndarray
     wind_spd: np.ndarray
     rms_error: float = 0.0
+    intensity: np.ndarray | None = None
     
     def __post_init__(self):
         """Validate that arrays have consistent shapes."""
         if not (len(self.heights_m) == len(self.wind_dir) == len(self.wind_spd)):
             raise ValueError("VAD arrays must have matching lengths")
+        if self.intensity is not None and len(self.intensity) != len(self.heights_m):
+            raise ValueError("VAD intensity must match the heights")
+
+    def above(self, min_intensity: float | None) -> "VADProfile":
+        """The levels whose intensity is at least *min_intensity* (all of
+        them without a floor or without intensity)."""
+        if min_intensity is None or self.intensity is None:
+            return self
+        with np.errstate(invalid="ignore"):
+            # files store intensity as float32: 1.002 reads back a hair under
+            keep = np.asarray(self.intensity) >= min_intensity - 1e-6
+        return VADProfile(self.timestamp, self.site, np.asarray(self.heights_m)[keep],
+                          np.asarray(self.wind_dir)[keep], np.asarray(self.wind_spd)[keep],
+                          self.rms_error, np.asarray(self.intensity)[keep])
     
     @property
     def label(self) -> str:
@@ -66,21 +83,6 @@ class VADProfile:
         """Calculate V (northward) wind component in m/s."""
         return self.v_component() * KNOT_TO_MS
     
-    def interpolate_to_height(self, target_height_m: float) -> tuple[float, float]:
-        """Interpolate wind direction and speed to a specific height.
-
-        Interpolation is performed through U/V components so 350→010 degree
-        crossings do not produce an artificial southerly wind at the midpoint.
-        
-        Returns:
-            (wind_dir, wind_spd) at target_height_m, or (nan, nan) if out of range
-        """
-        u, v = self.interpolate_components_to_height(target_height_m, unit="kt")
-        if np.isnan(u) or np.isnan(v):
-            return (np.nan, np.nan)
-
-        return _wind_dir_speed_from_components(float(u), float(v))
-
     def interpolate_components_to_height(self, target_height_m: float, unit: str = "m/s") -> tuple[float, float]:
         """Interpolate U/V wind components to a height.
 
@@ -133,10 +135,6 @@ class VADParameters:
     srw_0_1: float | None
     srw_0_3: float | None
     srw_0_6: float | None
-
-    def as_dict(self) -> dict[str, float | None]:
-        return self.__dict__.copy()
-
 
 def _layer_components(profile: VADProfile, z_bottom: float, z_top: float) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """Return heights/u/v in m/s for a layer, including interpolated bounds."""
@@ -301,6 +299,18 @@ class VADSet:
     def timestamps(self) -> list[datetime]:
         """List of all profile timestamps."""
         return [p.timestamp for p in self.profiles]
+
+    @property
+    def has_intensity(self) -> bool:
+        """Whether its profiles carry per-level intensity (a lidar's)."""
+        return any(p.intensity is not None for p in self.profiles)
+
+    def above(self, min_intensity: float | None) -> "VADSet":
+        """Every profile's levels at or above *min_intensity*; profiles with
+        none left are dropped."""
+        if min_intensity is None or not self.has_intensity:
+            return self
+        return VADSet([q for q in (p.above(min_intensity) for p in self.profiles) if len(q.heights_m)])
 
     def hodograph_bound_kt(self, *, min_bound: float = 60.0, padding: float = 15.0) -> float:
         """Return a stable hodograph half-width for the whole fetched set.

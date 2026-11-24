@@ -10,6 +10,7 @@ import math
 
 import config
 from PyQt6.QtCore import QSettings
+from core.geo import haversine_km
 from data.fetchers.routing_fetcher import search_places
 from ui import shortcuts, text_scale
 from ui.command_registry import Command, CommandRegistry
@@ -26,7 +27,7 @@ _DRAWER_SHORTCUTS = {
 }
 _DRAWER_NAMES = {
     "radar": "Radar", "prev_locs": "Previous locations", "hazards": "Hazards",
-    "satellite": "Satellite", "mesoanalysis": "Mesoanalysis", "sfcoa": "SFCOA",
+    "satellite": "Satellite", "contours": "Contours",
     "surface": "Surface obs", "sounding": "Sounding", "annotate": "Annotate", "map": "Map tools",
     "route": "Route", "landcover": "Land cover", "track": "Storm track", "lidar": "Doppler lidar",
 }
@@ -37,22 +38,15 @@ _SECTOR_NAMES = {"conus": "CONUS", "meso1": "MESO-1", "meso2": "MESO-2"}
 _DEPLOY_NEAREST = 5
 
 
-def _km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
-    return 6371.0 * 2 * math.asin(math.sqrt(a))
-
-
 def _mi(km: float) -> str:
-    return f"{km * 0.621371:.0f} mi"
+    from core import units  # noqa: PLC0415
+    return f"{units.dist(km):.0f} {units.dist_label()}"
 
 
 class MainWindowPaletteMixin:
 
     def _init_command_palette(self):
-        settings = QSettings("NSSL", "STORM")
+        settings = QSettings()
         self._command_registry = reg = CommandRegistry(
             load_recent=lambda: settings.value(_RECENT_KEY, [], type=list),
             save_recent=lambda ids: settings.setValue(_RECENT_KEY, ids),
@@ -130,7 +124,7 @@ class MainWindowPaletteMixin:
         here = self._palette_position()
         sites = list(self._radar_station_sites or [])
         if here is not None:
-            sites.sort(key=lambda s: _km(here[0], here[1], s["lat"], s["lon"]))
+            sites.sort(key=lambda s: haversine_km(here[0], here[1], s["lat"], s["lon"]))
         current = self.radar_controls.current_site()
         excluded = set()
         if self._archive:
@@ -144,7 +138,7 @@ class MainWindowPaletteMixin:
             if site == current:
                 hint.append("current")
             if here is not None:
-                hint.append(_mi(_km(here[0], here[1], info["lat"], info["lon"])))
+                hint.append(_mi(haversine_km(here[0], here[1], info["lat"], info["lon"])))
             yield Command(f"site:{site}", f"{site} {info.get('name', '')}".strip(), "Radar site",
                           lambda s=site: self._ctx_radar_site(s), hint=" · ".join(hint))
         product = self.radar_controls.current_product()
@@ -212,7 +206,7 @@ class MainWindowPaletteMixin:
             key=lambda p: (p["lat"] - here[0]) ** 2 + ((p["lon"] - here[1]) * coslat) ** 2,
         )[:_DEPLOY_NEAREST]
         for p in nearest:
-            km = _km(here[0], here[1], p["lat"], p["lon"])
+            km = haversine_km(here[0], here[1], p["lat"], p["lon"])
             yield Command(
                 f"deploy:{p['lat']:.4f},{p['lon']:.4f}",
                 f"Deployment location, ABI rank {p['rank_abi']}", "Deploy location",

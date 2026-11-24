@@ -497,7 +497,6 @@
     window.stormSetNlcdVisible = _stormNoop;
     window.stormSetNlcdOpacity = _stormNoop;
     window.stormSetSatelliteBasemapVisible = _stormNoop;
-    window.stormSetSatelliteBasemapOpacity = _stormNoop;
     window.stormSetMesoSectors = _stormNoop;
     window.stormSetRadarStations = _stormNoop;
     window.stormSetRadarStationsVisible = _stormNoop;
@@ -559,6 +558,13 @@
       console.info = function() { _forward('info', arguments); _orig.info.apply(console, arguments); };
     })();
 
+    // [units] distance in storm.toml: true for miles, false for kilometres
+    const STORM_DIST_MI = __UNITS_MI__;
+    function _stormDist(mi) {   // a distance given in miles, in the display unit
+      var d = STORM_DIST_MI ? mi : mi * 1.609344;
+      return d.toFixed(d < 10 ? 1 : 0) + (STORM_DIST_MI ? ' mi' : ' km');
+    }
+
     const STORM_STYLE = {
       version: 8,
       name: "STORM Dark",
@@ -566,6 +572,8 @@
       sources: {
         "storm-tiles": {
           type: "vector",
+          // the local file's credit (an online TileJSON brings its own)
+          attribution: "© OpenMapTiles © OpenStreetMap contributors",
           tiles: ["__TILE_URL__"],
           minzoom: 0,
           maxzoom: 14
@@ -575,7 +583,7 @@
           tiles: ["__STORM_BASE__/nlcdtiles/{z}/{x}/{y}.png"],
           minzoom: 3,
           maxzoom: 10,
-          bounds: [-116, 28, -82, 49],
+          bounds: __NLCD_BOUNDS__,
           tileSize: 256
         },
         "satellite-tiles": {
@@ -583,7 +591,7 @@
           tiles: ["__STORM_BASE__/satellitetiles/{z}/{x}/{y}.jpg"],
           minzoom: 0,
           maxzoom: 12,
-          bounds: [-116, 28, -82, 49],
+          bounds: __SAT_BOUNDS__,
           tileSize: 256
         }
       },
@@ -1012,7 +1020,7 @@
 
     map.addControl(new maplibregl.ScaleControl({
       maxWidth: 120,
-      unit: "imperial"
+      unit: STORM_DIST_MI ? "imperial" : "metric"
     }), "bottom-left");
 
     // STORM's own sources and layers (hazards, CWA, measure, route, ...).
@@ -1330,6 +1338,8 @@
         }
       }, 'road-label-motorway');
       if (window._damagePathsData) map.getSource('damage-paths').setData(window._damagePathsData);
+      // overlays from storm.toml [[sources]] set before the style was in
+      if (window._stormApplySourceOverlays) window._stormApplySourceOverlays();
 
       // Doppler lidar locations (archive LIDAR): every place a lidar scanned
       // from, picked by clicking like a radar station; the picked one has a
@@ -2238,8 +2248,8 @@
         return false;
       }
       var p = hits[0].properties || {};
-      var length = p.length != null ? Number(p.length).toFixed(1) + ' mi' : '—';
-      var width = p.width != null ? Number(p.width).toFixed(0) + ' yd' : '—';
+      var length = p.length != null ? _stormDist(Number(p.length)) : '—';
+      var width = p.width == null ? '—' : STORM_DIST_MI ? Number(p.width).toFixed(0) + ' yd' : (Number(p.width) * 0.9144).toFixed(0) + ' m';
       var wind = p.maxwind != null ? Number(p.maxwind).toFixed(0) + ' mph' : '—';
       tip.innerHTML =
         '<div class="title">' + _escHtml(p.ef_label || 'Damage path') +
@@ -3226,7 +3236,7 @@
         var rb = _privatePinDistanceBearing(ownLoc.lat, ownLoc.lon, lat, lon);
         var range = document.createElement('div');
         range.className = 'private-pin-menu-range';
-        range.textContent = rb.distanceMi.toFixed(rb.distanceMi < 10 ? 1 : 0) + ' mi, ' + Math.round(rb.bearingDeg) + ' deg';
+        range.textContent = _stormDist(rb.distanceMi) + ', ' + Math.round(rb.bearingDeg) + ' deg';
         menu.innerHTML = '';
         menu.appendChild(title);
         menu.appendChild(meta);
@@ -4183,6 +4193,69 @@
       }
     };
 
+    // GeoJSON overlays from storm.toml ([[sources]] kind = "overlay";
+    // data/fetchers/overlay_fetcher.py): per source a fill, a line, a circle
+    // and a label layer ('source-<id>-fill' ...), under the road labels.
+    window._sourceOverlays = window._sourceOverlays || {};
+    function _sourceOverlayLayers(id, style) {
+      var color = style.color || '#4FC3F7';
+      var width = style.width || 2;
+      var src = 'source-' + id;
+      var layers = [
+        {id: src + '-fill', type: 'fill', source: src,
+         filter: ['==', ['geometry-type'], 'Polygon'],
+         paint: {'fill-color': color, 'fill-opacity': style.fill_opacity === undefined ? 0.15 : style.fill_opacity}},
+        {id: src + '-line', type: 'line', source: src,
+         filter: ['in', ['geometry-type'], ['literal', ['LineString', 'Polygon']]],
+         layout: {'line-join': 'round', 'line-cap': 'round'},
+         paint: {'line-color': color, 'line-width': width}},
+        {id: src + '-circle', type: 'circle', source: src,
+         filter: ['==', ['geometry-type'], 'Point'],
+         paint: {'circle-color': color, 'circle-radius': style.radius || 5,
+                 'circle-stroke-width': 1.5, 'circle-stroke-color': '#0A0A0F'}}
+      ];
+      if (style.label) {
+        layers.push({id: src + '-label', type: 'symbol', source: src,
+          layout: {'text-field': ['to-string', ['coalesce', ['get', style.label], '']],
+                   'text-font': ['Noto Sans Bold'], 'text-size': 12,
+                   'text-offset': [0, 1.1], 'text-anchor': 'top', 'text-optional': true},
+          paint: {'text-color': '#FFFFFF', 'text-halo-color': '#0A0A0F', 'text-halo-width': 1.4}});
+      }
+      return layers;
+    }
+    function _applySourceOverlay(id) {
+      if (!_stormStyleReady()) return;
+      var entry = window._sourceOverlays[id];
+      var srcId = 'source-' + id;
+      var src = map.getSource(srcId);
+      if (!src) {
+        map.addSource(srcId, {type: 'geojson', data: entry.data});
+        var before = map.getLayer('road-label-motorway') ? 'road-label-motorway' : undefined;
+        _sourceOverlayLayers(id, entry.style).forEach(function(layer) { map.addLayer(layer, before); });
+      } else {
+        src.setData(entry.data);
+      }
+      ['fill', 'line', 'circle', 'label'].forEach(function(part) {
+        var lid = srcId + '-' + part;
+        if (map.getLayer(lid)) map.setLayoutProperty(lid, 'visibility', entry.visible ? 'visible' : 'none');
+      });
+    }
+    window._stormApplySourceOverlays = function() {
+      Object.keys(window._sourceOverlays).forEach(_applySourceOverlay);
+    };
+    window.stormSetSourceOverlay = function(id, geojsonStr, styleStr) {
+      try {
+        window._sourceOverlays[id] = {data: JSON.parse(geojsonStr), style: JSON.parse(styleStr), visible: true};
+      } catch(e) { console.warn('stormSetSourceOverlay:', e); return; }
+      _applySourceOverlay(id);
+    };
+    window.stormSetSourceOverlayVisible = function(id, visible) {
+      var entry = window._sourceOverlays[id];
+      if (!entry) return;
+      entry.visible = !!visible;
+      _applySourceOverlay(id);
+    };
+
     window.stormSetLidarLocations = function(geojsonStr) {
       try { window._lidarLocationsData = JSON.parse(geojsonStr); }
       catch(e) { console.warn('stormSetLidarLocations:', e); return; }
@@ -4246,12 +4319,6 @@
       map.getCanvas().style.cursor = window._trackEditActive ? 'crosshair' : '';
     };
 
-    window.stormSetScanSectorsVisible = function(visible) {
-      ['scan-sector-fill', 'scan-sector-line', 'scan-sector-point', 'scan-sector-label'].forEach(function(layerId) {
-        if (!map.getLayer(layerId)) return;
-        map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
-      });
-    };
 
     // MAP > ANNOTATIONS: show or hide the crew's annotations -- drawings
     // (fronts, boundaries, lines, areas), annotation markers and storm-motion
@@ -4369,7 +4436,8 @@
       } else {
         var anchor = window._measureAnchor;
         var dist  = _haversineM(anchor[1],anchor[0],lat,lon);
-        var label = dist.toFixed(1)+' mi  /  '+(dist*1.60934).toFixed(1)+' km';
+        var mi = dist.toFixed(1)+' mi', km = (dist*1.60934).toFixed(1)+' km';
+        var label = STORM_DIST_MI ? mi+'  /  '+km : km+'  /  '+mi;
         var midLon = (anchor[0] + lon) / 2.0;
         var midLat = (anchor[1] + lat) / 2.0;
         map.getSource('measure-line').setData({type:'FeatureCollection',features:[
@@ -4544,7 +4612,7 @@
       if (map.getSource(SAT_WMS_SRC)) {
         map.getSource(SAT_WMS_SRC).setTiles([tileUrl]);
       } else {
-        map.addSource(SAT_WMS_SRC, { type: 'raster', tiles: [tileUrl], tileSize: 256, bounds: [-116, 28, -82, 49] });
+        map.addSource(SAT_WMS_SRC, { type: 'raster', tiles: [tileUrl], tileSize: 256 });
         try {
           map.addLayer({
             id: SAT_WMS_LYR, type: 'raster', source: SAT_WMS_SRC,
@@ -4834,7 +4902,6 @@
     };
 
     var _satBasemapVisible = false;
-    var _satBasemapOpacity = 1.0;
     var SAT_BASEMAP_LYR = 'satellite-basemap';
     // vector fill layers hidden while satellite basemap is active
     var _SAT_HIDE_LYRS = ['landcover', 'landuse'];
@@ -4855,16 +4922,6 @@
       }
     };
 
-    window.stormSetSatelliteBasemapOpacity = function(opacity) {
-      _satBasemapOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 1.0));
-      try {
-        if (map.getLayer(SAT_BASEMAP_LYR)) {
-          map.setPaintProperty(SAT_BASEMAP_LYR, 'raster-opacity', _satBasemapOpacity);
-        }
-      } catch(e) {
-        console.warn('[STORM] satellite basemap opacity warning:', e.message || e);
-      }
-    };
 
     var _nlcdVisible = false;
     var _nlcdOpacity = 0.55;
@@ -5020,34 +5077,34 @@
       ];
     }
 
-    var _mesoanalysisVisible = false;
-    var _mesoanalysisOpacity = 1.0;
-    var _mesoanalysisProducts = {};
+    var _contourVisible = false;
+    var _contourOpacity = 1.0;
+    var _contourProducts = {};
 
-    function _mesoanalysisId(productId, suffix) {
-      return 'mesoanalysis-' + String(productId || 'overlay').replace(/[^A-Za-z0-9_-]/g, '-') + '-' + suffix;
+    function _contourId(productId, suffix) {
+      return 'contour-' + String(productId || 'overlay').replace(/[^A-Za-z0-9_-]/g, '-') + '-' + suffix;
     }
 
-    function _removeMesoanalysisLayers(productId) {
+    function _removeContourLayers(productId) {
       try {
-        var ids = productId ? [productId] : Object.keys(_mesoanalysisProducts);
+        var ids = productId ? [productId] : Object.keys(_contourProducts);
         ids.forEach(function(pid) {
-          var entry = _mesoanalysisProducts[pid] || {
-            line: _mesoanalysisId(pid, 'line'),
-            label: _mesoanalysisId(pid, 'label'),
-            source: _mesoanalysisId(pid, 'src')
+          var entry = _contourProducts[pid] || {
+            line: _contourId(pid, 'line'),
+            label: _contourId(pid, 'label'),
+            source: _contourId(pid, 'src')
           };
           if (map.getLayer(entry.label)) map.removeLayer(entry.label);
           if (map.getLayer(entry.line)) map.removeLayer(entry.line);
           if (map.getSource(entry.source)) map.removeSource(entry.source);
-          delete _mesoanalysisProducts[pid];
+          delete _contourProducts[pid];
         });
       } catch(e) {
-        console.warn('[STORM] mesoanalysis clear warning:', e.message || e);
+        console.warn('[STORM] Contours clear warning:', e.message || e);
       }
     }
 
-    function _addMesoanalysisLayer(layerDef, beforeId) {
+    function _addContourLayer(layerDef, beforeId) {
       try {
         if (beforeId && map.getLayer(beforeId)) {
           map.addLayer(layerDef, beforeId);
@@ -5056,19 +5113,19 @@
         }
       } catch(_) {
         try { map.addLayer(layerDef); } catch(e) {
-          console.error('[STORM] mesoanalysis layer add error:', e.message || e);
+          console.error('[STORM] Contours layer add error:', e.message || e);
         }
       }
     }
 
-    window.stormSetMesoanalysisOverlay = function(productId, tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom, labelUnits) {
+    window.stormSetContourOverlay = function(productId, tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom, labelUnits) {
       try {
         productId = String(productId || 'overlay');
-        _removeMesoanalysisLayers(productId);
-        var sourceId = _mesoanalysisId(productId, 'src');
-        var lineId = _mesoanalysisId(productId, 'line');
-        var labelId = _mesoanalysisId(productId, 'label');
-        _mesoanalysisProducts[productId] = { source: sourceId, line: lineId, label: labelId };
+        _removeContourLayers(productId);
+        var sourceId = _contourId(productId, 'src');
+        var lineId = _contourId(productId, 'line');
+        var labelId = _contourId(productId, 'label');
+        _contourProducts[productId] = { source: sourceId, line: lineId, label: labelId };
         map.addSource(sourceId, {
           type: 'vector',
           tiles: [tileUrl],
@@ -5076,7 +5133,7 @@
           maxzoom: maxzoom || 8,
           bounds: [west, south, east, north]
         });
-        _addMesoanalysisLayer({
+        _addContourLayer({
           id: lineId,
           type: 'line',
           source: sourceId,
@@ -5084,10 +5141,10 @@
           paint: {
             'line-color': ['coalesce', ['get', 'stroke'], '#F2D45C'],
             'line-width': ['coalesce', ['get', 'stroke-width'], 1],
-            'line-opacity': _mesoanalysisOpacity
+            'line-opacity': _contourOpacity
           }
         }, 'road-unpaved');
-        _addMesoanalysisLayer({
+        _addContourLayer({
           id: labelId,
           type: 'symbol',
           source: sourceId,
@@ -5106,170 +5163,44 @@
             'text-color': '#EFF3FF',
             'text-halo-color': '#0A0A0F',
             'text-halo-width': 1.2,
-            'text-opacity': _mesoanalysisOpacity
+            'text-opacity': _contourOpacity
           }
         }, 'road-unpaved');
-        window.stormSetMesoanalysisVisible(_mesoanalysisVisible);
+        window.stormSetContourVisible(_contourVisible);
       } catch(e) {
-        console.error('[STORM] mesoanalysis overlay inject error:', e.message || e);
+        console.error('[STORM] Contours overlay inject error:', e.message || e);
       }
     };
 
-    window.stormSetMesoanalysisVisible = function(visible) {
-      _mesoanalysisVisible = !!visible;
-      var state = _mesoanalysisVisible ? 'visible' : 'none';
+    window.stormSetContourVisible = function(visible) {
+      _contourVisible = !!visible;
+      var state = _contourVisible ? 'visible' : 'none';
       try {
-        Object.keys(_mesoanalysisProducts).forEach(function(pid) {
-          var entry = _mesoanalysisProducts[pid];
+        Object.keys(_contourProducts).forEach(function(pid) {
+          var entry = _contourProducts[pid];
           if (map.getLayer(entry.line)) map.setLayoutProperty(entry.line, 'visibility', state);
           if (map.getLayer(entry.label)) map.setLayoutProperty(entry.label, 'visibility', state);
         });
       } catch(e) {
-        console.warn('[STORM] mesoanalysis visibility warning:', e.message || e);
+        console.warn('[STORM] Contours visibility warning:', e.message || e);
       }
     };
 
-    window.stormSetMesoanalysisOpacity = function(opacity) {
-      _mesoanalysisOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
+    window.stormSetContourOpacity = function(opacity) {
+      _contourOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
       try {
-        Object.keys(_mesoanalysisProducts).forEach(function(pid) {
-          var entry = _mesoanalysisProducts[pid];
-          if (map.getLayer(entry.line)) map.setPaintProperty(entry.line, 'line-opacity', _mesoanalysisOpacity);
-          if (map.getLayer(entry.label)) map.setPaintProperty(entry.label, 'text-opacity', _mesoanalysisOpacity);
+        Object.keys(_contourProducts).forEach(function(pid) {
+          var entry = _contourProducts[pid];
+          if (map.getLayer(entry.line)) map.setPaintProperty(entry.line, 'line-opacity', _contourOpacity);
+          if (map.getLayer(entry.label)) map.setPaintProperty(entry.label, 'text-opacity', _contourOpacity);
         });
       } catch(e) {
-        console.warn('[STORM] mesoanalysis opacity warning:', e.message || e);
+        console.warn('[STORM] Contours opacity warning:', e.message || e);
       }
     };
 
-    window.stormClearMesoanalysisOverlay = function(productId) {
-      _removeMesoanalysisLayers(productId || '');
-    };
-
-    var _sfcoaVisible = false;
-    var _sfcoaOpacity = 1.0;
-    var _sfcoaProducts = {};
-
-    function _sfcoaId(productId, suffix) {
-      return 'sfcoa-' + String(productId || 'overlay').replace(/[^A-Za-z0-9_-]/g, '-') + '-' + suffix;
-    }
-
-    function _removeSfcoaLayers(productId) {
-      try {
-        var ids = productId ? [productId] : Object.keys(_sfcoaProducts);
-        ids.forEach(function(pid) {
-          var entry = _sfcoaProducts[pid] || {
-            line: _sfcoaId(pid, 'line'),
-            label: _sfcoaId(pid, 'label'),
-            source: _sfcoaId(pid, 'src')
-          };
-          if (map.getLayer(entry.label)) map.removeLayer(entry.label);
-          if (map.getLayer(entry.line)) map.removeLayer(entry.line);
-          if (map.getSource(entry.source)) map.removeSource(entry.source);
-          delete _sfcoaProducts[pid];
-        });
-      } catch(e) {
-        console.warn('[STORM] SFCOA clear warning:', e.message || e);
-      }
-    }
-
-    function _addSfcoaLayer(layerDef, beforeId) {
-      try {
-        if (beforeId && map.getLayer(beforeId)) {
-          map.addLayer(layerDef, beforeId);
-        } else {
-          map.addLayer(layerDef);
-        }
-      } catch(_) {
-        try { map.addLayer(layerDef); } catch(e) {
-          console.error('[STORM] SFCOA layer add error:', e.message || e);
-        }
-      }
-    }
-
-    window.stormSetSfcoaOverlay = function(productId, tileUrl, sourceLayer, west, south, east, north, minzoom, maxzoom, labelUnits) {
-      try {
-        productId = String(productId || 'overlay');
-        _removeSfcoaLayers(productId);
-        var sourceId = _sfcoaId(productId, 'src');
-        var lineId = _sfcoaId(productId, 'line');
-        var labelId = _sfcoaId(productId, 'label');
-        _sfcoaProducts[productId] = { source: sourceId, line: lineId, label: labelId };
-        map.addSource(sourceId, {
-          type: 'vector',
-          tiles: [tileUrl],
-          minzoom: minzoom || 0,
-          maxzoom: maxzoom || 8,
-          bounds: [west, south, east, north]
-        });
-        _addSfcoaLayer({
-          id: lineId,
-          type: 'line',
-          source: sourceId,
-          'source-layer': sourceLayer,
-          paint: {
-            'line-color': ['coalesce', ['get', 'stroke'], '#F2D45C'],
-            'line-width': ['coalesce', ['get', 'stroke-width'], 1],
-            'line-opacity': _sfcoaOpacity
-          }
-        }, 'road-unpaved');
-        _addSfcoaLayer({
-          id: labelId,
-          type: 'symbol',
-          source: sourceId,
-          'source-layer': sourceLayer,
-          minzoom: 0,
-          layout: {
-            'symbol-placement': 'line',
-            'text-field': _contourTextField(labelUnits),
-            'text-size': 10,
-            'text-font': ['Noto Sans Regular'],
-            'text-allow-overlap': false,
-            'text-ignore-placement': false,
-            'symbol-spacing': 320
-          },
-          paint: {
-            'text-color': '#EFF3FF',
-            'text-halo-color': '#0A0A0F',
-            'text-halo-width': 1.2,
-            'text-opacity': _sfcoaOpacity
-          }
-        }, 'road-unpaved');
-        window.stormSetSfcoaVisible(_sfcoaVisible);
-      } catch(e) {
-        console.error('[STORM] SFCOA overlay inject error:', e.message || e);
-      }
-    };
-
-    window.stormSetSfcoaVisible = function(visible) {
-      _sfcoaVisible = !!visible;
-      var state = _sfcoaVisible ? 'visible' : 'none';
-      try {
-        Object.keys(_sfcoaProducts).forEach(function(pid) {
-          var entry = _sfcoaProducts[pid];
-          if (map.getLayer(entry.line)) map.setLayoutProperty(entry.line, 'visibility', state);
-          if (map.getLayer(entry.label)) map.setLayoutProperty(entry.label, 'visibility', state);
-        });
-      } catch(e) {
-        console.warn('[STORM] SFCOA visibility warning:', e.message || e);
-      }
-    };
-
-    window.stormSetSfcoaOpacity = function(opacity) {
-      _sfcoaOpacity = Math.max(0, Math.min(1, parseFloat(opacity) || 0));
-      try {
-        Object.keys(_sfcoaProducts).forEach(function(pid) {
-          var entry = _sfcoaProducts[pid];
-          if (map.getLayer(entry.line)) map.setPaintProperty(entry.line, 'line-opacity', _sfcoaOpacity);
-          if (map.getLayer(entry.label)) map.setPaintProperty(entry.label, 'text-opacity', _sfcoaOpacity);
-        });
-      } catch(e) {
-        console.warn('[STORM] SFCOA opacity warning:', e.message || e);
-      }
-    };
-
-    window.stormClearSfcoaOverlay = function(productId) {
-      _removeSfcoaLayers(productId || '');
+    window.stormClearContourOverlay = function(productId) {
+      _removeContourLayers(productId || '');
     };
 
     window.stormSetMesoSectors = function(sectorsJson) {

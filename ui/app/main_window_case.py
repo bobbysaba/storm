@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import QSettings, QTimer, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
@@ -67,12 +67,12 @@ def package_fetch(url: str, cancel: threading.Event | None = None) -> bytes:
     kept = provenance.kept_bytes(url)
     if kept is not None:
         return kept
-    headers = {"User-Agent": "Mozilla/5.0 STORM/1.0"}
-    if config.NSSL_API_KEY and url.startswith(config.NSSL_API_ROOT):
-        headers["X-API-Key"] = config.NSSL_API_KEY       # the API only, as the MQTT reader does
+    from data import auth  # noqa: PLC0415
+    # the server may want a key or a CA of its own ([[auth]])
+    full, headers, context = auth.request(url, {"User-Agent": "Mozilla/5.0 STORM/1.0"})
     chunks = []
-    with urlopen(Request(url, headers=headers), timeout=_FETCH_TIMEOUT_S,
-                 context=config.NSSL_SSL_CONTEXT) as response:
+    with urlopen(Request(full, headers=headers), timeout=_FETCH_TIMEOUT_S,
+                 context=context) as response:
         while chunk := response.read(1 << 20):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("export canceled")
@@ -169,6 +169,17 @@ class MainWindowCaseMixin:
         entry(file_menu, "Change Day…", slot=self._change_day, palette="Change day", archive_only=True)
         sep = file_menu.addSeparator()
         sep.setVisible(self._archive)
+        # MONITOR: write the broker's traffic to [archive] recordings for ARCHIVE
+        record = QAction("Record Broker Traffic", self)
+        record.setCheckable(True)
+        record.setChecked(self._monitor and QSettings().value("monitor/record", False, type=bool))
+        record.setVisible(self._monitor)
+        record.toggled.connect(self._set_recording)
+        file_menu.addAction(record)
+        self._menu_commands.append(("Record broker traffic", record))
+        self._record_action = record
+        sep = file_menu.addSeparator()
+        sep.setVisible(self._monitor)
         entry(file_menu, "Save Map Screenshot…", action="screenshot")
 
         edit_menu = bar.addMenu("Edit")

@@ -35,7 +35,8 @@ QToolButton:pressed {
 
 
 class MapControls(Drawer):
-    """Drawer for map-context tools: routing, measuring, annotations and land cover."""
+    """Drawer for map-context tools: routing, measuring, annotations, land
+    cover, and the overlays from storm.toml ([[sources]] kind = "overlay")."""
 
 
     def __init__(
@@ -60,7 +61,7 @@ class MapControls(Drawer):
 
         self._drawer = QWidget()
         self._drawer.setObjectName("mapDrawer")
-        row = QHBoxLayout(self._drawer)
+        row = self._row = QHBoxLayout(self._drawer)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
 
@@ -103,3 +104,9 @@ class MapControls(Drawer):
         btn.setStyleSheet(_MAP_BUTTON_STYLE)
         return btn
 
+    def add_overlay_button(self, label: str, tooltip: str) -> QToolButton:
+        """A button for a [[sources]] overlay, after the built-in ones."""
+        btn = self._btn(label, tooltip)
+        self._row.addWidget(btn)
+        self.content_changed()
+        return btn
