@@ -18,7 +18,7 @@ archive_drawer(), a provider's own ARCHIVE button and drawer
 Keys, CAs, shared items, deployment locations and contour layers are
 settings ([[auth]], [mqtt] shared_items_url, [map] deployment_locations,
 kind = "contours" [[sources]]), not hooks.
-docs/providers.md has the details and an example. A provider that fails to
+https://bobbysaba.com/docs/storm/extend/providers/ has the details and an example. A provider that fails to
 load or returns bad sources is logged and left out; the app still starts.
 """
 from __future__ import annotations

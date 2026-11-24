@@ -2,7 +2,7 @@
 Per-install settings: ``storm.toml`` in the project folder (or the file named
 by ``STORM_CONFIG``) and secrets from ``.env``.  config.py keeps the constants
 that are the same for everyone.  Every setting is described in
-docs/configuration.md; storm.example.toml and profiles/ are starting points.
+https://bobbysaba.com/docs/storm/ref/configuration/; storm.example.toml and profiles/ are starting points.
 
 The headless publisher parses the same [mqtt] and [obs_columns] tables with
 the same code (headless/storm_headless/mqtt_settings.py, obs_columns.py).
@@ -126,7 +126,7 @@ _PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 @dataclass(frozen=True)
 class CodeProvider:
     """A provider: a package at providers/<name>/ (git-ignored except NSSL's)
-    or at [providers.<name>] path. Its interface is in docs/providers.md."""
+    or at [providers.<name>] path. Its interface is in https://bobbysaba.com/docs/storm/extend/providers/."""
     name: str
     path: Path
     # the table's other keys, handed to the package's functions
@@ -258,7 +258,7 @@ def _parse_provider(name: str, sub) -> CodeProvider | None:
     if not (path / "__init__.py").is_file():
         hint = did_you_mean(name, (p.parent.name for p in (PROJECT_DIR / "providers").glob("*/__init__.py")))
         raise SettingsError(f"[providers.{name}]: no provider package at {path}{hint} "
-                            "(a folder with an __init__.py; see docs/providers.md)")
+                            "(a folder with an __init__.py; see https://bobbysaba.com/docs/storm/extend/providers/)")
     options = tuple((k, v) for k, v in sub.items() if k not in ("enabled", "path"))
     return CodeProvider(name, path, options)
 

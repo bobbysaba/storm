@@ -6,7 +6,7 @@
 # providers/nssl/certs/team/, handed out by the STORM team; VIEWER uses the
 # read-only viewer certificate shipped in providers/nssl/certs/viewer/. The
 # NSSL API layers also need NSSL_API_KEY in .env (ask the STORM team). See
-# docs/configuration.md for every key.
+# https://bobbysaba.com/docs/storm/ref/configuration/ for every key.
 
 # NSSL's AWS IoT Core broker. AWS IoT only accepts certificate logins.
 [mqtt]
@@ -66,12 +66,12 @@ enabled = true
 # NSSL is this setup's own team: its drawer's vehicles start on and aren't
 # tagged "NSSL", and its recorded traffic's pre-3.0 vehicle IDs (lid1, p1)
 # read as their FOFS folder names (dltruck, probe1). A new vehicle's ID is its
-# FOFS folder name: providers/nssl/ADDING_A_VEHICLE.md has the steps
+# FOFS folder name: https://bobbysaba.com/docs/storm/extend/adding-a-vehicle/ has the steps
 team = true
 
 # The regional mesonets in SURFACE, from the NSSL API: the [[auth]] table
 # above adds the key and CA (without NSSL_API_KEY their buttons are off).
-# Every key is in docs/data-sources.md.
+# Every key is in https://bobbysaba.com/docs/storm/ref/your-sources/.
 [[sources]]
 id = "ok"
 kind = "station_obs"
@@ -195,7 +195,7 @@ heading_deg = ""
 
 # ARCHIVE: NSSL's recorded traffic on THREDDS, then your own recordings/
 # folder. Vehicle obs are the FOFS mesonet files (the provider, the default
-# with it on). See docs/archive-data.md.
+# with it on). See https://bobbysaba.com/docs/storm/ref/archive-data/.
 [archive]
 history = [
   "https://data.nssl.noaa.gov/thredds/fileServer/FOFS/STORM/annotations",

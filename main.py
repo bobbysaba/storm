@@ -400,7 +400,7 @@ def _warn_missing_files() -> None:
         else:
             title, text = ("Settings File Problems",
                            f"STORM is using {s.path.name}, but skipped what it couldn't use:\n\n{listed}")
-        QMessageBox.warning(None, title, text + "\n\nSee docs/configuration.md.")
+        QMessageBox.warning(None, title, text + "\n\nSee https://bobbysaba.com/docs/storm/ref/configuration/.")
 
     if runtime_flags.FLAGS.disable_mqtt:
         return

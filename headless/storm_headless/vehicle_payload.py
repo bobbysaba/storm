@@ -2,7 +2,7 @@
 Wire format for vehicle observations on <topic_root>/vehicles/{vehicle_id}.
 
 Every STORM client and the archive read this format, so any change here is a
-protocol change (and needs docs/wire-format.md updated).
+protocol change (and needs https://bobbysaba.com/docs/storm/ref/wire-format/ updated).
 """
 
 from datetime import datetime, timezone

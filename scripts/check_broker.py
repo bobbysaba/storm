@@ -75,7 +75,7 @@ def _connect_hint(e: Exception) -> str:
     if "CERTIFICATE_VERIFY_FAILED" in text:
         if "key usage" in text or "basic constraints" in text.lower():
             return (f"{text}\n      The CA certificate isn't marked as a CA (basicConstraints, keyUsage); "
-                    "Python 3.13 and later insist on it. See docs/broker.md, Other setups.")
+                    "Python 3.13 and later insist on it. See https://bobbysaba.com/docs/storm/team/broker/, Other setups.")
         return (f"{text}\n      The broker's certificate isn't trusted, or isn't for this host name: "
                 "set ca_cert in [mqtt] to your CA, and host to the name on the certificate.")
     if isinstance(e, ConnectionRefusedError):

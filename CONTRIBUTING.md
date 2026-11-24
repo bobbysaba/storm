@@ -14,7 +14,7 @@ python -m pytest -q              # about 30 seconds
 ```
 
 `cp storm.example.toml storm.toml` gives you a working setup without a
-broker (VIEWER and ARCHIVE launch). [docs/configuration.md](docs/configuration.md)
+broker (VIEWER and ARCHIVE launch). [the storm.toml reference](https://bobbysaba.com/docs/storm/ref/configuration/)
 has every setting.
 
 ## Making a change
@@ -24,10 +24,11 @@ has every setting.
   (`tests/test_provider_boundary.py` checks both); STORM reaches providers
   only through the hooks in `settings/code_providers.py`. Anything that only
   makes sense for one team goes in that team's profile, `[[sources]]` tables
-  or code provider ([docs/providers.md](docs/providers.md)).
-- Update the docs in the same change: [STORM_USER_GUIDE.md](STORM_USER_GUIDE.md)
-  for anything a user sees, and the reference in [docs/](docs/) for settings,
-  topics and file formats.
+  or code provider ([Code providers](https://bobbysaba.com/docs/storm/extend/providers/)).
+- Say what the documentation needs in the same change. The docs live at
+  <https://bobbysaba.com/docs/storm/>, not in this repository, so describe in
+  the pull request what a user sees and any settings, topics and file formats
+  that changed, and the maintainer updates the site.
 - Add or update tests under `tests/`. The suite runs in CI on macOS, Linux
   and Windows.
 - Never commit secrets: keys and passwords go in `.env`, certificates in
@@ -37,7 +38,7 @@ has every setting.
 
 ## Adding your team's data
 
-Most data doesn't need a code change: see [docs/data-sources.md](docs/data-sources.md).
+Most data doesn't need a code change: see [Your own data sources](https://bobbysaba.com/docs/storm/ref/your-sources/).
 If you use an AI coding agent, point it at [AGENTS.md](AGENTS.md).
 
 ## Reporting problems

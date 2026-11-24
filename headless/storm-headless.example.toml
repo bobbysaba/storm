@@ -19,7 +19,7 @@ data_dir = "/home/storm/mesonet"
 poll_s = 1
 publish_s = 5
 
-# Same [mqtt] keys as the STORM GUI's storm.toml (docs/configuration.md),
+# Same [mqtt] keys as the STORM GUI's storm.toml (https://bobbysaba.com/docs/storm/ref/configuration/),
 # plus client_id.
 [mqtt]
 host = "broker.example.org"
@@ -50,7 +50,7 @@ tls = "server"
 # client_id = "probe1-pi"
 
 # The logger CSV's columns and file name: the same [obs_columns] keys as the
-# STORM GUI's storm.toml (docs/configuration.md). Defaults are a plain
+# STORM GUI's storm.toml (https://bobbysaba.com/docs/storm/ref/configuration/). Defaults are a plain
 # *YYYYMMDD.csv with an ISO 8601 `time` column and STORM's field names; ""
 # means the file has no such column. install.sh --profile copies a profile's.
 # [obs_columns]

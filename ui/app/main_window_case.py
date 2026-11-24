@@ -38,7 +38,7 @@ from ui.command_registry import Command
 
 log = logging.getLogger("ui.app.main_window")
 
-USER_GUIDE = Path(__file__).resolve().parents[2] / "STORM_USER_GUIDE.md"
+DOCS_URL = "https://bobbysaba.com/docs/storm/"
 _FETCH_TIMEOUT_S = 30        # per socket read: Cancel waits at most this long on a stalled download
 
 
@@ -223,7 +223,7 @@ class MainWindowCaseMixin:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(PACKAGES_ROOT)))
 
     def _show_user_guide(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(USER_GUIDE)))
+        QDesktopServices.openUrl(QUrl(DOCS_URL))
 
     def _show_about(self):
         from core.case_package import storm_version  # noqa: PLC0415

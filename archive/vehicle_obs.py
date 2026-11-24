@@ -7,12 +7,12 @@ order for each vehicle; the first that has data for it wins:
     "vehicle-obs"            a folder (relative to the STORM folder)
     "https://host/obs"       a URL root
     "nssl"                   a provider's own files (providers/nssl/: FOFS, or a
-                             code provider's vehicle_obs_source(), docs/providers.md)
+                             code provider's vehicle_obs_source(), https://bobbysaba.com/docs/storm/extend/providers/)
 
 Below a folder or URL root a file sits at ``[archive] vehicle_obs_path``
 (default ``{vehicle}/{date}.csv``, date as YYYYMMDD). Without the setting:
 the provider sources of the providers turned on. A vehicle no source has
-moves on its recorded MQTT positions. The layout is in docs/archive-data.md.
+moves on its recorded MQTT positions. The layout is in https://bobbysaba.com/docs/storm/ref/archive-data/.
 
 Every source's rows get the same sanity checks (cleanup_track): missing-value
 codes and impossible readings dropped, null-island fixes, impossible jumps

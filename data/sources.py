@@ -1,6 +1,6 @@
 """
 Data sources a team adds in storm.toml without code: ``[[sources]]`` tables,
-each of a ``kind`` STORM already draws. Every key is in docs/data-sources.md.
+each of a ``kind`` STORM already draws. Every key is in https://bobbysaba.com/docs/storm/ref/your-sources/.
 
     station_obs   station plots in SURFACE, from a JSON or CSV feed
     overlay       GeoJSON points, lines and polygons on the map
@@ -11,7 +11,7 @@ each of a ``kind`` STORM already draws. Every key is in docs/data-sources.md.
 This module parses and checks the tables (settings/ calls parse_sources),
 reads a station_obs response into STORM's observations (read_station_obs)
 and sounding responses into soundings (read_launches, profile_levels,
-levels_to_sounding). A code provider (docs/providers.md) makes the same
+levels_to_sounding). A code provider (https://bobbysaba.com/docs/storm/extend/providers/) makes the same
 kinds with code_source(), its own fetch() in place of a URL. Fetching is
 data/fetchers/surface_fetcher.py, overlay_fetcher.py and
 source_sounding_fetcher.py and contour_fetcher.py. Qt-free.
@@ -494,7 +494,7 @@ _CODE_KEYS = {
 
 def code_source(kind: str, id: str, fetch: Callable, **options) -> Source:
     """A source whose data comes from *fetch()* in a code provider
-    (docs/providers.md) instead of a URL. *options* are the display keys
+    (https://bobbysaba.com/docs/storm/extend/providers/) instead of a URL. *options* are the display keys
     a [[sources]] table of that kind has: name, short, refresh_min, where,
     icon, and fresh_min (station_obs), style and archive (overlay), lat and
     lon (sounding). What fetch() returns, by kind:

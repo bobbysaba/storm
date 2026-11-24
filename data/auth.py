@@ -8,7 +8,7 @@ package). Each table covers the URLs that start with its ``url``:
     ca_cert = "certs/extra-ca.pem"      # an extra CA to trust for it
 
 The longest matching ``url`` wins, and a key is never sent to a URL no table
-covers. Every key is in docs/configuration.md.
+covers. Every key is in https://bobbysaba.com/docs/storm/ref/configuration/.
 """
 from __future__ import annotations
 

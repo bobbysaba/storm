@@ -3,7 +3,7 @@ The ``[obs_columns]`` table: which columns of a vehicle's logger CSV hold
 what, and which file in the logger's folder is today's.  Live obs-file
 watching (the GUI and the headless publisher) and ARCHIVE's vehicle-obs files
 (archive/vehicle_obs.py) read files with the same map.  See
-docs/configuration.md.
+https://bobbysaba.com/docs/storm/ref/configuration/.
 
 The table is one layout, or several named ones ([obs_columns.<name>]) to
 choose from in the launch window (headless: ``layout``).

@@ -1039,7 +1039,7 @@ class LaunchDialog(QDialog):
                 f"{mode.upper()} mode needs a broker it can publish to "
                 f"([mqtt] in {_settings.SETTINGS.path.name}):\n\n{lines}\n\n"
                 "VIEWER and ARCHIVE launch without one. "
-                "See docs/configuration.md.",
+                "See https://bobbysaba.com/docs/storm/ref/configuration/.",
             )
             return
 

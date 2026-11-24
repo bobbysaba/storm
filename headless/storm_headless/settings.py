@@ -107,7 +107,7 @@ def load_settings(config_path: str | Path | None, **overrides) -> Settings:
 
     if "gps_mode" in raw:
         raise SettingsError("gps_mode is gone: name the logger's layout with layout = \"<name>\" "
-                            "(an [obs_columns.<name>] table; see docs/configuration.md)")
+                            "(an [obs_columns.<name>] table; see https://bobbysaba.com/docs/storm/ref/configuration/)")
     try:
         obs_layouts = parse_obs_layouts(raw.get("obs_columns", {}))
     except ObsColumnsError as e:

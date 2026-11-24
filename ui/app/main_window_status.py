@@ -318,7 +318,7 @@ class MainWindowStatusMixin:
             self.conn_indicator.setText("● NO BROKER")
             set_pill_status(self.conn_indicator, "off")
             self.conn_indicator.setToolTip("No [mqtt] host in storm.toml: no live vehicles, "
-                                           "annotations or drawings. See docs/configuration.md.")
+                                           "annotations or drawings. See https://bobbysaba.com/docs/storm/ref/configuration/.")
         if self._monitor and broker.configured:
             self._apply_recording(self._record_action.isChecked())
 
@@ -371,7 +371,7 @@ class MainWindowStatusMixin:
             self._complete_mqtt_startup_phase()
         self.status_msg_label.setText(f"MQTT: offline: {reason}")
         self.conn_indicator.setToolTip(f"Can't connect to the broker: {reason}. "
-                                       "STORM keeps trying; docs/broker.md has fixes.")
+                                       "STORM keeps trying; https://bobbysaba.com/docs/storm/team/broker/ has fixes.")
         self._layout_overlays()
 
     def _on_mqtt_subscribe_refused(self, topic: str, reason: str):

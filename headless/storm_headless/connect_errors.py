@@ -43,7 +43,7 @@ def describe_connect_error(host: str, port: int, ctx: ssl.SSLContext | None,
         detail = str(e.verify_message or e)
         if "key usage" in detail or "basic constraints" in detail.lower():
             return ("the CA certificate (ca_cert) isn't marked as a CA; "
-                    "Python 3.13 and later need basicConstraints and keyUsage (docs/broker.md)")
+                    "Python 3.13 and later need basicConstraints and keyUsage (https://bobbysaba.com/docs/storm/team/broker/)")
         if "mismatch" in detail.lower():
             return f"the broker's certificate isn't for {host!r}: use the name on the certificate as host"
         return ("the broker's certificate isn't trusted: set ca_cert in [mqtt] to the CA "

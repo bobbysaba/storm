@@ -1,5 +1,5 @@
 """A contours source's runs, fields and tile files (kind = "contours",
-docs/data-sources.md#contours-contour-lines-from-vector-tiles).
+https://bobbysaba.com/docs/storm/ref/your-sources/#contours-contour-lines-from-vector-tiles).
 
 The source's url is a folder laid out as:
 

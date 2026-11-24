@@ -2,7 +2,7 @@
 The ``[mqtt]`` table: which broker to use and how to log in.  The STORM GUI
 (settings/, from storm.toml) and the headless publisher (storm-headless.toml)
 both parse it here, so the two read the same schema.  See
-docs/configuration.md.
+https://bobbysaba.com/docs/storm/ref/configuration/.
 
 Standard library only: this package runs on a Pi without the rest of STORM.
 """

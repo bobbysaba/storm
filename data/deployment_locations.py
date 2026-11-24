@@ -1,7 +1,7 @@
 """Past deployment locations for PREV LOCS, from ``[map] deployment_locations``:
 a CSV file or http(s) URL with ``lat`` and ``lon`` columns, and optionally
 ``rank_abi``, ``rank_aoi`` and ``rqi`` (the drawer's filters). Columns are
-in docs/configuration.md#map-home-location-and-local-time.
+in https://bobbysaba.com/docs/storm/ref/configuration/#map-home-location-and-local-time.
 """
 from __future__ import annotations
 

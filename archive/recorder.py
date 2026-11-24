@@ -2,7 +2,7 @@
 Records broker traffic for ARCHIVE mode to replay: every message under the
 topic root goes, one line each, into ``<folder>/<prefix>.<kind>.<YYYYMMDD>``
 (the UTC day it arrived), the files archive/history.py reads. The layout is
-in docs/archive-data.md.
+in https://bobbysaba.com/docs/storm/ref/archive-data/.
 
 Run it on any machine that stays connected through the field day:
 

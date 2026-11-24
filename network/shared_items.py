@@ -1,6 +1,6 @@
 """The day's shared items from ``[mqtt] shared_items_url``, read once at
 startup: for brokers that don't send retained messages on wildcard
-subscriptions (AWS IoT). The layout is in docs/wire-format.md#retained-messages.
+subscriptions (AWS IoT). The layout is in https://bobbysaba.com/docs/storm/ref/wire-format/#retained-messages.
 """
 from __future__ import annotations
 

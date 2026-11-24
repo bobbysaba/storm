@@ -1,8 +1,8 @@
 """
 Recorded broker traffic for ARCHIVE mode: one JSON Lines file per topic kind
 per UTC day, ``<prefix>.<kind>.<YYYYMMDD>`` (``.jsonl`` on the end is also
-read), each line one payload as published (docs/wire-format.md). The layout
-is in docs/archive-data.md.
+read), each line one payload as published (https://bobbysaba.com/docs/storm/ref/wire-format/). The layout
+is in https://bobbysaba.com/docs/storm/ref/archive-data/.
 
 Sources come from ``[archive] history`` in storm.toml, tried in order for
 each file; the first one that has it wins:
@@ -10,7 +10,7 @@ each file; the first one that has it wins:
     "recordings"             a folder (relative to the STORM folder)
     "https://host/storm"     a URL root, files fetched as <root>/<name> (with
                              the key and CA of the [[auth]] table covering it)
-    "farm"                   a code provider's history_source() (docs/providers.md)
+    "farm"                   a code provider's history_source() (https://bobbysaba.com/docs/storm/extend/providers/)
 
 Without the setting: the provider sources of the providers turned on, then
 the recorder's folder (``[archive] recordings``).

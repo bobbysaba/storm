@@ -1,6 +1,6 @@
 # STORM settings. Copy to storm.toml in the STORM folder and edit (or point
 # STORM_CONFIG at a file elsewhere). profiles/ holds ready-made versions for
-# known setups. Every key is described in docs/configuration.md.
+# known setups. Every key is described in https://bobbysaba.com/docs/storm/ref/configuration/.
 #
 # Relative paths are resolved against the STORM folder. Secrets (passwords,
 # API keys) go in .env, not here: see .env.example.
@@ -71,7 +71,7 @@ tls = "server"
 # temperature = "F"
 # distance = "mi"
 
-# Recorded broker traffic for ARCHIVE (docs/archive-data.md). The recorder
+# Recorded broker traffic for ARCHIVE (https://bobbysaba.com/docs/storm/ref/archive-data/). The recorder
 # (python -m archive.recorder, or MONITOR's File > Record Broker Traffic)
 # writes to `recordings`; ARCHIVE reads `history` in order, first file wins:
 # folders, http(s) URL roots, or provider names. Default: the providers that
@@ -111,7 +111,7 @@ tls = "server"
 # *YYYYMMDD.csv with an ISO 8601 `time` column and STORM's field names as
 # column names; "" means the file has no such column. Values are read as °C,
 # m/s, hPa and degrees unless [obs_columns.units] says otherwise. See
-# docs/configuration.md.
+# https://bobbysaba.com/docs/storm/ref/configuration/.
 # [obs_columns]
 # file = "*{date}.csv"       # {date} = the UTC day, YYYYMMDD; without it, the newest match
 # lat = "lat"
@@ -148,8 +148,8 @@ tls = "server"
 # (kind = "station_obs"), GeoJSON on the map (kind = "overlay"), soundings
 # in the Skew-T viewer (kind = "sounding") or contour lines of gridded fields,
 # run by run (kind = "contours", one at most). Every key and more examples:
-# docs/data-sources.md. API keys go in .env under the name api_key_env gives.
-# An AI coding agent can write these with you: docs/agent-setup.md.
+# https://bobbysaba.com/docs/storm/ref/your-sources/. API keys go in .env under the name api_key_env gives.
+# An AI coding agent can write these with you: https://bobbysaba.com/docs/storm/extend/agent-setup/.
 # [[sources]]
 # id = "farm"
 # kind = "station_obs"
@@ -187,7 +187,7 @@ tls = "server"
 # url = "https://data.example.org/meso"   # index.json, <run>/metadata.json, <run>/<field>.pmtiles
 
 # A server's key and CA, for every URL below url (sources, history, shared
-# items, ...); the key goes to no other server. docs/configuration.md.
+# items, ...); the key goes to no other server. https://bobbysaba.com/docs/storm/ref/configuration/.
 # [[auth]]
 # url = "https://data.example.org"
 # api_key_env = "FARM_API_KEY"
@@ -196,13 +196,13 @@ tls = "server"
 # Data providers: extra layers for a known setup (providers/<name>/). NSSL's
 # is built in and on without this table: ARCHIVE's NSSL button (its public
 # THREDDS data) for every team. enabled = false leaves it out; its live API
-# layers need profiles/nssl.toml and NSSL_API_KEY (docs/nssl.md).
+# layers need profiles/nssl.toml and NSSL_API_KEY (https://bobbysaba.com/docs/storm/team/nssl/).
 # [providers.nssl]
 # enabled = false
 #
 # Your own code provider, for feeds a [[sources]] table can't describe: a
 # package in providers/<name>/ (git-ignored) or at path. Other keys are its
-# options. docs/providers.md.
+# options. https://bobbysaba.com/docs/storm/extend/providers/.
 # [providers.farm]
 # enabled = true
 # path = "~/farm-storm"

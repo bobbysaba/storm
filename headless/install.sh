@@ -216,7 +216,7 @@ $( [ -n "$MQTT_TOPIC_ROOT" ] && echo "topic_root = \"$MQTT_TOPIC_ROOT\"" || echo
 # password = ""
 # defaults to "<vehicle_id>-pi"
 # client_id = ""
-# see docs/configuration.md in the STORM repository for every [mqtt] key
+# see https://bobbysaba.com/docs/storm/ref/configuration/ in the STORM repository for every [mqtt] key
 $( [ -n "$P_OBS_COLUMNS" ] && printf '\n# the logger columns from the profile\n%s' "$P_OBS_COLUMNS" )
 EOF
 fi

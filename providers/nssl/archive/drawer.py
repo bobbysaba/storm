@@ -1,4 +1,4 @@
-"""NSSL's drawer in ARCHIVE (the archive_drawer hook; docs/providers.md): one
+"""NSSL's drawer in ARCHIVE (the archive_drawer hook; https://bobbysaba.com/docs/storm/extend/providers/): one
 toolbar button whose drawer holds NSSL's public THREDDS data, for every
 team.
 

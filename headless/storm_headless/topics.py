@@ -9,7 +9,7 @@ in the [mqtt] table (default "storm"):
     <root>/scan_sectors/<vehicle_id>
 
 The STORM GUI (network/topics.py) and the headless publisher both build
-topics here.  Payloads are described in docs/wire-format.md.
+topics here.  Payloads are described in https://bobbysaba.com/docs/storm/ref/wire-format/.
 
 Standard library only: this package runs on a Pi without the rest of STORM.
 """

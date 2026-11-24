@@ -1,5 +1,5 @@
 """A provider's own ARCHIVE button and drawer (the archive_drawer hook;
-docs/providers.md): NSSL's, for every team, with its public THREDDS data.
+https://bobbysaba.com/docs/storm/extend/providers/): NSSL's, for every team, with its public THREDDS data.
 
 The drawer's objects are the same kinds the shared instrument hooks hand
 over. Its lidars and wind profiles join any team provider's in ARCHIVE's
