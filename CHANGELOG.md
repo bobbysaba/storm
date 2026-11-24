@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## Unreleased
 
 ### Changed
+- The documentation moved to <https://bobbysaba.com/docs/storm/>. `docs/`, `STORM_USER_GUIDE.md` and `providers/nssl/ADDING_A_VEHICLE.md` are gone, the README is the essentials with a link, and `headless/README.md` is a short install note. *Help > STORM User Guide* opens the site, and messages that named a `docs/` file now give its address. The site covers everything they did and adds a "Set up your team" path.
 - `storm.toml` problems no longer cost the whole file. Each table stands alone: one with an invalid value keeps its defaults (a bad `[units]` no longer drops the broker), and a bad `[[sources]]`, `[[auth]]`, `[providers.<name>]` or named `[obs_columns]` layout is left out on its own. Every problem is listed in one startup window and the log, not only the first, and the window now shows under the diagnostic profiles that turn MQTT off too.
 - An unknown table (a misspelled `[unit]`, which was silently ignored) or key is skipped with a suggestion: "unknown key pasword (did you mean password?)". The headless publisher's `--check` gives the same suggestions.
 - `archive/recorder.py` logs `storm.toml` problems and records with the rest of the file, instead of exiting.
