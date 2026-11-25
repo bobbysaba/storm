@@ -43,9 +43,10 @@ def test_archive_defaults(tmp_path):
 
 
 def test_archive_settings_are_read(tmp_path):
-    a = _load(tmp_path, '[archive]\nrecordings = "/data/rec"\n'
+    rec = tmp_path / "rec"  # absolute on every OS (a bare "/data/rec" has no drive on Windows)
+    a = _load(tmp_path, f'[archive]\nrecordings = "{rec.as_posix()}"\n'
                         'history = ["nssl", "https://x.org/storm/"]\nhistory_prefix = "team"\n').archive
-    assert a.recordings == Path("/data/rec")
+    assert a.recordings == rec
     assert a.history == ("nssl", "https://x.org/storm/") and a.history_prefix == "team"
 
 

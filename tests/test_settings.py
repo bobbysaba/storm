@@ -42,9 +42,10 @@ def test_defaults_follow_the_tls_mode():
 
 
 def test_relative_paths_resolve_against_the_project(tmp_path):
-    s = _load(tmp_path, '[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "a/c.crt"\nkey_file = "/abs/k.key"\n')
+    key = tmp_path / "k.key"  # absolute on every OS (a bare "/abs" has no drive on Windows)
+    s = _load(tmp_path, f'[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "a/c.crt"\nkey_file = "{key.as_posix()}"\n')
     assert s.mqtt.cert_file == settings.PROJECT_DIR / "a" / "c.crt"
-    assert s.mqtt.key_file == Path("/abs/k.key")
+    assert s.mqtt.key_file == key
 
 
 @pytest.mark.parametrize("table, message", [
@@ -75,8 +76,8 @@ def test_the_password_comes_from_the_environment_first(monkeypatch):
 
 
 def test_publishing_modes_report_missing_files_and_read_only(tmp_path):
-    s = _load(tmp_path, f'[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "{tmp_path}/c"\nkey_file = "{tmp_path}/k"\n')
-    assert s.broker_problems("monitor") == [f"missing file: {tmp_path}/c", f"missing file: {tmp_path}/k"]
+    s = _load(tmp_path, f'[mqtt]\nhost = "h"\ntls = "mutual"\ncert_file = "{tmp_path.as_posix()}/c"\nkey_file = "{tmp_path.as_posix()}/k"\n')
+    assert s.broker_problems("monitor") == [f"missing file: {tmp_path / 'c'}", f"missing file: {tmp_path / 'k'}"]
     (tmp_path / "c").write_text("x")
     (tmp_path / "k").write_text("x")
     assert s.broker_problems("vehicle") == []

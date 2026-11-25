@@ -62,7 +62,7 @@ def _package(folder, body=PACKAGE):
 def _settings(tmp_path, extra=""):
     pkg = _package(tmp_path / "acme_pkg")
     path = tmp_path / "storm.toml"
-    path.write_text(f'[providers.acme]\nenabled = true\npath = "{pkg}"\nlabel = "Acme Net"\n{extra}')
+    path.write_text(f'[providers.acme]\nenabled = true\npath = "{pkg.as_posix()}"\nlabel = "Acme Net"\n{extra}')
     return settings.load(path)
 
 
@@ -109,7 +109,7 @@ def test_a_provider_folder_in_providers_is_the_default(tmp_path):
 def test_a_broken_provider_is_left_out(tmp_path):
     pkg = _package(tmp_path / "broken", "raise RuntimeError('boom')\n")
     path = tmp_path / "storm.toml"
-    path.write_text(f'[providers.broken]\nenabled = true\npath = "{pkg}"\n')
+    path.write_text(f'[providers.broken]\nenabled = true\npath = "{pkg.as_posix()}"\n')
     s = settings.load(path)
     assert s.error == "" and s.sources_of("overlay") == ()
     assert "boom" in code_providers.errors["broken"]

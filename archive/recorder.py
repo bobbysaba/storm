@@ -89,7 +89,7 @@ class Recorder:
                 fh.close()
             self.folder.mkdir(parents=True, exist_ok=True)
             path = self.path_for(kind, now)
-            fh = path.open("a", encoding="utf-8")
+            fh = path.open("a", encoding="utf-8", newline="\n")  # same bytes on every OS
             log.info("recorder: writing %s", path)
             self._files[kind] = (day, fh)
         return fh

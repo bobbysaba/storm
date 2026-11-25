@@ -85,7 +85,7 @@ def test_a_drop_before_the_broker_answers_is_a_connect_failure(monkeypatch):
 def _pi_settings(tmp_path):
     from headless.storm_headless.settings import load_settings
     cfg = tmp_path / "pi.toml"
-    cfg.write_text(f'vehicle_id = "rt-pi"\ndata_dir = "{tmp_path}"\n[mqtt]\nhost = "broker.test"\ntls = "none"\n')
+    cfg.write_text(f'vehicle_id = "rt-pi"\ndata_dir = "{tmp_path.as_posix()}"\n[mqtt]\nhost = "broker.test"\ntls = "none"\n')
     return load_settings(str(cfg))
 
 
