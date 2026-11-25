@@ -10,6 +10,7 @@ import settings
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton
 from PyQt6.QtCore import Qt, QTimer, QSettings
 from ui.theme import set_pill_status
+from data.endpoints import DOCS_URL
 from data.update_checker import UpdateWorker
 from network.mqtt_client import MQTTClient
 from network.storm_cone_sync import StormConeSync
@@ -318,7 +319,7 @@ class MainWindowStatusMixin:
             self.conn_indicator.setText("● NO BROKER")
             set_pill_status(self.conn_indicator, "off")
             self.conn_indicator.setToolTip("No [mqtt] host in storm.toml: no live vehicles, "
-                                           "annotations or drawings. See https://bobbysaba.com/docs/storm/ref/configuration/.")
+                                           f"annotations or drawings. See {DOCS_URL}ref/configuration/.")
         if self._monitor and broker.configured:
             self._apply_recording(self._record_action.isChecked())
 
@@ -371,7 +372,7 @@ class MainWindowStatusMixin:
             self._complete_mqtt_startup_phase()
         self.status_msg_label.setText(f"MQTT: offline: {reason}")
         self.conn_indicator.setToolTip(f"Can't connect to the broker: {reason}. "
-                                       "STORM keeps trying; https://bobbysaba.com/docs/storm/team/broker/ has fixes.")
+                                       f"STORM keeps trying; {DOCS_URL}team/broker/ has fixes.")
         self._layout_overlays()
 
     def _on_mqtt_subscribe_refused(self, topic: str, reason: str):

@@ -34,11 +34,11 @@ import config
 from core.case_package import PACKAGES_ROOT
 from core.storm_track import parse_track_csv
 from core.workspace import unused_path
+from data.endpoints import DOCS_URL
 from ui.command_registry import Command
 
 log = logging.getLogger("ui.app.main_window")
 
-DOCS_URL = "https://bobbysaba.com/docs/storm/"
 _FETCH_TIMEOUT_S = 30        # per socket read: Cancel waits at most this long on a stalled download
 
 

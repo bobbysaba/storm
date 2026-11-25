@@ -9,6 +9,10 @@ change it here; the fetchers build their URLs from this file. Run
 """
 from __future__ import annotations
 
+# ---- STORM's own documentation (opened from the Help menu) ------------------------------
+DOCS_URL = "https://bobbysaba.com/docs/storm/"
+
+
 # ---- AWS open data (archive mode) -----------------------------------------------------
 NEXRAD_LEVEL2_BUCKET = "https://unidata-nexrad-level2.s3.amazonaws.com"   # <YYYY>/<MM>/<DD>/<SITE>/
 GOES16_BUCKET = "noaa-goes16"

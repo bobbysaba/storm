@@ -20,6 +20,7 @@ from PyQt6.QtGui import QIcon
 
 import config as _config
 import settings as _settings
+from data.endpoints import DOCS_URL
 from data.update_checker import UpdateWorker
 from ui.launch.date_widgets import _AvailabilityCalendar, _CircularProgress, _ClickConsumer, _YearGridPopup
 from ui.launch.icons import _LEFT, _RIGHT, _calendar_glyph_icon, _svg_pixmap, _triangle_icon, combo_down_arrow_qss
@@ -1039,7 +1040,7 @@ class LaunchDialog(QDialog):
                 f"{mode.upper()} mode needs a broker it can publish to "
                 f"([mqtt] in {_settings.SETTINGS.path.name}):\n\n{lines}\n\n"
                 "VIEWER and ARCHIVE launch without one. "
-                "See https://bobbysaba.com/docs/storm/ref/configuration/.",
+                f"See {DOCS_URL}ref/configuration/.",
             )
             return
 

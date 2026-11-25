@@ -33,7 +33,9 @@ def test_tls_to_a_port_that_doesnt_speak_it():
     ctx = ssl.create_default_context()
     reason = describe_connect_error("127.0.0.1", server.getsockname()[1], ctx)
     server.close()
-    assert "doesn't speak TLS" in reason or "TLS failed" in reason
+    # Windows reports the server's hang-up as a reset instead of an SSL error
+    assert ("doesn't speak TLS" in reason or "TLS failed" in reason
+            or "closed the connection during TLS" in reason)
 
 
 class _Code:
